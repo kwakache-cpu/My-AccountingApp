@@ -1,95 +1,106 @@
 import streamlit as st
 import pandas as pd
+import sqlite3
+from datetime import datetime, timedelta
 
-# --- 1. CLIENT LICENSE DATABASE ---
-# When a client pays, add their 'Key' and 'Company Name' here.
-# Each key is unique to that specific business.
-CLIENT_REGISTRY = {
-    "KAY-PRO-2026": "E.K.A Financial Consultancy",
-    "GHS-RETAIL-77": "Accra Market Square Ltd",
-    "LOG-PRO-441": "Speedway Logistics Ghana",
-    "MOMO-VEND-99": "Daily Cash Services"
-}
+# --- 1. DATABASE SETUP (PERMANENT STORAGE) ---
+def init_db():
+    conn = sqlite3.connect('eka_accounting.db')
+    c = conn.cursor()
+    # Table for Company Access & Subscription
+    c.execute('''CREATE TABLE IF NOT EXISTS registry 
+                 (key TEXT PRIMARY KEY, name TEXT, plan TEXT, 
+                  expiry_date DATE, role TEXT)''')
+    # Table for Company Ledgers (Example of data saving)
+    c.execute('''CREATE TABLE IF NOT EXISTS ledgers 
+                 (company_key TEXT, category TEXT, ledger_name TEXT)''')
+    conn.commit()
+    conn.close()
 
-# --- 2. CONFIGURATION ---
-ADMIN_EMAIL = "kwakache@gmail.com"
-HELPLINE_WHATSAPP = "+233546044673"
-HELPLINE_CALL = "+233507017767"
+init_db()
 
-# --- 3. THE SECURITY GATEKEEPER ---
-def check_access():
-    if 'authorized' not in st.session_state:
-        st.session_state['authorized'] = False
-        st.session_state['client_name'] = ""
+# --- 2. AUTHENTICATION LOGIC ---
+if 'authorized' not in st.session_state:
+    st.session_state['authorized'] = False
+    st.session_state['user_data'] = None
 
-    if not st.session_state['authorized']:
-        # NEW NAME: E.K.A Cloud Accounting
-        st.title("🛡️ E.K.A Cloud Accounting - Access Portal")
-        st.warning("Please enter your business license key to unlock your dashboard.")
+def login_screen():
+    st.title("🛡️ E.K.A Cloud Accounting - Portal")
+    key = st.text_input("Enter License Key", type="password")
+    if st.button("Unlock System"):
+        conn = sqlite3.connect('eka_accounting.db')
+        df = pd.read_sql(f"SELECT * FROM registry WHERE key='{key}'", conn)
+        conn.close()
         
-        tab1, tab2 = st.tabs(["💳 Get Access", "🔑 Unlock System"])
+        if not df.empty:
+            st.session_state['authorized'] = True
+            st.session_state['user_data'] = df.iloc[0].to_dict()
+            st.rerun()
+        elif key == "KAY-ADMIN-MASTER": # Hardcoded emergency admin key
+            st.session_state['authorized'] = True
+            st.session_state['user_data'] = {"key": "ADMIN", "name": "E.K.A Admin", "role": "Owner", "expiry_date": "2099-12-31"}
+            st.rerun()
+        else:
+            st.error("Invalid Key. Contact Support: +233546044673")
+
+# --- 3. MASTER ADMIN DASHBOARD (FOR YOU) ---
+def admin_dashboard():
+    st.title("👑 Owner's Registration Center")
+    with st.form("reg_form"):
+        c_name = st.text_input("New Company Name")
+        c_key = st.text_input("Assign Unique Key")
+        days = st.number_input("Subscription Days", value=30)
+        submit = st.form_submit_button("Register & Save Data")
         
-        with tab1:
-            st.subheader("Subscription Plans")
-            st.write("• Monthly: 200 GHS | • Yearly: 1,800 GHS")
-            if st.button("Request New Access"):
-                st.info(f"WhatsApp your business name to {HELPLINE_WHATSAPP}")
-        
-        with tab2:
-            st.subheader("Client Login")
-            entered_key = st.text_input("License Key", type="password")
-            if st.button("Unlock Dashboard"):
-                # Check if the key exists in our registry
-                if entered_key in CLIENT_REGISTRY:
-                    st.session_state['authorized'] = True
-                    # This tells the app which company name to display
-                    st.session_state['client_name'] = CLIENT_REGISTRY[entered_key]
-                    st.rerun()
-                else:
-                    st.error("Invalid Key. Check your spelling or WhatsApp support.")
-        
-        st.divider()
-        st.markdown(f"**WhatsApp Support (Only):** {HELPLINE_WHATSAPP}")
-        st.markdown(f"**Call Support:** {HELPLINE_CALL} | **Email:** {ADMIN_EMAIL}")
+        if submit:
+            expiry = datetime.now().date() + timedelta(days=days)
+            conn = sqlite3.connect('eka_accounting.db')
+            try:
+                conn.execute("INSERT INTO registry VALUES (?, ?, ?, ?, ?)", 
+                             (c_key, c_name, "Pro", expiry, "Client"))
+                conn.commit()
+                st.success(f"Company {c_name} saved permanently! Key: {c_key}")
+            except:
+                st.error("Key already exists!")
+            conn.close()
+
+    st.subheader("Managed Companies")
+    conn = sqlite3.connect('eka_accounting.db')
+    st.write(pd.read_sql("SELECT name, expiry_date FROM registry", conn))
+    conn.close()
+
+# --- 4. CLIENT ERP (WITH EXPIRY REMINDERS) ---
+def erp_dashboard():
+    user = st.session_state['user_data']
+    expiry_date = datetime.strptime(user['expiry_date'], '%Y-%m-%d').date()
+    today = datetime.now().date()
+    days_left = (expiry_date - today).days
+
+    # SIDEBAR MODULES
+    st.sidebar.title(f"🏢 {user['name']}")
+    menu = st.sidebar.selectbox("Modules", ["1. Company Setup", "2. Chart of Accounts", "4. Inventory", "15. Reports"])
+
+    # 7-DAY EXPIRY REMINDER
+    if 0 <= days_left <= 7:
+        st.warning(f"⚠️ Subscription Reminder: Your access expires in {days_left} days. Please resubscribe to avoid lockout.")
+    elif days_left < 0:
+        st.error("🚫 Subscription Expired. Please renew to access your data.")
         st.stop()
 
-# Run the gate
-check_access()
+    if menu == "1. Company Setup":
+        st.header("🏗️ Permanent Company Configuration")
+        st.info("Your data is securely saved in the E.K.A Cloud Database.")
+        # Module logic continues here...
 
-# --- 4. THE ERP DASHBOARD (Only visible after unlocking) ---
-st.set_page_config(page_title="E.K.A Cloud Accounting", layout="wide")
+# --- 5. MAIN EXECUTION ---
+if not st.session_state['authorized']:
+    login_screen()
+else:
+    if st.session_state['user_data']['role'] == "Owner":
+        admin_dashboard()
+    else:
+        erp_dashboard()
 
-# Sidebar - Branded to the specific client
-st.sidebar.title(f"🏢 {st.session_state['client_name']}")
-menu = st.sidebar.selectbox("Main Menu", ["📊 Dashboard", "⚙️ Settings"])
-
-if menu == "📊 Dashboard":
-    st.title(f"📊 Dashboard: {st.session_state['client_name']}")
-    st.success(f"Verified Access: {st.session_state['client_name']}")
-
-    # Business Profile Section
-    with st.expander("🏢 Business Configuration", expanded=True):
-        col1, col2 = st.columns(2)
-        with col1:
-            # Displays the name based on the key they used
-            st.text_input("Business Name", value=st.session_state['client_name'], disabled=True)
-        with col2:
-            st.text_input("TIN Number", placeholder="e.g. P000784560X")
-        
-        if st.button("💾 Save Profile Settings"):
-            st.toast("Settings Saved!")
-            st.balloons()
-
-    # Accounting Metrics
-    st.divider()
-    m1, m2, m3 = st.columns(3)
-    m1.metric("Revenue", "0.00 GHS")
-    m2.metric("Expenses", "0.00 GHS")
-    m3.metric("Net Profit", "0.00 GHS")
-
-elif menu == "⚙️ Settings":
-    st.title("⚙️ System Settings")
-    st.write(f"Logged in as: **{st.session_state['client_name']}**")
-    if st.button("Log Out"):
-        st.session_state['authorized'] = False
-        st.rerun()
+if st.sidebar.button("Log Out"):
+    st.session_state['authorized'] = False
+    st.rerun()
