@@ -1,17 +1,18 @@
 import streamlit as st
 import datetime
+import pandas as pd
 import requests
 
 # --- PAYSTACK & BUSINESS CONFIG ---
-PAYSTACK_PUBLIC_KEY = "pk_test_187173o2e1df8ea7dc68c6163" # From your screenshot
+PAYSTACK_PUBLIC_KEY = "pk_test_187173o2e1df8ea7dc68c6163" 
 ADMIN_EMAIL = "kwakache@gmail.com"
-HELPLINE = "+233546044673"
+HELPLINE_WHATSAPP = "+233546044673"
+HELPLINE_CALL = "+233507017767"
 PRICE_MONTHLY = 200
 PRICE_YEARLY = 1800
 
 def subscription_gate():
-    # In a full Level 3 version, we will store this in a database. 
-    # For now, this is your Manual Gatekeeper.
+    # Session state keeps the user logged in while the browser tab is open
     if 'authenticated' not in st.session_state:
         st.session_state['authenticated'] = False
 
@@ -28,27 +29,37 @@ def subscription_gate():
             
             st.info(f"**Payment Methods:** MoMo, Visa, Mastercard (USD/GBP/GHS accepted)")
             
-            # This is a placeholder for the Paystack JS Trigger
             if st.button(f"Proceed to Secure Payment ({amount} GHS)"):
                 st.write(f"Redirecting to Paystack... (Please pay to E.K.A Financial Consultancy)")
-                st.success(f"Once paid, send a screenshot to {HELPLINE} to receive your Key.")
+                st.success(f"Once paid, WhatsApp a screenshot to {HELPLINE_WHATSAPP} to receive your Key.")
 
         with tab2:
             st.subheader("Activate License")
             key = st.text_input("Enter the 8-digit key sent to your email", type="password")
             if st.button("Unlock ERP"):
-                # SECRET KEY LOGIC: You can change this '2026' key whenever you want
+                # MASTER KEY
                 if key == "KAY-PRO-2026": 
                     st.session_state['authenticated'] = True
                     st.rerun()
                 else:
-                    st.error("Invalid Key. Please contact the helpline.")
+                    st.error("Invalid Key. Please contact support.")
         
         st.divider()
-        st.markdown(f"**Support:** {HELPLINE} | {ADMIN_EMAIL}")
-        st.stop() # Stops the ERP from loading below
+        st.markdown(f"**WhatsApp Support (Only):** {HELPLINE_WHATSAPP}")
+        st.markdown(f"**Call Support:** {HELPLINE_CALL} | **Email:** {ADMIN_EMAIL}")
+        st.stop() # This locks the app until authenticated is True
 
-# --- EXECUTE GATEKEEPER ---
+# --- EXECUTE THE GATEKEEPER ---
 subscription_gate()
 
-# ... YOUR EXISTING ERP CODE STARTS HERE ...
+# ==========================================
+# YOUR EXISTING ERP CODE STARTS BELOW THIS LINE
+# ==========================================
+
+st.title("📊 Tally Pro ERP Dashboard")
+st.write("Welcome back, Emmanuel. Your system is fully active.")
+
+# Example Placeholder for your ERP content
+with st.expander("Company Configuration"):
+    st.text_input("Company Name", value="E.K.A Financial Consultancy")
+    st.text_input("TIN Number")
