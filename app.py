@@ -1,39 +1,52 @@
 import streamlit as st
 import pandas as pd
-import requests
 
-# --- 1. SETTINGS & CONFIGURATION ---
+# --- 1. CLIENT LICENSE DATABASE ---
+# When a client pays, add their 'Key' and 'Company Name' here.
+# Each key is unique to that specific business.
+CLIENT_REGISTRY = {
+    "KAY-PRO-2026": "E.K.A Financial Consultancy",
+    "GHS-RETAIL-77": "Accra Market Square Ltd",
+    "LOG-PRO-441": "Speedway Logistics Ghana",
+    "MOMO-VEND-99": "Daily Cash Services"
+}
+
+# --- 2. CONFIGURATION ---
 ADMIN_EMAIL = "kwakache@gmail.com"
 HELPLINE_WHATSAPP = "+233546044673"
 HELPLINE_CALL = "+233507017767"
 
-# --- 2. THE GATEKEEPER ---
+# --- 3. THE SECURITY GATEKEEPER ---
 def check_access():
     if 'authorized' not in st.session_state:
         st.session_state['authorized'] = False
+        st.session_state['client_name'] = ""
 
     if not st.session_state['authorized']:
-        st.title("🛡️ Tally Pro - Access Portal")
-        st.warning("Subscription required to access E.K.A Financial ERP.")
+        # NEW NAME: E.K.A Cloud Accounting
+        st.title("🛡️ E.K.A Cloud Accounting - Access Portal")
+        st.warning("Please enter your business license key to unlock your dashboard.")
         
-        tab1, tab2 = st.tabs(["💳 Get Access", "🔑 Enter License Key"])
+        tab1, tab2 = st.tabs(["💳 Get Access", "🔑 Unlock System"])
         
         with tab1:
-            st.subheader("Select a Plan")
-            st.write("• Monthly: 200 GHS")
-            st.write("• Yearly: 1,800 GHS")
-            if st.button("Proceed to Payment"):
-                st.info(f"Please WhatsApp a screenshot of your payment to {HELPLINE_WHATSAPP}")
+            st.subheader("Subscription Plans")
+            st.write("• Monthly: 200 GHS | • Yearly: 1,800 GHS")
+            if st.button("Request New Access"):
+                st.info(f"WhatsApp your business name to {HELPLINE_WHATSAPP}")
         
         with tab2:
-            st.subheader("Activate System")
-            key = st.text_input("License Key", type="password")
+            st.subheader("Client Login")
+            entered_key = st.text_input("License Key", type="password")
             if st.button("Unlock Dashboard"):
-                if key == "KAY-PRO-2026":
+                # Check if the key exists in our registry
+                if entered_key in CLIENT_REGISTRY:
                     st.session_state['authorized'] = True
+                    # This tells the app which company name to display
+                    st.session_state['client_name'] = CLIENT_REGISTRY[entered_key]
                     st.rerun()
                 else:
-                    st.error("Invalid Key. Check your spelling or contact support.")
+                    st.error("Invalid Key. Check your spelling or WhatsApp support.")
         
         st.divider()
         st.markdown(f"**WhatsApp Support (Only):** {HELPLINE_WHATSAPP}")
@@ -43,54 +56,40 @@ def check_access():
 # Run the gate
 check_access()
 
-# --- 3. THE ERP DASHBOARD (Only visible after unlocking) ---
-st.set_page_config(page_title="Tally Pro ERP", layout="wide")
+# --- 4. THE ERP DASHBOARD (Only visible after unlocking) ---
+st.set_page_config(page_title="E.K.A Cloud Accounting", layout="wide")
 
-# Sidebar Navigation
-st.sidebar.title("Tally Pro Menu")
-menu = st.sidebar.selectbox("Go to:", ["📊 Dashboard", "📈 Stock Watchlist", "⚙️ Settings"])
+# Sidebar - Branded to the specific client
+st.sidebar.title(f"🏢 {st.session_state['client_name']}")
+menu = st.sidebar.selectbox("Main Menu", ["📊 Dashboard", "⚙️ Settings"])
 
 if menu == "📊 Dashboard":
-    st.title("📊 Tally Pro ERP Dashboard")
-    st.success("Welcome back, Emmanuel. System is fully active.")
+    st.title(f"📊 Dashboard: {st.session_state['client_name']}")
+    st.success(f"Verified Access: {st.session_state['client_name']}")
 
-    # Company Configuration Section
-    with st.expander("🏢 Company Configuration", expanded=True):
+    # Business Profile Section
+    with st.expander("🏢 Business Configuration", expanded=True):
         col1, col2 = st.columns(2)
         with col1:
-            name = st.text_input("Company Name", value="E.K.A Financial Consultancy")
+            # Displays the name based on the key they used
+            st.text_input("Business Name", value=st.session_state['client_name'], disabled=True)
         with col2:
-            tin = st.text_input("TIN Number", placeholder="e.g. P000784560X")
+            st.text_input("TIN Number", placeholder="e.g. P000784560X")
         
-        # THE MISSING SUBMIT BUTTON
-        if st.button("💾 Save & Initialize Dashboard"):
-            st.toast(f"Configuration for {name} Saved!")
+        if st.button("💾 Save Profile Settings"):
+            st.toast("Settings Saved!")
             st.balloons()
 
-    # Financial Metrics
+    # Accounting Metrics
     st.divider()
     m1, m2, m3 = st.columns(3)
-    m1.metric("Total Revenue", "0.00 GHS", "0%")
-    m2.metric("Expenses", "0.00 GHS", "0%")
-    m3.metric("Net Profit", "0.00 GHS", "0%")
-
-elif menu == "📈 Stock Watchlist":
-    st.title("📈 Ghana Stock Watchlist")
-    st.info("Monitoring SIC, CAL, and MTNGH for 'Best Buy' opportunities.")
-    
-    # Custom Table for your specific stocks
-    stock_data = {
-        "Ticker": ["MTNGH", "CAL", "SIC"],
-        "Last Price (GHS)": [2.15, 0.48, 0.25],
-        "Market Sentiment": ["Bullish", "Neutral", "Waiting"]
-    }
-    df = pd.DataFrame(stock_data)
-    st.table(df)
-    st.caption("Last updated: Wednesday Market Close")
+    m1.metric("Revenue", "0.00 GHS")
+    m2.metric("Expenses", "0.00 GHS")
+    m3.metric("Net Profit", "0.00 GHS")
 
 elif menu == "⚙️ Settings":
     st.title("⚙️ System Settings")
-    st.write(f"**Administrator:** {ADMIN_EMAIL}")
+    st.write(f"Logged in as: **{st.session_state['client_name']}**")
     if st.button("Log Out"):
         st.session_state['authorized'] = False
         st.rerun()
