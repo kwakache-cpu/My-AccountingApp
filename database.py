@@ -6,11 +6,12 @@ def get_connection():
 def init_db():
     conn = get_connection()
     c = conn.cursor()
+    # Ensure the table exists
     c.execute('''CREATE TABLE IF NOT EXISTS companies 
                  (key TEXT PRIMARY KEY, name TEXT, tin TEXT, 
                   sub_admin_key TEXT, recovery_answer TEXT)''')
     
-    # Check if existing table needs the new columns (Patch)
+    # MIGRATION: Add columns if they are missing from an old version
     c.execute("PRAGMA table_info(companies)")
     cols = [column[1] for column in c.fetchall()]
     if "sub_admin_key" not in cols:
@@ -24,9 +25,11 @@ def init_db():
     c.execute('''CREATE TABLE IF NOT EXISTS ledgers 
                  (id INTEGER PRIMARY KEY AUTOINCREMENT, company_key TEXT, name TEXT, category TEXT)''')
     c.execute('''CREATE TABLE IF NOT EXISTS payroll 
-                 (id INTEGER PRIMARY KEY AUTOINCREMENT, company_key TEXT, emp_name TEXT, basic_salary REAL, net_salary REAL)''')
+                 (id INTEGER PRIMARY KEY AUTOINCREMENT, company_key TEXT, emp_name TEXT, 
+                  basic_salary REAL, ssnit_tier1 REAL, paye REAL, net_salary REAL)''')
     c.execute('''CREATE TABLE IF NOT EXISTS audit_logs 
-                 (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp DATETIME DEFAULT CURRENT_TIMESTAMP, company_key TEXT, action TEXT)''')
+                 (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp DATETIME DEFAULT CURRENT_TIMESTAMP, 
+                  company_key TEXT, action TEXT)''')
     conn.commit()
     conn.close()
 
