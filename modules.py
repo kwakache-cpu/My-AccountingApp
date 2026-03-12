@@ -38,8 +38,10 @@ def show_vouchers(comp_key, can_edit):
         if st.form_submit_button("Post Transaction"):
             conn.execute("INSERT INTO vouchers (company_key, date, v_type, ledger, amount, narration) VALUES (?, ?, ?, ?, ?, ?)",
                          (comp_key, "2026-03-12", v_type, ledger, amount, note))
+            # NEW: Audit Trail Logging
+            conn.execute("INSERT INTO audit_logs (company_key, action) VALUES (?, ?)", (comp_key, f"Posted {v_type} for GHS {amount}"))
             conn.commit()
-            st.success("Voucher Recorded!")
+            st.success("Voucher Recorded & Logged!")
 
 def show_payroll(comp_key, can_edit):
     st.header("🇬🇭 12. Payroll (SSNIT & PAYE)")
@@ -54,11 +56,23 @@ def show_payroll(comp_key, can_edit):
             conn = get_connection()
             conn.execute("INSERT INTO payroll (company_key, emp_name, basic_salary, ssnit_tier1, paye, net_salary) VALUES (?,?,?,?,?,?)",
                          (comp_key, name, basic, ssnit, paye, net))
+            # NEW: Audit Trail Logging
+            conn.execute("INSERT INTO audit_logs (company_key, action) VALUES (?, ?)", (comp_key, f"Processed Payroll for {name}"))
             conn.commit()
             st.success(f"Processed Payroll for {name}!")
     conn = get_connection()
     df = pd.read_sql("SELECT emp_name, basic_salary, ssnit_tier1, paye, net_salary FROM payroll WHERE company_key=?", conn, params=(comp_key,))
     st.dataframe(df)
+
+# NEW: Audit Trail View
+def show_audit_trail(comp_key):
+    st.header("🕵️ Audit Trail (Security Log)")
+    conn = get_connection()
+    df = pd.read_sql("SELECT timestamp, action FROM audit_logs WHERE company_key=? ORDER BY timestamp DESC", conn, params=(comp_key,))
+    if not df.empty:
+        st.dataframe(df, use_container_width=True)
+    else:
+        st.info("No logs found yet. Actions will appear here as they happen.")
 
 def show_reports(comp_key):
     st.header("📊 15. Financial Reports")

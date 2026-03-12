@@ -52,9 +52,9 @@ else:
                 st.success(f"Registered {n}")
     else:
         st.sidebar.title(f"🏢 {user['name']}")
-        # FIX: Consistently using the variable name 'role'
         role = st.sidebar.radio("Access Level", ["Administrator", "Staff"])
-        menu = st.sidebar.selectbox("Modules", ["Company Setup", "Chart of Accounts", "Vouchers", "Payroll", "Reports"])
+        # Added Audit Trail to this list
+        menu = st.sidebar.selectbox("Modules", ["Company Setup", "Chart of Accounts", "Vouchers", "Payroll", "Audit Trail", "Reports"])
         
         is_admin = (role == "Administrator")
         
@@ -62,6 +62,7 @@ else:
         elif menu == "Chart of Accounts": show_chart_of_accounts(user['key'], is_admin)
         elif menu == "Vouchers": show_vouchers(user['key'], is_admin)
         elif menu == "Payroll": show_payroll(user['key'], is_admin)
+        elif menu == "Audit Trail": show_audit_trail(user['key'])
         elif menu == "Reports": show_reports(user['key'])
 
     if st.sidebar.button("Log Out"):
