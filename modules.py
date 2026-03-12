@@ -23,7 +23,6 @@ def show_chart_of_accounts(comp_key, can_edit):
                 conn.execute("INSERT INTO ledgers (company_key, name, category) VALUES (?, ?, ?)", (comp_key, name, cat))
                 conn.commit()
                 st.success(f"Added {name}")
-
     conn = get_connection()
     df = pd.read_sql("SELECT name, category FROM ledgers WHERE company_key=?", conn, params=(comp_key,))
     st.table(df)
@@ -31,13 +30,9 @@ def show_chart_of_accounts(comp_key, can_edit):
 # --- 6. VOUCHER ENTRY ---
 def show_vouchers(comp_key, can_edit):
     st.header("✍️ 6. Voucher Entry")
-    if not can_edit:
-        st.error("Staff: Read-only.")
-        return
-
+    if not can_edit: return
     conn = get_connection()
     ledger_list = pd.read_sql("SELECT name FROM ledgers WHERE company_key=?", conn, params=(comp_key,))['name'].tolist()
-
     with st.form("v_form"):
         v_type = st.selectbox("Type", ["Sales", "Purchase", "Payment", "Receipt"])
         ledger = st.selectbox("Ledger", ledger_list if ledger_list else ["Setup Ledgers First"])
@@ -49,31 +44,44 @@ def show_vouchers(comp_key, can_edit):
             conn.commit()
             st.success("Posted!")
 
+# --- 12. PAYROLL (GHANA TAX) ---
+def show_payroll(comp_key, can_edit):
+    st.header("🇬🇭 12. Payroll (SSNIT & PAYE)")
+    
+    with st.form("payroll_calc"):
+        name = st.text_input("Employee Name")
+        basic = st.number_input("Basic Salary (GHS)", min_value=0.0)
+        
+        if st.form_submit_button("Calculate & Process"):
+            # Ghana SSNIT logic (5.5% Employee contribution)
+            ssnit = basic * 0.055
+            taxable_income = basic - ssnit
+            
+            # Simple GRA PAYE Tier Logic (Simplified for Demo)
+            if taxable_income <= 402: paye = 0
+            elif taxable_income <= 512: paye = (taxable_income - 402) * 0.05
+            else: paye = (taxable_income - 512) * 0.10 + 5.5  # Tiered placeholder
+            
+            net = basic - ssnit - paye
+            
+            conn = get_connection()
+            conn.execute("INSERT INTO payroll (company_key, emp_name, basic_salary, ssnit_tier1, paye, net_salary) VALUES (?,?,?,?,?)",
+                         (comp_key, name, basic, ssnit, paye, net))
+            conn.commit()
+            st.success(f"Payroll processed for {name}!")
+
+    conn = get_connection()
+    df = pd.read_sql("SELECT emp_name, basic_salary, ssnit_tier1 as SSNIT, paye as PAYE, net_salary as NET FROM payroll WHERE company_key=?", conn, params=(comp_key,))
+    st.dataframe(df)
+
 # --- 15. FINANCIAL REPORTS ---
 def show_reports(comp_key):
     st.header("📊 15. Financial Reports")
     conn = get_connection()
-    
-    # Simple Profit & Loss Logic
-    st.subheader("Profit & Loss Statement")
-    
-    # Get all vouchers joined with their ledger categories
-    query = '''
-        SELECT v.amount, l.category 
-        FROM vouchers v 
-        JOIN ledgers l ON v.ledger = l.name 
-        WHERE v.company_key = ?
-    '''
+    query = 'SELECT v.amount, l.category FROM vouchers v JOIN ledgers l ON v.ledger = l.name WHERE v.company_key = ?'
     df = pd.read_sql(query, conn, params=(comp_key,))
-    
     if not df.empty:
         income = df[df['category'] == 'Income']['amount'].sum()
         expenses = df[df['category'] == 'Expense']['amount'].sum()
-        profit = income - expenses
-        
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Total Income", f"GHS {income:,.2f}")
-        c2.metric("Total Expenses", f"GHS {expenses:,.2f}")
-        c3.metric("Net Profit", f"GHS {profit:,.2f}")
-    else:
-        st.warning("No data found. Post some vouchers to see reports.")
+        st.metric("Net Profit", f"GHS {income - expenses:,.2f}")
+    else: st.warning("No data found.")

@@ -37,17 +37,12 @@ else:
     user = st.session_state.user
     if user['role'] == "Owner":
         st.title("👑 Owner's Registration Center")
-        
-        # --- NEW: DATABASE BACKUP FEATURE ---
         with st.sidebar:
-            st.write("🛠️ System Tools")
             if os.path.exists("eka_vault.db"):
                 with open("eka_vault.db", "rb") as f:
-                    st.download_button("💾 Download Database Backup", f, file_name="eka_vault_backup.db")
-        
+                    st.download_button("💾 Database Backup", f, file_name="eka_vault_backup.db")
         with st.form("reg"):
-            n = st.text_input("Company Name")
-            k = st.text_input("Key")
+            n, k = st.text_input("Company Name"), st.text_input("Key")
             if st.form_submit_button("Register"):
                 conn = get_connection()
                 conn.execute("INSERT OR REPLACE INTO companies VALUES (?, ?, ?, ?)", (k, n, "", "2026-12-31"))
@@ -56,11 +51,12 @@ else:
     else:
         st.sidebar.title(f"🏢 {user['name']}")
         role = st.sidebar.radio("Role", ["Administrator", "Staff"])
-        menu = st.sidebar.selectbox("Modules", ["Company Setup", "Chart of Accounts", "Vouchers", "Reports"])
+        menu = st.sidebar.selectbox("Modules", ["Company Setup", "Chart of Accounts", "Vouchers", "Payroll", "Reports"])
         
         if menu == "Company Setup": show_company_setup(user['name'], role=="Administrator")
         elif menu == "Chart of Accounts": show_chart_of_accounts(user['key'], role=="Administrator")
         elif menu == "Vouchers": show_vouchers(user['key'], role=="Administrator")
+        elif menu == "Payroll": show_payroll(user['key'], role=="Administrator")
         elif menu == "Reports": show_reports(user['key'])
 
     if st.sidebar.button("Log Out"):

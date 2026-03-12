@@ -15,11 +15,15 @@ def init_db():
     c.execute('''CREATE TABLE IF NOT EXISTS vouchers 
                  (id INTEGER PRIMARY KEY AUTOINCREMENT, company_key TEXT, 
                   date TEXT, v_type TEXT, ledger TEXT, amount REAL, narration TEXT)''')
-    # 3. Chart of Accounts (Ledgers)
+    # 3. Chart of Accounts
     c.execute('''CREATE TABLE IF NOT EXISTS ledgers 
                  (id INTEGER PRIMARY KEY AUTOINCREMENT, company_key TEXT, 
                   name TEXT, category TEXT)''')
-    # 4. Security Audit Logs
+    # 4. Payroll Records
+    c.execute('''CREATE TABLE IF NOT EXISTS payroll 
+                 (id INTEGER PRIMARY KEY AUTOINCREMENT, company_key TEXT, 
+                  emp_name TEXT, basic_salary REAL, ssnit_tier1 REAL, paye REAL, net_salary REAL)''')
+    # 5. Security Audit Logs
     c.execute('''CREATE TABLE IF NOT EXISTS audit_logs 
                  (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp DATETIME DEFAULT CURRENT_TIMESTAMP, 
                   company_key TEXT, action TEXT)''')
