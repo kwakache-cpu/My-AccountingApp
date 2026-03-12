@@ -1,11 +1,9 @@
 import streamlit as st
-from database import get_connection, init_db # Added init_db here
+from database import get_connection, init_db
 from modules import *
 import pandas as pd
 import os
 
-# --- SAFETY TRIGGER ---
-# This ensures any new tables (like Payroll) are created immediately
 init_db() 
 
 st.set_page_config(page_title="E.K.A Cloud ERP", layout="wide")
@@ -42,9 +40,9 @@ else:
     if user['role'] == "Owner":
         st.title("👑 Owner's Registration Center")
         with st.sidebar:
-            if os.path.exists("eka_vault.db"):
-                with open("eka_vault.db", "rb") as f:
-                    st.download_button("💾 Database Backup", f, file_name="eka_vault_backup.db")
+            if os.path.exists("eka_vault_v2.db"):
+                with open("eka_vault_v2.db", "rb") as f:
+                    st.download_button("💾 Backup v2", f, file_name="eka_vault_v2.db")
         with st.form("reg"):
             n, k = st.text_input("Company Name"), st.text_input("Key")
             if st.form_submit_button("Register"):
@@ -56,7 +54,6 @@ else:
         st.sidebar.title(f"🏢 {user['name']}")
         role = st.sidebar.radio("Role", ["Administrator", "Staff"])
         menu = st.sidebar.selectbox("Modules", ["Company Setup", "Chart of Accounts", "Vouchers", "Payroll", "Reports"])
-        
         if menu == "Company Setup": show_company_setup(user['name'], role=="Administrator")
         elif menu == "Chart of Accounts": show_chart_of_accounts(user['key'], role=="Administrator")
         elif menu == "Vouchers": show_vouchers(user['key'], role=="Administrator")

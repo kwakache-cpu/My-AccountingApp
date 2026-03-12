@@ -2,8 +2,8 @@ import sqlite3
 import streamlit as st
 
 def get_connection():
-    db_name = st.secrets.get("DB_NAME", "eka_vault.db")
-    return sqlite3.connect(db_name, check_same_thread=False)
+    # We change the name to v2 to force a fresh, clean start
+    return sqlite3.connect("eka_vault_v2.db", check_same_thread=False)
 
 def init_db():
     conn = get_connection()
@@ -19,10 +19,11 @@ def init_db():
     c.execute('''CREATE TABLE IF NOT EXISTS ledgers 
                  (id INTEGER PRIMARY KEY AUTOINCREMENT, company_key TEXT, 
                   name TEXT, category TEXT)''')
-    # 4. Payroll Records
+    # 4. Payroll Records (Now with all 7 necessary columns)
     c.execute('''CREATE TABLE IF NOT EXISTS payroll 
                  (id INTEGER PRIMARY KEY AUTOINCREMENT, company_key TEXT, 
-                  emp_name TEXT, basic_salary REAL, ssnit_tier1 REAL, paye REAL, net_salary REAL)''')
+                  emp_name TEXT, basic_salary REAL, ssnit_tier1 REAL, 
+                  paye REAL, net_salary REAL)''')
     # 5. Security Audit Logs
     c.execute('''CREATE TABLE IF NOT EXISTS audit_logs 
                  (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp DATETIME DEFAULT CURRENT_TIMESTAMP, 
