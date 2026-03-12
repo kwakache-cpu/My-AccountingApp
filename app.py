@@ -3,7 +3,7 @@ from database import get_connection
 from modules import *
 from datetime import datetime, timedelta
 
-st.set_page_config(page_title="E.K.A Cloud Accounting", layout="wide")
+st.set_page_config(page_title="E.K.A Cloud ERP", layout="wide")
 
 if 'auth' not in st.session_state:
     st.session_state.auth = False
@@ -11,50 +11,64 @@ if 'auth' not in st.session_state:
 
 def login():
     st.title("🛡️ E.K.A Cloud Accounting - Access Portal")
-    key = st.text_input("Enter License Key", type="password")
+    
+    # MASTER OVERRIDE: Hardcoded for immediate access
+    MASTER_ADMIN_KEY = "JUANMANUEL2"
+    
+    user_input = st.text_input("Enter License Key", type="password")
     
     if st.button("Unlock System"):
-        if key == "KAY-ADMIN-MASTER":
+        # Check against the override key first
+        if user_input.strip() == MASTER_ADMIN_KEY:
             st.session_state.auth = True
-            st.session_state.user = {"name": "Master Admin", "role": "Owner", "key": "ADMIN"}
+            st.session_state.user = {"name": "Master Owner", "role": "Owner", "key": "ADMIN"}
+            st.success("Master Access Granted!")
             st.rerun()
         else:
+            # Check database for clients
             conn = get_connection()
             cur = conn.cursor()
-            cur.execute("SELECT * FROM companies WHERE key=?", (key,))
+            cur.execute("SELECT * FROM companies WHERE key=?", (user_input.strip(),))
             res = cur.fetchone()
             if res:
                 st.session_state.auth = True
                 st.session_state.user = {"key": res[0], "name": res[1], "expiry": res[3], "role": "Client"}
                 st.rerun()
             else:
-                st.error("Invalid Key. Contact +233546044673")
+                st.error("Invalid Key. Please contact support.")
 
-def owner_admin():
-    st.title("👑 Owner's Registration Center")
-    with st.form("reg"):
-        n = st.text_input("Company Name")
-        k = st.text_input("Assign Unique Key")
-        d = st.number_input("Subscription Days", value=30)
-        if st.form_submit_button("Register & Save"):
-            exp = (datetime.now() + timedelta(days=d)).date()
-            conn = get_connection()
-            conn.execute("INSERT OR REPLACE INTO companies VALUES (?, ?, ?, ?)", (k, n, "", str(exp)))
-            conn.commit()
-            st.success(f"Registered {n}! Give them key: {k}")
-
+# --- APP MAIN LOGIC ---
 if not st.session_state.auth:
     login()
 else:
     user = st.session_state.user
     if user['role'] == "Owner":
-        owner_admin()
-    else:
-        st.sidebar.title(f"🏢 {user['name']}")
-        role_type = st.sidebar.radio("Your Role", ["Administrator (Full Access)", "Staff (View Only)"])
-        can_edit = (role_type == "Administrator (Full Access)")
+        st.sidebar.success("🔑 MASTER ADMIN MODE")
+        st.title("👑 Owner's Registration Center")
         
-        # 18-Module Sidebar
+        # Form to add new clients (like Star Bakery)
+        with st.form("reg_form"):
+            name = st.text_input("New Company Name")
+            key = st.text_input("Assign Unique Key")
+            days = st.number_input("Subscription Days", value=30)
+            if st.form_submit_button("Register Company"):
+                exp = (datetime.now() + timedelta(days=days)).date()
+                conn = get_connection()
+                conn.execute("INSERT OR REPLACE INTO companies VALUES (?, ?, ?, ?)", (key, name, "", str(exp)))
+                conn.commit()
+                st.success(f"Registered {name}! Access Key: {key}")
+                
+        # Show all registered companies
+        st.subheader("Registered Clients")
+        conn = get_connection()
+        clients = pd.read_sql("SELECT name, key, expiry FROM companies", conn)
+        st.table(clients)
+    else:
+        # Client ERP View
+        st.sidebar.title(f"🏢 {user['name']}")
+        role = st.sidebar.radio("Access Level", ["Administrator", "Staff"])
+        can_edit = (role == "Administrator")
+        
         menu = st.sidebar.selectbox("Modules", ["Company Setup", "Inventory", "Vouchers", "Reports"])
         
         if menu == "Company Setup": show_company_setup(user['name'], can_edit)
