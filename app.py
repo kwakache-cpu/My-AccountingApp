@@ -23,53 +23,74 @@ def login():
                 st.rerun()
             
             conn = get_connection()
-            # Check Master Admin Key
+            # 1. Master Admin Check
             res = conn.execute("SELECT key, name FROM companies WHERE key=?", (user_input,)).fetchone()
             if res:
                 st.session_state.auth, st.session_state.user = True, {"key": res[0], "name": res[1], "role": "Master Admin"}
                 st.rerun()
             
-            # Check Sub-Admin Key
+            # 2. Sub-Admin (Data Entry) Check
             res_sub = conn.execute("SELECT key, name FROM companies WHERE sub_admin_key=?", (user_input,)).fetchone()
             if res_sub:
                 st.session_state.auth, st.session_state.user = True, {"key": res_sub[0], "name": res_sub[1], "role": "Sub-Admin"}
                 st.rerun()
+
+            # 3. Staff (Read-Only) Check - Note: We'll use a standard 'staff' suffix or specific field later if needed
+            if user_input.endswith("-staff"):
+                # Simple logic for now: if key ends in -staff, it's read-only for that company
+                actual_key = user_input.replace("-staff", "")
+                res_staff = conn.execute("SELECT key, name FROM companies WHERE key=?", (actual_key,)).fetchone()
+                if res_staff:
+                    st.session_state.auth, st.session_state.user = True, {"key": res_staff[0], "name": res_staff[1], "role": "Staff"}
+                    st.rerun()
             
-            st.error("Invalid Key.")
+            st.error("Invalid Key. If you are Staff, ensure you use your assigned suffix.")
 
     with tab2:
         st.subheader("Reset Access")
         comp_id = st.text_input("Company Name")
-        answer = st.text_input("Your Secret Recovery Answer", type="password")
+        answer = st.text_input("Recovery Answer", type="password")
         if st.button("Reveal Master Key"):
             conn = get_connection()
             res = conn.execute("SELECT key FROM companies WHERE name=? AND recovery_answer=?", (comp_id, answer)).fetchone()
-            if res: st.success(f"Recovery Successful. Your Master Key is: {res[0]}")
-            else: st.error("Details do not match our records.")
+            if res: st.success(f"Your Master Key is: {res[0]}")
+            else: st.error("Verification failed.")
 
 if not st.session_state.auth:
     login()
 else:
     u = st.session_state.user
     if u['role'] == "Dev":
-        st.title("👑 Developer Registration Center")
+        st.title("👑 Developer Dashboard")
         with st.form("reg"):
             n, k = st.text_input("Company Name"), st.text_input("Master Key")
-            if st.form_submit_button("Register Company"):
+            if st.form_submit_button("Register"):
                 conn = get_connection()
                 conn.execute("INSERT OR REPLACE INTO companies (key, name) VALUES (?, ?)", (k, n))
                 conn.commit()
-                st.success(f"Registered {n} with key {k}")
+                st.success(f"Registered {n}")
     else:
         st.sidebar.title(f"🏢 {u['name']}")
-        role_select = st.sidebar.radio("View Mode", ["Active Entry", "Staff (Read-Only)"])
+        st.sidebar.info(f"Access level: {u['role']}")
         
-        final_role = "Staff" if role_select == "Staff (Read-Only)" else u['role']
-        menu = st.sidebar.selectbox("Modules", ["Company Setup", "Vouchers", "Payroll", "Audit Trail", "Reports"])
+        # PERMISSION LOCK: Only Master Admin sees the mode switcher
+        if u['role'] == "Master Admin":
+            role_select = st.sidebar.radio("Session Type", ["Master Admin", "Staff View (Read-Only)"])
+            active_role = "Staff" if role_select == "Staff View (Read-Only)" else "Master Admin"
+        else:
+            # Sub-Admins and Staff are LOCKED into their roles
+            active_role = u['role']
+
+        # MODULE RESTRICTION: Define which menus are visible
+        menu_options = ["Vouchers", "Payroll", "Audit Trail", "Reports"]
+        if active_role == "Master Admin":
+            menu_options.insert(0, "Company Setup")
         
-        if menu == "Company Setup": show_company_setup(u['key'], u['name'], final_role)
-        elif menu == "Vouchers": show_vouchers(u['key'], final_role)
-        elif menu == "Payroll": show_payroll(u['key'], final_role)
+        menu = st.sidebar.selectbox("Modules", menu_options)
+        
+        if menu == "Company Setup": show_company_setup(u['key'], u['name'], active_role)
+        elif menu == "Vouchers": show_vouchers(u['key'], active_role)
+        elif menu == "Payroll": show_payroll(u['key'], active_role)
         elif menu == "Audit Trail": show_audit_trail(u['key'])
         elif menu == "Reports": show_reports(u['key'])
 
