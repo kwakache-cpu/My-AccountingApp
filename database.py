@@ -2,13 +2,13 @@ import sqlite3
 import streamlit as st
 
 def get_connection():
-    # Continuing with our healthy v2 database
-    return sqlite3.connect("eka_vault_v2.db", check_same_thread=False)
+    # Moving to v3 to finalize the new security structure
+    return sqlite3.connect("eka_vault_v3.db", check_same_thread=False)
 
 def init_db():
     conn = get_connection()
     c = conn.cursor()
-    # Updated: Added sub_admin_key and recovery_answer
+    # Updated: master structure for all security features
     c.execute('''CREATE TABLE IF NOT EXISTS companies 
                  (key TEXT PRIMARY KEY, name TEXT, tin TEXT, 
                   sub_admin_key TEXT, recovery_answer TEXT)''')

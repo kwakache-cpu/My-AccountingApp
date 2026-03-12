@@ -10,7 +10,7 @@ def show_company_setup(comp_key, company_name, user_role):
     with col1:
         st.subheader("🔑 Access Management")
         new_sub = st.text_input("Set Bookkeeper/Sub-Admin Key", type="password")
-        if st.button("Update Keys") and is_master:
+        if st.button("Update Sub-Admin Access") and is_master:
             conn = get_connection()
             conn.execute("UPDATE companies SET sub_admin_key=? WHERE key=?", (new_sub, comp_key))
             conn.commit()
@@ -18,8 +18,8 @@ def show_company_setup(comp_key, company_name, user_role):
     
     with col2:
         st.subheader("🛡️ Password Recovery")
-        ans = st.text_input("Set Recovery Answer (Your first car/pet?)", type="password")
-        if st.button("Save Recovery") and is_master:
+        ans = st.text_input("Set Recovery Answer", type="password", help="Example: Your first pet's name")
+        if st.button("Save Recovery Answer") and is_master:
             conn = get_connection()
             conn.execute("UPDATE companies SET recovery_answer=? WHERE key=?", (ans, comp_key))
             conn.commit()
@@ -27,13 +27,12 @@ def show_company_setup(comp_key, company_name, user_role):
 
 def show_vouchers(comp_key, user_role):
     st.header("✍️ 6. Voucher Entry")
-    # SECURITY: Only Master Admin and Sub-Admin (Bookkeeper) can see the input form
     if user_role in ["Master Admin", "Sub-Admin"]:
         conn = get_connection()
         ledger_list = pd.read_sql("SELECT name FROM ledgers WHERE company_key=?", conn, params=(comp_key,))['name'].tolist()
         with st.form("v_form"):
             v_type = st.selectbox("Type", ["Sales", "Purchase", "Payment", "Receipt"])
-            ledger = st.selectbox("Ledger", ledger_list if ledger_list else ["No Ledgers"])
+            ledger = st.selectbox("Ledger", ledger_list if ledger_list else ["No Ledgers Found"])
             amount = st.number_input("Amount (GHS)", min_value=0.0)
             note = st.text_area("Narration")
             if st.form_submit_button("Post Transaction"):
@@ -43,7 +42,7 @@ def show_vouchers(comp_key, user_role):
                 conn.commit()
                 st.success("Transaction Saved!")
     else:
-        st.warning("🔒 Staff Access: Read-Only Mode. You cannot enter vouchers.")
+        st.warning("🔒 Staff View: You have read-only access to these records.")
     
     conn = get_connection()
     df = pd.read_sql("SELECT date, v_type, ledger, amount FROM vouchers WHERE company_key=?", conn, params=(comp_key,))
@@ -55,7 +54,7 @@ def show_payroll(comp_key, user_role):
         with st.form("payroll_calc"):
             name = st.text_input("Employee Name")
             basic = st.number_input("Basic Salary (GHS)", min_value=0.0)
-            if st.form_submit_button("Process"):
+            if st.form_submit_button("Process Payroll"):
                 ssnit = round(basic * 0.055, 2)
                 taxable = basic - ssnit
                 paye = round((taxable - 402) * 0.05, 2) if taxable > 402 else 0
@@ -65,9 +64,9 @@ def show_payroll(comp_key, user_role):
                              (comp_key, name, basic, ssnit, paye, net))
                 conn.execute("INSERT INTO audit_logs (company_key, action) VALUES (?, ?)", (comp_key, f"{user_role} processed payroll: {name}"))
                 conn.commit()
-                st.success(f"Processed!")
+                st.success(f"Payroll Processed for {name}!")
     else:
-        st.warning("🔒 Staff Access: Read-Only Mode.")
+        st.warning("🔒 Staff View: Read-only access.")
     
     conn = get_connection()
     df = pd.read_sql("SELECT emp_name, net_salary FROM payroll WHERE company_key=?", conn, params=(comp_key,))
