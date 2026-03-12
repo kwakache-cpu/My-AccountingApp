@@ -1,94 +1,98 @@
 import streamlit as st
-import pandas as pd
-from database import get_connection
+from database import get_connection, init_db
+from modules import *
+import os
 
-def show_company_setup(comp_key, company_name, user_role):
-    # HARD LOCK: Even if the URL is guessed, the code won't run for non-admins
-    if user_role != "Master Admin":
-        st.error("Access Denied: Master Admin only.")
-        return
+init_db() 
 
-    st.header(f"🏗️ Company Settings: {company_name}")
-    col1, col2 = st.columns(2)
-    with col1:
-        st.subheader("🔑 Access Management")
-        sub_key = st.text_input("Sub-Admin (Data Entry) Key", type="password", help="Full data entry access.")
-        if st.button("Save Sub-Admin Key"):
-            conn = get_connection()
-            conn.execute("UPDATE companies SET sub_admin_key=? WHERE key=?", (sub_key, comp_key))
-            conn.commit()
-            st.success("Sub-Admin key updated!")
-        
-        st.info(f"Staff (Read-Only) Key: {comp_key}-staff")
+st.set_page_config(page_title="E.K.A Cloud ERP", layout="wide")
+
+if 'auth' not in st.session_state:
+    st.session_state.auth = False
+    st.session_state.user = None
+
+def login():
+    st.title("🛡️ E.K.A Cloud Accounting - Access Portal")
+    tab1, tab2 = st.tabs(["Login", "Forgot Password"])
     
-    with col2:
-        st.subheader("🛡️ Password Recovery")
-        ans = st.text_input("Secret Recovery Answer", type="password")
-        if st.button("Save Recovery"):
+    with tab1:
+        user_input = st.text_input("Enter License Key", type="password")
+        if st.button("Unlock System"):
+            if user_input == "JUANMANUEL2":
+                st.session_state.auth, st.session_state.user = True, {"name": "Developer", "role": "Dev", "key": "ADMIN"}
+                st.rerun()
+            
             conn = get_connection()
-            conn.execute("UPDATE companies SET recovery_answer=? WHERE key=?", (ans, comp_key))
-            conn.commit()
-            st.success("Recovery answer saved!")
+            # Path A: Master Admin Key
+            res = conn.execute("SELECT key, name FROM companies WHERE key=?", (user_input,)).fetchone()
+            if res:
+                st.session_state.auth, st.session_state.user = True, {"key": res[0], "name": res[1], "role": "Master Admin"}
+                st.rerun()
+            
+            # Path B: Sub-Admin (Data Entry) Key
+            res_sub = conn.execute("SELECT key, name FROM companies WHERE sub_admin_key=?", (user_input,)).fetchone()
+            if res_sub:
+                st.session_state.auth, st.session_state.user = True, {"key": res_sub[0], "name": res_sub[1], "role": "Sub-Admin"}
+                st.rerun()
 
-def show_vouchers(comp_key, user_role):
-    st.header("✍️ Voucher Entry")
-    # Sub-Admins can enter data, Staff cannot
-    if user_role in ["Master Admin", "Sub-Admin"]:
-        conn = get_connection()
-        ledgers = pd.read_sql("SELECT name FROM ledgers WHERE company_key=?", conn, params=(comp_key,))['name'].tolist()
-        with st.form("v_form"):
-            v_type = st.selectbox("Type", ["Sales", "Purchase", "Payment", "Receipt"])
-            ledger = st.selectbox("Ledger", ledgers if ledgers else ["No Ledgers"])
-            amount = st.number_input("Amount (GHS)", min_value=0.0)
-            note = st.text_area("Narration")
-            if st.form_submit_button("Post Transaction"):
-                conn.execute("INSERT INTO vouchers (company_key, date, v_type, ledger, amount, narration) VALUES (?, ?, ?, ?, ?, ?)",
-                             (comp_key, "2026-03-12", v_type, ledger, amount, note))
-                conn.execute("INSERT INTO audit_logs (company_key, action) VALUES (?, ?)", (comp_key, f"{user_role} posted {v_type}"))
-                conn.commit()
-                st.success("Transaction Recorded!")
-    else:
-        st.warning("🔒 Staff Access: View-Only.")
-    
-    conn = get_connection()
-    df = pd.read_sql("SELECT date, v_type, ledger, amount FROM vouchers WHERE company_key=?", conn, params=(comp_key,))
-    st.table(df)
+            # Path C: Staff (Read-Only) Key
+            if user_input.endswith("-staff"):
+                actual_key = user_input.replace("-staff", "")
+                res_staff = conn.execute("SELECT key, name FROM companies WHERE key=?", (actual_key,)).fetchone()
+                if res_staff:
+                    st.session_state.auth, st.session_state.user = True, {"key": res_staff[0], "name": res_staff[1], "role": "Staff"}
+                    st.rerun()
+            
+            st.error("Invalid Key. If you are Staff, ensure you use your assigned '-staff' suffix.")
 
-def show_payroll(comp_key, user_role):
-    st.header("🇬🇭 Payroll")
-    if user_role in ["Master Admin", "Sub-Admin"]:
-        with st.form("pay_form"):
-            name = st.text_input("Employee Name")
-            basic = st.number_input("Basic Salary", min_value=0.0)
-            if st.form_submit_button("Process"):
-                ssnit = round(basic * 0.055, 2)
-                taxable = basic - ssnit
-                paye = round((taxable - 402) * 0.05, 2) if taxable > 402 else 0
-                net = round(basic - ssnit - paye, 2)
+    with tab2:
+        st.subheader("Reset Access")
+        comp_name = st.text_input("Company Registered Name")
+        answer = st.text_input("Recovery Answer", type="password")
+        if st.button("Reveal Master Key"):
+            conn = get_connection()
+            res = conn.execute("SELECT key FROM companies WHERE name=? AND recovery_answer=?", (comp_name, answer)).fetchone()
+            if res: st.success(f"Verified. Your Master Key is: {res[0]}")
+            else: st.error("Verification failed. Incorrect details.")
+
+if not st.session_state.auth:
+    login()
+else:
+    u = st.session_state.user
+    if u['role'] == "Dev":
+        st.title("👑 Developer Dashboard")
+        with st.form("reg"):
+            n, k = st.text_input("Company Name"), st.text_input("Master Key")
+            if st.form_submit_button("Register"):
                 conn = get_connection()
-                conn.execute("INSERT INTO payroll (company_key, emp_name, basic_salary, ssnit_tier1, paye, net_salary) VALUES (?,?,?,?,?,?)",
-                             (comp_key, name, basic, ssnit, paye, net))
-                conn.execute("INSERT INTO audit_logs (company_key, action) VALUES (?, ?)", (comp_key, f"{user_role} ran payroll for {name}"))
+                conn.execute("INSERT OR REPLACE INTO companies (key, name) VALUES (?, ?)", (k, n))
                 conn.commit()
-                st.success("Payroll Processed!")
+                st.success(f"Registered {n}")
     else:
-        st.warning("🔒 Staff Access: View-Only.")
-    
-    conn = get_connection()
-    df = pd.read_sql("SELECT emp_name, net_salary FROM payroll WHERE company_key=?", conn, params=(comp_key,))
-    st.dataframe(df)
+        st.sidebar.title(f"🏢 {u['name']}")
+        
+        # PERMISSION LOCK: Only Master Admin can toggle views
+        if u['role'] == "Master Admin":
+            role_select = st.sidebar.radio("View As", ["Master Admin", "Staff View (Read-Only)"])
+            active_role = "Staff" if role_select == "Staff View (Read-Only)" else "Master Admin"
+        else:
+            # Sub-Admins and Staff are LOCKED into their specific roles
+            active_role = u['role']
+            st.sidebar.info(f"📍 Access Level: {active_role}")
 
-def show_audit_trail(comp_key):
-    st.header("🕵️ Audit Trail")
-    conn = get_connection()
-    df = pd.read_sql("SELECT timestamp, action FROM audit_logs WHERE company_key=? ORDER BY timestamp DESC", conn, params=(comp_key,))
-    st.dataframe(df, use_container_width=True)
+        # Menu visibility logic
+        menu_options = ["Vouchers", "Payroll", "Audit Trail", "Reports"]
+        if active_role == "Master Admin":
+            menu_options.insert(0, "Company Setup")
+        
+        menu = st.sidebar.selectbox("Navigate To:", menu_options)
+        
+        if menu == "Company Setup": show_company_setup(u['key'], u['name'], active_role)
+        elif menu == "Vouchers": show_vouchers(u['key'], active_role)
+        elif menu == "Payroll": show_payroll(u['key'], active_role)
+        elif menu == "Audit Trail": show_audit_trail(u['key'])
+        elif menu == "Reports": show_reports(u['key'])
 
-def show_reports(comp_key):
-    st.header("📊 Reports")
-    conn = get_connection()
-    df = pd.read_sql('SELECT v.amount, l.category FROM vouchers v JOIN ledgers l ON v.ledger = l.name WHERE v.company_key = ?', conn, params=(comp_key,))
-    if not df.empty:
-        inc = df[df['category'] == 'Income']['amount'].sum()
-        exp = df[df['category'] == 'Expense']['amount'].sum()
-        st.metric("Net Profit", f"GHS {inc - exp:,.2f}")
+    if st.sidebar.button("Log Out"):
+        st.session_state.auth = False
+        st.rerun()

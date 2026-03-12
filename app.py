@@ -23,38 +23,37 @@ def login():
                 st.rerun()
             
             conn = get_connection()
-            # 1. Master Admin Check
+            # Path A: Master Admin Key
             res = conn.execute("SELECT key, name FROM companies WHERE key=?", (user_input,)).fetchone()
             if res:
                 st.session_state.auth, st.session_state.user = True, {"key": res[0], "name": res[1], "role": "Master Admin"}
                 st.rerun()
             
-            # 2. Sub-Admin (Data Entry) Check
+            # Path B: Sub-Admin (Data Entry) Key
             res_sub = conn.execute("SELECT key, name FROM companies WHERE sub_admin_key=?", (user_input,)).fetchone()
             if res_sub:
                 st.session_state.auth, st.session_state.user = True, {"key": res_sub[0], "name": res_sub[1], "role": "Sub-Admin"}
                 st.rerun()
 
-            # 3. Staff (Read-Only) Check - Note: We'll use a standard 'staff' suffix or specific field later if needed
+            # Path C: Staff (Read-Only) Key
             if user_input.endswith("-staff"):
-                # Simple logic for now: if key ends in -staff, it's read-only for that company
                 actual_key = user_input.replace("-staff", "")
                 res_staff = conn.execute("SELECT key, name FROM companies WHERE key=?", (actual_key,)).fetchone()
                 if res_staff:
                     st.session_state.auth, st.session_state.user = True, {"key": res_staff[0], "name": res_staff[1], "role": "Staff"}
                     st.rerun()
             
-            st.error("Invalid Key. If you are Staff, ensure you use your assigned suffix.")
+            st.error("Invalid Key. If you are Staff, ensure you use your assigned '-staff' suffix.")
 
     with tab2:
         st.subheader("Reset Access")
-        comp_id = st.text_input("Company Name")
+        comp_name = st.text_input("Company Registered Name")
         answer = st.text_input("Recovery Answer", type="password")
         if st.button("Reveal Master Key"):
             conn = get_connection()
-            res = conn.execute("SELECT key FROM companies WHERE name=? AND recovery_answer=?", (comp_id, answer)).fetchone()
-            if res: st.success(f"Your Master Key is: {res[0]}")
-            else: st.error("Verification failed.")
+            res = conn.execute("SELECT key FROM companies WHERE name=? AND recovery_answer=?", (comp_name, answer)).fetchone()
+            if res: st.success(f"Verified. Your Master Key is: {res[0]}")
+            else: st.error("Verification failed. Incorrect details.")
 
 if not st.session_state.auth:
     login()
@@ -71,22 +70,22 @@ else:
                 st.success(f"Registered {n}")
     else:
         st.sidebar.title(f"🏢 {u['name']}")
-        st.sidebar.info(f"Access level: {u['role']}")
         
-        # PERMISSION LOCK: Only Master Admin sees the mode switcher
+        # PERMISSION LOCK: Only Master Admin can toggle views
         if u['role'] == "Master Admin":
-            role_select = st.sidebar.radio("Session Type", ["Master Admin", "Staff View (Read-Only)"])
+            role_select = st.sidebar.radio("View As", ["Master Admin", "Staff View (Read-Only)"])
             active_role = "Staff" if role_select == "Staff View (Read-Only)" else "Master Admin"
         else:
-            # Sub-Admins and Staff are LOCKED into their roles
+            # Sub-Admins and Staff are LOCKED into their specific roles
             active_role = u['role']
+            st.sidebar.info(f"📍 Access Level: {active_role}")
 
-        # MODULE RESTRICTION: Define which menus are visible
+        # Menu visibility logic
         menu_options = ["Vouchers", "Payroll", "Audit Trail", "Reports"]
         if active_role == "Master Admin":
             menu_options.insert(0, "Company Setup")
         
-        menu = st.sidebar.selectbox("Modules", menu_options)
+        menu = st.sidebar.selectbox("Navigate To:", menu_options)
         
         if menu == "Company Setup": show_company_setup(u['key'], u['name'], active_role)
         elif menu == "Vouchers": show_vouchers(u['key'], active_role)
