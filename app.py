@@ -2,6 +2,7 @@ import streamlit as st
 from database import get_connection
 from modules import *
 from datetime import datetime, timedelta
+import pandas as pd
 
 st.set_page_config(page_title="E.K.A Cloud ERP", layout="wide")
 
@@ -11,70 +12,48 @@ if 'auth' not in st.session_state:
 
 def login():
     st.title("🛡️ E.K.A Cloud Accounting - Access Portal")
-    
-    # MASTER OVERRIDE: Hardcoded for immediate access
-    MASTER_ADMIN_KEY = "JUANMANUEL2"
-    
+    MASTER_KEY = "JUANMANUEL2"
     user_input = st.text_input("Enter License Key", type="password")
-    
     if st.button("Unlock System"):
-        # Check against the override key first
-        if user_input.strip() == MASTER_ADMIN_KEY:
+        if user_input.strip() == MASTER_KEY:
             st.session_state.auth = True
-            st.session_state.user = {"name": "Master Owner", "role": "Owner", "key": "ADMIN"}
-            st.success("Master Access Granted!")
+            st.session_state.user = {"name": "Master Admin", "role": "Owner", "key": "ADMIN"}
             st.rerun()
         else:
-            # Check database for clients
             conn = get_connection()
             cur = conn.cursor()
             cur.execute("SELECT * FROM companies WHERE key=?", (user_input.strip(),))
             res = cur.fetchone()
             if res:
                 st.session_state.auth = True
-                st.session_state.user = {"key": res[0], "name": res[1], "expiry": res[3], "role": "Client"}
+                st.session_state.user = {"key": res[0], "name": res[1], "role": "Client"}
                 st.rerun()
             else:
-                st.error("Invalid Key. Please contact support.")
+                st.error("Invalid Key.")
 
-# --- APP MAIN LOGIC ---
 if not st.session_state.auth:
     login()
 else:
     user = st.session_state.user
     if user['role'] == "Owner":
-        st.sidebar.success("🔑 MASTER ADMIN MODE")
         st.title("👑 Owner's Registration Center")
-        
-        # Form to add new clients (like Star Bakery)
-        with st.form("reg_form"):
-            name = st.text_input("New Company Name")
-            key = st.text_input("Assign Unique Key")
-            days = st.number_input("Subscription Days", value=30)
-            if st.form_submit_button("Register Company"):
-                exp = (datetime.now() + timedelta(days=days)).date()
+        with st.form("reg"):
+            n = st.text_input("Company Name")
+            k = st.text_input("Key")
+            if st.form_submit_button("Register"):
                 conn = get_connection()
-                conn.execute("INSERT OR REPLACE INTO companies VALUES (?, ?, ?, ?)", (key, name, "", str(exp)))
+                conn.execute("INSERT OR REPLACE INTO companies VALUES (?, ?, ?, ?)", (k, n, "", str(datetime.now().date())))
                 conn.commit()
-                st.success(f"Registered {name}! Access Key: {key}")
-                
-        # Show all registered companies
-        st.subheader("Registered Clients")
-        conn = get_connection()
-        clients = pd.read_sql("SELECT name, key, expiry FROM companies", conn)
-        st.table(clients)
+                st.success(f"Registered {n}")
     else:
-        # Client ERP View
         st.sidebar.title(f"🏢 {user['name']}")
-        role = st.sidebar.radio("Access Level", ["Administrator", "Staff"])
-        can_edit = (role == "Administrator")
+        role = st.sidebar.radio("Role", ["Administrator", "Staff"])
+        menu = st.sidebar.selectbox("Modules", ["Company Setup", "Chart of Accounts", "Inventory", "Vouchers", "Reports"])
         
-        menu = st.sidebar.selectbox("Modules", ["Company Setup", "Inventory", "Vouchers", "Reports"])
-        
-        if menu == "Company Setup": show_company_setup(user['name'], can_edit)
-        elif menu == "Inventory": show_inventory(can_edit)
-        elif menu == "Vouchers": show_vouchers(can_edit)
-        elif menu == "Reports": show_reports()
+        if menu == "Company Setup": show_company_setup(user['name'], role=="Administrator")
+        elif menu == "Chart of Accounts": show_chart_of_accounts(user['key'], role=="Administrator")
+        elif menu == "Vouchers": show_vouchers(user['key'], role=="Administrator")
+        elif menu == "Reports": st.write("Financial Statements Generating...")
 
     if st.sidebar.button("Log Out"):
         st.session_state.auth = False
