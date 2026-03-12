@@ -1,8 +1,12 @@
 import streamlit as st
-from database import get_connection
+from database import get_connection, init_db # Added init_db here
 from modules import *
 import pandas as pd
 import os
+
+# --- SAFETY TRIGGER ---
+# This ensures any new tables (like Payroll) are created immediately
+init_db() 
 
 st.set_page_config(page_title="E.K.A Cloud ERP", layout="wide")
 
