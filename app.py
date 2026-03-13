@@ -10,19 +10,18 @@ if 'auth' not in st.session_state:
     st.session_state.user = None
 
 def login_ui():
-    st.title("🛡️ E.K.A Cloud Accounting - Access Portal")
-    t1, t2 = st.tabs(["Login", "Forgot Password"])
+    st.title("🛡️ E.K.A Cloud Accounting")
+    t1, t2 = st.tabs(["Login", "Recovery"])
     
     with t1:
-        # Added unique key='login_key' to stop the Duplicate ID error
-        key_in = st.text_input("Enter License Key", type="password", key="login_key")
-        if st.button("Unlock System"):
+        key_in = st.text_input("Enter License Key", type="password", key="login_key_input")
+        if st.button("Unlock System", key="login_btn"):
             if key_in == "JUANMANUEL2":
                 st.session_state.auth, st.session_state.user = True, {"name": "Developer", "role": "Dev", "key": "ADMIN"}
                 st.rerun()
             
             conn = get_connection()
-            # Check Master, Sub-Admin, and Staff keys
+            # Check Master, Sub-Admin, and Staff
             res = conn.execute("SELECT key, name FROM companies WHERE key=?", (key_in,)).fetchone()
             if res:
                 st.session_state.auth, st.session_state.user = True, {"key": res[0], "name": res[1], "role": "Master Admin"}
@@ -38,16 +37,15 @@ def login_ui():
                 st.session_state.auth, st.session_state.user = True, {"key": res_st[0], "name": res_st[1], "role": "Staff"}
                 st.rerun()
             
-            st.error("Access Denied. Please verify your key.")
+            st.error("Invalid Key.")
 
     with t2:
-        # Added unique keys to recovery inputs
-        c_name = st.text_input("Registered Company Name", key="recov_name")
-        ans = st.text_input("Recovery Answer", type="password", key="recov_ans")
-        if st.button("Recover Master Key"):
+        c_name = st.text_input("Company Name", key="recov_cname")
+        ans = st.text_input("Recovery Answer", type="password", key="recov_ans_input")
+        if st.button("Recover Key", key="recov_btn"):
             conn = get_connection()
             res = conn.execute("SELECT key FROM companies WHERE name=? AND recovery_answer=?", (c_name, ans)).fetchone()
-            if res: st.success(f"Verified. Your Master Key is: {res[0]}")
+            if res: st.success(f"Your Master Key: {res[0]}")
             else: st.error("Verification failed.")
 
 if not st.session_state.auth:
@@ -55,41 +53,45 @@ if not st.session_state.auth:
 else:
     u = st.session_state.user
     if u['role'] == "Dev":
-        st.title("👑 Developer Control Center")
-        with st.form("reg"):
-            n, k, t = st.text_input("Company Name"), st.text_input("Master Key"), st.text_input("TIN")
-            if st.form_submit_button("Register Company"):
+        st.title("👑 Dev Center")
+        with st.form("reg_form"):
+            n, k, t = st.text_input("Name"), st.text_input("Key"), st.text_input("TIN")
+            if st.form_submit_button("Register"):
                 conn = get_connection()
                 conn.execute("INSERT OR REPLACE INTO companies (key, name, tin) VALUES (?, ?, ?)", (k, n, t))
                 conn.commit()
-                st.success(f"Registered {n}!")
+                st.success("Registered!")
     else:
         st.sidebar.title(f"🏢 {u['name']}")
         active_role = u['role']
-        st.sidebar.info(f"📍 Mode: {active_role}")
+        
+        # Admin can toggle to Staff view
+        if u['role'] == "Master Admin":
+            v = st.sidebar.radio("View Mode", ["Master Admin", "Staff (Read-Only)"], key="view_toggle")
+            active_role = "Staff" if "Staff" in v else "Master Admin"
 
-        menu_opts = ["POS (Point of Sale)", "Vouchers", "Chart of Accounts", "Inventory", "Sales", "Purchases", "Banking", "Receivables", "Payables", "Taxation", "Payroll", "Fixed Assets", "Financial Reports", "Audit Trail"]
-        if active_role == "Master Admin": menu_opts.insert(0, "Company Setup")
+        menu = ["POS (Point of Sale)", "Vouchers", "Chart of Accounts", "Inventory", "Sales", "Purchases", "Banking", "Receivables", "Payables", "Taxation", "Payroll", "Fixed Assets", "Financial Reports", "Audit Trail"]
+        if active_role == "Master Admin": menu.insert(0, "Company Setup")
         
-        choice = st.sidebar.selectbox("Navigate To", menu_opts)
+        choice = st.sidebar.selectbox("Navigate To", menu, key="nav_menu")
         
-        # ROUTING
+        # Route to modules
         if choice == "Company Setup": show_company_setup(u['key'], u['name'], active_role)
         elif choice == "POS (Point of Sale)": show_pos(u['key'], u['name'], active_role)
         elif choice == "Vouchers": show_vouchers(u['key'], active_role)
         elif choice == "Chart of Accounts": show_chart_of_accounts(u['key'], active_role)
         elif choice == "Inventory": show_inventory(u['key'], active_role)
-        elif choice == "Sales": show_sales_purchase(u['key'], active_role, mode="Sales")
-        elif choice == "Purchases": show_sales_purchase(u['key'], active_role, mode="Purchase")
+        elif choice == "Sales": show_sales_purchase(u['key'], active_role, "Sales")
+        elif choice == "Purchases": show_sales_purchase(u['key'], active_role, "Purchase")
         elif choice == "Banking": show_banking(u['key'], active_role)
-        elif choice == "Receivables": show_aging_reports(u['key'], mode="Receivable")
-        elif choice == "Payables": show_aging_reports(u['key'], mode="Payable")
+        elif choice == "Receivables": show_aging_reports(u['key'], "Receivable")
+        elif choice == "Payables": show_aging_reports(u['key'], "Payable")
         elif choice == "Taxation": show_tax_reports(u['key'])
         elif choice == "Payroll": show_payroll(u['key'], active_role)
         elif choice == "Fixed Assets": show_fixed_assets(u['key'], active_role)
         elif choice == "Financial Reports": show_reports(u['key'])
         elif choice == "Audit Trail": show_audit_trail(u['key'])
-    
-    if st.sidebar.button("Logout"):
+
+    if st.sidebar.button("Logout", key="logout_btn"):
         st.session_state.auth = False
         st.rerun()
