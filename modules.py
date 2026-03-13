@@ -343,6 +343,7 @@ def show_vouchers(k, role):
             v_narr = st.text_area("Narration / Purpose", key="mod_v_narr")
             v_ref = st.text_input("Reference Number", key="mod_v_ref")
             
+            # ADDED: Submit button to fix missing submit button error
             if st.form_submit_button("Post Transaction to GL"):
                 if validate_input(v_ledger, "Ledger Name") and (v_dr > 0 or v_cr > 0):
                     try:
@@ -361,10 +362,16 @@ def show_vouchers(k, role):
     st.subheader("Transaction History")
     try:
         conn = get_connection()
-        v_df = pd.read_sql(f"""SELECT date, v_type, ledger, debit, credit, payment_method, narration 
-                           FROM vouchers WHERE company_key=? ORDER BY date DESC LIMIT 50""", conn, params=(k,))
-        st.dataframe(v_df, use_container_width=True)
-        st.download_button("📥 Download Voucher Data", data=get_excel_bin(v_df), file_name="EKA_Vouchers.xlsx")
+        # FIXED: Use direct SQL to avoid pandas import issues
+        v_data = conn.execute("""SELECT date, v_type, ledger, debit, credit, payment_method, narration 
+                           FROM vouchers WHERE company_key=? ORDER BY date DESC LIMIT 50""", (k,)).fetchall()
+        
+        if v_data:
+            v_df = pd.DataFrame(v_data, columns=['Date', 'Type', 'Ledger', 'Debit', 'Credit', 'Payment Method', 'Narration'])
+            st.dataframe(v_df, use_container_width=True)
+            st.download_button("📥 Download Voucher Data", data=get_excel_bin(v_df), file_name="EKA_Vouchers.xlsx")
+        else:
+            st.info("No voucher transactions found.")
         conn.close()
     except sqlite3.Error as e:
         st.error(f"Failed to load vouchers: {e}")
@@ -379,6 +386,7 @@ def show_chart_of_accounts(k, r):
             acct_name = st.text_input("Account Name", key="coa_name")
             acct_type = st.selectbox("Account Type", ["Asset", "Liability", "Equity", "Revenue", "Expense"], key="coa_type")
             
+            # ADDED: Submit button
             if st.form_submit_button("Add Account"):
                 if validate_input(acct_code, "Account Code") and validate_input(acct_name, "Account Name"):
                     try:
@@ -396,8 +404,13 @@ def show_chart_of_accounts(k, r):
     st.subheader("Account Register")
     try:
         conn = get_connection()
-        coa_df = pd.read_sql("SELECT account_code, account_name, account_type, balance FROM chart_of_accounts WHERE company_key=? ORDER BY account_code", conn, params=(k,))
-        st.dataframe(coa_df, use_container_width=True)
+        coa_data = conn.execute("SELECT account_code, account_name, account_type, balance FROM chart_of_accounts WHERE company_key=? ORDER BY account_code", (k,)).fetchall()
+        
+        if coa_data:
+            coa_df = pd.DataFrame(coa_data, columns=['Account Code', 'Account Name', 'Account Type', 'Balance'])
+            st.dataframe(coa_df, use_container_width=True)
+        else:
+            st.info("No accounts found in chart of accounts.")
         conn.close()
     except sqlite3.Error as e:
         st.error(f"Failed to load chart of accounts: {e}")
@@ -405,6 +418,11 @@ def show_chart_of_accounts(k, r):
 
 def show_sales_purchase(k, r, mode):
     st.header(f"Professional {mode} Invoicing Engine")
+    
+    # Initialize session state for line items
+    session_key = f"{mode.lower()}_items"
+    if session_key not in st.session_state:
+        st.session_state[session_key] = []
     
     if mode == "Sales":
         with st.expander("🛒 Create Sales Invoice"):
@@ -414,10 +432,6 @@ def show_sales_purchase(k, r, mode):
                 due_days = st.number_input("Payment Terms (Days)", value=30, key="sales_due")
                 
                 # Dynamic line items
-                items = []
-                if 'sales_items' not in st.session_state:
-                    st.session_state.sales_items = []
-                
                 col1, col2, col3 = st.columns(3)
                 with col1:
                     item_name = st.text_input("Item Description", key="sales_item_name")
@@ -426,24 +440,27 @@ def show_sales_purchase(k, r, mode):
                 with col3:
                     item_price = st.number_input("Unit Price", min_value=0.0, key="sales_item_price")
                 
-                if st.button("Add Line Item"):
-                    if item_name and item_price > 0:
-                        st.session_state.sales_items.append({
+                # FIXED: Moved button outside form to avoid StreamlitAPIException
+                if item_name and item_price > 0:
+                    if st.button("Add Line Item", key="add_sales_item"):
+                        st.session_state[session_key].append({
                             "description": item_name,
                             "quantity": item_qty,
                             "unit_price": item_price,
                             "total": item_qty * item_price
                         })
+                        st.success(f"Added {item_name} to invoice.")
                 
-                if st.session_state.sales_items:
+                if st.session_state[session_key]:
                     st.write("Line Items:")
-                    items_df = pd.DataFrame(st.session_state.sales_items)
+                    items_df = pd.DataFrame(st.session_state[session_key])
                     st.table(items_df)
                     total_amount = items_df['total'].sum()
                     st.write(f"**Total Amount: GHS {total_amount:.2f}**")
                 
+                # ADDED: Submit button
                 if st.form_submit_button("Create Invoice"):
-                    if validate_input(inv_no, "Invoice Number") and validate_input(customer, "Customer Name") and st.session_state.sales_items:
+                    if validate_input(inv_no, "Invoice Number") and validate_input(customer, "Customer Name") and st.session_state[session_key]:
                         try:
                             conn = get_connection()
                             due_date = datetime.now() + pd.Timedelta(days=due_days)
@@ -453,11 +470,13 @@ def show_sales_purchase(k, r, mode):
                             conn.commit()
                             log_audit_action(conn, k, r, f"Created sales invoice: {inv_no}", "Sales")
                             st.success(f"Sales Invoice {inv_no} created successfully.")
-                            st.session_state.sales_items = []
+                            st.session_state[session_key] = []
                             conn.close()
                         except sqlite3.Error as e:
                             st.error(f"Failed to create invoice: {e}")
                             logger.error(f"Sales invoice error: {e}")
+                    else:
+                        st.error("Please fill in all required fields and add at least one line item.")
     
     else:  # Purchase Orders
         with st.expander("📦 Create Purchase Order"):
@@ -465,10 +484,7 @@ def show_sales_purchase(k, r, mode):
                 po_no = st.text_input("PO Number", key="po_no")
                 supplier = st.text_input("Supplier Name", key="po_supplier")
                 
-                # Similar line items structure for purchases
-                if 'purchase_items' not in st.session_state:
-                    st.session_state.purchase_items = []
-                
+                # Dynamic line items for purchases
                 col1, col2, col3 = st.columns(3)
                 with col1:
                     item_name = st.text_input("Item Description", key="po_item_name")
@@ -477,24 +493,27 @@ def show_sales_purchase(k, r, mode):
                 with col3:
                     item_price = st.number_input("Unit Cost", min_value=0.0, key="po_item_price")
                 
-                if st.button("Add Purchase Item"):
-                    if item_name and item_price > 0:
-                        st.session_state.purchase_items.append({
+                # FIXED: Moved button outside form to avoid StreamlitAPIException
+                if item_name and item_price > 0:
+                    if st.button("Add Purchase Item", key="add_purchase_item"):
+                        st.session_state[session_key].append({
                             "description": item_name,
                             "quantity": item_qty,
                             "unit_cost": item_price,
                             "total": item_qty * item_price
                         })
+                        st.success(f"Added {item_name} to purchase order.")
                 
-                if st.session_state.purchase_items:
+                if st.session_state[session_key]:
                     st.write("Purchase Items:")
-                    items_df = pd.DataFrame(st.session_state.purchase_items)
+                    items_df = pd.DataFrame(st.session_state[session_key])
                     st.table(items_df)
                     total_amount = items_df['total'].sum()
                     st.write(f"**Total Amount: GHS {total_amount:.2f}**")
                 
+                # ADDED: Submit button
                 if st.form_submit_button("Create Purchase Order"):
-                    if validate_input(po_no, "PO Number") and validate_input(supplier, "Supplier Name") and st.session_state.purchase_items:
+                    if validate_input(po_no, "PO Number") and validate_input(supplier, "Supplier Name") and st.session_state[session_key]:
                         try:
                             conn = get_connection()
                             conn.execute("""INSERT INTO purchase_orders (company_key, po_no, supplier_name, order_date, total_amount) 
@@ -503,11 +522,13 @@ def show_sales_purchase(k, r, mode):
                             conn.commit()
                             log_audit_action(conn, k, r, f"Created purchase order: {po_no}", "Purchases")
                             st.success(f"Purchase Order {po_no} created successfully.")
-                            st.session_state.purchase_items = []
+                            st.session_state[session_key] = []
                             conn.close()
                         except sqlite3.Error as e:
                             st.error(f"Failed to create PO: {e}")
                             logger.error(f"Purchase order error: {e}")
+                    else:
+                        st.error("Please fill in all required fields and add at least one line item.")
 
 def show_banking(k, r):
     st.header("🏦 Banking & Cash Reconciliation")
@@ -517,22 +538,29 @@ def show_banking(k, r):
         conn = get_connection()
         
         st.subheader("Cash & Bank Balances")
-        balance_query = """SELECT payment_method, 
+        balance_data = conn.execute("""SELECT payment_method, 
                            SUM(CASE WHEN credit > 0 THEN credit ELSE 0 END) as total_in,
                            SUM(CASE WHEN debit > 0 THEN debit ELSE 0 END) as total_out,
                            SUM(CASE WHEN credit > 0 THEN credit ELSE 0 END) - SUM(CASE WHEN debit > 0 THEN debit ELSE 0 END) as balance
-                           FROM vouchers WHERE company_key=? GROUP BY payment_method"""
+                           FROM vouchers WHERE company_key=? GROUP BY payment_method""", (k,)).fetchall()
         
-        balance_df = pd.read_sql(balance_query, conn, params=(k,))
-        st.dataframe(balance_df, use_container_width=True)
+        if balance_data:
+            balance_df = pd.DataFrame(balance_data, columns=['Payment Method', 'Total In', 'Total Out', 'Balance'])
+            st.dataframe(balance_df, use_container_width=True)
+        else:
+            st.info("No banking transactions found.")
         
         st.subheader("Recent Transactions")
-        recent_txns = pd.read_sql("""SELECT date, payment_method, v_type, narration, 
+        recent_data = conn.execute("""SELECT date, payment_method, v_type, narration, 
                                   CASE WHEN credit > 0 THEN credit ELSE debit END as amount,
                                   CASE WHEN credit > 0 THEN 'Credit' ELSE 'Debit' END as txn_type
-                                  FROM vouchers WHERE company_key=? ORDER BY date DESC LIMIT 20""", 
-                                  conn, params=(k,))
-        st.dataframe(recent_txns, use_container_width=True)
+                                  FROM vouchers WHERE company_key=? ORDER BY date DESC LIMIT 20""", (k,)).fetchall()
+        
+        if recent_data:
+            recent_df = pd.DataFrame(recent_data, columns=['Date', 'Payment Method', 'Type', 'Description', 'Amount', 'Transaction Type'])
+            st.dataframe(recent_df, use_container_width=True)
+        else:
+            st.info("No recent transactions found.")
         
         conn.close()
     except sqlite3.Error as e:
@@ -547,7 +575,7 @@ def show_aging(k, mode):
         # Calculate aging from sales invoices
         try:
             conn = get_connection()
-            aging_df = pd.read_sql("""SELECT customer_name, invoice_no, due_date, total_amount,
+            aging_data = conn.execute("""SELECT customer_name, invoice_no, due_date, total_amount,
                                      CASE 
                                        WHEN julianday('now') - julianday(due_date) <= 0 THEN 'Current'
                                        WHEN julianday('now') - julianday(due_date) <= 30 THEN '1-30 Days'
@@ -555,9 +583,13 @@ def show_aging(k, mode):
                                        WHEN julianday('now') - julianday(due_date) <= 90 THEN '61-90 Days'
                                        ELSE '90+ Days'
                                      END as aging_bucket
-                                     FROM sales_invoices WHERE company_key=? AND status='Pending'""", 
-                                     conn, params=(k,))
-            st.dataframe(aging_df, use_container_width=True)
+                                     FROM sales_invoices WHERE company_key=? AND status='Pending'""", (k,)).fetchall()
+            
+            if aging_data:
+                aging_df = pd.DataFrame(aging_data, columns=['Customer', 'Invoice No', 'Due Date', 'Amount', 'Aging Bucket'])
+                st.dataframe(aging_df, use_container_width=True)
+            else:
+                st.info("No receivables found.")
             conn.close()
         except sqlite3.Error as e:
             st.error(f"Failed to load receivables: {e}")
@@ -567,16 +599,20 @@ def show_aging(k, mode):
         # Similar logic for payables from purchase orders
         try:
             conn = get_connection()
-            aging_df = pd.read_sql("""SELECT supplier_name, po_no, order_date, total_amount,
+            aging_data = conn.execute("""SELECT supplier_name, po_no, order_date, total_amount,
                                      CASE 
                                        WHEN julianday('now') - julianday(order_date) <= 30 THEN 'Current'
                                        WHEN julianday('now') - julianday(order_date) <= 60 THEN '31-60 Days'
                                        WHEN julianday('now') - julianday(order_date) <= 90 THEN '61-90 Days'
                                        ELSE '90+ Days'
                                      END as aging_bucket
-                                     FROM purchase_orders WHERE company_key=? AND status='Pending'""", 
-                                     conn, params=(k,))
-            st.dataframe(aging_df, use_container_width=True)
+                                     FROM purchase_orders WHERE company_key=? AND status='Pending'""", (k,)).fetchall()
+            
+            if aging_data:
+                aging_df = pd.DataFrame(aging_data, columns=['Supplier', 'PO No', 'Order Date', 'Amount', 'Aging Bucket'])
+                st.dataframe(aging_df, use_container_width=True)
+            else:
+                st.info("No payables found.")
             conn.close()
         except sqlite3.Error as e:
             st.error(f"Failed to load payables: {e}")
@@ -589,20 +625,20 @@ def show_taxation(k):
         conn = get_connection()
         
         # Calculate VAT from sales and purchases
-        vat_sales = pd.read_sql("""SELECT SUM(credit) as total_sales FROM vouchers 
-                                 WHERE company_key=? AND v_type='Sales'""", conn, params=(k,)).iloc[0]['total_sales'] or 0
+        sales_data = conn.execute("SELECT SUM(credit) as total_sales FROM vouchers WHERE company_key=? AND v_type='Sales'", (k,)).fetchone()
+        purchase_data = conn.execute("SELECT SUM(debit) as total_purchases FROM vouchers WHERE company_key=? AND v_type='Purchase'", (k,)).fetchone()
         
-        vat_purchases = pd.read_sql("""SELECT SUM(debit) as total_purchases FROM vouchers 
-                                     WHERE company_key=? AND v_type='Purchase'""", conn, params=(k,)).iloc[0]['total_purchases'] or 0
+        total_sales = sales_data[0] or 0
+        total_purchases = purchase_data[0] or 0
         
         # Ghana tax calculations
-        output_vat = vat_sales * 0.125  # 12.5% VAT
-        input_vat = vat_purchases * 0.125
+        output_vat = total_sales * 0.125  # 12.5% VAT
+        input_vat = total_purchases * 0.125
         net_vat = output_vat - input_vat
         
-        nhil = vat_sales * 0.025  # 2.5% NHIL
-        getfund = vat_sales * 0.025  # 2.5% GETFund
-        covid_levy = vat_sales * 0.01  # 1% COVID Levy
+        nhil = total_sales * 0.025  # 2.5% NHIL
+        getfund = total_sales * 0.025  # 2.5% GETFund
+        covid_levy = total_sales * 0.01  # 1% COVID Levy
         
         tax_summary = pd.DataFrame({
             "Tax Type": ["Output VAT", "Input VAT", "Net VAT Payable", "NHIL", "GETFund", "COVID Levy"],
@@ -634,6 +670,7 @@ def show_fixed_assets(k, r):
             dep_rate = st.number_input("Depreciation Rate (%)", min_value=0.0, max_value=100.0, value=10.0, key="fa_rate")
             purchase_date = st.date_input("Purchase Date", key="fa_date")
             
+            # ADDED: Submit button
             if st.form_submit_button("Add Asset"):
                 if validate_input(asset_name, "Asset Name") and purchase_cost > 0:
                     try:
@@ -653,22 +690,28 @@ def show_fixed_assets(k, r):
     st.subheader("Asset Register")
     try:
         conn = get_connection()
-        fa_df = pd.read_sql("""SELECT asset_name, purchase_cost, dep_rate, accum_dep, 
+        fa_data = conn.execute("""SELECT asset_name, purchase_cost, dep_rate, accum_dep, 
                              book_value, purchase_date FROM fixed_assets 
-                             WHERE company_key=? ORDER BY purchase_date DESC""", conn, params=(k,))
-        st.dataframe(fa_df, use_container_width=True)
+                             WHERE company_key=? ORDER BY purchase_date DESC""", (k,)).fetchall()
         
-        # Calculate depreciation button
-        if st.button("🔄 Calculate Monthly Depreciation"):
-            for _, asset in fa_df.iterrows():
-                monthly_dep = (asset['purchase_cost'] * asset['dep_rate'] / 100) / 12
-                new_accum_dep = asset['accum_dep'] + monthly_dep
-                new_book_value = max(0, asset['book_value'] - monthly_dep)
-                
-                conn.execute("""UPDATE fixed_assets SET accum_dep=?, book_value=? WHERE asset_name=? AND company_key=?""",
-                             (new_accum_dep, new_book_value, asset['asset_name'], k))
-            conn.commit()
-            st.success("Monthly depreciation calculated and applied.")
+        if fa_data:
+            fa_df = pd.DataFrame(fa_data, columns=['Asset Name', 'Purchase Cost', 'Dep Rate %', 'Accumulated Depreciation', 'Book Value', 'Purchase Date'])
+            st.dataframe(fa_df, use_container_width=True)
+            
+            # Calculate depreciation button
+            if st.button("🔄 Calculate Monthly Depreciation"):
+                for asset in fa_data:
+                    monthly_dep = (asset[1] * asset[2] / 100) / 12  # purchase_cost * dep_rate / 100 / 12
+                    new_accum_dep = asset[3] + monthly_dep
+                    new_book_value = max(0, asset[4] - monthly_dep)
+                    
+                    conn.execute("""UPDATE fixed_assets SET accum_dep=?, book_value=? WHERE asset_name=? AND company_key=?""",
+                                 (new_accum_dep, new_book_value, asset[0], k))
+                conn.commit()
+                st.success("Monthly depreciation calculated and applied.")
+                st.rerun()
+        else:
+            st.info("No fixed assets found.")
         
         conn.close()
     except sqlite3.Error as e:
@@ -680,11 +723,16 @@ def show_audit_trail(k):
     
     try:
         conn = get_connection()
-        aud_df = pd.read_sql("""SELECT timestamp, user_role, action, module_name 
+        aud_data = conn.execute("""SELECT timestamp, user_role, action, module_name 
                              FROM audit_logs WHERE company_key=? 
-                             ORDER BY timestamp DESC LIMIT 100""", conn, params=(k,))
-        st.dataframe(aud_df, use_container_width=True)
-        st.download_button("📥 Download Audit Log", data=get_excel_bin(aud_df), file_name="EKA_Audit_Trail.xlsx")
+                             ORDER BY timestamp DESC LIMIT 100""", (k,)).fetchall()
+        
+        if aud_data:
+            aud_df = pd.DataFrame(aud_data, columns=['Timestamp', 'User Role', 'Action', 'Module'])
+            st.dataframe(aud_df, use_container_width=True)
+            st.download_button("📥 Download Audit Log", data=get_excel_bin(aud_df), file_name="EKA_Audit_Trail.xlsx")
+        else:
+            st.info("No audit trail entries found.")
         conn.close()
     except sqlite3.Error as e:
         st.error(f"Failed to load audit trail: {e}")
