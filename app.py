@@ -2,9 +2,7 @@ import streamlit as st
 from database import get_connection, init_db
 from modules import *
 
-# Initialize database on startup
 init_db()
-
 st.set_page_config(page_title="E.K.A Cloud ERP", layout="wide")
 
 if 'auth' not in st.session_state:
@@ -16,28 +14,25 @@ def login_ui():
     t1, t2 = st.tabs(["Login", "Forgot Password"])
     
     with t1:
-        key_in = st.text_input("Enter License Key", type="password")
+        # Added unique key='login_key' to stop the Duplicate ID error
+        key_in = st.text_input("Enter License Key", type="password", key="login_key")
         if st.button("Unlock System"):
-            # 1. DEVELOPER ACCESS (The Priority Master Key)
             if key_in == "JUANMANUEL2":
-                st.session_state.auth = True
-                st.session_state.user = {"name": "Developer", "role": "Dev", "key": "ADMIN"}
+                st.session_state.auth, st.session_state.user = True, {"name": "Developer", "role": "Dev", "key": "ADMIN"}
                 st.rerun()
             
             conn = get_connection()
-            # 2. MASTER ADMIN CHECK
+            # Check Master, Sub-Admin, and Staff keys
             res = conn.execute("SELECT key, name FROM companies WHERE key=?", (key_in,)).fetchone()
             if res:
                 st.session_state.auth, st.session_state.user = True, {"key": res[0], "name": res[1], "role": "Master Admin"}
                 st.rerun()
             
-            # 3. SUB-ADMIN CHECK
             res_s = conn.execute("SELECT key, name FROM companies WHERE sub_admin_key=?", (key_in,)).fetchone()
             if res_s:
                 st.session_state.auth, st.session_state.user = True, {"key": res_s[0], "name": res_s[1], "role": "Sub-Admin"}
                 st.rerun()
-            
-            # 4. STAFF CHECK (Custom Staff Key)
+
             res_st = conn.execute("SELECT key, name FROM companies WHERE staff_key=?", (key_in,)).fetchone()
             if res_st:
                 st.session_state.auth, st.session_state.user = True, {"key": res_st[0], "name": res_st[1], "role": "Staff"}
@@ -46,8 +41,9 @@ def login_ui():
             st.error("Access Denied. Please verify your key.")
 
     with t2:
-        c_name = st.text_input("Registered Company Name")
-        ans = st.text_input("Recovery Answer", type="password")
+        # Added unique keys to recovery inputs
+        c_name = st.text_input("Registered Company Name", key="recov_name")
+        ans = st.text_input("Recovery Answer", type="password", key="recov_ans")
         if st.button("Recover Master Key"):
             conn = get_connection()
             res = conn.execute("SELECT key FROM companies WHERE name=? AND recovery_answer=?", (c_name, ans)).fetchone()
@@ -58,35 +54,26 @@ if not st.session_state.auth:
     login_ui()
 else:
     u = st.session_state.user
-    
     if u['role'] == "Dev":
         st.title("👑 Developer Control Center")
         with st.form("reg"):
-            n, k, t = st.text_input("Company Name"), st.text_input("Set Master Key"), st.text_input("TIN Number")
+            n, k, t = st.text_input("Company Name"), st.text_input("Master Key"), st.text_input("TIN")
             if st.form_submit_button("Register Company"):
                 conn = get_connection()
                 conn.execute("INSERT OR REPLACE INTO companies (key, name, tin) VALUES (?, ?, ?)", (k, n, t))
                 conn.commit()
-                st.success(f"Registered {n} successfully!")
-    
+                st.success(f"Registered {n}!")
     else:
         st.sidebar.title(f"🏢 {u['name']}")
         active_role = u['role']
         st.sidebar.info(f"📍 Mode: {active_role}")
 
-        # FULL MODULE LIST
-        menu_opts = [
-            "POS (Point of Sale)", "Vouchers", "Chart of Accounts", "Inventory", 
-            "Sales", "Purchases", "Banking", "Receivables", "Payables", 
-            "Taxation", "Payroll", "Fixed Assets", "Financial Reports", "Audit Trail"
-        ]
-        
-        if active_role == "Master Admin":
-            menu_opts.insert(0, "Company Setup")
+        menu_opts = ["POS (Point of Sale)", "Vouchers", "Chart of Accounts", "Inventory", "Sales", "Purchases", "Banking", "Receivables", "Payables", "Taxation", "Payroll", "Fixed Assets", "Financial Reports", "Audit Trail"]
+        if active_role == "Master Admin": menu_opts.insert(0, "Company Setup")
         
         choice = st.sidebar.selectbox("Navigate To", menu_opts)
         
-        # Routing to Modules
+        # ROUTING
         if choice == "Company Setup": show_company_setup(u['key'], u['name'], active_role)
         elif choice == "POS (Point of Sale)": show_pos(u['key'], u['name'], active_role)
         elif choice == "Vouchers": show_vouchers(u['key'], active_role)
