@@ -75,9 +75,14 @@ else:
             active_role = "Staff" if view == "Staff (Read-Only)" else "Master Admin"
         else:
             active_role = u['role']
-            st.sidebar.info(f"📍 Mode: {active_role}")
+# FIXED ROLE: Users stay in the role they used to log in.
+        active_role = u['role']
+        st.sidebar.info(f"📍 Mode: {active_role}")
 
+        # Define the menu
         menu_opts = ["Vouchers", "Payroll", "Audit Trail", "Reports"]
+        
+        # Only the Master Admin can see 'Company Setup'
         if active_role == "Master Admin":
             menu_opts.insert(0, "Company Setup")
         
