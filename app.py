@@ -250,7 +250,7 @@ else:
         
         # Dashboard Module (NEW)
         if choice == "🏠 Dashboard":
-            show_dashboard(u['key'], u['name'], u['role'])
+            show_dashboard(u['key'], u['name'], u['role'])  # FIXED: Correct parameter passing
         
         # Comprehensive Mapping Logic
         elif choice == "Company Setup": show_company_setup(u['key'], u['name'], u['role'])
@@ -320,7 +320,7 @@ def show_dashboard(company_key, company_name, role):
         
         with col1:
             st.subheader("📈 Recent Transactions")
-            # FIXED: Use direct SQL instead of pd.read_sql to avoid pandas import issues
+            # FIXED: Use direct SQL instead of pd.read_sql
             recent_data = conn.execute("""SELECT date, v_type, narration, 
                                         CASE WHEN credit > 0 THEN credit ELSE debit END as amount
                                         FROM vouchers WHERE company_key=? 
