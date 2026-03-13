@@ -175,13 +175,19 @@ def show_payroll(company_key, role):
     st.subheader("Consolidated Payroll Register")
     try:
         conn = get_connection()
-        pr_df = pd.read_sql(f"""SELECT emp_name as 'Name', basic_salary as 'Basic', 
+        # FIXED: Use direct SQL instead of pd.read_sql
+        pr_data_raw = conn.execute("""SELECT emp_name as 'Name', basic_salary as 'Basic', 
                             ssnit_t1 as 'Tier 1', ssnit_t2 as 'Tier 2', 
                             taxable_income as 'Taxable', paye as 'PAYE', net_salary as 'Net Pay', 
                             month as 'Period', year as 'Year'
-                            FROM payroll WHERE company_key=? ORDER BY year DESC, month DESC""", conn, params=(company_key,))
-        st.dataframe(pr_df, use_container_width=True)
-        st.download_button("📥 Export Payroll Data (Excel)", data=get_excel_bin(pr_df), file_name="EKA_Payroll_Data.xlsx")
+                            FROM payroll WHERE company_key=? ORDER BY year DESC, month DESC""", (company_key,)).fetchall()
+        
+        if pr_data_raw:
+            pr_df = pd.DataFrame(pr_data_raw, columns=['Name', 'Basic', 'Tier 1', 'Tier 2', 'Taxable', 'PAYE', 'Net Pay', 'Period', 'Year'])
+            st.dataframe(pr_df, use_container_width=True)
+            st.download_button("📥 Export Payroll Data (Excel)", data=get_excel_bin(pr_df), file_name="EKA_Payroll_Data.xlsx")
+        else:
+            st.info("No payroll records found.")
         conn.close()
     except sqlite3.Error as e:
         st.error(f"Failed to load payroll data: {e}")
@@ -277,35 +283,42 @@ def show_reports(company_key):
         
         with rep_t1:
             st.subheader("Statement of Comprehensive Income")
-            # Enhanced P&L Logic with proper grouping
-            pl_data = pd.read_sql(f"""SELECT ledger as 'Account Head', 
+            # FIXED: Use direct SQL instead of pd.read_sql
+            pl_data_raw = conn.execute("""SELECT ledger as 'Account Head', 
                                   SUM(CASE WHEN v_type IN ('Sales', 'Income') THEN credit ELSE 0 END) as 'Revenue (Cr)',
                                   SUM(CASE WHEN v_type IN ('Expense', 'Purchase') THEN debit ELSE 0 END) as 'Expenses (Dr)' 
                                   FROM vouchers WHERE company_key=? 
-                                  GROUP BY ledger ORDER BY ledger""", conn, params=(company_key,))
+                                  GROUP BY ledger ORDER BY ledger""", (company_key,)).fetchall()
             
-            st.table(pl_data)
-            
-            revenue = pl_data['Revenue (Cr)'].sum()
-            expenses = pl_data['Expenses (Dr)'].sum()
-            net_pl = revenue - expenses
-            
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                st.metric("Total Revenue", f"GHS {revenue:.2f}")
-            with col2:
-                st.metric("Total Expenses", f"GHS {expenses:.2f}")
-            with col3:
-                color = "normal" if net_pl >= 0 else "inverse"
-                st.metric("Net Profit/Loss", f"GHS {net_pl:.2f}", delta=None, delta_color=color)
-            
-            st.download_button("📥 Export P&L Report", data=get_excel_bin(pl_data), file_name="EKA_PL_Report.xlsx")
+            if pl_data_raw:
+                pl_data = pd.DataFrame(pl_data_raw, columns=['Account Head', 'Revenue (Cr)', 'Expenses (Dr)'])
+                st.table(pl_data)
+                
+                revenue = pl_data['Revenue (Cr)'].sum()
+                expenses = pl_data['Expenses (Dr)'].sum()
+                net_pl = revenue - expenses
+                
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    st.metric("Total Revenue", f"GHS {revenue:.2f}")
+                with col2:
+                    st.metric("Total Expenses", f"GHS {expenses:.2f}")
+                with col3:
+                    color = "normal" if net_pl >= 0 else "inverse"
+                    st.metric("Net Profit/Loss", f"GHS {net_pl:.2f}", delta=None, delta_color=color)
+                
+                st.download_button("📥 Export P&L Report", data=get_excel_bin(pl_data), file_name="EKA_PL_Report.xlsx")
+            else:
+                st.info("No financial data found for P&L statement.")
         
         with rep_t2:
             st.subheader("Statement of Financial Position")
-            # Calculate assets from inventory and fixed assets
-            inv_value = pd.read_sql("SELECT SUM(qty * cost_price) as value FROM inventory WHERE company_key=?", conn, params=(company_key,)).iloc[0]['value'] or 0
-            fa_value = pd.read_sql("SELECT SUM(book_value) as value FROM fixed_assets WHERE company_key=?", conn, params=(company_key,)).iloc[0]['value'] or 0
+            # FIXED: Use direct SQL instead of pd.read_sql
+            inv_data = conn.execute("SELECT SUM(qty * cost_price) as value FROM inventory WHERE company_key=?", (company_key,)).fetchone()
+            fa_data = conn.execute("SELECT SUM(book_value) as value FROM fixed_assets WHERE company_key=?", (company_key,)).fetchone()
+            
+            inv_value = inv_data[0] if inv_data and inv_data[0] is not None else 0
+            fa_value = fa_data[0] if fa_data and fa_data[0] is not None else 0
             
             balance_sheet = pd.DataFrame({
                 "Category": ["Current Assets - Inventory", "Fixed Assets", "Total Assets", "Liabilities", "Equity"],
@@ -315,12 +328,18 @@ def show_reports(company_key):
             
         with rep_t3:
             st.subheader("Cash Flow Statement")
-            cash_data = pd.read_sql(f"""SELECT date, payment_method, 
+            # FIXED: Use direct SQL instead of pd.read_sql
+            cash_data_raw = conn.execute("""SELECT date, payment_method, 
                                   SUM(CASE WHEN credit > 0 THEN credit ELSE 0 END) as cash_in,
                                   SUM(CASE WHEN debit > 0 THEN debit ELSE 0 END) as cash_out
                                   FROM vouchers WHERE company_key=? 
-                                  GROUP BY date, payment_method ORDER BY date DESC LIMIT 20""", conn, params=(company_key,))
-            st.dataframe(cash_data, use_container_width=True)
+                                  GROUP BY date, payment_method ORDER BY date DESC LIMIT 20""", (company_key,)).fetchall()
+            
+            if cash_data_raw:
+                cash_data = pd.DataFrame(cash_data_raw, columns=['Date', 'Payment Method', 'Cash In', 'Cash Out'])
+                st.dataframe(cash_data, use_container_width=True)
+            else:
+                st.info("No cash flow data found.")
             
         conn.close()
     except sqlite3.Error as e:
@@ -723,12 +742,34 @@ def show_audit_trail(k):
     
     try:
         conn = get_connection()
-        aud_data = conn.execute("""SELECT timestamp, user_role, action, module_name 
-                             FROM audit_logs WHERE company_key=? 
-                             ORDER BY timestamp DESC LIMIT 100""", (k,)).fetchall()
         
-        if aud_data:
-            aud_df = pd.DataFrame(aud_data, columns=['Timestamp', 'User Role', 'Action', 'Module'])
+        # FIXED: Check if user_role column exists, if not use role column
+        try:
+            aud_data_raw = conn.execute("""SELECT timestamp, user_role, action, module_name 
+                                 FROM audit_logs WHERE company_key=? 
+                                 ORDER BY timestamp DESC LIMIT 100""", (k,)).fetchall()
+            if aud_data_raw:
+                aud_df = pd.DataFrame(aud_data_raw, columns=['Timestamp', 'User Role', 'Action', 'Module'])
+            else:
+                # Fallback: Try without user_role column
+                aud_data_raw = conn.execute("""SELECT timestamp, role, action, module_name 
+                                     FROM audit_logs WHERE company_key=? 
+                                     ORDER BY timestamp DESC LIMIT 100""", (k,)).fetchall()
+                if aud_data_raw:
+                    aud_df = pd.DataFrame(aud_data_raw, columns=['Timestamp', 'User Role', 'Action', 'Module'])
+                else:
+                    aud_df = None
+        except sqlite3.Error:
+            # If user_role column doesn't exist, try alternative query
+            aud_data_raw = conn.execute("""SELECT timestamp, 'Unknown' as user_role, action, module_name 
+                                 FROM audit_logs WHERE company_key=? 
+                                 ORDER BY timestamp DESC LIMIT 100""", (k,)).fetchall()
+            if aud_data_raw:
+                aud_df = pd.DataFrame(aud_data_raw, columns=['Timestamp', 'User Role', 'Action', 'Module'])
+            else:
+                aud_df = None
+        
+        if aud_df is not None and not aud_df.empty:
             st.dataframe(aud_df, use_container_width=True)
             st.download_button("📥 Download Audit Log", data=get_excel_bin(aud_df), file_name="EKA_Audit_Trail.xlsx")
         else:
