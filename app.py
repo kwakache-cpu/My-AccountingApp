@@ -1,4 +1,5 @@
 import streamlit as st
+import pandas as pd  # <-- ADD THIS IMPORT
 from database import get_connection, init_db, log_audit_action
 from modules import *
 import logging
@@ -319,4 +320,58 @@ def show_dashboard(company_key, company_name, role):
         
         with col1:
             st.subheader("📈 Recent Transactions")
-            recent_tx
+            # FIXED: Use direct SQL instead of pd.read_sql to avoid pandas import issues
+            recent_data = conn.execute("""SELECT date, v_type, narration, 
+                                        CASE WHEN credit > 0 THEN credit ELSE debit END as amount
+                                        FROM vouchers WHERE company_key=? 
+                                        ORDER BY date DESC LIMIT 10""", (company_key,)).fetchall()
+            
+            if recent_data:
+                # Convert to DataFrame manually
+                recent_txns = pd.DataFrame(recent_data, columns=['Date', 'Type', 'Description', 'Amount'])
+                st.dataframe(recent_txns, use_container_width=True)
+            else:
+                st.info("No recent transactions found.")
+        
+        with col2:
+            st.subheader("📦 Low Stock Items")
+            # FIXED: Use direct SQL instead of pd.read_sql
+            low_stock_data = conn.execute("""SELECT item_name, qty, unit FROM inventory 
+                                           WHERE company_key=? AND qty <= 10 
+                                           ORDER BY qty ASC LIMIT 10""", (company_key,)).fetchall()
+            
+            if low_stock_data:
+                low_stock = pd.DataFrame(low_stock_data, columns=['Item', 'Quantity', 'Unit'])
+                st.dataframe(low_stock, use_container_width=True)
+            else:
+                st.success("All stock levels are adequate!")
+        
+        # Quick Actions
+        st.subheader("⚡ Quick Actions")
+        col1, col2, col3, col4 = st.columns(4)
+        
+        with col1:
+            if st.button("➕ New Sale", use_container_width=True):
+                st.session_state.selected_module = "POS (Point of Sale)"
+                st.rerun()
+        
+        with col2:
+            if st.button("📦 Add Inventory", use_container_width=True):
+                st.session_state.selected_module = "Inventory & Stock"
+                st.rerun()
+        
+        with col3:
+            if st.button("💰 Process Payroll", use_container_width=True):
+                st.session_state.selected_module = "Ghana Payroll (SSNIT)"
+                st.rerun()
+        
+        with col4:
+            if st.button("📊 View Reports", use_container_width=True):
+                st.session_state.selected_module = "Financial Intelligence"
+                st.rerun()
+        
+        conn.close()
+        
+    except sqlite3.Error as e:
+        st.error("Failed to load dashboard data")
+        logger.error(f"Dashboard error: {e}")
