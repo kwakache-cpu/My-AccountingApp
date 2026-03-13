@@ -18,7 +18,7 @@ def login_ui():
     with t1:
         key_in = st.text_input("Enter License Key", type="password")
         if st.button("Unlock System"):
-            # 1. DEVELOPER ACCESS (Priority)
+            # 1. DEVELOPER ACCESS (The Priority Master Key)
             if key_in == "JUANMANUEL2":
                 st.session_state.auth = True
                 st.session_state.user = {"name": "Developer", "role": "Dev", "key": "ADMIN"}
@@ -37,13 +37,11 @@ def login_ui():
                 st.session_state.auth, st.session_state.user = True, {"key": res_s[0], "name": res_s[1], "role": "Sub-Admin"}
                 st.rerun()
             
-            # 4. STAFF CHECK
-            if key_in.endswith("-staff"):
-                k = key_in.replace("-staff", "")
-                res_st = conn.execute("SELECT key, name FROM companies WHERE key=?", (k,)).fetchone()
-                if res_st:
-                    st.session_state.auth, st.session_state.user = True, {"key": res_st[0], "name": res_st[1], "role": "Staff"}
-                    st.rerun()
+            # 4. STAFF CHECK (Custom Staff Key)
+            res_st = conn.execute("SELECT key, name FROM companies WHERE staff_key=?", (key_in,)).fetchone()
+            if res_st:
+                st.session_state.auth, st.session_state.user = True, {"key": res_st[0], "name": res_st[1], "role": "Staff"}
+                st.rerun()
             
             st.error("Access Denied. Please verify your key.")
 
@@ -64,36 +62,33 @@ else:
     if u['role'] == "Dev":
         st.title("👑 Developer Control Center")
         with st.form("reg"):
-            n, k = st.text_input("New Company Name"), st.text_input("Set Master Key")
+            n, k, t = st.text_input("Company Name"), st.text_input("Set Master Key"), st.text_input("TIN Number")
             if st.form_submit_button("Register Company"):
                 conn = get_connection()
-                conn.execute("INSERT OR REPLACE INTO companies (key, name) VALUES (?, ?)", (k, n))
+                conn.execute("INSERT OR REPLACE INTO companies (key, name, tin) VALUES (?, ?, ?)", (k, n, t))
                 conn.commit()
-                st.success(f"Registered {n} with key {k}")
+                st.success(f"Registered {n} successfully!")
     
     else:
         st.sidebar.title(f"🏢 {u['name']}")
-        
-        # LOCKED ROLE: No radio buttons, strict access level
         active_role = u['role']
         st.sidebar.info(f"📍 Mode: {active_role}")
 
-        # FULL ERP MENU
+        # FULL MODULE LIST
         menu_opts = [
-            "Vouchers", "Chart of Accounts", "Inventory", 
-            "Sales", "Purchases", "Banking", 
-            "Receivables", "Payables", "Taxation", 
-            "Payroll", "Fixed Assets", "Financial Reports", "Audit Trail"
+            "POS (Point of Sale)", "Vouchers", "Chart of Accounts", "Inventory", 
+            "Sales", "Purchases", "Banking", "Receivables", "Payables", 
+            "Taxation", "Payroll", "Fixed Assets", "Financial Reports", "Audit Trail"
         ]
         
-        # Security: Only Master Admin sees Company Setup
         if active_role == "Master Admin":
             menu_opts.insert(0, "Company Setup")
         
         choice = st.sidebar.selectbox("Navigate To", menu_opts)
         
-        # ROUTING LOGIC
+        # Routing to Modules
         if choice == "Company Setup": show_company_setup(u['key'], u['name'], active_role)
+        elif choice == "POS (Point of Sale)": show_pos(u['key'], u['name'], active_role)
         elif choice == "Vouchers": show_vouchers(u['key'], active_role)
         elif choice == "Chart of Accounts": show_chart_of_accounts(u['key'], active_role)
         elif choice == "Inventory": show_inventory(u['key'], active_role)
