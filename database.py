@@ -1,11 +1,13 @@
 import sqlite3
 import os
+from datetime import datetime
 
 def get_connection():
-    # Persistent connection for the v3 enterprise database
+    """Establish a professional connection to the E.K.A Enterprise Database."""
     return sqlite3.connect("eka_enterprise_v3.db", check_same_thread=False)
 
 def init_db():
+    """Initialize the full multi-module schema for Ghana compliance."""
     conn = get_connection()
     c = conn.cursor()
     
@@ -19,16 +21,15 @@ def init_db():
                   recovery_answer TEXT,
                   created_at DATETIME DEFAULT CURRENT_TIMESTAMP)''')
     
-    # 2. Professional Chart of Accounts
-    c.execute('''CREATE TABLE IF NOT EXISTS accounts 
-                 (id INTEGER PRIMARY KEY AUTOINCREMENT, 
-                  company_key TEXT, 
-                  name TEXT, 
-                  account_group TEXT, 
-                  opening_balance REAL DEFAULT 0.0,
-                  current_balance REAL DEFAULT 0.0)''')
+    # 2. System Fees & Gatekeeper Settings
+    c.execute('''CREATE TABLE IF NOT EXISTS system_settings 
+                 (id INTEGER PRIMARY KEY, 
+                  software_fee REAL DEFAULT 0.0, 
+                  maintenance_fee REAL DEFAULT 0.0, 
+                  subscription_months INTEGER DEFAULT 12,
+                  currency TEXT DEFAULT 'GHS')''')
 
-    # 3. Inventory Master (Detailed Tracking)
+    # 3. Inventory & Warehouse Management
     c.execute('''CREATE TABLE IF NOT EXISTS inventory 
                  (id INTEGER PRIMARY KEY AUTOINCREMENT, 
                   company_key TEXT, 
@@ -37,11 +38,10 @@ def init_db():
                   qty REAL DEFAULT 0.0, 
                   price REAL DEFAULT 0.0, 
                   cost_price REAL DEFAULT 0.0, 
-                  expiry_date TEXT, 
-                  warehouse_loc TEXT, 
+                  warehouse TEXT, 
                   barcode TEXT)''')
 
-    # 4. Voucher Journal (The Accounting Engine)
+    # 4. Universal Voucher Journal (With Payment Methods)
     c.execute('''CREATE TABLE IF NOT EXISTS vouchers 
                  (id INTEGER PRIMARY KEY AUTOINCREMENT, 
                   company_key TEXT, 
@@ -50,6 +50,7 @@ def init_db():
                   ledger TEXT, 
                   debit REAL DEFAULT 0.0, 
                   credit REAL DEFAULT 0.0, 
+                  payment_method TEXT, 
                   narration TEXT, 
                   ref_no TEXT)''')
 
@@ -90,6 +91,7 @@ def init_db():
 
     conn.commit()
     conn.close()
+    print("Database structure verified and initialized.")
 
 if __name__ == "__main__":
     init_db()
