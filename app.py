@@ -2,9 +2,12 @@ import streamlit as st
 from database import get_connection, init_db
 from modules import *
 
+# Initialize database on startup
 init_db()
+
 st.set_page_config(page_title="E.K.A Cloud ERP", layout="wide")
 
+# Session state for security
 if 'auth' not in st.session_state:
     st.session_state.auth = False
     st.session_state.user = None
@@ -16,7 +19,7 @@ def login_ui():
     with t1:
         key_in = st.text_input("Enter License Key", type="password")
         if st.button("Unlock System"):
-            # 1. DEVELOPER ACCESS (The Priority)
+            # 1. DEVELOPER ACCESS (The Priority Master Key)
             if key_in == "JUANMANUEL2":
                 st.session_state.auth = True
                 st.session_state.user = {"name": "Developer", "role": "Dev", "key": "ADMIN"}
@@ -54,10 +57,13 @@ def login_ui():
             if res: st.success(f"Verified. Your Master Key is: {res[0]}")
             else: st.error("Verification failed.")
 
+# Main Logic
 if not st.session_state.auth:
     login_ui()
 else:
     u = st.session_state.user
+    
+    # DEVELOPER DASHBOARD
     if u['role'] == "Dev":
         st.title("👑 Developer Control Center")
         with st.form("reg"):
@@ -67,28 +73,17 @@ else:
                 conn.execute("INSERT OR REPLACE INTO companies (key, name) VALUES (?, ?)", (k, n))
                 conn.commit()
                 st.success(f"Registered {n} with key {k}")
+    
+    # CLIENT DASHBOARD (Star Co. Ltd, etc.)
     else:
         st.sidebar.title(f"🏢 {u['name']}")
-        # Permission logic for the Sidebar
-        else:
-        # FIXED ROLE: Users stay in the role they used to log in.
-        active_role = u['role']
-        st.sidebar.info(f"📍 Mode: {active_role}")
-
-        # Define the menu
-        menu_opts = ["Vouchers", "Payroll", "Audit Trail", "Reports"]
         
-        # Only the Master Admin can see 'Company Setup'
-        if active_role == "Master Admin":
-            menu_opts.insert(0, "Company Setup")
-
-        choice = st.sidebar.selectbox("Navigate To", menu_opts)
-            active_role = u['role']
-# FIXED ROLE: Users stay in the role they used to log in.
+        # FIXED ROLE: Users are locked to the access level of their key.
+        # No radio buttons allowed here.
         active_role = u['role']
         st.sidebar.info(f"📍 Mode: {active_role}")
 
-        # Define the menu
+        # Define Navigation
         menu_opts = ["Vouchers", "Payroll", "Audit Trail", "Reports"]
         
         # Only the Master Admin can see 'Company Setup'
@@ -97,7 +92,7 @@ else:
         
         choice = st.sidebar.selectbox("Navigate To", menu_opts)
         
-        # Call specific modules
+        # Route to Modules
         if choice == "Company Setup": show_company_setup(u['key'], u['name'], active_role)
         elif choice == "Vouchers": show_vouchers(u['key'], active_role)
         elif choice == "Payroll": show_payroll(u['key'], active_role)
