@@ -817,7 +817,7 @@ def show_audit_trail(k):
         filter_clause = ""
         params = [k]
         if is_master_admin:
-            filter_clause = f" AND {role_col} IN ('Master Admin','Sub-Admin','Staff')"
+            filter_clause = f" AND {role_col} != 'Dev'"
 
         sql = f"""SELECT timestamp, {role_col} as user_role, action, module_name 
                      FROM audit_logs WHERE company_key=? {filter_clause} 
