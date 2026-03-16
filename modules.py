@@ -14,14 +14,36 @@ logger = logging.getLogger(__name__)
 # ==========================================
 def get_excel_bin(df):
     """Professional Excel Binary Generator for Data Backup."""
-    output = io.BytesIO()
-    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-        df.to_excel(writer, index=False, sheet_name='EKA_ERP_Export')
-        # Add auto-filter to the Excel sheet
-        worksheet = writer.sheets['EKA_ERP_Export']
-        (max_row, max_col) = df.shape
-        worksheet.autofilter(0, 0, max_row, max_col - 1)
-    return output.getvalue()
+    def _col_letter(idx: int) -> str:
+        """Convert zero-based column index to Excel column letters."""
+        result = ""
+        while idx >= 0:
+            result = chr(ord("A") + (idx % 26)) + result
+            idx = idx // 26 - 1
+        return result
+
+    def _write(engine: str):
+        output = io.BytesIO()
+        with pd.ExcelWriter(output, engine=engine) as writer:
+            df.to_excel(writer, index=False, sheet_name="EKA_ERP_Export")
+            worksheet = writer.sheets["EKA_ERP_Export"]
+            max_row, max_col = df.shape
+
+            if engine == "xlsxwriter":
+                worksheet.autofilter(0, 0, max_row, max_col - 1)
+            else:
+                # openpyxl auto-filter syntax
+                last_col = _col_letter(max_col - 1)
+                worksheet.auto_filter.ref = f"A1:{last_col}{max_row + 1}"
+        return output.getvalue()
+
+    for engine in ("xlsxwriter", "openpyxl"):
+        try:
+            return _write(engine)
+        except ModuleNotFoundError:
+            continue
+
+    raise RuntimeError("Excel export requires either 'xlsxwriter' or 'openpyxl' to be installed.")
 
 def validate_input(value, field_name, required=True):
     """Validate user input and provide feedback."""
@@ -777,41 +799,41 @@ def show_fixed_assets(k, r):
 
 def show_audit_trail(k):
     st.header("🕵️ Forensic Audit Trail")
-    
+
+    # Restrict Master Admin from seeing Dev logs
+    current_role = st.session_state.get('user', {}).get('role')
+    is_master_admin = current_role == "Master Admin"
+
     try:
         conn = get_connection()
-        
-        # FIXED: Check if user_role column exists, if not use role column
+
+        # Determine which role column exists
+        role_col = "user_role"
         try:
-            aud_data_raw = conn.execute("""SELECT timestamp, user_role, action, module_name 
-                                 FROM audit_logs WHERE company_key=? 
-                                 ORDER BY timestamp DESC LIMIT 100""", (k,)).fetchall()
-            if aud_data_raw:
-                aud_df = pd.DataFrame(aud_data_raw, columns=['Timestamp', 'User Role', 'Action', 'Module'])
-            else:
-                # Fallback: Try without user_role column
-                aud_data_raw = conn.execute("""SELECT timestamp, role, action, module_name 
-                                     FROM audit_logs WHERE company_key=? 
-                                     ORDER BY timestamp DESC LIMIT 100""", (k,)).fetchall()
-                if aud_data_raw:
-                    aud_df = pd.DataFrame(aud_data_raw, columns=['Timestamp', 'User Role', 'Action', 'Module'])
-                else:
-                    aud_df = None
-        except sqlite3.Error:
-            # If user_role column doesn't exist, try alternative query
-            aud_data_raw = conn.execute("""SELECT timestamp, 'Unknown' as user_role, action, module_name 
-                                 FROM audit_logs WHERE company_key=? 
-                                 ORDER BY timestamp DESC LIMIT 100""", (k,)).fetchall()
-            if aud_data_raw:
-                aud_df = pd.DataFrame(aud_data_raw, columns=['Timestamp', 'User Role', 'Action', 'Module'])
-            else:
-                aud_df = None
-        
+            conn.execute("SELECT user_role FROM audit_logs LIMIT 1")
+        except sqlite3.OperationalError:
+            role_col = "role"
+
+        filter_clause = ""
+        params = [k]
+        if is_master_admin:
+            filter_clause = f" AND {role_col} IN ('Master Admin','Sub-Admin','Staff')"
+
+        sql = f"""SELECT timestamp, {role_col} as user_role, action, module_name 
+                     FROM audit_logs WHERE company_key=? {filter_clause} 
+                     ORDER BY timestamp DESC LIMIT 100"""
+
+        aud_data_raw = conn.execute(sql, params).fetchall()
+        aud_df = None
+        if aud_data_raw:
+            aud_df = pd.DataFrame(aud_data_raw, columns=['Timestamp', 'User Role', 'Action', 'Module'])
+
         if aud_df is not None and not aud_df.empty:
             st.dataframe(aud_df, use_container_width=True)
             st.download_button("📥 Download Audit Log", data=get_excel_bin(aud_df), file_name="EKA_Audit_Trail.xlsx")
         else:
             st.info("No audit trail entries found.")
+
         conn.close()
     except sqlite3.Error as e:
         st.error(f"Failed to load audit trail: {e}")

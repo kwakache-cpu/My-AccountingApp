@@ -135,6 +135,99 @@ def login_ui():
                 st.error("System error during recovery. Please try again.")
                 logger.error(f"Recovery error: {e}")
 
+# Dashboard Module (NEW FUNCTION)
+def show_dashboard(company_key, company_name, role):
+    """Enhanced company dashboard with key metrics and insights."""
+    st.header(f"📊 Business Dashboard: {company_name}")
+    
+    try:
+        conn = get_connection()
+        
+        # Key Business Metrics
+        col1, col2, col3, col4 = st.columns(4)
+        
+        # Total Inventory Value
+        inv_val = conn.execute("SELECT SUM(qty * cost_price) FROM inventory WHERE company_key=?", (company_key,)).fetchone()[0] or 0
+        col1.metric("Inventory Value", f"GHS {inv_val:.2f}")
+        
+        # Total Sales (Current Month)
+        current_month = datetime.now().strftime('%Y-%m')
+        month_sales = conn.execute("""SELECT SUM(credit) FROM vouchers 
+                                    WHERE company_key=? AND v_type='Sales' 
+                                    AND date LIKE ?""", (company_key, f"{current_month}%")).fetchone()[0] or 0
+        col2.metric("Month Sales", f"GHS {month_sales:.2f}")
+        
+        # Total Employees
+        emp_count = conn.execute("SELECT COUNT(DISTINCT emp_name) FROM payroll WHERE company_key=?", (company_key,)).fetchone()[0] or 0
+        col3.metric("Employees", str(emp_count))
+        
+        # Fixed Assets Value
+        fa_val = conn.execute("SELECT SUM(book_value) FROM fixed_assets WHERE company_key=?", (company_key,)).fetchone()[0] or 0
+        col4.metric("Asset Value", f"GHS {fa_val:.2f}")
+        
+        st.markdown("---")
+        
+        # Recent Activity
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.subheader("📈 Recent Transactions")
+            # FIXED: Use direct SQL instead of pd.read_sql
+            recent_data = conn.execute("""SELECT date, v_type, narration, 
+                                        CASE WHEN credit > 0 THEN credit ELSE debit END as amount
+                                        FROM vouchers WHERE company_key=? 
+                                        ORDER BY date DESC LIMIT 10""", (company_key,)).fetchall()
+            
+            if recent_data:
+                # Convert to DataFrame manually
+                recent_txns = pd.DataFrame(recent_data, columns=['Date', 'Type', 'Description', 'Amount'])
+                st.dataframe(recent_txns, use_container_width=True)
+            else:
+                st.info("No recent transactions found.")
+        
+        with col2:
+            st.subheader("📦 Low Stock Items")
+            # FIXED: Use direct SQL instead of pd.read_sql
+            low_stock_data = conn.execute("""SELECT item_name, qty, unit FROM inventory 
+                                           WHERE company_key=? AND qty <= 10 
+                                           ORDER BY qty ASC LIMIT 10""", (company_key,)).fetchall()
+            
+            if low_stock_data:
+                low_stock = pd.DataFrame(low_stock_data, columns=['Item', 'Quantity', 'Unit'])
+                st.dataframe(low_stock, use_container_width=True)
+            else:
+                st.success("All stock levels are adequate!")
+        
+        # Quick Actions
+        st.subheader("⚡ Quick Actions")
+        col1, col2, col3, col4 = st.columns(4)
+        
+        with col1:
+            if st.button("➕ New Sale", use_container_width=True):
+                st.session_state.selected_module = "POS (Point of Sale)"
+                st.rerun()
+        
+        with col2:
+            if st.button("📦 Add Inventory", use_container_width=True):
+                st.session_state.selected_module = "Inventory & Stock"
+                st.rerun()
+        
+        with col3:
+            if st.button("💰 Process Payroll", use_container_width=True):
+                st.session_state.selected_module = "Ghana Payroll (SSNIT)"
+                st.rerun()
+        
+        with col4:
+            if st.button("📊 View Reports", use_container_width=True):
+                st.session_state.selected_module = "Financial Intelligence"
+                st.rerun()
+        
+        conn.close()
+        
+    except sqlite3.Error as e:
+        st.error("Failed to load dashboard data")
+        logger.error(f"Dashboard error: {e}")
+
 # Main application flow
 if not st.session_state.auth or not check_session_timeout():
     login_ui()
@@ -162,10 +255,83 @@ else:
             m2.metric("Active Subscriptions", str(active_subscriptions))
             m3.metric("Monthly Revenue", f"GHS {monthly_revenue:.2f}")
             m4.metric("System Uptime", "100%")
-            
+
+            # Global Forensic Trail (Dev only)
+            st.markdown("---")
+            st.subheader("🛡️ Global Forensic Trail")
+            try:
+                # Prefer user_role; fallback to role
+                col = "user_role"
+                try:
+                    conn.execute("SELECT user_role FROM audit_logs LIMIT 1")
+                except sqlite3.OperationalError:
+                    col = "role"
+
+                trail_data = conn.execute(f"SELECT timestamp, company_key, {col} as user_role, action, module_name "
+                                          "FROM audit_logs ORDER BY timestamp DESC LIMIT 50").fetchall()
+                if trail_data:
+                    trail_df = pd.DataFrame(trail_data, columns=['Timestamp', 'Company', 'User Role', 'Action', 'Module'])
+                    st.dataframe(trail_df, use_container_width=True)
+                else:
+                    st.info("No audit activity found.")
+            except sqlite3.Error:
+                st.info("Unable to load global audit trail.")
+
         except sqlite3.Error as e:
             st.error("Failed to load system metrics")
             logger.error(f"Dashboard metrics error: {e}")
+
+        st.markdown("---")
+        st.subheader("🏢 Enterprise Instance Manager")
+        try:
+            conn = get_connection()
+            instance_df = pd.read_sql(
+                """
+                SELECT c.key AS company_key,
+                       c.name AS company_name,
+                       s.software_fee,
+                       s.subscription_months
+                FROM companies c
+                LEFT JOIN system_settings s ON c.key = s.company_key
+                ORDER BY c.name
+                """,
+                conn
+            )
+
+            edited_instances = st.data_editor(
+                instance_df,
+                use_container_width=True,
+                num_rows='dynamic',
+                key='enterprise_instance_editor',
+                column_config={
+                    'company_key': st.column_config.TextColumn(label='Company Key', disabled=True)
+                } if hasattr(st, 'column_config') else None
+            )
+
+            if st.button('Sync Changes', key='enterprise_sync_changes'):
+                changed_mask = (edited_instances != instance_df).any(axis=1)
+                changed_rows = edited_instances[changed_mask]
+
+                if not changed_rows.empty:
+                    for _, row in changed_rows.iterrows():
+                        conn.execute(
+                            "UPDATE companies SET name=? WHERE key=?",
+                            (row['company_name'], row['company_key'])
+                        )
+                        conn.execute(
+                            "UPDATE system_settings SET software_fee=?, subscription_months=? WHERE company_key=?",
+                            (row['software_fee'], row['subscription_months'], row['company_key'])
+                        )
+                    conn.commit()
+                    st.success('Enterprise instances synced successfully.')
+                    log_audit_action(conn, 'SYSTEM', 'Dev', 'Synced enterprise instance settings', 'System Admin')
+                else:
+                    st.info('No changes to sync.')
+
+            conn.close()
+        except sqlite3.Error as e:
+            st.error(f"Failed to load enterprise instances: {e}")
+            logger.error(f"Instance manager error: {e}")
 
         st.markdown("---")
         with st.form("provision_new_client_v3"):
@@ -282,96 +448,3 @@ else:
         st.session_state.user = None
         st.session_state.login_attempts = 0
         st.rerun()
-
-# Dashboard Module (NEW FUNCTION)
-def show_dashboard(company_key, company_name, role):
-    """Enhanced company dashboard with key metrics and insights."""
-    st.header(f"📊 Business Dashboard: {company_name}")
-    
-    try:
-        conn = get_connection()
-        
-        # Key Business Metrics
-        col1, col2, col3, col4 = st.columns(4)
-        
-        # Total Inventory Value
-        inv_val = conn.execute("SELECT SUM(qty * cost_price) FROM inventory WHERE company_key=?", (company_key,)).fetchone()[0] or 0
-        col1.metric("Inventory Value", f"GHS {inv_val:.2f}")
-        
-        # Total Sales (Current Month)
-        current_month = datetime.now().strftime('%Y-%m')
-        month_sales = conn.execute("""SELECT SUM(credit) FROM vouchers 
-                                    WHERE company_key=? AND v_type='Sales' 
-                                    AND date LIKE ?""", (company_key, f"{current_month}%")).fetchone()[0] or 0
-        col2.metric("Month Sales", f"GHS {month_sales:.2f}")
-        
-        # Total Employees
-        emp_count = conn.execute("SELECT COUNT(DISTINCT emp_name) FROM payroll WHERE company_key=?", (company_key,)).fetchone()[0] or 0
-        col3.metric("Employees", str(emp_count))
-        
-        # Fixed Assets Value
-        fa_val = conn.execute("SELECT SUM(book_value) FROM fixed_assets WHERE company_key=?", (company_key,)).fetchone()[0] or 0
-        col4.metric("Asset Value", f"GHS {fa_val:.2f}")
-        
-        st.markdown("---")
-        
-        # Recent Activity
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            st.subheader("📈 Recent Transactions")
-            # FIXED: Use direct SQL instead of pd.read_sql
-            recent_data = conn.execute("""SELECT date, v_type, narration, 
-                                        CASE WHEN credit > 0 THEN credit ELSE debit END as amount
-                                        FROM vouchers WHERE company_key=? 
-                                        ORDER BY date DESC LIMIT 10""", (company_key,)).fetchall()
-            
-            if recent_data:
-                # Convert to DataFrame manually
-                recent_txns = pd.DataFrame(recent_data, columns=['Date', 'Type', 'Description', 'Amount'])
-                st.dataframe(recent_txns, use_container_width=True)
-            else:
-                st.info("No recent transactions found.")
-        
-        with col2:
-            st.subheader("📦 Low Stock Items")
-            # FIXED: Use direct SQL instead of pd.read_sql
-            low_stock_data = conn.execute("""SELECT item_name, qty, unit FROM inventory 
-                                           WHERE company_key=? AND qty <= 10 
-                                           ORDER BY qty ASC LIMIT 10""", (company_key,)).fetchall()
-            
-            if low_stock_data:
-                low_stock = pd.DataFrame(low_stock_data, columns=['Item', 'Quantity', 'Unit'])
-                st.dataframe(low_stock, use_container_width=True)
-            else:
-                st.success("All stock levels are adequate!")
-        
-        # Quick Actions
-        st.subheader("⚡ Quick Actions")
-        col1, col2, col3, col4 = st.columns(4)
-        
-        with col1:
-            if st.button("➕ New Sale", use_container_width=True):
-                st.session_state.selected_module = "POS (Point of Sale)"
-                st.rerun()
-        
-        with col2:
-            if st.button("📦 Add Inventory", use_container_width=True):
-                st.session_state.selected_module = "Inventory & Stock"
-                st.rerun()
-        
-        with col3:
-            if st.button("💰 Process Payroll", use_container_width=True):
-                st.session_state.selected_module = "Ghana Payroll (SSNIT)"
-                st.rerun()
-        
-        with col4:
-            if st.button("📊 View Reports", use_container_width=True):
-                st.session_state.selected_module = "Financial Intelligence"
-                st.rerun()
-        
-        conn.close()
-        
-    except sqlite3.Error as e:
-        st.error("Failed to load dashboard data")
-        logger.error(f"Dashboard error: {e}")
