@@ -7,6 +7,7 @@ import logging
 import sqlite3
 from datetime import datetime, timedelta
 import hashlib
+from dateutil.relativedelta import relativedelta
 
 # Check maintenance status
 maintenance_status = check_maintenance_window()
@@ -66,12 +67,21 @@ if 'reference' in st.query_params:
             parts = reference.split("-")
             company_name = parts[1].replace("_", " ")
             plan = parts[2]
+            # Determine months based on plan
+            if plan == "Basic":
+                months = 12
+            elif plan == "Premium":
+                months = 18
+            elif plan == "Enterprise":
+                months = 24
+            else:
+                months = 12
             # Generate a key
             import uuid
             company_key = str(uuid.uuid4())[:8].upper()
             try:
                 conn = get_connection()
-                expiry_date = datetime.now() + timedelta(days=365)  # 1 year
+                expiry_date = datetime.now() + relativedelta(months=months)
                 conn.execute("INSERT INTO companies (key, name, admin_email, deployment_status, expiry_date) VALUES (?, ?, ?, ?, ?)", 
                              (company_key, company_name, verification['email'], "Pending", expiry_date.isoformat()))
                 conn.commit()
@@ -85,8 +95,8 @@ if 'reference' in st.query_params:
             company_key = reference.split("-")[1]
             try:
                 conn = get_connection()
-                # Add 1 year to expiry_date
-                new_expiry = datetime.now() + timedelta(days=365)
+                # Add 12 months to expiry_date
+                new_expiry = datetime.now() + relativedelta(months=12)
                 conn.execute("UPDATE companies SET expiry_date=? WHERE key=?", (new_expiry.isoformat(), company_key))
                 conn.commit()
                 log_audit_action(conn, company_key, 'System', f'License renewal verified: {reference}', 'Renewal')
@@ -552,11 +562,12 @@ else:
                     company_name = st.text_input("Company Name")
                     plan_type = st.selectbox("Plan Type", ["Basic", "Premium", "Enterprise"])
                     payment_status = st.selectbox("Payment Status", ["Cash", "Bank Transfer", "Bypass"])
+                    duration_months = st.number_input('Deployment Duration (Months)', min_value=1, max_value=24, value=12)
                     submitted = st.form_submit_button("Deploy License")
                     if submitted:
                         if company_name:
                             key = hashlib.md5(company_name.encode()).hexdigest()[:10]
-                            expiry_date = (datetime.now() + timedelta(days=365)).isoformat()
+                            expiry_date = (datetime.now() + relativedelta(months=duration_months)).isoformat()
                             try:
                                 conn.execute("INSERT INTO companies (key, name, expiry_date, status) VALUES (?, ?, ?, ?)", (key, company_name, expiry_date, 'Active'))
                                 conn.commit()
