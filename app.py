@@ -7,6 +7,7 @@ import logging
 from datetime import date, datetime, timedelta
 import hashlib
 from dateutil.relativedelta import relativedelta
+from sqlalchemy import text
 
 # Check maintenance status
 maintenance_status = check_maintenance_window()
@@ -79,7 +80,6 @@ if 'reference' in st.query_params:
             import uuid
             company_key = str(uuid.uuid4())[:8].upper()
             try:
-                from sqlalchemy import text
                 conn = get_connection()
                 expiry_date = datetime.now() + relativedelta(months=months)
                 conn.execute(
@@ -96,7 +96,6 @@ if 'reference' in st.query_params:
             # Renewal payment
             company_key = reference.split("-")[1]
             try:
-                from sqlalchemy import text
                 conn = get_connection()
                 # Add 12 months to expiry_date
                 new_expiry = datetime.now() + relativedelta(months=12)
@@ -114,7 +113,6 @@ if 'reference' in st.query_params:
             # Existing invoice payment
             # Find the company_key and amount from sales_invoices
             try:
-                from sqlalchemy import text
                 conn = get_connection()
                 invoice_data = conn.execute(text("SELECT company_key, total_amount FROM sales_invoices WHERE invoice_no=:invoice_no"), {"invoice_no": reference}).fetchone()
                 if invoice_data:
@@ -535,7 +533,6 @@ else:
                 
                 # Get actual metrics from database
                 try:
-                    from sqlalchemy import text
                     total_companies = conn.execute(text("SELECT COUNT(*) FROM companies")).fetchone()[0]
                 except Exception:
                     total_companies = 0
@@ -552,7 +549,6 @@ else:
                 st.markdown("---")
                 st.subheader("🛡️ Global Forensic Trail")
                 try:
-                    from sqlalchemy import text
                     # Wrap the read operation so the app continues even if the table is missing
                     try:
                         trail_df = pd.read_sql(
@@ -583,7 +579,6 @@ else:
                     submitted = st.form_submit_button("Deploy License")
                     if submitted:
                         if company_name:
-                            from sqlalchemy import text
                             key = hashlib.md5(company_name.encode()).hexdigest()[:10]
                             expiry_date = (date.today() + relativedelta(months=+duration_months)).isoformat()
                             try:
