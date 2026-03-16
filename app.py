@@ -334,6 +334,59 @@ else:
             logger.error(f"Instance manager error: {e}")
 
         st.markdown("---")
+        st.subheader("📂 Client Portfolio Manager")
+        try:
+            conn = get_connection()
+            portfolio_df = pd.read_sql(
+                """
+                SELECT c.name AS company_name,
+                       c.created_at AS created_date,
+                       c.status AS account_status,
+                       c.subscription_end_date,
+                       COALESCE(SUM(v.credit), 0) AS total_revenue_collected
+                FROM companies c
+                LEFT JOIN vouchers v ON c.key = v.company_key AND v.v_type = 'Sales'
+                GROUP BY c.key, c.name, c.created_at, c.status, c.subscription_end_date
+                ORDER BY c.name
+                """,
+                conn
+            )
+
+            edited_portfolio = st.data_editor(
+                portfolio_df,
+                use_container_width=True,
+                key='client_portfolio_editor',
+                column_config={
+                    'company_name': st.column_config.TextColumn(label='Company Name', disabled=True),
+                    'created_date': st.column_config.TextColumn(label='Created Date', disabled=True),
+                    'total_revenue_collected': st.column_config.NumberColumn(label='Total Revenue Collected (GHS)', disabled=True),
+                    'account_status': st.column_config.SelectboxColumn(label='Account Status', options=['Active', 'Suspended']),
+                    'subscription_end_date': st.column_config.DateColumn(label='Subscription End Date')
+                } if hasattr(st, 'column_config') else None
+            )
+
+            if st.button('Update Client Portfolio', key='portfolio_update_changes'):
+                changed_mask = (edited_portfolio != portfolio_df).any(axis=1)
+                changed_rows = edited_portfolio[changed_mask]
+
+                if not changed_rows.empty:
+                    for _, row in changed_rows.iterrows():
+                        conn.execute(
+                            "UPDATE companies SET status=?, subscription_end_date=? WHERE name=?",
+                            (row['account_status'], row['subscription_end_date'], row['company_name'])
+                        )
+                    conn.commit()
+                    st.success('Client portfolio updated successfully.')
+                    log_audit_action(conn, 'SYSTEM', 'Dev', 'Updated client portfolio', 'System Admin')
+                else:
+                    st.info('No changes to update.')
+
+            conn.close()
+        except sqlite3.Error as e:
+            st.error(f"Failed to load client portfolio: {e}")
+            logger.error(f"Portfolio manager error: {e}")
+
+        st.markdown("---")
         with st.form("provision_new_client_v3"):
             st.subheader("Deploy New Enterprise Instance")
             cl_name = st.text_input("Client/Company Name", key="dev_client_name")

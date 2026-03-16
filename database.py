@@ -40,8 +40,22 @@ def init_db():
                       sub_admin_key TEXT, 
                       staff_key TEXT, 
                       recovery_answer TEXT,
+                      status TEXT DEFAULT 'Active',
+                      subscription_end_date DATETIME,
                       created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                       updated_at DATETIME DEFAULT CURRENT_TIMESTAMP)''')
+        
+        # Ensure schema is up to date for existing databases
+        try:
+            c.execute("ALTER TABLE companies ADD COLUMN status TEXT DEFAULT 'Active'")
+        except sqlite3.OperationalError:
+            # Column already exists
+            pass
+        try:
+            c.execute("ALTER TABLE companies ADD COLUMN subscription_end_date DATETIME")
+        except sqlite3.OperationalError:
+            # Column already exists
+            pass
         
         # 2. System Fees & Gatekeeper Settings
         c.execute('''CREATE TABLE IF NOT EXISTS system_settings 
@@ -148,12 +162,20 @@ def init_db():
                       company_key TEXT,
                       invoice_no TEXT,
                       customer_name TEXT,
+                      customer_email TEXT,
                       invoice_date TEXT,
                       due_date TEXT,
                       total_amount REAL,
                       status TEXT DEFAULT 'Pending',
                       created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                       FOREIGN KEY (company_key) REFERENCES companies(key))''')
+
+        # Ensure schema is up to date for existing databases
+        try:
+            c.execute("ALTER TABLE sales_invoices ADD COLUMN customer_email TEXT")
+        except sqlite3.OperationalError:
+            # Column already exists
+            pass
 
         # 10. Purchase Orders (NEW)
         c.execute('''CREATE TABLE IF NOT EXISTS purchase_orders 

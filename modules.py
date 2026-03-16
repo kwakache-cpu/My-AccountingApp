@@ -6,9 +6,40 @@ import sqlite3
 from database import get_connection, log_audit_action, init_db
 from datetime import datetime
 import logging
+import requests
+
+import requests
 
 # Configure logging
 logger = logging.getLogger(__name__)
+
+# ==========================================
+# PAYSTACK PAYMENT INTEGRATION
+# ==========================================
+def initialize_paystack_payment(email, amount, reference):
+    """Initialize a Paystack payment transaction."""
+    url = "https://api.paystack.co/transaction/initialize"
+    headers = {
+        "Authorization": f"Bearer {st.secrets['PAYSTACK_SECRET_KEY']}",
+        "Content-Type": "application/json"
+    }
+    data = {
+        "email": email,
+        "amount": int(amount * 100),  # Convert to pesewas
+        "reference": reference
+    }
+    try:
+        response = requests.post(url, headers=headers, json=data)
+        response.raise_for_status()
+        result = response.json()
+        if result.get("status"):
+            return result["data"]["authorization_url"]
+        else:
+            st.error(f"Paystack error: {result.get('message')}")
+            return None
+    except requests.RequestException as e:
+        st.error(f"Payment initialization failed: {e}")
+        return None
 
 # ==========================================
 # 0. SYSTEM ENGINE: EXCEL EXPORT & IMPORT
@@ -587,6 +618,7 @@ def show_sales_purchase(k, r, mode):
             with st.form("sales_form"):
                 inv_no = st.text_input("Invoice Number", key="sales_inv_no")
                 customer = st.text_input("Customer Name", key="sales_customer")
+                customer_email = st.text_input("Customer Email", key="sales_customer_email")
                 due_days = st.number_input("Payment Terms (Days)", value=30, key="sales_due")
                 
                 # Dynamic line items
@@ -618,13 +650,13 @@ def show_sales_purchase(k, r, mode):
                 
                 # ADDED: Submit button
                 if st.form_submit_button("Create Invoice"):
-                    if validate_input(inv_no, "Invoice Number") and validate_input(customer, "Customer Name") and st.session_state[session_key]:
+                    if validate_input(inv_no, "Invoice Number") and validate_input(customer, "Customer Name") and validate_input(customer_email, "Customer Email") and st.session_state[session_key]:
                         try:
                             conn = get_connection()
                             due_date = datetime.now() + pd.Timedelta(days=due_days)
-                            conn.execute("""INSERT INTO sales_invoices (company_key, invoice_no, customer_name, invoice_date, due_date, total_amount) 
-                                         VALUES (?,?,?,?,?,?)""", 
-                                         (k, inv_no, customer, str(datetime.now().date()), str(due_date.date()), total_amount))
+                            conn.execute("""INSERT INTO sales_invoices (company_key, invoice_no, customer_name, customer_email, invoice_date, due_date, total_amount) 
+                                         VALUES (?,?,?,?,?,?,?)""", 
+                                         (k, inv_no, customer, customer_email, str(datetime.now().date()), str(due_date.date()), total_amount))
                             conn.commit()
                             log_audit_action(conn, k, r, f"Created sales invoice: {inv_no}", "Sales")
                             st.success(f"Sales Invoice {inv_no} created successfully.")
@@ -635,6 +667,31 @@ def show_sales_purchase(k, r, mode):
                             logger.error(f"Sales invoice error: {e}")
                     else:
                         st.error("Please fill in all required fields and add at least one line item.")
+    
+    # Pending Sales Invoices with Pay Online
+    st.subheader("Pending Sales Invoices")
+    try:
+        conn = get_connection()
+        pending_invoices = conn.execute("""SELECT id, invoice_no, customer_name, customer_email, total_amount, due_date 
+                                         FROM sales_invoices WHERE company_key=? AND status='Pending'""", (k,)).fetchall()
+        conn.close()
+        
+        if pending_invoices:
+            for inv in pending_invoices:
+                inv_id, inv_no, cust_name, cust_email, amount, due_date = inv
+                with st.expander(f"Invoice {inv_no} - {cust_name} - Due: {due_date}"):
+                    st.write(f"**Amount:** GHS {amount:.2f}")
+                    if st.button("Pay Online", key=f"pay_{inv_id}"):
+                        url = initialize_paystack_payment(cust_email, amount, inv_no)
+                        if url:
+                            st.link_button("Proceed to Paystack", url)
+                        else:
+                            st.error("Failed to initialize payment.")
+        else:
+            st.info("No pending sales invoices.")
+    except sqlite3.Error as e:
+        st.error(f"Failed to load pending invoices: {e}")
+        logger.error(f"Pending invoices error: {e}")
     
     else:  # Purchase Orders
         with st.expander("📦 Create Purchase Order"):
