@@ -10,29 +10,61 @@ logger = logging.getLogger(__name__)
 def get_engine():
     """Establish a SQLAlchemy engine connection to Supabase.
 
-    This always uses the Supavisor transaction pooler (port 6543) to avoid
-    IPv6/connectivity issues on Streamlit Cloud.
+    This explicitly tries the Supavisor pooler (port 6543) first, then falls back
+    to direct Postgres (port 5432) if needed.
+
+    A strict SSL mode and pre-ping are enforced to prevent operational failures.
     """
     db_url = st.secrets.get('DB_URL')
     if not db_url:
         raise RuntimeError("DB_URL is not set in Streamlit secrets.")
 
-    # Ensure we always connect via the Supavisor pooler (6543)
-    # and force SSL mode (required by Supabase).
-    if ":5432" in db_url:
-        db_url = db_url.replace(":5432", ":6543")
+    # Normalize: strip whitespace and ensure scheme is postgresql
+    db_url = db_url.strip()
+    if not db_url.startswith("postgresql://") and not db_url.startswith("postgres://"):
+        raise RuntimeError("DB_URL must start with postgresql:// or postgres://")
 
-    if "sslmode=" not in db_url:
-        sep = '&' if '?' in db_url else '?'
-        db_url = f"{db_url}{sep}sslmode=require"
+    def _normalize(url: str, port: int) -> str:
+        # Replace port if present or append pooler port
+        if ":" in url.split("//", 1)[1].split("@")[-1]:
+            # Contains explicit port
+            url = url.replace(":5432", f":{port}").replace(":6543", f":{port}")
+        else:
+            # Append port if none present
+            if "@" in url:
+                parts = url.split("@")
+                url = f"{parts[0]}@{parts[1]}:{port}"
+            else:
+                url = f"{url}:{port}"
+        # Ensure SSL mode is required
+        if "sslmode=" not in url:
+            sep = '&' if '?' in url else '?'
+            url = f"{url}{sep}sslmode=require"
+        return url
 
-    engine = create_engine(db_url, connect_args={'sslmode': 'require'}, pool_pre_ping=True)
+    pooler_url = _normalize(db_url, 6543)
+    direct_url = _normalize(db_url, 5432)
 
-    # Verify connection immediately
-    with engine.connect() as conn:
-        conn.execute(text("SELECT 1"))
+    connect_args = {"sslmode": "require", "connect_timeout": 10}
+    engine_kwargs = {
+        "connect_args": connect_args,
+        "pool_pre_ping": True,
+        "pool_size": 10,
+        "max_overflow": 20,
+    }
 
-    return engine
+    def _create(url: str):
+        engine = create_engine(url, echo=False, **engine_kwargs)
+        with engine.connect() as conn:
+            conn.execute(text("SELECT 1"))
+        return engine
+
+    # Try pooler first, then fallback to direct if it fails
+    try:
+        return _create(pooler_url)
+    except Exception as e:
+        logger.warning(f"Pooler connection failed, trying direct PG port: {e}")
+        return _create(direct_url)
 
 def get_connection():
     """Get a connection from the SQLAlchemy engine for backward compatibility."""
