@@ -272,6 +272,24 @@ def show_pos(company_key, company_name, role):
 def show_payroll(company_key, role):
     st.header("🇬🇭 Ghana Payroll (SSNIT & PAYE Engine)")
     
+    # Demo Mode Check
+    if st.session_state.get('demo_mode', False):
+        st.info("🚀 Demo Mode Active: Showing sample payroll data.")
+        demo_pr_df = pd.DataFrame({
+            'Name': ['John Doe', 'Jane Smith', 'Bob Johnson'],
+            'Basic': [2000.0, 2500.0, 1800.0],
+            'Tier 1': [270.0, 270.0, 243.0],
+            'Tier 2': [100.0, 125.0, 90.0],
+            'Taxable': [1900.0, 2375.0, 1710.0],
+            'PAYE': [95.0, 118.75, 85.5],
+            'Net Pay': [1805.0, 2256.25, 1624.5],
+            'Period': ['March', 'March', 'March'],
+            'Year': ['2026', '2026', '2026']
+        })
+        st.dataframe(demo_pr_df, use_container_width=True)
+        st.download_button("📥 Export Sample Payroll Data", data=get_excel_bin(demo_pr_df), file_name="Demo_Payroll_Data.xlsx")
+        return
+    
     with st.expander("📝 Generate Monthly Employee Pay-Slip"):
         e_name = st.text_input("Employee Full Name", key="mod_pr_name")
         e_basic = st.number_input("Basic Salary (GHS)", min_value=0.0, key="mod_pr_basic")
@@ -370,6 +388,21 @@ def show_payroll(company_key, role):
 # ==========================================
 def show_inventory(company_key, role):
     st.header("📦 Inventory Control & Warehouse Logistics")
+    
+    # Demo Mode Check
+    if st.session_state.get('demo_mode', False):
+        st.info("🚀 Demo Mode Active: Showing sample inventory data.")
+        demo_inv_df = pd.DataFrame({
+            'Product': ['Product A', 'Product B', 'Product C'],
+            'Stock Level': [100, 50, 75],
+            'Selling Price': [10.0, 20.0, 15.0],
+            'Cost Price': [8.0, 15.0, 12.0],
+            'Warehouse': ['Main', 'Main', 'Secondary'],
+            'Barcode': ['123456', '234567', '345678']
+        })
+        st.dataframe(demo_inv_df, use_container_width=True)
+        st.download_button("📥 Download Sample Inventory", data=get_excel_bin(demo_inv_df), file_name="Demo_Stock_Master.xlsx")
+        return
     
     # OFFLINE SYNC ENGINE (Fixed)
     st.subheader("Intelligent Excel Sync")
@@ -470,20 +503,19 @@ def show_reports(company_key):
         
         with rep_t1:
             st.subheader("Statement of Comprehensive Income")
-            # FIXED: Use direct SQL instead of pd.read_sql
-            pl_data_raw = conn.execute("""SELECT ledger as 'Account Head', 
-                                  SUM(CASE WHEN v_type IN ('Sales', 'Income') THEN credit ELSE 0 END) as 'Revenue (Cr)',
-                                  SUM(CASE WHEN v_type IN ('Expense', 'Purchase') THEN debit ELSE 0 END) as 'Expenses (Dr)' 
-                                  FROM vouchers WHERE company_key=? 
-                                  GROUP BY ledger ORDER BY ledger""", (company_key,)).fetchall()
             
-            if pl_data_raw:
-                pl_data = pd.DataFrame(pl_data_raw, columns=['Account Head', 'Revenue (Cr)', 'Expenses (Dr)'])
-                st.table(pl_data)
+            if st.session_state.get('demo_mode', False):
+                st.info("🚀 Demo Mode Active: Showing sample P&L data.")
+                demo_pl_data = pd.DataFrame({
+                    'Account Head': ['Sales Revenue', 'Service Income', 'Operating Expenses', 'Cost of Goods Sold'],
+                    'Revenue (Cr)': [50000.0, 10000.0, 0.0, 0.0],
+                    'Expenses (Dr)': [0.0, 0.0, 25000.0, 20000.0]
+                })
+                st.table(demo_pl_data)
                 
-                revenue = pl_data['Revenue (Cr)'].sum()
-                expenses = pl_data['Expenses (Dr)'].sum()
-                net_pl = revenue - expenses
+                revenue = 60000.0
+                expenses = 45000.0
+                net_pl = 15000.0
                 
                 col1, col2, col3 = st.columns(3)
                 with col1:
@@ -491,12 +523,37 @@ def show_reports(company_key):
                 with col2:
                     st.metric("Total Expenses", f"GHS {expenses:.2f}")
                 with col3:
-                    color = "normal" if net_pl >= 0 else "inverse"
-                    st.metric("Net Profit/Loss", f"GHS {net_pl:.2f}", delta=None, delta_color=color)
+                    st.metric("Net Profit", f"GHS {net_pl:.2f}", delta=None, delta_color="normal")
                 
-                st.download_button("📥 Export P&L Report", data=get_excel_bin(pl_data), file_name="EKA_PL_Report.xlsx")
+                st.download_button("📥 Export Sample P&L Report", data=get_excel_bin(demo_pl_data), file_name="Demo_PL_Report.xlsx")
             else:
-                st.info("No financial data found for P&L statement.")
+                # FIXED: Use direct SQL instead of pd.read_sql
+                pl_data_raw = conn.execute("""SELECT ledger as 'Account Head', 
+                                      SUM(CASE WHEN v_type IN ('Sales', 'Income') THEN credit ELSE 0 END) as 'Revenue (Cr)',
+                                      SUM(CASE WHEN v_type IN ('Expense', 'Purchase') THEN debit ELSE 0 END) as 'Expenses (Dr)' 
+                                      FROM vouchers WHERE company_key=? 
+                                      GROUP BY ledger ORDER BY ledger""", (company_key,)).fetchall()
+                
+                if pl_data_raw:
+                    pl_data = pd.DataFrame(pl_data_raw, columns=['Account Head', 'Revenue (Cr)', 'Expenses (Dr)'])
+                    st.table(pl_data)
+                    
+                    revenue = pl_data['Revenue (Cr)'].sum()
+                    expenses = pl_data['Expenses (Dr)'].sum()
+                    net_pl = revenue - expenses
+                    
+                    col1, col2, col3 = st.columns(3)
+                    with col1:
+                        st.metric("Total Revenue", f"GHS {revenue:.2f}")
+                    with col2:
+                        st.metric("Total Expenses", f"GHS {expenses:.2f}")
+                    with col3:
+                        color = "normal" if net_pl >= 0 else "inverse"
+                        st.metric("Net Profit/Loss", f"GHS {net_pl:.2f}", delta=None, delta_color=color)
+                    
+                    st.download_button("📥 Export P&L Report", data=get_excel_bin(pl_data), file_name="EKA_PL_Report.xlsx")
+                else:
+                    st.info("No financial data found for P&L statement.")
         
         with rep_t2:
             st.subheader("Statement of Financial Position")

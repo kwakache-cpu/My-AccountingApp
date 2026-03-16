@@ -6,6 +6,10 @@ import logging
 import sqlite3
 from datetime import datetime, timedelta
 
+# Initialize Demo Mode
+if 'demo_mode' not in st.session_state:
+    st.session_state.demo_mode = False
+
 # Payment Verification Logic
 if 'reference' in st.query_params:
     reference = st.query_params['reference']
@@ -92,6 +96,14 @@ def login_ui():
         )
         
         if st.button("Access Cloud Modules", key="v3_final_auth_submit_btn"):
+            # Demo Mode Bypass
+            if st.session_state.demo_toggle:
+                st.session_state.auth = True
+                st.session_state.user = {"key": "DEMO", "name": "Demo Corp", "role": "Master Admin"}
+                st.session_state.demo_mode = True
+                st.session_state.login_attempts = 0
+                st.rerun()
+            
             try:
                 conn = get_connection()
                 
@@ -163,6 +175,10 @@ def login_ui():
             except sqlite3.Error as e:
                 st.error("System error during recovery. Please try again.")
                 logger.error(f"Recovery error: {e}")
+
+    # Demo Mode Toggle
+    st.markdown("---")
+    st.toggle('🚀 Try Demo Mode', key='demo_toggle')
 
 # Dashboard Module (NEW FUNCTION)
 def show_dashboard(company_key, company_name, role):
