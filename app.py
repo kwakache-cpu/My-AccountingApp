@@ -102,6 +102,22 @@ if 'reference' in st.query_params:
     # Clear the reference from URL
     st.query_params.clear()
 
+# Check Maintenance Window
+maintenance_status = check_maintenance_window()
+if maintenance_status == 'maintenance':
+    st.markdown("""
+    <div style='position: fixed; top: 0; left: 0; width: 100%; height: 100%; background-color: #f8f9fa; display: flex; align-items: center; justify-content: center; z-index: 9999;'>
+        <div style='text-align: center; padding: 40px; background: white; border-radius: 15px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); max-width: 500px;'>
+            <h1 style='color: #1f2937; margin-bottom: 20px;'>🏗️ System Upgrade in Progress</h1>
+            <p style='color: #6b7280; font-size: 18px; line-height: 1.6;'>
+                We are currently performing scheduled maintenance to improve your experience. 
+                We will be back online at 02:00 AM GMT. Thank you for your patience.
+            </p>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+    st.stop()
+
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -159,6 +175,30 @@ def check_license_expiry(company_key):
             days_left = (expiry_date - datetime.now()).days
             if days_left <= 7 and days_left >= 0:
                 return days_left
+    except:
+        pass
+    return None
+
+def check_maintenance_window():
+    """Check maintenance status. Returns 'maintenance' if in window, 'warning' if within 3 days, None otherwise."""
+    try:
+        conn = get_connection()
+        maint = conn.execute("SELECT maintenance_date FROM maintenance_settings WHERE id=1").fetchone()
+        conn.close()
+        if maint and maint[0]:
+            maint_date = datetime.fromisoformat(maint[0]).date()
+            now = datetime.now()
+            current_date = now.date()
+            current_time = now.time()
+            
+            # Check if in maintenance window
+            if current_date == maint_date and current_time >= datetime.strptime("00:00", "%H:%M").time() and current_time <= datetime.strptime("02:00", "%H:%M").time():
+                return 'maintenance'
+            
+            # Check if within 3 days
+            days_diff = (maint_date - current_date).days
+            if 0 <= days_diff <= 3:
+                return 'warning', maint_date
     except:
         pass
     return None
@@ -272,6 +312,11 @@ def show_dashboard(company_key, company_name, role):
     st.header(f"📊 Business Dashboard: {company_name}")
     
     if st.session_state.get('demo_mode', False):
+        # Maintenance Banner
+        if maintenance_status and maintenance_status[0] == 'warning':
+            maint_date = maintenance_status[1]
+            st.info(f"🛠️ Scheduled Maintenance: We will be upgrading our services on {maint_date} from 12:00 AM to 02:00 AM GMT. The system may be temporarily offline during this window.")
+        
         # Demo Mode Dashboard
         col1, col2, col3, col4 = st.columns(4)
         col1.metric("Inventory Value", "GHS 25,000.00")
@@ -304,6 +349,11 @@ def show_dashboard(company_key, company_name, role):
             st.dataframe(demo_stock, use_container_width=True)
         
         return
+    
+    # Maintenance Banner for Regular Users
+    if maintenance_status and maintenance_status[0] == 'warning':
+        maint_date = maintenance_status[1]
+        st.info(f"🛠️ Scheduled Maintenance: We will be upgrading our services on {maint_date} from 12:00 AM to 02:00 AM GMT. The system may be temporarily offline during this window.")
     
     try:
         conn = get_connection()
@@ -405,6 +455,11 @@ else:
     u = st.session_state.user
     
     if u['role'] == "Dev":
+        # Maintenance Banner
+        if maintenance_status and maintenance_status[0] == 'warning':
+            maint_date = maintenance_status[1]
+            st.info(f"🛠️ Scheduled Maintenance: We will be upgrading our services on {maint_date} from 12:00 AM to 02:00 AM GMT. The system may be temporarily offline during this window.")
+        
         # Gatekeeper Dashboard with Enhanced Metrics
         st.title("👑 Gatekeeper System Dashboard")
         
@@ -632,6 +687,40 @@ else:
                 except sqlite3.Error as e:
                     st.error(f"Health check failed: {e}")
                     logger.error(f"Health check error: {e}")
+        
+        # Maintenance Configuration
+        st.markdown("---")
+        st.subheader("🛠️ Maintenance Configuration")
+        try:
+            conn = get_connection()
+            maint_settings = conn.execute("SELECT maintenance_date FROM maintenance_settings WHERE id=1").fetchone()
+            current_maint_date = maint_settings[0] if maint_settings else None
+            
+            with st.form("maintenance_config_form"):
+                maint_date_input = st.date_input(
+                    "Scheduled Maintenance Date",
+                    value=datetime.strptime(current_maint_date, '%Y-%m-%d').date() if current_maint_date else None,
+                    key="maint_date_input"
+                )
+                maint_time = st.time_input("Maintenance Start Time (GMT)", value=datetime.strptime("00:00", "%H:%M").time(), key="maint_time_input")
+                
+                if st.form_submit_button("Schedule Maintenance"):
+                    # Combine date and time
+                    maint_datetime = datetime.combine(maint_date_input, maint_time).isoformat()
+                    
+                    if maint_settings:
+                        conn.execute("UPDATE maintenance_settings SET maintenance_date=? WHERE id=1", (maint_datetime,))
+                    else:
+                        conn.execute("INSERT INTO maintenance_settings (id, maintenance_date) VALUES (1, ?)", (maint_datetime,))
+                    
+                    conn.commit()
+                    st.success(f"Maintenance scheduled for {maint_date_input} at {maint_time} GMT.")
+                    log_audit_action(conn, 'SYSTEM', 'Dev', f'Scheduled maintenance: {maint_datetime}', 'System Admin')
+            
+            conn.close()
+        except sqlite3.Error as e:
+            st.error(f"Failed to load maintenance settings: {e}")
+            logger.error(f"Maintenance config error: {e}")
                     
     elif u['role'] == "Demo":
         # Demo User Interface

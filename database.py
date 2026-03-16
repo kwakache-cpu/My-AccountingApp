@@ -75,16 +75,14 @@ def init_db():
             # Column already exists
             pass
         
-        # 2. System Fees & Gatekeeper Settings
-        c.execute('''CREATE TABLE IF NOT EXISTS system_settings 
+        # 3. Global Maintenance Settings
+        c.execute('''CREATE TABLE IF NOT EXISTS maintenance_settings 
                      (id INTEGER PRIMARY KEY, 
-                      company_key TEXT,
-                      software_fee REAL DEFAULT 0.0, 
-                      setup_fee_paid REAL DEFAULT 0.0,
-                      maintenance_fee REAL DEFAULT 0.0, 
-                      subscription_months INTEGER DEFAULT 12,
-                      currency TEXT DEFAULT 'GHS',
-                      FOREIGN KEY (company_key) REFERENCES companies(key))''')
+                      maintenance_date TEXT,
+                      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP)''')
+
+        # Insert default if not exists
+        c.execute("INSERT OR IGNORE INTO maintenance_settings (id) VALUES (1)")
 
         # Ensure schema is up to date for existing databases
         try:
