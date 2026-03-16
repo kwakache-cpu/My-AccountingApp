@@ -2,9 +2,26 @@ import streamlit as st
 import pandas as pd  # <-- ADD THIS IMPORT
 from database import get_connection, init_db, log_audit_action
 from modules import *
+from modules import check_maintenance_window
 import logging
 import sqlite3
 from datetime import datetime, timedelta
+
+# Check maintenance status
+status = check_maintenance_window()
+if status == 'maintenance':
+    st.markdown("""
+    <div style='position: fixed; top: 0; left: 0; width: 100%; height: 100%; background-color: #f8f9fa; display: flex; align-items: center; justify-content: center; z-index: 9999;'>
+        <div style='text-align: center; padding: 40px; background: white; border-radius: 15px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); max-width: 500px;'>
+            <h1 style='color: #1f2937; margin-bottom: 20px;'>🏗️ System Upgrade in Progress</h1>
+            <p style='color: #6b7280; font-size: 18px; line-height: 1.6;'>
+                We are currently performing scheduled maintenance to improve your experience. 
+                We will be back online at 02:00 AM GMT. Thank you for your patience.
+            </p>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+    st.stop()
 
 # Google Analytics Injection
 def inject_ga():
@@ -189,9 +206,6 @@ def check_maintenance_window():
         pass
     return None
 
-# Check Maintenance Window
-maintenance_status = check_maintenance_window()
-
 def show_system_status():
     """Public-facing system status monitoring dashboard."""
     st.title("🌐 System Status Dashboard")
@@ -229,6 +243,10 @@ def login_ui():
     """Secure Multi-Tier Authentication Interface with Enhanced Security."""
     st.markdown("<h1 style='text-align: center; color: #1E3A8A;'>🛡️ E.K.A ENTERPRISE ERP</h1>", unsafe_allow_html=True)
     st.markdown("<hr>", unsafe_allow_html=True)
+    
+    # Maintenance Warning Banner
+    if status == 'warning':
+        st.info("🛠️ Scheduled Maintenance: We will be upgrading our services soon. The system may be temporarily offline during the maintenance window.")
     
     # Check for brute force attempts
     if st.session_state.login_attempts >= 5:

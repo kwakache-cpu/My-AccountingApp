@@ -1083,3 +1083,30 @@ def show_onboarding_payment():
                     st.error("Failed to initialize payment.")
             else:
                 st.error("Please fill in all required fields.")
+
+# ==========================================
+# MAINTENANCE SYSTEM
+# ==========================================
+def check_maintenance_window():
+    """Check maintenance status. Returns 'maintenance' if in window, 'warning' if within 3 days, None otherwise."""
+    try:
+        conn = get_connection()
+        maint = conn.execute("SELECT maintenance_date FROM maintenance_settings WHERE id=1 AND is_active=1").fetchone()
+        conn.close()
+        if maint and maint[0] and maint[0] != 'None':
+            maint_date = datetime.fromisoformat(maint[0]).date()
+            now = datetime.now()
+            current_date = now.date()
+            current_time = now.time()
+            
+            # Check if in maintenance window
+            if current_date == maint_date and current_time >= datetime.strptime("00:00", "%H:%M").time() and current_time <= datetime.strptime("02:00", "%H:%M").time():
+                return 'maintenance'
+            
+            # Check if within 3 days
+            days_diff = (maint_date - current_date).days
+            if 0 <= days_diff <= 3:
+                return 'warning'
+    except:
+        pass
+    return None

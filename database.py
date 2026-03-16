@@ -79,10 +79,10 @@ def init_db():
         c.execute('''CREATE TABLE IF NOT EXISTS maintenance_settings 
                      (id INTEGER PRIMARY KEY, 
                       maintenance_date TEXT,
-                      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP)''')
+                      is_active BOOLEAN DEFAULT 1)''')
 
         # Insert default if not exists
-        c.execute("INSERT OR IGNORE INTO maintenance_settings (id) VALUES (1)")
+        c.execute("INSERT OR IGNORE INTO maintenance_settings (id, maintenance_date) VALUES (1, 'None')")
 
         # Ensure schema is up to date for existing databases
         try:
