@@ -4,7 +4,6 @@ from database import get_connection, init_db, log_audit_action
 from modules import *
 from modules import check_maintenance_window
 import logging
-import sqlite3
 from datetime import date, datetime, timedelta
 import hashlib
 from dateutil.relativedelta import relativedelta
@@ -80,49 +79,62 @@ if 'reference' in st.query_params:
             import uuid
             company_key = str(uuid.uuid4())[:8].upper()
             try:
+                from sqlalchemy import text
                 conn = get_connection()
                 expiry_date = datetime.now() + relativedelta(months=months)
-                conn.execute("INSERT INTO companies (key, name, admin_email, deployment_status, expiry_date) VALUES (?, ?, ?, ?, ?)", 
-                             (company_key, company_name, verification['email'], "Pending", expiry_date.isoformat()))
+                conn.execute(
+                    text("INSERT INTO companies (key, name, admin_email, deployment_status, expiry_date) VALUES (:key, :name, :email, :status, :expiry)"),
+                    {"key": company_key, "name": company_name, "email": verification['email'], "status": "Pending", "expiry": expiry_date.isoformat()}
+                )
                 conn.commit()
                 log_audit_action(conn, company_key, 'System', f'Onboarding payment verified: {reference}', 'Onboarding')
                 st.success(f"Company {company_name} onboarded successfully. Deployment pending.")
-            except sqlite3.Error as e:
+            except Exception as e:
                 st.error(f"Failed to onboard company: {e}")
                 logger.error(f"Onboarding error: {e}")
         elif reference.startswith("RENEWAL-"):
             # Renewal payment
             company_key = reference.split("-")[1]
             try:
+                from sqlalchemy import text
                 conn = get_connection()
                 # Add 12 months to expiry_date
                 new_expiry = datetime.now() + relativedelta(months=12)
-                conn.execute("UPDATE companies SET expiry_date=? WHERE key=?", (new_expiry.isoformat(), company_key))
+                conn.execute(
+                    text("UPDATE companies SET expiry_date=:expiry WHERE key=:key"),
+                    {"expiry": new_expiry.isoformat(), "key": company_key}
+                )
                 conn.commit()
                 log_audit_action(conn, company_key, 'System', f'License renewal verified: {reference}', 'Renewal')
                 st.success("License Renewed Successfully! Thank you for your continued business.")
-            except sqlite3.Error as e:
+            except Exception as e:
                 st.error(f"Failed to renew license: {e}")
                 logger.error(f"Renewal error: {e}")
         else:
             # Existing invoice payment
             # Find the company_key and amount from sales_invoices
             try:
+                from sqlalchemy import text
                 conn = get_connection()
-                invoice_data = conn.execute("SELECT company_key, total_amount FROM sales_invoices WHERE invoice_no=?", (reference,)).fetchone()
+                invoice_data = conn.execute(text("SELECT company_key, total_amount FROM sales_invoices WHERE invoice_no=:invoice_no"), {"invoice_no": reference}).fetchone()
                 if invoice_data:
                     company_key, amount = invoice_data
                     # Insert Sales voucher
-                    conn.execute("""INSERT INTO vouchers (company_key, date, v_type, ledger, debit, credit, payment_method, narration, ref_no) 
-                                 VALUES (?,?,?,?,?,?,?,?,?)""", 
-                                 (company_key, str(datetime.now().date()), 'Sales', 'Online Payment', 0.0, amount, 'Paystack', f'Paystack Online Payment: {reference}', reference))
+                    conn.execute(
+                        text("""INSERT INTO vouchers (company_key, date, v_type, ledger, debit, credit, payment_method, narration, ref_no) 
+                                 VALUES (:company_key, :date, :v_type, :ledger, :debit, :credit, :method, :narration, :ref_no)"""),
+                        {
+                            "company_key": company_key, "date": str(datetime.now().date()), "v_type": "Sales", "ledger": "Online Payment",
+                            "debit": 0.0, "credit": amount, "method": "Paystack", "narration": f"Paystack Online Payment: {reference}", "ref_no": reference
+                        }
+                    )
                     conn.commit()
                     log_audit_action(conn, company_key, 'System', f'Paystack payment verified: {reference}', 'Payments')
                     st.balloons()
                 else:
                     st.error("Invoice not found in database.")
                 conn.close()
-            except sqlite3.Error as e:
+            except Exception as e:
                 st.error(f"Failed to record payment: {e}")
                 logger.error(f"Payment recording error: {e}")
     else:
@@ -325,7 +337,7 @@ def login_ui():
                     conn.close()
                     st.error(f"Access Denied. Please verify your License Key. Attempts: {st.session_state.login_attempts}/5")
                     
-                except sqlite3.Error as e:
+                except Exception as e:
                     st.error("System error during authentication. Please try again.")
                     logger.error(f"Login error: {e}")
         elif st.session_state.get('demo_toggle'):
@@ -346,7 +358,7 @@ def login_ui():
                     st.error("Verification failed. Data does not match our records.")
                     log_audit_action(conn, "SYSTEM", "Recovery", f"Failed recovery attempt for {rec_name}", "Authentication")
                 conn.close()
-            except sqlite3.Error as e:
+            except Exception as e:
                 st.error("System error during recovery. Please try again.")
                 logger.error(f"Recovery error: {e}")
 
@@ -491,7 +503,7 @@ def show_dashboard(company_key, company_name, role):
         
         conn.close()
         
-    except sqlite3.Error as e:
+    except Exception as e:
         st.error("Failed to load dashboard data")
         logger.error(f"Dashboard error: {e}")
 
@@ -523,27 +535,31 @@ else:
                 
                 # Get actual metrics from database
                 try:
-                    total_companies = conn.execute("SELECT COUNT(*) FROM companies").fetchone()[0]
-                except sqlite3.Error:
+                    from sqlalchemy import text
+                    total_companies = conn.execute(text("SELECT COUNT(*) FROM companies")).fetchone()[0]
+                except Exception:
                     total_companies = 0
                 try:
-                    active_subscriptions = conn.execute("SELECT COUNT(*) FROM system_settings WHERE subscription_months > 0").fetchone()[0]
-                except sqlite3.Error:
+                    active_subscriptions = conn.execute(text("SELECT COUNT(*) FROM system_settings WHERE subscription_months > 0")).fetchone()[0]
+                except Exception:
                     active_subscriptions = 0
                 try:
-                    monthly_revenue = conn.execute("SELECT SUM(software_fee) FROM system_settings").fetchone()[0] or 0
-                except sqlite3.Error:
+                    monthly_revenue = conn.execute(text("SELECT SUM(software_fee) FROM system_settings")).fetchone()[0] or 0
+                except Exception:
                     monthly_revenue = 0
                 
                 # Global Forensic Trail (Dev only)
                 st.markdown("---")
                 st.subheader("🛡️ Global Forensic Trail")
                 try:
+                    from sqlalchemy import text
                     # Wrap the read operation so the app continues even if the table is missing
                     try:
                         trail_df = pd.read_sql(
-                            "SELECT timestamp, company_key, user, action, details "
-                            "FROM audit_logs ORDER BY timestamp DESC LIMIT 50",
+                            text(
+                                "SELECT timestamp, company_key, \"user\", action, details "
+                                "FROM audit_logs ORDER BY timestamp DESC LIMIT 50"
+                            ),
                             conn,
                         )
                     except Exception as e:
@@ -567,24 +583,25 @@ else:
                     submitted = st.form_submit_button("Deploy License")
                     if submitted:
                         if company_name:
+                            from sqlalchemy import text
                             key = hashlib.md5(company_name.encode()).hexdigest()[:10]
                             expiry_date = (date.today() + relativedelta(months=+duration_months)).isoformat()
                             try:
                                 conn.execute(
-                                    "INSERT INTO companies (key, name, expiry_date, status) VALUES (?, ?, ?, ?)",
-                                    (key, company_name, expiry_date, 'Active'),
+                                    text("INSERT INTO companies (key, name, expiry_date, status) VALUES (:key, :name, :expiry, :status)"),
+                                    {"key": key, "name": company_name, "expiry": expiry_date, "status": "Active"}
                                 )
                                 conn.commit()
                                 st.success(f"License deployed for {company_name}")
                                 log_audit_action(conn, 'SYSTEM', 'Dev', f'Manual license deployment for {company_name}', 'System Admin')
-                            except sqlite3.Error as e:
+                            except Exception as e:
                                 st.error(f"Failed to deploy: {e}")
                         else:
                             st.error("Company Name is required")
 
                 conn.close()
 
-            except sqlite3.Error as e:
+            except Exception as e:
                 st.error("Failed to load system metrics")
                 logger.error(f"Dashboard metrics error: {e}")
 
@@ -640,7 +657,7 @@ else:
                     st.info('No changes to sync.')
 
                 conn.close()
-            except sqlite3.Error as e:
+            except Exception as e:
                 st.error(f"Failed to load enterprise instances: {e}")
                 logger.error(f"Instance manager error: {e}")
 
@@ -716,7 +733,7 @@ else:
                                 st.info(f"Success email sent to {company['company_name']} admin.")
 
                 conn.close()
-            except sqlite3.Error as e:
+            except Exception as e:
                 st.error(f"Failed to load client portfolio: {e}")
                 logger.error(f"Portfolio manager error: {e}")
             col1, col2 = st.columns(2)
@@ -733,12 +750,12 @@ else:
                             try:
                                 count = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
                                 health_status[table] = f"✅ OK ({count} records)"
-                            except sqlite3.Error:
+                            except Exception:
                                 health_status[table] = "❌ Error"
                         
                         st.json(health_status)
                         conn.close()
-                    except sqlite3.Error as e:
+                    except Exception as e:
                         st.error(f"Health check failed: {e}")
                         logger.error(f"Health check error: {e}")
         
@@ -772,7 +789,7 @@ else:
                         log_audit_action(conn, 'SYSTEM', 'Dev', f'Scheduled maintenance: {maint_datetime}', 'System Admin')
                 
                 conn.close()
-            except sqlite3.Error as e:
+            except Exception as e:
                 st.error(f"Failed to load maintenance settings: {e}")
                 logger.error(f"Maintenance config error: {e}")
         
@@ -832,7 +849,7 @@ else:
                         st.rerun()
                 
                 conn.close()
-            except sqlite3.Error as e:
+            except Exception as e:
                 st.error(f"Failed to load license data: {e}")
                 logger.error(f"License management error: {e}")
                     
