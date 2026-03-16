@@ -8,14 +8,36 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 def get_engine():
-    """Establish a SQLAlchemy engine connection to Supabase."""
-    try:
-        db_url = st.secrets['DB_URL']
-        engine = create_engine(db_url, echo=False)
+    """Establish a SQLAlchemy engine connection to Supabase.
+
+    If connecting via the default Postgres port (5432) fails, automatically retry using
+    the Supavisor pooler port (6543) for improved compatibility on Streamlit Cloud.
+    """
+    db_url = st.secrets.get('DB_URL')
+    if not db_url:
+        raise RuntimeError("DB_URL is not set in Streamlit secrets.")
+
+    def _create(url):
+        engine = create_engine(url, echo=False)
+        # Verify we can connect immediately (raises on failure)
+        with engine.connect() as conn:
+            conn.execute(text("SELECT 1"))
         return engine
+
+    try:
+        return _create(db_url)
     except Exception as e:
-        logger.error(f"Database connection error: {e}")
-        raise
+        logger.warning(f"Primary DB connection failed, retrying using Supavisor pooler (6543): {e}")
+        # Attempt to replace :5432 with :6543 in the URL (common Supabase pooler port)
+        if ":5432" in db_url:
+            alt_url = db_url.replace(":5432", ":6543")
+        else:
+            alt_url = db_url
+        try:
+            return _create(alt_url)
+        except Exception as e2:
+            logger.error(f"Supabase connection failed (both direct and pooler): {e2}")
+            raise
 
 def get_connection():
     """Get a connection from the SQLAlchemy engine for backward compatibility."""
