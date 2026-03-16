@@ -5,7 +5,7 @@ from modules import *
 from modules import check_maintenance_window
 import logging
 import sqlite3
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 import hashlib
 from dateutil.relativedelta import relativedelta
 
@@ -539,15 +539,17 @@ else:
                 st.markdown("---")
                 st.subheader("🛡️ Global Forensic Trail")
                 try:
-                    # Prefer user_role; fallback to role
-                    col = "user_role"
+                    # Wrap the read operation so the app continues even if the table is missing
                     try:
-                        conn.execute("SELECT user_role FROM audit_logs LIMIT 1")
-                    except sqlite3.OperationalError:
-                        col = "role"
+                        trail_df = pd.read_sql(
+                            "SELECT timestamp, company_key, user, action, details "
+                            "FROM audit_logs ORDER BY timestamp DESC LIMIT 50",
+                            conn,
+                        )
+                    except Exception as e:
+                        logger.error(f"Failed to read audit_logs table: {e}")
+                        trail_df = pd.DataFrame()
 
-                    trail_df = pd.read_sql(f"SELECT timestamp, company_key, {col} as user_role, action, module_name "
-                                           "FROM audit_logs ORDER BY timestamp DESC LIMIT 50", conn)
                     if not trail_df.empty:
                         st.dataframe(trail_df, use_container_width=True)
                     else:
@@ -555,21 +557,23 @@ else:
                 except Exception as e:
                     logger.error(f"Failed to load audit trail: {e}")
                     st.info("Unable to load global audit trail.")
-                
+
                 st.markdown("---")
                 st.subheader("🚀 Manual License Deployment")
-                with st.form("manual_deployment"):
+                with st.form("manual_deploy"):
                     company_name = st.text_input("Company Name")
                     plan_type = st.selectbox("Plan Type", ["Basic", "Premium", "Enterprise"])
-                    payment_status = st.selectbox("Payment Status", ["Cash", "Bank Transfer", "Bypass"])
-                    duration_months = st.number_input('Deployment Duration (Months)', min_value=1, max_value=24, value=12)
+                    duration_months = st.number_input("Duration (Months)", min_value=1, max_value=24, value=12)
                     submitted = st.form_submit_button("Deploy License")
                     if submitted:
                         if company_name:
                             key = hashlib.md5(company_name.encode()).hexdigest()[:10]
-                            expiry_date = (datetime.now() + relativedelta(months=duration_months)).isoformat()
+                            expiry_date = (date.today() + relativedelta(months=+duration_months)).isoformat()
                             try:
-                                conn.execute("INSERT INTO companies (key, name, expiry_date, status) VALUES (?, ?, ?, ?)", (key, company_name, expiry_date, 'Active'))
+                                conn.execute(
+                                    "INSERT INTO companies (key, name, expiry_date, status) VALUES (?, ?, ?, ?)",
+                                    (key, company_name, expiry_date, 'Active'),
+                                )
                                 conn.commit()
                                 st.success(f"License deployed for {company_name}")
                                 log_audit_action(conn, 'SYSTEM', 'Dev', f'Manual license deployment for {company_name}', 'System Admin')
@@ -577,7 +581,7 @@ else:
                                 st.error(f"Failed to deploy: {e}")
                         else:
                             st.error("Company Name is required")
-                
+
                 conn.close()
 
             except sqlite3.Error as e:

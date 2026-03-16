@@ -20,8 +20,12 @@ def get_connection():
 def log_audit_action(conn, company_key, user_role, action, module_name):
     """Log audit trail entries for security and compliance."""
     try:
-        conn.execute("""INSERT INTO audit_logs (company_key, user_role, action, module_name) 
-                     VALUES (?,?,?,?)""", (company_key, user_role, action, module_name))
+        # Store legacy columns as well as the new structured fields for audit analysis
+        conn.execute(
+            """INSERT INTO audit_logs (company_key, user_role, user, action, details, module_name) 
+                     VALUES (?,?,?,?,?,?)""",
+            (company_key, user_role, user_role, action, module_name, module_name),
+        )
         conn.commit()
     except sqlite3.Error as e:
         logger.error(f"Audit logging error: {e}")
@@ -152,12 +156,15 @@ def init_db():
                       FOREIGN KEY (company_key) REFERENCES companies(key))''')
 
         # 7. Security Audit Trail
+        # Ensure the audit trail includes a clear user and details field for compliance
         c.execute('''CREATE TABLE IF NOT EXISTS audit_logs 
                      (id INTEGER PRIMARY KEY AUTOINCREMENT, 
                       timestamp DATETIME DEFAULT CURRENT_TIMESTAMP, 
                       company_key TEXT, 
                       user_role TEXT, 
+                      user TEXT, 
                       action TEXT, 
+                      details TEXT, 
                       module_name TEXT,
                       FOREIGN KEY (company_key) REFERENCES companies(key))''')
 
