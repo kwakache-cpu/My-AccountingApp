@@ -181,7 +181,7 @@ else:
                     try:
                         conn = get_connection()
                         conn.execute("INSERT INTO companies (key, name, tin) VALUES (?,?,?)", (cl_key, cl_name, cl_tin))
-                        conn.execute("INSERT INTO system_settings (company_key, software_fee, subscription_months) VALUES (?,?,?)", (cl_key, cl_fee, cl_months))
+                        conn.execute("INSERT INTO system_settings (company_key, software_fee, setup_fee_paid, subscription_months) VALUES (?,?,?,?)", (cl_key, cl_fee, cl_fee, cl_months))
                         conn.commit()
                         log_audit_action(conn, cl_key, "Dev", f"Provisioned new client: {cl_name}", "System Admin")
                         st.success(f"System Instance deployed for {cl_name} with {cl_months} months access.")

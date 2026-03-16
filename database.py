@@ -48,10 +48,18 @@ def init_db():
                      (id INTEGER PRIMARY KEY, 
                       company_key TEXT,
                       software_fee REAL DEFAULT 0.0, 
+                      setup_fee_paid REAL DEFAULT 0.0,
                       maintenance_fee REAL DEFAULT 0.0, 
                       subscription_months INTEGER DEFAULT 12,
                       currency TEXT DEFAULT 'GHS',
                       FOREIGN KEY (company_key) REFERENCES companies(key))''')
+
+        # Ensure schema is up to date for existing databases
+        try:
+            c.execute("ALTER TABLE system_settings ADD COLUMN setup_fee_paid REAL DEFAULT 0.0")
+        except sqlite3.OperationalError:
+            # Column already exists
+            pass
 
         # 3. Inventory & Warehouse Management
         c.execute('''CREATE TABLE IF NOT EXISTS inventory 

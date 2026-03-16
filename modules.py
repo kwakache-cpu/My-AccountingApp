@@ -2,7 +2,7 @@ import streamlit as st
 import pandas as pd
 import io
 import sqlite3
-from database import get_connection, log_audit_action
+from database import get_connection, log_audit_action, init_db
 from datetime import datetime
 import logging
 
@@ -184,8 +184,31 @@ def show_payroll(company_key, role):
         
         if pr_data_raw:
             pr_df = pd.DataFrame(pr_data_raw, columns=['Name', 'Basic', 'Tier 1', 'Tier 2', 'Taxable', 'PAYE', 'Net Pay', 'Period', 'Year'])
-            st.dataframe(pr_df, use_container_width=True)
-            st.download_button("📥 Export Payroll Data (Excel)", data=get_excel_bin(pr_df), file_name="EKA_Payroll_Data.xlsx")
+            edited_payroll = st.data_editor(pr_df, use_container_width=True, key='payroll_editor')
+
+            if st.button("Save Changes", key="payroll_save_changes"):
+                try:
+                    changed_mask = (edited_payroll != pr_df).any(axis=1)
+                    changed_rows = edited_payroll[changed_mask]
+
+                    if not changed_rows.empty:
+                        for _, row in changed_rows.iterrows():
+                            conn.execute(
+                                """UPDATE payroll SET basic_salary=?, ssnit_t1=?, ssnit_t2=?, taxable_income=?, paye=?, net_salary=?
+                                     WHERE company_key=? AND emp_name=? AND month=? AND year=?""",
+                                (row['Basic'], row['Tier 1'], row['Tier 2'], row['Taxable'], row['PAYE'], row['Net Pay'],
+                                 company_key, row['Name'], row['Period'], row['Year'])
+                            )
+                        conn.commit()
+                        st.success("Payroll changes saved.")
+                        log_audit_action(conn, company_key, role, "Updated payroll records", "Payroll")
+                    else:
+                        st.info("No changes detected.")
+                except sqlite3.Error as e:
+                    st.error(f"Failed to save payroll changes: {e}")
+                    logger.error(f"Payroll save error: {e}")
+
+            st.download_button("📥 Export Payroll Data (Excel)", data=get_excel_bin(edited_payroll), file_name="EKA_Payroll_Data.xlsx")
         else:
             st.info("No payroll records found.")
         conn.close()
@@ -260,12 +283,27 @@ def show_inventory(company_key, role):
     st.subheader("Master Stock Register")
     try:
         conn = get_connection()
-        inv_df = pd.read_sql(f"""SELECT item_name as 'Product', qty as 'Stock Level', 
-                             price as 'Selling Price', cost_price as 'Cost Price', 
-                             warehouse as 'Warehouse', barcode as 'Barcode'
-                             FROM inventory WHERE company_key=? ORDER BY item_name""", conn, params=(company_key,))
-        st.dataframe(inv_df, use_container_width=True)
-        st.download_button("📥 Download Master Inventory", data=get_excel_bin(inv_df), file_name="EKA_Stock_Master.xlsx")
+        try:
+            inv_df = pd.read_sql(f"""SELECT item_name as 'Product', qty as 'Stock Level', 
+                                 price as 'Selling Price', cost_price as 'Cost Price', 
+                                 warehouse as 'Warehouse', barcode as 'Barcode'
+                                 FROM inventory WHERE company_key=? ORDER BY item_name""", conn, params=(company_key,))
+        except Exception:
+            st.warning("Database schema might be outdated. Initializing...")
+            init_db()
+            inv_df = pd.read_sql(f"""SELECT item_name as 'Product', qty as 'Stock Level', 
+                                 price as 'Selling Price', cost_price as 'Cost Price', 
+                                 warehouse as 'Warehouse', barcode as 'Barcode'
+                                 FROM inventory WHERE company_key=? ORDER BY item_name""", conn, params=(company_key,))
+        edited_df = st.data_editor(inv_df, use_container_width=True, num_rows='dynamic', key='inventory_editor')
+        if not edited_df.equals(inv_df):
+            for index, row in edited_df.iterrows():
+                conn.execute("""UPDATE inventory SET qty=?, price=?, cost_price=?, warehouse=?, barcode=? WHERE item_name=? AND company_key=?""",
+                             (row['Stock Level'], row['Selling Price'], row['Cost Price'], row['Warehouse'], row['Barcode'], row['Product'], company_key))
+            conn.commit()
+            st.success("Inventory updated successfully.")
+            log_audit_action(conn, company_key, role, "Updated inventory via data editor", "Inventory")
+        st.download_button("📥 Download Master Inventory", data=get_excel_bin(edited_df), file_name="EKA_Stock_Master.xlsx")
         conn.close()
     except sqlite3.Error as e:
         st.error(f"Failed to load inventory: {e}")
