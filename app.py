@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd  # <-- ADD THIS IMPORT
 from database import get_connection, init_db, log_audit_action
 from modules import *
+from modules import check_maintenance_window
 import logging
 import sqlite3
 from datetime import datetime, timedelta
@@ -670,7 +671,7 @@ else:
             except sqlite3.Error as e:
                 st.error(f"Failed to load client portfolio: {e}")
                 logger.error(f"Portfolio manager error: {e}")
-            
+            col1, col2 = st.columns(2)
             with col2:
                 if st.button("📊 System Health Check", key="dev_health_check"):
                     try:

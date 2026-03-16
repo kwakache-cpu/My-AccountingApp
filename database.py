@@ -84,16 +84,6 @@ def init_db():
         # Insert default if not exists
         c.execute("INSERT OR IGNORE INTO maintenance_settings (id, maintenance_date) VALUES (1, 'None')")
 
-        # 2. System Settings (Licensing & Payments)
-        c.execute('''CREATE TABLE IF NOT EXISTS system_settings 
-                     (id INTEGER PRIMARY KEY AUTOINCREMENT,
-                      company_key TEXT UNIQUE,
-                      software_fee REAL DEFAULT 0.0,
-                      setup_fee_paid REAL DEFAULT 0.0,
-                      subscription_months INTEGER DEFAULT 0,
-                      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                      FOREIGN KEY (company_key) REFERENCES companies(key))''')
-
         # Ensure schema is up to date for existing databases
         try:
             c.execute("ALTER TABLE system_settings ADD COLUMN setup_fee_paid REAL DEFAULT 0.0")
