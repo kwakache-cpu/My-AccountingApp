@@ -552,19 +552,23 @@ else:
             st.subheader("🏢 Enterprise Instance Manager")
             try:
                 conn = get_connection()
-                instance_df = pd.read_sql(
-                    """
-                    SELECT c.key AS company_key,
-                           c.name AS company_name,
-                           s.software_fee,
-                           s.subscription_months
-                    FROM companies c
-                    LEFT JOIN system_settings s ON c.key = s.company_key
-                    ORDER BY c.name
-                    """,
-                    conn
-                )
-
+                try:
+                    instance_df = pd.read_sql(
+                        """
+                        SELECT c.key AS company_key,
+                               c.name AS company_name,
+                               s.software_fee,
+                               s.subscription_months
+                        FROM companies c
+                        LEFT JOIN system_settings s ON c.key = s.company_key
+                        ORDER BY c.name
+                        """,
+                        conn
+                    )
+                except Exception as e:
+                    logger.error(f"Failed to read instance_df: {e}")
+                    instance_df = pd.DataFrame()
+                
                 edited_instances = st.data_editor(
                     instance_df,
                     use_container_width=True,
