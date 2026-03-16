@@ -44,6 +44,7 @@ def init_db():
                       status TEXT DEFAULT 'Active',
                       subscription_end_date DATETIME,
                       deployment_status TEXT DEFAULT 'Live',
+                      expiry_date DATETIME,
                       created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                       updated_at DATETIME DEFAULT CURRENT_TIMESTAMP)''')
         
@@ -65,6 +66,11 @@ def init_db():
             pass
         try:
             c.execute("ALTER TABLE companies ADD COLUMN deployment_status TEXT DEFAULT 'Live'")
+        except sqlite3.OperationalError:
+            # Column already exists
+            pass
+        try:
+            c.execute("ALTER TABLE companies ADD COLUMN expiry_date DATETIME")
         except sqlite3.OperationalError:
             # Column already exists
             pass

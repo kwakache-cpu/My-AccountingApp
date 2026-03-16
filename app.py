@@ -53,14 +53,29 @@ if 'reference' in st.query_params:
             company_key = str(uuid.uuid4())[:8].upper()
             try:
                 conn = get_connection()
-                conn.execute("INSERT INTO companies (key, name, admin_email, deployment_status) VALUES (?, ?, ?, ?)", 
-                             (company_key, company_name, verification['email'], "Pending"))
+                expiry_date = datetime.now() + timedelta(days=365)  # 1 year
+                conn.execute("INSERT INTO companies (key, name, admin_email, deployment_status, expiry_date) VALUES (?, ?, ?, ?, ?)", 
+                             (company_key, company_name, verification['email'], "Pending", expiry_date.isoformat()))
                 conn.commit()
                 log_audit_action(conn, company_key, 'System', f'Onboarding payment verified: {reference}', 'Onboarding')
                 st.success(f"Company {company_name} onboarded successfully. Deployment pending.")
             except sqlite3.Error as e:
                 st.error(f"Failed to onboard company: {e}")
                 logger.error(f"Onboarding error: {e}")
+        elif reference.startswith("RENEWAL-"):
+            # Renewal payment
+            company_key = reference.split("-")[1]
+            try:
+                conn = get_connection()
+                # Add 1 year to expiry_date
+                new_expiry = datetime.now() + timedelta(days=365)
+                conn.execute("UPDATE companies SET expiry_date=? WHERE key=?", (new_expiry.isoformat(), company_key))
+                conn.commit()
+                log_audit_action(conn, company_key, 'System', f'License renewal verified: {reference}', 'Renewal')
+                st.success("License Renewed Successfully! Thank you for your continued business.")
+            except sqlite3.Error as e:
+                st.error(f"Failed to renew license: {e}")
+                logger.error(f"Renewal error: {e}")
         else:
             # Existing invoice payment
             # Find the company_key and amount from sales_invoices
@@ -124,6 +139,30 @@ def update_activity():
     """Update last activity timestamp."""
     st.session_state.last_activity = datetime.now()
 
+def enter_demo():
+    """Enter demo mode."""
+    st.session_state.auth = True
+    st.session_state.user = {"key": "DEMO", "name": "Demo Corporation Ltd", "role": "Demo"}
+    st.session_state.demo_mode = True
+    st.session_state.start_time = datetime.now()
+    st.session_state.login_attempts = 0
+    st.rerun()
+
+def check_license_expiry(company_key):
+    """Check if license is expiring within 7 days. Returns days left or None."""
+    try:
+        conn = get_connection()
+        expiry = conn.execute("SELECT expiry_date FROM companies WHERE key=?", (company_key,)).fetchone()
+        conn.close()
+        if expiry and expiry[0]:
+            expiry_date = datetime.fromisoformat(expiry[0])
+            days_left = (expiry_date - datetime.now()).days
+            if days_left <= 7 and days_left >= 0:
+                return days_left
+    except:
+        pass
+    return None
+
 def login_ui():
     """Secure Multi-Tier Authentication Interface with Enhanced Security."""
     st.markdown("<h1 style='text-align: center; color: #1E3A8A;'>🛡️ E.K.A ENTERPRISE ERP</h1>", unsafe_allow_html=True)
@@ -137,74 +176,69 @@ def login_ui():
     t1, t2, t3 = st.tabs(["🔒 Secure Login", "🔑 System Recovery", "🏢 Register New Company"])
     
     with t1:
-        # Assigned unique keys to ensure no Duplicate ID errors
-        license_key = st.text_input(
-            "System License Key", 
-            type="password", 
-            key="v3_final_login_input_field"
-        )
-        
-        if st.button("Access Cloud Modules", key="v3_final_auth_submit_btn"):
-            # Demo Mode Bypass
-            if st.session_state.demo_toggle:
-                st.session_state.auth = True
-                st.session_state.user = {"key": "DEMO", "name": "Demo Corp", "role": "Master Admin"}
-                st.session_state.demo_mode = True
-                st.session_state.login_attempts = 0
-                st.rerun()
+        if not st.session_state.get('demo_toggle'):
+            # Assigned unique keys to ensure no Duplicate ID errors
+            license_key = st.text_input(
+                "System License Key", 
+                type="password", 
+                key="v3_final_login_input_field"
+            )
             
-            try:
-                conn = get_connection()
-                
-                # Developer Backdoor
-                if license_key == "JUANMANUEL2":
-                    st.session_state.auth = True
-                    st.session_state.user = {"name": "Gatekeeper", "role": "Dev", "key": "ADMIN"}
-                    log_audit_action(conn, "SYSTEM", "Dev", "Developer login", "Authentication")
-                    conn.close()
-                    st.session_state.login_attempts = 0
-                    st.rerun()
-                
-                # Master Admin Check
-                admin = conn.execute("SELECT key, name FROM companies WHERE key=?", (license_key,)).fetchone()
-                if admin:
-                    st.session_state.auth = True
-                    st.session_state.user = {"key": admin[0], "name": admin[1], "role": "Master Admin"}
-                    log_audit_action(conn, admin[0], "Master Admin", "Successful login", "Authentication")
-                    conn.close()
-                    st.session_state.login_attempts = 0
-                    st.rerun()
-                
-                # Sub-Admin/Staff Check
-                sub = conn.execute("SELECT key, name FROM companies WHERE sub_admin_key=?", (license_key,)).fetchone()
-                if sub:
-                    st.session_state.auth = True
-                    st.session_state.user = {"key": sub[0], "name": sub[1], "role": "Sub-Admin"}
-                    log_audit_action(conn, sub[0], "Sub-Admin", "Successful login", "Authentication")
-                    conn.close()
-                    st.session_state.login_attempts = 0
-                    st.rerun()
+            if st.button("Access Cloud Modules", key="v3_final_auth_submit_btn"):
+                try:
+                    conn = get_connection()
                     
-                if license_key.endswith("-staff"):
-                    pure_k = license_key.replace("-staff", "")
-                    staff = conn.execute("SELECT key, name FROM companies WHERE key=?", (pure_k,)).fetchone()
-                    if staff:
+                    # Developer Backdoor
+                    if license_key == "JUANMANUEL2":
                         st.session_state.auth = True
-                        st.session_state.user = {"key": staff[0], "name": staff[1], "role": "Staff"}
-                        log_audit_action(conn, staff[0], "Staff", "Successful login", "Authentication")
+                        st.session_state.user = {"name": "Gatekeeper", "role": "Dev", "key": "ADMIN"}
+                        log_audit_action(conn, "SYSTEM", "Dev", "Developer login", "Authentication")
                         conn.close()
                         st.session_state.login_attempts = 0
                         st.rerun()
-                
-                # Failed login attempt
-                st.session_state.login_attempts += 1
-                log_audit_action(conn, "SYSTEM", "Unknown", f"Failed login attempt {st.session_state.login_attempts}", "Authentication")
-                conn.close()
-                st.error(f"Access Denied. Please verify your License Key. Attempts: {st.session_state.login_attempts}/5")
-                
-            except sqlite3.Error as e:
-                st.error("System error during authentication. Please try again.")
-                logger.error(f"Login error: {e}")
+                    
+                    # Master Admin Check
+                    admin = conn.execute("SELECT key, name FROM companies WHERE key=?", (license_key,)).fetchone()
+                    if admin:
+                        st.session_state.auth = True
+                        st.session_state.user = {"key": admin[0], "name": admin[1], "role": "Master Admin"}
+                        log_audit_action(conn, admin[0], "Master Admin", "Successful login", "Authentication")
+                        conn.close()
+                        st.session_state.login_attempts = 0
+                        st.rerun()
+                    
+                    # Sub-Admin/Staff Check
+                    sub = conn.execute("SELECT key, name FROM companies WHERE sub_admin_key=?", (license_key,)).fetchone()
+                    if sub:
+                        st.session_state.auth = True
+                        st.session_state.user = {"key": sub[0], "name": sub[1], "role": "Sub-Admin"}
+                        log_audit_action(conn, sub[0], "Sub-Admin", "Successful login", "Authentication")
+                        conn.close()
+                        st.session_state.login_attempts = 0
+                        st.rerun()
+                        
+                    if license_key.endswith("-staff"):
+                        pure_k = license_key.replace("-staff", "")
+                        staff = conn.execute("SELECT key, name FROM companies WHERE key=?", (pure_k,)).fetchone()
+                        if staff:
+                            st.session_state.auth = True
+                            st.session_state.user = {"key": staff[0], "name": staff[1], "role": "Staff"}
+                            log_audit_action(conn, staff[0], "Staff", "Successful login", "Authentication")
+                            conn.close()
+                            st.session_state.login_attempts = 0
+                            st.rerun()
+                    
+                    # Failed login attempt
+                    st.session_state.login_attempts += 1
+                    log_audit_action(conn, "SYSTEM", "Unknown", f"Failed login attempt {st.session_state.login_attempts}", "Authentication")
+                    conn.close()
+                    st.error(f"Access Denied. Please verify your License Key. Attempts: {st.session_state.login_attempts}/5")
+                    
+                except sqlite3.Error as e:
+                    st.error("System error during authentication. Please try again.")
+                    logger.error(f"Login error: {e}")
+        elif st.session_state.get('demo_toggle'):
+            st.button('🚀 Enter Demo ERP', on_click=enter_demo)
 
     with t2:
         st.subheader("Cloud Recovery Protocol")
@@ -236,6 +270,40 @@ def login_ui():
 def show_dashboard(company_key, company_name, role):
     """Enhanced company dashboard with key metrics and insights."""
     st.header(f"📊 Business Dashboard: {company_name}")
+    
+    if st.session_state.get('demo_mode', False):
+        # Demo Mode Dashboard
+        col1, col2, col3, col4 = st.columns(4)
+        col1.metric("Inventory Value", "GHS 25,000.00")
+        col2.metric("Month Sales", "GHS 15,000.00")
+        col3.metric("Employees", "5")
+        col4.metric("Asset Value", "GHS 50,000.00")
+        
+        st.markdown("---")
+        
+        # Recent Activity
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.subheader("📈 Recent Transactions")
+            demo_txns = pd.DataFrame({
+                'Date': ['2026-03-15', '2026-03-14', '2026-03-13'],
+                'Type': ['Sales', 'Purchase', 'Sales'],
+                'Description': ['Product Sale', 'Office Supplies', 'Service Revenue'],
+                'Amount': [5000.0, 2000.0, 3000.0]
+            })
+            st.dataframe(demo_txns, use_container_width=True)
+        
+        with col2:
+            st.subheader("📦 Low Stock Items")
+            demo_stock = pd.DataFrame({
+                'Item': ['Product A', 'Product B'],
+                'Quantity': [5, 8],
+                'Unit': ['pcs', 'pcs']
+            })
+            st.dataframe(demo_stock, use_container_width=True)
+        
+        return
     
     try:
         conn = get_connection()
@@ -519,7 +587,8 @@ else:
                 if cl_name and cl_key:
                     try:
                         conn = get_connection()
-                        conn.execute("INSERT INTO companies (key, name, tin) VALUES (?,?,?)", (cl_key, cl_name, cl_tin))
+                        expiry_date = datetime.now() + timedelta(days=365)  # 1 year
+                        conn.execute("INSERT INTO companies (key, name, tin, expiry_date) VALUES (?,?,?,?)", (cl_key, cl_name, cl_tin, expiry_date.isoformat()))
                         conn.execute("INSERT INTO system_settings (company_key, software_fee, setup_fee_paid, subscription_months) VALUES (?,?,?,?)", (cl_key, cl_fee, cl_fee, cl_months))
                         conn.commit()
                         log_audit_action(conn, cl_key, "Dev", f"Provisioned new client: {cl_name}", "System Admin")
@@ -564,6 +633,46 @@ else:
                     st.error(f"Health check failed: {e}")
                     logger.error(f"Health check error: {e}")
                     
+    elif u['role'] == "Demo":
+        # Demo User Interface
+        # Check demo timeout
+        if 'start_time' in st.session_state:
+            elapsed = (datetime.now() - st.session_state.start_time).total_seconds()
+            if elapsed > 1800:  # 30 minutes
+                st.session_state.clear()
+                st.warning("Demo Session Expired. Please Register to continue.")
+                st.rerun()
+        
+        st.info("Viewing in Demo Mode. Real-time database is disconnected. [🏢 Register New Company](?tab=register)")
+        
+        st.sidebar.markdown(f"""
+        <div style='background-color:#e0f2fe; padding:20px; border-radius:15px; border: 1px solid #0ea5e9;'>
+            <h2 style='margin-bottom:0;'>🚀 {u['name']}</h2>
+            <p style='color:#0c4a6e;'>Role: <b>Demo User</b></p>
+            <p style='color:#0c4a6e; font-size:12px;'>Session: Active</p>
+        </div>
+        """, unsafe_allow_html=True)
+        
+        menu = ["Dashboard", "Inventory", "Payroll", "Sales/Purchase", "Reports", "Banking", "Taxation", "Audit Trail"]
+        choice = st.sidebar.selectbox("Navigation", menu)
+        
+        if choice == "Dashboard":
+            show_dashboard("DEMO", "Demo Corporation Ltd", "Demo")
+        elif choice == "Inventory":
+            show_inventory("DEMO", "Demo")
+        elif choice == "Payroll":
+            show_payroll("DEMO", "Demo")
+        elif choice == "Sales/Purchase":
+            show_sales_purchase("DEMO", "Demo", "Sales")
+        elif choice == "Reports":
+            show_reports("DEMO")
+        elif choice == "Banking":
+            show_banking("DEMO", "Demo")
+        elif choice == "Taxation":
+            show_taxation("DEMO")
+        elif choice == "Audit Trail":
+            show_audit_trail("DEMO")
+                    
     else:
         # Regular User Interface
         st.sidebar.markdown(f"""
@@ -573,6 +682,23 @@ else:
             <p style='color:#6b7280; font-size:12px;'>Session: Active</p>
         </div>
         """, unsafe_allow_html=True)
+        
+        # License Expiry Check
+        days_left = check_license_expiry(u['key'])
+        if days_left is not None:
+            col1, col2 = st.columns([4, 1])
+            with col1:
+                st.warning(f"⚠️ Your license expires in {days_left} days. Please renew to avoid service interruption.")
+            with col2:
+                if st.button("Renew Now", key="renew_license"):
+                    # Trigger renewal payment
+                    reference = f"RENEWAL-{u['key']}"
+                    amount = 1000  # Fixed renewal fee
+                    url = initialize_paystack_payment("", amount, reference)  # No email needed for renewal
+                    if url:
+                        st.link_button("Proceed to Paystack", url)
+                    else:
+                        st.error("Failed to initialize renewal payment.")
         
         menu = [
             "🏠 Dashboard", "POS (Point of Sale)", "Vouchers & Journals", "Chart of Accounts", 
