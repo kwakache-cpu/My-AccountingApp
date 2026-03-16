@@ -511,9 +511,18 @@ else:
                 conn = get_connection()
                 
                 # Get actual metrics from database
-                total_companies = conn.execute("SELECT COUNT(*) FROM companies").fetchone()[0]
-                active_subscriptions = conn.execute("SELECT COUNT(*) FROM system_settings WHERE subscription_months > 0").fetchone()[0]
-                monthly_revenue = conn.execute("SELECT SUM(software_fee) FROM system_settings").fetchone()[0] or 0
+                try:
+                    total_companies = conn.execute("SELECT COUNT(*) FROM companies").fetchone()[0]
+                except sqlite3.Error:
+                    total_companies = 0
+                try:
+                    active_subscriptions = conn.execute("SELECT COUNT(*) FROM system_settings WHERE subscription_months > 0").fetchone()[0]
+                except sqlite3.Error:
+                    active_subscriptions = 0
+                try:
+                    monthly_revenue = conn.execute("SELECT SUM(software_fee) FROM system_settings").fetchone()[0] or 0
+                except sqlite3.Error:
+                    monthly_revenue = 0
                 
                 conn.close()
                 
@@ -608,21 +617,25 @@ else:
             st.subheader("📂 Client Portfolio Manager")
             try:
                 conn = get_connection()
-                portfolio_df = pd.read_sql(
-                    """
-                    SELECT c.name AS company_name,
-                           c.created_at AS created_date,
-                           c.status AS account_status,
-                           c.deployment_status,
-                           c.subscription_end_date,
-                           COALESCE(SUM(v.credit), 0) AS total_revenue_collected
-                    FROM companies c
-                    LEFT JOIN vouchers v ON c.key = v.company_key AND v.v_type = 'Sales'
-                    GROUP BY c.key, c.name, c.created_at, c.status, c.deployment_status, c.subscription_end_date
-                    ORDER BY c.name
-                    """,
-                    conn
-                )
+                try:
+                    portfolio_df = pd.read_sql(
+                        """
+                        SELECT c.name AS company_name,
+                               c.created_at AS created_date,
+                               c.status AS account_status,
+                               c.deployment_status,
+                               c.subscription_end_date,
+                               COALESCE(SUM(v.credit), 0) AS total_revenue_collected
+                        FROM companies c
+                        LEFT JOIN vouchers v ON c.key = v.company_key AND v.v_type = 'Sales'
+                        GROUP BY c.key, c.name, c.created_at, c.status, c.deployment_status, c.subscription_end_date
+                        ORDER BY c.name
+                        """,
+                        conn
+                    )
+                except Exception as e:
+                    logger.error(f"Failed to read portfolio_df: {e}")
+                    portfolio_df = pd.DataFrame()
 
                 edited_portfolio = st.data_editor(
                     portfolio_df,
@@ -737,11 +750,15 @@ else:
             try:
                 conn = get_connection()
                 # Get all companies with expiry dates
-                companies_df = pd.read_sql("""
-                    SELECT c.key, c.name, c.expiry_date, c.status
-                    FROM companies c
-                    ORDER BY c.expiry_date ASC
-                """, conn)
+                try:
+                    companies_df = pd.read_sql("""
+                        SELECT c.key, c.name, c.expiry_date, c.status
+                        FROM companies c
+                        ORDER BY c.expiry_date ASC
+                    """, conn)
+                except Exception as e:
+                    logger.error(f"Failed to read companies_df: {e}")
+                    companies_df = pd.DataFrame()
                 
                 # Calculate days remaining
                 now = datetime.now()
