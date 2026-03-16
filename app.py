@@ -2,14 +2,13 @@ import streamlit as st
 import pandas as pd  # <-- ADD THIS IMPORT
 from database import get_connection, init_db, log_audit_action
 from modules import *
-from modules import check_maintenance_window
 import logging
 import sqlite3
 from datetime import datetime, timedelta
 
 # Check maintenance status
-status = check_maintenance_window()
-if status == 'maintenance':
+maintenance_status = check_maintenance_window()
+if maintenance_status == 'maintenance':
     st.markdown("""
     <div style='position: fixed; top: 0; left: 0; width: 100%; height: 100%; background-color: #f8f9fa; display: flex; align-items: center; justify-content: center; z-index: 9999;'>
         <div style='text-align: center; padding: 40px; background: white; border-radius: 15px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); max-width: 500px;'>
@@ -245,7 +244,7 @@ def login_ui():
     st.markdown("<hr>", unsafe_allow_html=True)
     
     # Maintenance Warning Banner
-    if status == 'warning':
+    if maintenance_status == 'warning':
         st.info("🛠️ Scheduled Maintenance: We will be upgrading our services soon. The system may be temporarily offline during the maintenance window.")
     
     # Check for brute force attempts
@@ -356,9 +355,8 @@ def show_dashboard(company_key, company_name, role):
     
     if st.session_state.get('demo_mode', False):
         # Maintenance Banner
-        if maintenance_status and maintenance_status[0] == 'warning':
-            maint_date = maintenance_status[1]
-            st.info(f"🛠️ Scheduled Maintenance: We will be upgrading our services on {maint_date} from 12:00 AM to 02:00 AM GMT. The system may be temporarily offline during this window.")
+        if maintenance_status == 'warning':
+            st.info(f"🛠️ Scheduled Maintenance: We will be upgrading our services on [scheduled date] from 12:00 AM to 02:00 AM GMT. The system may be temporarily offline during this window.")
         
         # Demo Mode Dashboard
         col1, col2, col3, col4 = st.columns(4)
@@ -394,9 +392,8 @@ def show_dashboard(company_key, company_name, role):
         return
     
     # Maintenance Banner for Regular Users
-    if maintenance_status and maintenance_status[0] == 'warning':
-        maint_date = maintenance_status[1]
-        st.info(f"🛠️ Scheduled Maintenance: We will be upgrading our services on {maint_date} from 12:00 AM to 02:00 AM GMT. The system may be temporarily offline during this window.")
+    if maintenance_status == 'warning':
+        st.info(f"🛠️ Scheduled Maintenance: We will be upgrading our services on [scheduled date] from 12:00 AM to 02:00 AM GMT. The system may be temporarily offline during this window.")
     
     try:
         conn = get_connection()
@@ -499,9 +496,8 @@ else:
     
     if u['role'] == "Dev":
         # Maintenance Banner
-        if maintenance_status and maintenance_status[0] == 'warning':
-            maint_date = maintenance_status[1]
-            st.info(f"🛠️ Scheduled Maintenance: We will be upgrading our services on {maint_date} from 12:00 AM to 02:00 AM GMT. The system may be temporarily offline during this window.")
+        if maintenance_status == 'warning':
+            st.info(f"🛠️ Scheduled Maintenance: We will be upgrading our services on [scheduled date] from 12:00 AM to 02:00 AM GMT. The system may be temporarily offline during this window.")
         
         # Gatekeeper Dashboard with Enhanced Metrics
         st.title("👑 Gatekeeper System Dashboard")
