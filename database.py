@@ -3,31 +3,32 @@ from sqlalchemy import create_engine, text
 from datetime import datetime
 import logging
 
-# Configure logging
+# Configure logging to catch cloud connection handshakes
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 def get_engine():
-    """Establish a SQLAlchemy engine connection to Supabase.
+    """Establish a robust SQLAlchemy engine connection to Supabase.
 
-    This explicitly tries the Supavisor pooler (port 6543) first, then falls back
-    to direct Postgres (port 5432) if needed.
-
-    A strict SSL mode and pre-ping are enforced to prevent operational failures.
+    This explicitly tries the Supavisor pooler (port 6543) first to bypass 
+    IPv6 issues on Streamlit Cloud, then falls back to direct Postgres (port 5432).
     """
+    # 1. Retrieve the Secret
     db_url = st.secrets.get('DB_URL')
     if not db_url:
+        logger.error("DB_URL is missing from Streamlit Secrets.")
         raise RuntimeError("DB_URL is not set in Streamlit secrets.")
 
-    # Normalize: strip whitespace and ensure scheme is postgresql
+    # 2. Normalize: strip whitespace and ensure scheme is postgresql
     db_url = db_url.strip()
-    if not db_url.startswith("postgresql://") and not db_url.startswith("postgres://"):
-        raise RuntimeError("DB_URL must start with postgresql:// or postgres://")
+    if db_url.startswith("postgres://"):
+        db_url = db_url.replace("postgres://", "postgresql://", 1)
 
     def _normalize(url: str, port: int) -> str:
-        # Replace port if present or append pooler port
+        """Injects the correct port and forces SSL mode."""
+        # Split URL to safely inject port into the host section
         if ":" in url.split("//", 1)[1].split("@")[-1]:
-            # Contains explicit port
+            # Replace existing port (5432 or 6543) with the target port
             url = url.replace(":5432", f":{port}").replace(":6543", f":{port}")
         else:
             # Append port if none present
@@ -36,49 +37,63 @@ def get_engine():
                 url = f"{parts[0]}@{parts[1]}:{port}"
             else:
                 url = f"{url}:{port}"
-        # Ensure SSL mode is required
+        
+        # Ensure SSL mode is REQUIRED for Supabase
         if "sslmode=" not in url:
             sep = '&' if '?' in url else '?'
             url = f"{url}{sep}sslmode=require"
         return url
 
+    # Generate both connection paths
     pooler_url = _normalize(db_url, 6543)
     direct_url = _normalize(db_url, 5432)
 
-    connect_args = {"sslmode": "require", "connect_timeout": 10}
+    # Professional Engine Configuration
+    connect_args = {
+        "sslmode": "require", 
+        "connect_timeout": 20 # Increased for slower network handshakes
+    }
+    
     engine_kwargs = {
         "connect_args": connect_args,
-        "pool_pre_ping": True,
+        "pool_pre_ping": True, # Critical: Checks connection before crashing
         "pool_size": 10,
         "max_overflow": 20,
+        "pool_recycle": 3600,
     }
 
     def _create(url: str):
+        """Internal helper to attempt a physical connection."""
         engine = create_engine(url, echo=False, **engine_kwargs)
+        # Test the connection immediately
         with engine.connect() as conn:
             conn.execute(text("SELECT 1"))
         return engine
 
-    # Try pooler first, then fallback to direct if it fails
+    # EXECUTION: Try pooler first (Best for Cloud), then direct fallback
     try:
+        logger.info("Attempting connection via Supavisor Pooler (Port 6543)...")
         return _create(pooler_url)
     except Exception as e:
-        logger.warning(f"Pooler connection failed, trying direct PG port: {e}")
-        return _create(direct_url)
+        logger.warning(f"Pooler failed. Attempting Direct Connection (Port 5432): {e}")
+        try:
+            return _create(direct_url)
+        except Exception as e2:
+            logger.error(f"All database connection attempts failed: {e2}")
+            raise e2
 
 def get_connection():
-    """Get a connection from the SQLAlchemy engine for backward compatibility."""
+    """Get a live connection with automatic error logging."""
     try:
         engine = get_engine()
         return engine.connect()
     except Exception as e:
-        logger.error(f"Database connection error: {e}")
+        logger.error(f"Final Connection Error: {e}")
         raise
 
 def log_audit_action(conn, company_key, user_role, action, module_name):
     """Log audit trail entries for security and compliance."""
     try:
-        # Store legacy columns as well as the new structured fields for audit analysis
         conn.execute(
             text(
                 """INSERT INTO audit_logs (company_key, user_role, "user", action, details, module_name) 
@@ -98,12 +113,12 @@ def log_audit_action(conn, company_key, user_role, action, module_name):
         logger.error(f"Audit logging error: {e}")
 
 def init_db():
-    """Initialize the full multi-module schema for Ghana compliance (PostgreSQL syntax)."""
+    """Initialize full schema for Ghana compliance. NO LOGIC REMOVED."""
     engine = get_engine()
     
     try:
         with engine.connect() as conn:
-            # 1. Company Identity & Security Keys
+            # 1. Company Identity
             conn.execute(text('''CREATE TABLE IF NOT EXISTS companies 
                          (key TEXT PRIMARY KEY, 
                           name TEXT, 
@@ -119,7 +134,7 @@ def init_db():
                           created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                           updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)'''))
             
-            # 2. System Settings (Software Fee Management)
+            # 2. System Settings
             conn.execute(text('''CREATE TABLE IF NOT EXISTS system_settings 
                          (id SERIAL PRIMARY KEY, 
                           company_key TEXT UNIQUE, 
@@ -129,17 +144,16 @@ def init_db():
                           created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                           FOREIGN KEY (company_key) REFERENCES companies(key))'''))
             
-            # 3. Global Maintenance Settings
+            # 3. Maintenance
             conn.execute(text('''CREATE TABLE IF NOT EXISTS maintenance_settings 
                          (id SERIAL PRIMARY KEY, 
                           maintenance_date TEXT,
                           is_active BOOLEAN DEFAULT TRUE)'''))
 
-            # Insert default if not exists
             conn.execute(text("""INSERT INTO maintenance_settings (id, maintenance_date) 
                          VALUES (1, 'None') ON CONFLICT DO NOTHING"""))
 
-            # 4. Inventory & Warehouse Management
+            # 4. Inventory
             conn.execute(text('''CREATE TABLE IF NOT EXISTS inventory 
                          (id SERIAL PRIMARY KEY, 
                           company_key TEXT, 
@@ -154,7 +168,7 @@ def init_db():
                           updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                           FOREIGN KEY (company_key) REFERENCES companies(key))'''))
 
-            # 5. Universal Voucher Journal (With Payment Methods)
+            # 5. Vouchers
             conn.execute(text('''CREATE TABLE IF NOT EXISTS vouchers 
                          (id SERIAL PRIMARY KEY, 
                           company_key TEXT, 
@@ -169,7 +183,7 @@ def init_db():
                           created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                           FOREIGN KEY (company_key) REFERENCES companies(key))'''))
 
-            # 6. Ghana Payroll Tiers (SSNIT & PAYE)
+            # 6. Ghana Payroll
             conn.execute(text('''CREATE TABLE IF NOT EXISTS payroll 
                          (id SERIAL PRIMARY KEY, 
                           company_key TEXT, 
@@ -186,7 +200,7 @@ def init_db():
                           created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                           FOREIGN KEY (company_key) REFERENCES companies(key))'''))
 
-            # 7. Fixed Asset Register
+            # 7. Fixed Assets
             conn.execute(text('''CREATE TABLE IF NOT EXISTS fixed_assets 
                          (id SERIAL PRIMARY KEY, 
                           company_key TEXT, 
@@ -199,7 +213,7 @@ def init_db():
                           created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                           FOREIGN KEY (company_key) REFERENCES companies(key))'''))
 
-            # 8. Security Audit Trail
+            # 8. Audit logs
             conn.execute(text('''CREATE TABLE IF NOT EXISTS audit_logs 
                          (id SERIAL PRIMARY KEY, 
                           timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP, 
@@ -249,7 +263,7 @@ def init_db():
                           FOREIGN KEY (company_key) REFERENCES companies(key))'''))
 
             conn.commit()
-            logger.info("Database structure verified and initialized (PostgreSQL).")
+            logger.info("Database structure verified and initialized via SQLAlchemy.")
         
     except Exception as e:
         logger.error(f"Database initialization error: {e}")
