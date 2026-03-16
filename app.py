@@ -6,9 +6,37 @@ import logging
 import sqlite3
 from datetime import datetime, timedelta
 
+# Google Analytics Injection
+def inject_ga():
+    """Inject Google Analytics tracking script."""
+    ga_id = st.secrets.get('GA_MEASUREMENT_ID', '')
+    if not ga_id:
+        return  # Skip if no GA ID
+    
+    demo_event = ""
+    if st.session_state.get('demo_toggle', False) and not st.session_state.get('demo_event_sent', False):
+        demo_event = "gtag('event', 'demo_signup', {});"
+        st.session_state.demo_event_sent = True
+    
+    ga_script = f"""
+    <!-- Google Analytics -->
+    <script async src="https://www.googletagmanager.com/gtag/js?id={ga_id}"></script>
+    <script>
+      window.dataLayer = window.dataLayer || [];
+      function gtag(){{dataLayer.push(arguments);}}
+      gtag('js', new Date());
+      gtag('config', '{ga_id}');
+      {demo_event}
+    </script>
+    """
+    
+    st.components.v1.html(ga_script, height=0)
+
 # Initialize Demo Mode
 if 'demo_mode' not in st.session_state:
     st.session_state.demo_mode = False
+if 'demo_event_sent' not in st.session_state:
+    st.session_state.demo_event_sent = False
 
 # Payment Verification Logic
 if 'reference' in st.query_params:
@@ -278,6 +306,10 @@ if not st.session_state.auth or not check_session_timeout():
     login_ui()
 else:
     update_activity()  # Update activity on each interaction
+    
+    # Inject Google Analytics
+    inject_ga()
+    
     u = st.session_state.user
     
     if u['role'] == "Dev":
