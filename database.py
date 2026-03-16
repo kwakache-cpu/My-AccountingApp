@@ -10,12 +10,33 @@ logger = logging.getLogger(__name__)
 def get_engine():
     """Establish a SQLAlchemy engine connection to Supabase.
 
-    If connecting via the default Postgres port (5432) fails, automatically retry using
-    the Supavisor pooler port (6543) for improved compatibility on Streamlit Cloud.
+    This uses the Supavisor transaction pooler (port 6543) and forces SSL mode.
     """
     db_url = st.secrets.get('DB_URL')
     if not db_url:
         raise RuntimeError("DB_URL is not set in Streamlit secrets.")
+
+    # Normalize for Supavisor (pooler) + enforce SSL
+    from urllib.parse import urlparse, urlunparse, parse_qsl, urlencode
+
+    parsed = urlparse(db_url)
+    # Prefer the pooler port (6543) to avoid IPv6 / direct port issues in Streamlit Cloud
+    netloc = parsed.netloc
+    if parsed.port and parsed.port != 6543:
+        netloc = netloc.replace(f":{parsed.port}", ":6543")
+    elif parsed.port is None:
+        # No explicit port in URL: append pooler port
+        if '@' in netloc:
+            userinfo, host = netloc.split('@', 1)
+            netloc = f"{userinfo}@{host}:6543"
+        else:
+            netloc = f"{netloc}:6543"
+
+    # Ensure SSL mode is required
+    query = dict(parse_qsl(parsed.query, keep_blank_values=True))
+    query['sslmode'] = 'require'
+    normalized = parsed._replace(netloc=netloc, query=urlencode(query, doseq=True))
+    normalized_url = urlunparse(normalized)
 
     def _create(url):
         engine = create_engine(url, echo=False)
@@ -25,19 +46,10 @@ def get_engine():
         return engine
 
     try:
-        return _create(db_url)
+        return _create(normalized_url)
     except Exception as e:
-        logger.warning(f"Primary DB connection failed, retrying using Supavisor pooler (6543): {e}")
-        # Attempt to replace :5432 with :6543 in the URL (common Supabase pooler port)
-        if ":5432" in db_url:
-            alt_url = db_url.replace(":5432", ":6543")
-        else:
-            alt_url = db_url
-        try:
-            return _create(alt_url)
-        except Exception as e2:
-            logger.error(f"Supabase connection failed (both direct and pooler): {e2}")
-            raise
+        logger.error(f"Supabase connection failed using pooler/SSL: {e}")
+        raise
 
 def get_connection():
     """Get a connection from the SQLAlchemy engine for backward compatibility."""
