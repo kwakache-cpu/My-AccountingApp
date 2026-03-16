@@ -40,12 +40,19 @@ def init_db():
                       sub_admin_key TEXT, 
                       staff_key TEXT, 
                       recovery_answer TEXT,
+                      admin_email TEXT,
                       status TEXT DEFAULT 'Active',
                       subscription_end_date DATETIME,
+                      deployment_status TEXT DEFAULT 'Live',
                       created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                       updated_at DATETIME DEFAULT CURRENT_TIMESTAMP)''')
         
         # Ensure schema is up to date for existing databases
+        try:
+            c.execute("ALTER TABLE companies ADD COLUMN admin_email TEXT")
+        except sqlite3.OperationalError:
+            # Column already exists
+            pass
         try:
             c.execute("ALTER TABLE companies ADD COLUMN status TEXT DEFAULT 'Active'")
         except sqlite3.OperationalError:
@@ -53,6 +60,11 @@ def init_db():
             pass
         try:
             c.execute("ALTER TABLE companies ADD COLUMN subscription_end_date DATETIME")
+        except sqlite3.OperationalError:
+            # Column already exists
+            pass
+        try:
+            c.execute("ALTER TABLE companies ADD COLUMN deployment_status TEXT DEFAULT 'Live'")
         except sqlite3.OperationalError:
             # Column already exists
             pass

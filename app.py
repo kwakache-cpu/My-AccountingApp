@@ -41,26 +41,47 @@ if 'demo_event_sent' not in st.session_state:
 # Payment Verification Logic
 if 'reference' in st.query_params:
     reference = st.query_params['reference']
-    if verify_paystack_payment(reference):
-        # Find the company_key and amount from sales_invoices
-        try:
-            conn = get_connection()
-            invoice_data = conn.execute("SELECT company_key, total_amount FROM sales_invoices WHERE invoice_no=?", (reference,)).fetchone()
-            if invoice_data:
-                company_key, amount = invoice_data
-                # Insert Sales voucher
-                conn.execute("""INSERT INTO vouchers (company_key, date, v_type, ledger, debit, credit, payment_method, narration, ref_no) 
-                             VALUES (?,?,?,?,?,?,?,?,?)""", 
-                             (company_key, str(datetime.now().date()), 'Sales', 'Online Payment', 0.0, amount, 'Paystack', f'Paystack Online Payment: {reference}', reference))
+    verification = verify_paystack_payment(reference)
+    if verification.get('verified'):
+        if reference.startswith("ONBOARD-"):
+            # Onboarding payment
+            parts = reference.split("-")
+            company_name = parts[1].replace("_", " ")
+            plan = parts[2]
+            # Generate a key
+            import uuid
+            company_key = str(uuid.uuid4())[:8].upper()
+            try:
+                conn = get_connection()
+                conn.execute("INSERT INTO companies (key, name, admin_email, deployment_status) VALUES (?, ?, ?, ?)", 
+                             (company_key, company_name, verification['email'], "Pending"))
                 conn.commit()
-                log_audit_action(conn, company_key, 'System', f'Paystack payment verified: {reference}', 'Payments')
-                st.balloons()
-            else:
-                st.error("Invoice not found in database.")
-            conn.close()
-        except sqlite3.Error as e:
-            st.error(f"Failed to record payment: {e}")
-            logger.error(f"Payment recording error: {e}")
+                log_audit_action(conn, company_key, 'System', f'Onboarding payment verified: {reference}', 'Onboarding')
+                st.success(f"Company {company_name} onboarded successfully. Deployment pending.")
+            except sqlite3.Error as e:
+                st.error(f"Failed to onboard company: {e}")
+                logger.error(f"Onboarding error: {e}")
+        else:
+            # Existing invoice payment
+            # Find the company_key and amount from sales_invoices
+            try:
+                conn = get_connection()
+                invoice_data = conn.execute("SELECT company_key, total_amount FROM sales_invoices WHERE invoice_no=?", (reference,)).fetchone()
+                if invoice_data:
+                    company_key, amount = invoice_data
+                    # Insert Sales voucher
+                    conn.execute("""INSERT INTO vouchers (company_key, date, v_type, ledger, debit, credit, payment_method, narration, ref_no) 
+                                 VALUES (?,?,?,?,?,?,?,?,?)""", 
+                                 (company_key, str(datetime.now().date()), 'Sales', 'Online Payment', 0.0, amount, 'Paystack', f'Paystack Online Payment: {reference}', reference))
+                    conn.commit()
+                    log_audit_action(conn, company_key, 'System', f'Paystack payment verified: {reference}', 'Payments')
+                    st.balloons()
+                else:
+                    st.error("Invoice not found in database.")
+                conn.close()
+            except sqlite3.Error as e:
+                st.error(f"Failed to record payment: {e}")
+                logger.error(f"Payment recording error: {e}")
     else:
         st.error("Payment verification failed.")
     # Clear the reference from URL
@@ -113,7 +134,7 @@ def login_ui():
         st.error("Too many failed login attempts. Please wait before trying again.")
         return
     
-    t1, t2 = st.tabs(["🔒 Secure Login", "🔑 System Recovery"])
+    t1, t2, t3 = st.tabs(["🔒 Secure Login", "🔑 System Recovery", "🏢 Register New Company"])
     
     with t1:
         # Assigned unique keys to ensure no Duplicate ID errors
@@ -203,6 +224,9 @@ def login_ui():
             except sqlite3.Error as e:
                 st.error("System error during recovery. Please try again.")
                 logger.error(f"Recovery error: {e}")
+
+    with t3:
+        show_onboarding_payment()
 
     # Demo Mode Toggle
     st.markdown("---")
@@ -419,11 +443,12 @@ else:
                 SELECT c.name AS company_name,
                        c.created_at AS created_date,
                        c.status AS account_status,
+                       c.deployment_status,
                        c.subscription_end_date,
                        COALESCE(SUM(v.credit), 0) AS total_revenue_collected
                 FROM companies c
                 LEFT JOIN vouchers v ON c.key = v.company_key AND v.v_type = 'Sales'
-                GROUP BY c.key, c.name, c.created_at, c.status, c.subscription_end_date
+                GROUP BY c.key, c.name, c.created_at, c.status, c.deployment_status, c.subscription_end_date
                 ORDER BY c.name
                 """,
                 conn
@@ -438,6 +463,7 @@ else:
                     'created_date': st.column_config.TextColumn(label='Created Date', disabled=True),
                     'total_revenue_collected': st.column_config.NumberColumn(label='Total Revenue Collected (GHS)', disabled=True),
                     'account_status': st.column_config.SelectboxColumn(label='Account Status', options=['Active', 'Suspended']),
+                    'deployment_status': st.column_config.TextColumn(label='Deployment Status', disabled=True),
                     'subscription_end_date': st.column_config.DateColumn(label='Subscription End Date')
                 } if hasattr(st, 'column_config') else None
             )
@@ -457,6 +483,23 @@ else:
                     log_audit_action(conn, 'SYSTEM', 'Dev', 'Updated client portfolio', 'System Admin')
                 else:
                     st.info('No changes to update.')
+
+            # Deploy Pending Companies
+            pending_companies = portfolio_df[portfolio_df['deployment_status'] == 'Pending']
+            if not pending_companies.empty:
+                st.subheader("🚀 Pending Deployments")
+                for _, company in pending_companies.iterrows():
+                    col1, col2 = st.columns([3, 1])
+                    with col1:
+                        st.write(f"**{company['company_name']}** - Created: {company['created_date']}")
+                    with col2:
+                        if st.button(f"🚀 Deploy Now", key=f"deploy_{company['company_name']}"):
+                            conn.execute("UPDATE companies SET deployment_status='Live' WHERE name=?", (company['company_name'],))
+                            conn.commit()
+                            st.success(f"Company {company['company_name']} deployed successfully!")
+                            log_audit_action(conn, 'SYSTEM', 'Dev', f'Deployed company: {company["company_name"]}', 'System Admin')
+                            # Simulate email
+                            st.info(f"Success email sent to {company['company_name']} admin.")
 
             conn.close()
         except sqlite3.Error as e:

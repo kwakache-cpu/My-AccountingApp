@@ -52,11 +52,15 @@ def verify_paystack_payment(reference):
         response.raise_for_status()
         result = response.json()
         if result.get("status") and result["data"]["status"] == "success":
-            return True
+            return {
+                "verified": True,
+                "amount": result["data"]["amount"] / 100,
+                "email": result["data"]["customer"]["email"]
+            }
         else:
-            return False
+            return {"verified": False}
     except requests.RequestException:
-        return False
+        return {"verified": False}
 
 # ==========================================
 # 0. SYSTEM ENGINE: EXCEL EXPORT & IMPORT
@@ -1048,3 +1052,34 @@ def show_audit_trail(k):
     except sqlite3.Error as e:
         st.error(f"Failed to load audit trail: {e}")
         logger.error(f"Audit trail error: {e}")
+
+# ==========================================
+# ONBOARDING & PAYMENT MODULE
+# ==========================================
+def show_onboarding_payment():
+    st.header("🏢 New Client Onboarding")
+    
+    plans = {
+        "Basic": 500,
+        "Premium": 1000,
+        "Enterprise": 2000
+    }
+    
+    with st.form("onboarding_form"):
+        company_name = st.text_input("Company Name")
+        admin_email = st.text_input("Admin Email")
+        selected_plan = st.selectbox("Select Plan", list(plans.keys()))
+        
+        submitted = st.form_submit_button("Pay to Initialize ERP")
+        
+        if submitted:
+            if validate_input(company_name, "Company Name") and validate_input(admin_email, "Admin Email"):
+                amount = plans[selected_plan]
+                reference = f"ONBOARD-{company_name.replace(' ', '_')}-{selected_plan}"
+                url = initialize_paystack_payment(admin_email, amount, reference)
+                if url:
+                    st.link_button("Proceed to Paystack", url)
+                else:
+                    st.error("Failed to initialize payment.")
+            else:
+                st.error("Please fill in all required fields.")
