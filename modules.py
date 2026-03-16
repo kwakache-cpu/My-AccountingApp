@@ -41,6 +41,23 @@ def initialize_paystack_payment(email, amount, reference):
         st.error(f"Payment initialization failed: {e}")
         return None
 
+def verify_paystack_payment(reference):
+    """Verify a Paystack payment transaction."""
+    url = f"https://api.paystack.co/transaction/verify/{reference}"
+    headers = {
+        "Authorization": f"Bearer {st.secrets['PAYSTACK_SECRET_KEY']}"
+    }
+    try:
+        response = requests.get(url, headers=headers)
+        response.raise_for_status()
+        result = response.json()
+        if result.get("status") and result["data"]["status"] == "success":
+            return True
+        else:
+            return False
+    except requests.RequestException:
+        return False
+
 # ==========================================
 # 0. SYSTEM ENGINE: EXCEL EXPORT & IMPORT
 # ==========================================

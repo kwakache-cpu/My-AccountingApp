@@ -3,7 +3,36 @@ import pandas as pd  # <-- ADD THIS IMPORT
 from database import get_connection, init_db, log_audit_action
 from modules import *
 import logging
+import sqlite3
 from datetime import datetime, timedelta
+
+# Payment Verification Logic
+if 'reference' in st.query_params:
+    reference = st.query_params['reference']
+    if verify_paystack_payment(reference):
+        # Find the company_key and amount from sales_invoices
+        try:
+            conn = get_connection()
+            invoice_data = conn.execute("SELECT company_key, total_amount FROM sales_invoices WHERE invoice_no=?", (reference,)).fetchone()
+            if invoice_data:
+                company_key, amount = invoice_data
+                # Insert Sales voucher
+                conn.execute("""INSERT INTO vouchers (company_key, date, v_type, ledger, debit, credit, payment_method, narration, ref_no) 
+                             VALUES (?,?,?,?,?,?,?,?,?)""", 
+                             (company_key, str(datetime.now().date()), 'Sales', 'Online Payment', 0.0, amount, 'Paystack', f'Paystack Online Payment: {reference}', reference))
+                conn.commit()
+                log_audit_action(conn, company_key, 'System', f'Paystack payment verified: {reference}', 'Payments')
+                st.balloons()
+            else:
+                st.error("Invoice not found in database.")
+            conn.close()
+        except sqlite3.Error as e:
+            st.error(f"Failed to record payment: {e}")
+            logger.error(f"Payment recording error: {e}")
+    else:
+        st.error("Payment verification failed.")
+    # Clear the reference from URL
+    st.query_params.clear()
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
