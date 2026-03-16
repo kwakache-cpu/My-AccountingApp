@@ -6,6 +6,7 @@ from modules import check_maintenance_window
 import logging
 import sqlite3
 from datetime import datetime, timedelta
+import hashlib
 
 # Check maintenance status
 maintenance_status = check_maintenance_window()
@@ -524,14 +525,6 @@ else:
                 except sqlite3.Error:
                     monthly_revenue = 0
                 
-                conn.close()
-                
-                m1, m2, m3, m4 = st.columns(4)
-                m1.metric("Total Licenses", str(total_companies))
-                m2.metric("Active Subscriptions", str(active_subscriptions))
-                m3.metric("Monthly Revenue", f"GHS {monthly_revenue:.2f}")
-                m4.metric("System Uptime", "100%")
-
                 # Global Forensic Trail (Dev only)
                 st.markdown("---")
                 st.subheader("🛡️ Global Forensic Trail")
@@ -543,15 +536,38 @@ else:
                     except sqlite3.OperationalError:
                         col = "role"
 
-                    trail_data = conn.execute(f"SELECT timestamp, company_key, {col} as user_role, action, module_name "
-                                              "FROM audit_logs ORDER BY timestamp DESC LIMIT 50").fetchall()
-                    if trail_data:
-                        trail_df = pd.DataFrame(trail_data, columns=['Timestamp', 'Company', 'User Role', 'Action', 'Module'])
+                    trail_df = pd.read_sql(f"SELECT timestamp, company_key, {col} as user_role, action, module_name "
+                                           "FROM audit_logs ORDER BY timestamp DESC LIMIT 50", conn)
+                    if not trail_df.empty:
                         st.dataframe(trail_df, use_container_width=True)
                     else:
                         st.info("No audit activity found.")
-                except sqlite3.Error:
+                except Exception as e:
+                    logger.error(f"Failed to load audit trail: {e}")
                     st.info("Unable to load global audit trail.")
+                
+                st.markdown("---")
+                st.subheader("🚀 Manual License Deployment")
+                with st.form("manual_deployment"):
+                    company_name = st.text_input("Company Name")
+                    plan_type = st.selectbox("Plan Type", ["Basic", "Premium", "Enterprise"])
+                    payment_status = st.selectbox("Payment Status", ["Cash", "Bank Transfer", "Bypass"])
+                    submitted = st.form_submit_button("Deploy License")
+                    if submitted:
+                        if company_name:
+                            key = hashlib.md5(company_name.encode()).hexdigest()[:10]
+                            expiry_date = (datetime.now() + timedelta(days=365)).isoformat()
+                            try:
+                                conn.execute("INSERT INTO companies (key, name, expiry_date, status) VALUES (?, ?, ?, ?)", (key, company_name, expiry_date, 'Active'))
+                                conn.commit()
+                                st.success(f"License deployed for {company_name}")
+                                log_audit_action(conn, 'SYSTEM', 'Dev', f'Manual license deployment for {company_name}', 'System Admin')
+                            except sqlite3.Error as e:
+                                st.error(f"Failed to deploy: {e}")
+                        else:
+                            st.error("Company Name is required")
+                
+                conn.close()
 
             except sqlite3.Error as e:
                 st.error("Failed to load system metrics")
