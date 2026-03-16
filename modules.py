@@ -1,4 +1,5 @@
 import streamlit as st
+import streamlit.components.v1 as components
 import pandas as pd
 import io
 import sqlite3
@@ -132,12 +133,90 @@ def show_pos(company_key, company_name, role):
                     conn.commit()
                     log_audit_action(conn, company_key, role, "Completed POS transaction", "POS")
                     st.success("Transaction Synced to Cloud Ledger.")
-                    st.session_state.cart = []
+
+                    # Store receipt for printing
+                    st.session_state.last_receipt = {
+                        'company_name': company_name,
+                        'datetime': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                        'items': list(st.session_state.cart),
+                        'total': grand_total
+                    }
+                    st.session_state.show_receipt = True
                 except sqlite3.Error as e:
                     st.error(f"Transaction failed: {e}")
                     logger.error(f"POS transaction error: {e}")
                 finally:
                     conn.close()
+
+            if st.session_state.cart and st.button("🖨️ Print Customer Receipt", key="mod_pos_print_btn"):
+                st.session_state.show_receipt = True
+
+            if st.session_state.get('show_receipt') and st.session_state.get('last_receipt'):
+                receipt = st.session_state['last_receipt']
+                receipt_html = f"""
+                <html>
+                <head>
+                    <style>
+                        body {{ font-family: Arial, sans-serif; margin: 0; padding: 20px; }}
+                        .receipt {{ max-width: 600px; margin: auto; border: 1px solid #ddd; padding: 20px; }}
+                        .header {{ text-align: center; margin-bottom: 20px; }}
+                        .header h1 {{ margin: 0; font-size: 24px; }}
+                        .header p {{ margin: 4px 0; font-size: 14px; }}
+                        table {{ width: 100%; border-collapse: collapse; margin-top: 20px; }}
+                        th, td {{ border: 1px solid #ddd; padding: 8px; text-align: left; }}
+                        th {{ background: #f7f7f7; }}
+                        .total {{ text-align: right; margin-top: 20px; font-size: 18px; font-weight: bold; }}
+                        .footer {{ text-align: center; margin-top: 30px; font-size: 14px; color: #555; }}
+                        @media print {{
+                            body {{ margin: 0; }}
+                            .receipt {{ border: none; }}
+                        }}
+                    </style>
+                </head>
+                <body>
+                    <div class="receipt">
+                        <div class="header">
+                            <h1><b>{receipt['company_name']}</b></h1>
+                            <h2>CASH SALE RECEIPT</h2>
+                            <p>{receipt['datetime']}</p>
+                        </div>
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th>Item</th>
+                                    <th>Qty</th>
+                                    <th>Price (GHS)</th>
+                                    <th>Total (GHS)</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                """
+
+                for item in receipt['items']:
+                    receipt_html += f"""
+                        <tr>
+                            <td>{item['Product']}</td>
+                            <td>{item['Qty']}</td>
+                            <td>{item['Price']:.2f}</td>
+                            <td>{item['Total']:.2f}</td>
+                        </tr>
+                    """
+
+                receipt_html += f"""
+                            </tbody>
+                        </table>
+                        <div class="total">Grand Total: GHS {receipt['total']:.2f}</div>
+                        <div class="footer">Thank you for your business!</div>
+                    </div>
+                    <script>
+                        window.print();
+                    </script>
+                </body>
+                </html>
+                """
+
+                components.html(receipt_html, height=800)
+                st.session_state.show_receipt = False
 
 # ==========================================
 # 3. GHANA PAYROLL (Statutory Tier Processing)
