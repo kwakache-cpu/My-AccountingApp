@@ -1,6 +1,6 @@
 import streamlit as st
 from sqlalchemy import create_engine, text
-from sqlalchemy.pool import NullPool  # ✅ REQUIRED for Supabase
+from sqlalchemy.pool import NullPool  # Required for Supabase Transaction Pooler
 from datetime import datetime
 import logging
 
@@ -11,11 +11,11 @@ logger = logging.getLogger(__name__)
 def get_engine():
     """Establish a robust SQLAlchemy engine connection to Supabase.
 
-    This explicitly tries the Supavisor pooler (port 6543) first to bypass 
-    IPv6 issues on Streamlit Cloud, then falls back to direct Postgres (port 5432).
+    This explicitly uses the Supavisor pooler (port 6543) with NullPool
+    to prevent connection freezing on Streamlit Cloud.
     """
-    # 1. Retrieve the Secret
-    db_url = st.secrets.get('DATABASE_URL')  # ✅ FIXED SECRET NAME
+    # 1. Retrieve the Secret (Updated to DATABASE_URL)
+    db_url = st.secrets.get('DATABASE_URL')
     if not db_url:
         logger.error("DATABASE_URL is missing from Streamlit Secrets.")
         raise RuntimeError("DATABASE_URL is not set in Streamlit secrets.")
@@ -27,46 +27,38 @@ def get_engine():
 
     def _normalize(url: str, port: int) -> str:
         """Injects the correct port and forces SSL mode."""
-        # Split URL to safely inject port into the host section
         if ":" in url.split("//", 1)[1].split("@")[-1]:
-            # Replace existing port (5432 or 6543) with the target port
             url = url.replace(":5432", f":{port}").replace(":6543", f":{port}")
         else:
-            # Append port if none present
             if "@" in url:
                 parts = url.split("@")
                 url = f"{parts[0]}@{parts[1]}:{port}"
             else:
                 url = f"{url}:{port}"
         
-        # Ensure SSL mode is REQUIRED for Supabase
         if "sslmode=" not in url:
             sep = '&' if '?' in url else '?'
             url = f"{url}{sep}sslmode=require"
         return url
 
-    # Generate both connection paths
+    # Generate connection paths
     pooler_url = _normalize(db_url, 6543)
     direct_url = _normalize(db_url, 5432)
 
     # Professional Engine Configuration
-    connect_args = {
-        "sslmode": "require",
-        "connect_timeout": 20
-    }
-    
+    # Upgraded with NullPool and Explicit SSL for Supabase Compliance
     engine_kwargs = {
-        "connect_args": connect_args,
-        "pool_pre_ping": True,
-        "pool_size": 10,
-        "max_overflow": 20,
-        "pool_recycle": 3600,
-        "poolclass": NullPool  # ✅ CRITICAL FIX FOR SUPABASE
+        "connect_args": {
+            "sslmode": "require", 
+            "connect_timeout": 20
+        },
+        "poolclass": NullPool, # Mandatory for Transaction Pooler (Port 6543)
+        "echo": False
     }
 
     def _create(url: str):
         """Internal helper to attempt a physical connection."""
-        engine = create_engine(url, echo=False, **engine_kwargs)
+        engine = create_engine(url, **engine_kwargs)
         # Test the connection immediately
         with engine.connect() as conn:
             conn.execute(text("SELECT 1"))
