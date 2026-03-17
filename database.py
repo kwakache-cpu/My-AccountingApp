@@ -1,6 +1,7 @@
 import streamlit as st
 from sqlalchemy import create_engine, text
 from sqlalchemy.pool import StaticPool
+from datetime import datetime
 import logging
 
 # Configure logging
@@ -8,10 +9,15 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 def get_engine():
-    """Create a local SQLite engine for stability while preserving all logic."""
-    # SQLite creates a local file 'eka_vault.db' on the Streamlit server.
+    """Establish a robust SQLite engine connection.
+    
+    This replaces the Supabase connection logic with a local file 
+    to ensure the app is live and stable for your volunteers.
+    """
+    # Local file-based database (No ports or SSL required)
     sqlite_url = "sqlite:///eka_vault.db"
     
+    # StaticPool is required for SQLite on Streamlit Cloud to prevent "Table Not Found" errors
     engine = create_engine(
         sqlite_url,
         connect_args={"check_same_thread": False},
@@ -20,12 +26,16 @@ def get_engine():
     return engine
 
 def get_connection():
-    """Get a live local connection."""
-    engine = get_engine()
-    return engine.connect()
+    """Get a live connection with automatic error logging."""
+    try:
+        engine = get_engine()
+        return engine.connect()
+    except Exception as e:
+        logger.error(f"Final Connection Error: {e}")
+        raise
 
 def log_audit_action(conn, company_key, user_role, action, module_name):
-    """Log audit trail entries exactly as originally designed."""
+    """Log audit trail entries for security and compliance."""
     try:
         conn.execute(
             text(
@@ -46,12 +56,12 @@ def log_audit_action(conn, company_key, user_role, action, module_name):
         logger.error(f"Audit logging error: {e}")
 
 def init_db():
-    """RESTORATION COMPLETE: All 11 tables and full logic restored."""
+    """Initialize full schema for Ghana compliance. NO LOGIC REMOVED."""
     engine = get_engine()
     
     try:
         with engine.connect() as conn:
-            # 1. Company Identity (Restored)
+            # 1. Company Identity
             conn.execute(text('''CREATE TABLE IF NOT EXISTS companies 
                          (key TEXT PRIMARY KEY, 
                           name TEXT, 
@@ -67,7 +77,7 @@ def init_db():
                           created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                           updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)'''))
             
-            # 2. System Settings (Restored)
+            # 2. System Settings
             conn.execute(text('''CREATE TABLE IF NOT EXISTS system_settings 
                          (id INTEGER PRIMARY KEY AUTOINCREMENT, 
                           company_key TEXT UNIQUE, 
@@ -77,16 +87,18 @@ def init_db():
                           created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                           FOREIGN KEY (company_key) REFERENCES companies(key))'''))
             
-            # 3. Maintenance Settings (Restored)
+            # 3. Maintenance
             conn.execute(text('''CREATE TABLE IF NOT EXISTS maintenance_settings 
                          (id INTEGER PRIMARY KEY AUTOINCREMENT, 
                           maintenance_date TEXT,
                           is_active BOOLEAN DEFAULT 1)'''))
 
-            conn.execute(text("""INSERT OR IGNORE INTO maintenance_settings (id, maintenance_date) 
-                         VALUES (1, 'None')"""))
+            # Fixed Maintenance table error: Check if it's empty before inserting
+            res = conn.execute(text("SELECT COUNT(*) FROM maintenance_settings")).scalar()
+            if res == 0:
+                conn.execute(text("INSERT INTO maintenance_settings (maintenance_date, is_active) VALUES ('None', 1)"))
 
-            # 4. Inventory (Restored)
+            # 4. Inventory
             conn.execute(text('''CREATE TABLE IF NOT EXISTS inventory 
                          (id INTEGER PRIMARY KEY AUTOINCREMENT, 
                           company_key TEXT, 
@@ -101,7 +113,7 @@ def init_db():
                           updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                           FOREIGN KEY (company_key) REFERENCES companies(key))'''))
 
-            # 5. Vouchers (Restored)
+            # 5. Vouchers
             conn.execute(text('''CREATE TABLE IF NOT EXISTS vouchers 
                          (id INTEGER PRIMARY KEY AUTOINCREMENT, 
                           company_key TEXT, 
@@ -116,7 +128,7 @@ def init_db():
                           created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                           FOREIGN KEY (company_key) REFERENCES companies(key))'''))
 
-            # 6. Ghana Payroll (Restored - SSNIT Tiers Included)
+            # 6. Ghana Payroll
             conn.execute(text('''CREATE TABLE IF NOT EXISTS payroll 
                          (id INTEGER PRIMARY KEY AUTOINCREMENT, 
                           company_key TEXT, 
@@ -133,7 +145,7 @@ def init_db():
                           created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                           FOREIGN KEY (company_key) REFERENCES companies(key))'''))
 
-            # 7. Fixed Assets (Restored)
+            # 7. Fixed Assets
             conn.execute(text('''CREATE TABLE IF NOT EXISTS fixed_assets 
                          (id INTEGER PRIMARY KEY AUTOINCREMENT, 
                           company_key TEXT, 
@@ -146,7 +158,7 @@ def init_db():
                           created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                           FOREIGN KEY (company_key) REFERENCES companies(key))'''))
 
-            # 8. Audit logs (Restored)
+            # 8. Audit logs
             conn.execute(text('''CREATE TABLE IF NOT EXISTS audit_logs 
                          (id INTEGER PRIMARY KEY AUTOINCREMENT, 
                           timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP, 
@@ -158,7 +170,7 @@ def init_db():
                           module_name TEXT,
                           FOREIGN KEY (company_key) REFERENCES companies(key))'''))
 
-            # 9. Chart of Accounts (Restored)
+            # 9. Chart of Accounts
             conn.execute(text('''CREATE TABLE IF NOT EXISTS chart_of_accounts 
                          (id INTEGER PRIMARY KEY AUTOINCREMENT,
                           company_key TEXT,
@@ -169,7 +181,7 @@ def init_db():
                           created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                           FOREIGN KEY (company_key) REFERENCES companies(key))'''))
 
-            # 10. Sales Invoices (Restored)
+            # 10. Sales Invoices
             conn.execute(text('''CREATE TABLE IF NOT EXISTS sales_invoices 
                          (id INTEGER PRIMARY KEY AUTOINCREMENT,
                           company_key TEXT,
@@ -183,7 +195,7 @@ def init_db():
                           created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                           FOREIGN KEY (company_key) REFERENCES companies(key))'''))
 
-            # 11. Purchase Orders (Restored)
+            # 11. Purchase Orders
             conn.execute(text('''CREATE TABLE IF NOT EXISTS purchase_orders 
                          (id INTEGER PRIMARY KEY AUTOINCREMENT,
                           company_key TEXT,
@@ -196,7 +208,7 @@ def init_db():
                           FOREIGN KEY (company_key) REFERENCES companies(key))'''))
 
             conn.commit()
-            logger.info("Full schema restored and initialized locally.")
+            logger.info("Database structure verified and initialized via SQLAlchemy.")
         
     except Exception as e:
         logger.error(f"Database initialization error: {e}")
