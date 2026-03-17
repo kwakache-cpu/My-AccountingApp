@@ -8,11 +8,10 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 def get_engine():
-    """Create a local SQLite engine for immediate app stability."""
-    # This creates a local file database—no ports (5432/6543) needed.
+    """Create a local SQLite engine for stability while preserving all logic."""
+    # SQLite creates a local file 'eka_vault.db' on the Streamlit server.
     sqlite_url = "sqlite:///eka_vault.db"
     
-    # Professional SQLite configuration for Streamlit Cloud
     engine = create_engine(
         sqlite_url,
         connect_args={"check_same_thread": False},
@@ -26,7 +25,7 @@ def get_connection():
     return engine.connect()
 
 def log_audit_action(conn, company_key, user_role, action, module_name):
-    """LOGIC INTACT: Log audit trail entries locally."""
+    """Log audit trail entries exactly as originally designed."""
     try:
         conn.execute(
             text(
@@ -47,68 +46,161 @@ def log_audit_action(conn, company_key, user_role, action, module_name):
         logger.error(f"Audit logging error: {e}")
 
 def init_db():
-    """SCHEMA INTACT: Initialize all 11 tables for Ghana compliance."""
+    """RESTORATION COMPLETE: All 11 tables and full logic restored."""
     engine = get_engine()
+    
     try:
         with engine.connect() as conn:
-            # 1. Company Identity
+            # 1. Company Identity (Restored)
             conn.execute(text('''CREATE TABLE IF NOT EXISTS companies 
-                         (key TEXT PRIMARY KEY, name TEXT, tin TEXT, sub_admin_key TEXT, 
-                          staff_key TEXT, recovery_answer TEXT, admin_email TEXT, 
-                          status TEXT DEFAULT 'Active', subscription_end_date TIMESTAMP, 
-                          deployment_status TEXT DEFAULT 'Live', expiry_date TIMESTAMP, 
-                          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)'''))
+                         (key TEXT PRIMARY KEY, 
+                          name TEXT, 
+                          tin TEXT, 
+                          sub_admin_key TEXT, 
+                          staff_key TEXT, 
+                          recovery_answer TEXT,
+                          admin_email TEXT,
+                          status TEXT DEFAULT 'Active',
+                          subscription_end_date TIMESTAMP,
+                          deployment_status TEXT DEFAULT 'Live',
+                          expiry_date TIMESTAMP,
+                          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                          updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)'''))
             
-            # 2. System Settings
+            # 2. System Settings (Restored)
             conn.execute(text('''CREATE TABLE IF NOT EXISTS system_settings 
-                         (id INTEGER PRIMARY KEY AUTOINCREMENT, company_key TEXT, 
-                          software_fee REAL DEFAULT 0.0, subscription_months INTEGER DEFAULT 12)'''))
+                         (id INTEGER PRIMARY KEY AUTOINCREMENT, 
+                          company_key TEXT UNIQUE, 
+                          software_fee REAL DEFAULT 0.0, 
+                          subscription_months INTEGER DEFAULT 12,
+                          setup_fee_paid REAL DEFAULT 0.0,
+                          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                          FOREIGN KEY (company_key) REFERENCES companies(key))'''))
             
-            # 3. Maintenance
+            # 3. Maintenance Settings (Restored)
             conn.execute(text('''CREATE TABLE IF NOT EXISTS maintenance_settings 
-                         (id INTEGER PRIMARY KEY AUTOINCREMENT, maintenance_date TEXT, is_active BOOLEAN DEFAULT 1)'''))
-            
-            # 4. Inventory
-            conn.execute(text('''CREATE TABLE IF NOT EXISTS inventory 
-                         (id INTEGER PRIMARY KEY AUTOINCREMENT, company_key TEXT, item_name TEXT, 
-                          unit TEXT, qty REAL DEFAULT 0.0, price REAL DEFAULT 0.0)'''))
-            
-            # 5. Vouchers
-            conn.execute(text('''CREATE TABLE IF NOT EXISTS vouchers 
-                         (id INTEGER PRIMARY KEY AUTOINCREMENT, company_key TEXT, date TEXT, v_type TEXT, 
-                          ledger TEXT, debit REAL DEFAULT 0.0, credit REAL DEFAULT 0.0)'''))
-            
-            # 6. Ghana Payroll
-            conn.execute(text('''CREATE TABLE IF NOT EXISTS payroll 
-                         (id INTEGER PRIMARY KEY AUTOINCREMENT, company_key TEXT, emp_name TEXT, 
-                          basic_salary REAL, net_salary REAL, month TEXT, year TEXT)'''))
-            
-            # 7. Fixed Assets
-            conn.execute(text('''CREATE TABLE IF NOT EXISTS fixed_assets 
-                         (id INTEGER PRIMARY KEY AUTOINCREMENT, asset_name TEXT, purchase_cost REAL)'''))
-            
-            # 8. Audit logs
-            conn.execute(text('''CREATE TABLE IF NOT EXISTS audit_logs 
-                         (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP, 
-                          company_key TEXT, user_role TEXT, "user" TEXT, action TEXT, module_name TEXT)'''))
-            
-            # 9. Chart of Accounts
-            conn.execute(text('''CREATE TABLE IF NOT EXISTS chart_of_accounts 
-                         (id INTEGER PRIMARY KEY AUTOINCREMENT, company_key TEXT, account_name TEXT, balance REAL DEFAULT 0.0)'''))
-            
-            # 10. Sales Invoices
-            conn.execute(text('''CREATE TABLE IF NOT EXISTS sales_invoices 
-                         (id INTEGER PRIMARY KEY AUTOINCREMENT, company_key TEXT, customer_name TEXT, total_amount REAL)'''))
-            
-            # 11. Purchase Orders
-            conn.execute(text('''CREATE TABLE IF NOT EXISTS purchase_orders 
-                         (id INTEGER PRIMARY KEY AUTOINCREMENT, company_key TEXT, supplier_name TEXT, total_amount REAL)'''))
+                         (id INTEGER PRIMARY KEY AUTOINCREMENT, 
+                          maintenance_date TEXT,
+                          is_active BOOLEAN DEFAULT 1)'''))
 
-            conn.execute(text("INSERT OR IGNORE INTO maintenance_settings (id, maintenance_date) VALUES (1, 'None')"))
+            conn.execute(text("""INSERT OR IGNORE INTO maintenance_settings (id, maintenance_date) 
+                         VALUES (1, 'None')"""))
+
+            # 4. Inventory (Restored)
+            conn.execute(text('''CREATE TABLE IF NOT EXISTS inventory 
+                         (id INTEGER PRIMARY KEY AUTOINCREMENT, 
+                          company_key TEXT, 
+                          item_name TEXT, 
+                          unit TEXT, 
+                          qty REAL DEFAULT 0.0, 
+                          price REAL DEFAULT 0.0, 
+                          cost_price REAL DEFAULT 0.0, 
+                          warehouse TEXT DEFAULT 'Main',
+                          barcode TEXT,
+                          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                          updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                          FOREIGN KEY (company_key) REFERENCES companies(key))'''))
+
+            # 5. Vouchers (Restored)
+            conn.execute(text('''CREATE TABLE IF NOT EXISTS vouchers 
+                         (id INTEGER PRIMARY KEY AUTOINCREMENT, 
+                          company_key TEXT, 
+                          date TEXT, 
+                          v_type TEXT, 
+                          ledger TEXT, 
+                          debit REAL DEFAULT 0.0, 
+                          credit REAL DEFAULT 0.0, 
+                          payment_method TEXT, 
+                          narration TEXT, 
+                          ref_no TEXT,
+                          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                          FOREIGN KEY (company_key) REFERENCES companies(key))'''))
+
+            # 6. Ghana Payroll (Restored - SSNIT Tiers Included)
+            conn.execute(text('''CREATE TABLE IF NOT EXISTS payroll 
+                         (id INTEGER PRIMARY KEY AUTOINCREMENT, 
+                          company_key TEXT, 
+                          emp_name TEXT, 
+                          basic_salary REAL, 
+                          ssnit_t1 REAL, 
+                          ssnit_t2 REAL, 
+                          ssnit_t3 REAL DEFAULT 0.0,
+                          taxable_income REAL, 
+                          paye REAL, 
+                          net_salary REAL, 
+                          month TEXT, 
+                          year TEXT,
+                          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                          FOREIGN KEY (company_key) REFERENCES companies(key))'''))
+
+            # 7. Fixed Assets (Restored)
+            conn.execute(text('''CREATE TABLE IF NOT EXISTS fixed_assets 
+                         (id INTEGER PRIMARY KEY AUTOINCREMENT, 
+                          company_key TEXT, 
+                          asset_name TEXT, 
+                          purchase_cost REAL, 
+                          dep_rate REAL, 
+                          accum_dep REAL DEFAULT 0.0, 
+                          book_value REAL, 
+                          purchase_date TEXT,
+                          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                          FOREIGN KEY (company_key) REFERENCES companies(key))'''))
+
+            # 8. Audit logs (Restored)
+            conn.execute(text('''CREATE TABLE IF NOT EXISTS audit_logs 
+                         (id INTEGER PRIMARY KEY AUTOINCREMENT, 
+                          timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP, 
+                          company_key TEXT, 
+                          user_role TEXT, 
+                          "user" TEXT, 
+                          action TEXT, 
+                          details TEXT, 
+                          module_name TEXT,
+                          FOREIGN KEY (company_key) REFERENCES companies(key))'''))
+
+            # 9. Chart of Accounts (Restored)
+            conn.execute(text('''CREATE TABLE IF NOT EXISTS chart_of_accounts 
+                         (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                          company_key TEXT,
+                          account_code TEXT,
+                          account_name TEXT,
+                          account_type TEXT,
+                          balance REAL DEFAULT 0.0,
+                          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                          FOREIGN KEY (company_key) REFERENCES companies(key))'''))
+
+            # 10. Sales Invoices (Restored)
+            conn.execute(text('''CREATE TABLE IF NOT EXISTS sales_invoices 
+                         (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                          company_key TEXT,
+                          invoice_no TEXT,
+                          customer_name TEXT,
+                          customer_email TEXT,
+                          invoice_date TEXT,
+                          due_date TEXT,
+                          total_amount REAL,
+                          status TEXT DEFAULT 'Pending',
+                          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                          FOREIGN KEY (company_key) REFERENCES companies(key))'''))
+
+            # 11. Purchase Orders (Restored)
+            conn.execute(text('''CREATE TABLE IF NOT EXISTS purchase_orders 
+                         (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                          company_key TEXT,
+                          po_no TEXT,
+                          supplier_name TEXT,
+                          order_date TEXT,
+                          total_amount REAL,
+                          status TEXT DEFAULT 'Pending',
+                          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                          FOREIGN KEY (company_key) REFERENCES companies(key))'''))
+
             conn.commit()
-            logger.info("Local SQLite Database initialized with ALL logic intact.")
+            logger.info("Full schema restored and initialized locally.")
+        
     except Exception as e:
-        logger.error(f"Local Init Error: {e}")
+        logger.error(f"Database initialization error: {e}")
+        raise
 
 if __name__ == "__main__":
     init_db()
