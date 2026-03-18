@@ -47,6 +47,8 @@ def init_db():
                       address TEXT,
                       subscription_expiry DATE,
                       maintenance_mode BOOLEAN DEFAULT 0,
+                      status TEXT DEFAULT 'Active',
+                      deployment_status TEXT DEFAULT 'Pending',
                       created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                       updated_at DATETIME DEFAULT CURRENT_TIMESTAMP)''')
         
@@ -266,6 +268,19 @@ def init_db():
                       approved_by TEXT,
                       notes TEXT,
                       FOREIGN KEY (company_key) REFERENCES companies(key))''')
+
+        # Ensure missing columns exist in existing databases
+        try:
+            # Add status column if it doesn't exist
+            c.execute("ALTER TABLE companies ADD COLUMN status TEXT DEFAULT 'Active'")
+        except:
+            pass  # Column already exists
+        
+        try:
+            # Add deployment_status column if it doesn't exist
+            c.execute("ALTER TABLE companies ADD COLUMN deployment_status TEXT DEFAULT 'Pending'")
+        except:
+            pass  # Column already exists
 
         conn.commit()
         logger.info("Database structure verified and initialized.")
