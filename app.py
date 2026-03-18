@@ -403,7 +403,7 @@ def show_dashboard(company_key, company_name, role):
                 'Description': ['Product Sale', 'Office Supplies', 'Service Revenue'],
                 'Amount': [5000.0, 2000.0, 3000.0]
             })
-            st.dataframe(demo_txns, use_container_width=True)
+            st.dataframe(demo_txns, width='stretch')
         
         with col2:
             st.subheader("📦 Low Stock Items")
@@ -412,7 +412,7 @@ def show_dashboard(company_key, company_name, role):
                 'Quantity': [5, 8],
                 'Unit': ['pcs', 'pcs']
             })
-            st.dataframe(demo_stock, use_container_width=True)
+            st.dataframe(demo_stock, width='stretch')
         
         return
     
@@ -455,7 +455,7 @@ def show_dashboard(company_key, company_name, role):
             
             if recent_data:
                 recent_txns = pd.DataFrame(recent_data, columns=['Date', 'Type', 'Description', 'Amount'])
-                st.dataframe(recent_txns, use_container_width=True)
+                st.dataframe(recent_txns, width='stretch')
             else:
                 st.info("No recent transactions found.")
         
@@ -467,7 +467,7 @@ def show_dashboard(company_key, company_name, role):
             
             if low_stock_data:
                 low_stock = pd.DataFrame(low_stock_data, columns=['Item', 'Quantity', 'Unit'])
-                st.dataframe(low_stock, use_container_width=True)
+                st.dataframe(low_stock, width='stretch')
             else:
                 st.success("All stock levels are adequate!")
         
@@ -476,22 +476,22 @@ def show_dashboard(company_key, company_name, role):
         col1, col2, col3, col4 = st.columns(4)
         
         with col1:
-            if st.button("➕ New Sale", use_container_width=True):
+            if st.button("➕ New Sale", width='stretch'):
                 st.session_state.selected_module = "POS (Point of Sale)"
                 st.rerun()
         
         with col2:
-            if st.button("📦 Add Inventory", use_container_width=True):
+            if st.button("📦 Add Inventory", width='stretch'):
                 st.session_state.selected_module = "Inventory & Stock"
                 st.rerun()
         
         with col3:
-            if st.button("💰 Process Payroll", use_container_width=True):
+            if st.button("💰 Process Payroll", width='stretch'):
                 st.session_state.selected_module = "Ghana Payroll (SSNIT)"
                 st.rerun()
         
         with col4:
-            if st.button("📊 View Reports", use_container_width=True):
+            if st.button("📊 View Reports", width='stretch'):
                 st.session_state.selected_module = "Financial Intelligence"
                 st.rerun()
         
@@ -549,7 +549,7 @@ else:
                     
                     if trail_data:
                         trail_df = pd.DataFrame(trail_data, columns=['Timestamp', 'Company Key', 'User Role', 'Action', 'Module'])
-                        st.dataframe(trail_df, use_container_width=True)
+                        st.dataframe(trail_df, width='stretch')
                     else:
                         st.info("No audit activity found.")
                 except Exception as e:

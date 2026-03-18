@@ -15,7 +15,7 @@ def get_connection():
         conn = sqlite3.connect("eka_enterprise_v3.db", check_same_thread=False)
         conn.execute("PRAGMA foreign_keys = ON")  # Enable foreign key constraints
         return conn
-    except sqlite3.Error as e:
+    except Exception as e:
         logger.error(f"Database connection error: {e}")
         raise
 
@@ -25,7 +25,7 @@ def log_audit_action(conn, company_key, user_role, action, module_name):
         conn.execute(text("""INSERT INTO audit_logs (company_key, user_role, action, module_name) 
                      VALUES (?,?,?,?)"""), (company_key, user_role, action, module_name))
         conn.commit()
-    except sqlite3.Error as e:
+    except Exception as e:
         logger.error(f"Audit logging error: {e}")
 
 def init_db():
@@ -270,7 +270,7 @@ def init_db():
         conn.commit()
         logger.info("Database structure verified and initialized.")
         
-    except sqlite3.Error as e:
+    except Exception as e:
         logger.error(f"Database initialization error: {e}")
         conn.rollback()
         raise

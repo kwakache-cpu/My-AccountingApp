@@ -4,9 +4,10 @@ import pandas as pd
 import io
 import sqlite3
 from database import get_connection, log_audit_action
-from datetime import datetime
+from datetime import datetime, timedelta
 import logging
 import requests
+from sqlalchemy import text
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -1206,7 +1207,7 @@ def show_fixed_assets(k, r):
             st.info("No fixed assets found.")
         
         conn.close()
-    except sqlite3.Error as e:
+    except Exception as e:
         st.error(f"Failed to load fixed assets: {e}")
         logger.error(f"Fixed assets display error: {e}")
 
@@ -1218,37 +1219,37 @@ def show_audit_trail(k):
         
         # FIXED: Check if user_role column exists, if not use role column
         try:
-            aud_data_raw = conn.execute("""SELECT timestamp, user_role, action, module_name 
-                                 FROM audit_logs WHERE company_key=? 
-                                 ORDER BY timestamp DESC LIMIT 100""", (k,)).fetchall()
+            aud_data_raw = conn.execute(text("""SELECT timestamp, user_role, action, module_name 
+                                 FROM audit_logs WHERE company_key = :key 
+                                 ORDER BY timestamp DESC LIMIT 100"""), {"key": k}).fetchall()
             if aud_data_raw:
                 aud_df = pd.DataFrame(aud_data_raw, columns=['Timestamp', 'User Role', 'Action', 'Module'])
             else:
                 # Fallback: Try without user_role column
-                aud_data_raw = conn.execute("""SELECT timestamp, role, action, module_name 
-                                     FROM audit_logs WHERE company_key=? 
-                                     ORDER BY timestamp DESC LIMIT 100""", (k,)).fetchall()
+                aud_data_raw = conn.execute(text("""SELECT timestamp, role, action, module_name 
+                                     FROM audit_logs WHERE company_key = :key 
+                                     ORDER BY timestamp DESC LIMIT 100"""), {"key": k}).fetchall()
                 if aud_data_raw:
                     aud_df = pd.DataFrame(aud_data_raw, columns=['Timestamp', 'User Role', 'Action', 'Module'])
                 else:
                     aud_df = None
-        except sqlite3.Error:
+        except Exception:
             # If user_role column doesn't exist, try alternative query
-            aud_data_raw = conn.execute("""SELECT timestamp, 'Unknown' as user_role, action, module_name 
-                                 FROM audit_logs WHERE company_key=? 
-                                 ORDER BY timestamp DESC LIMIT 100""", (k,)).fetchall()
+            aud_data_raw = conn.execute(text("""SELECT timestamp, 'Unknown' as user_role, action, module_name 
+                                 FROM audit_logs WHERE company_key = :key 
+                                 ORDER BY timestamp DESC LIMIT 100"""), {"key": k}).fetchall()
             if aud_data_raw:
                 aud_df = pd.DataFrame(aud_data_raw, columns=['Timestamp', 'User Role', 'Action', 'Module'])
             else:
                 aud_df = None
         
         if aud_df is not None and not aud_df.empty:
-            st.dataframe(aud_df, use_container_width=True)
+            st.dataframe(aud_df, width='stretch')
             st.download_button("📥 Download Audit Log", data=get_excel_bin(aud_df), file_name="EKA_Audit_Trail.xlsx")
         else:
             st.info("No audit trail entries found.")
         conn.close()
-    except sqlite3.Error as e:
+    except Exception as e:
         st.error(f"Failed to load audit trail: {e}")
         logger.error(f"Audit trail error: {e}")
 
@@ -1290,7 +1291,7 @@ def check_maintenance_window():
     """Check maintenance status. Returns 'maintenance' if in window, 'warning' if within 3 days, None otherwise."""
     try:
         conn = get_connection()
-        maint = conn.execute("SELECT maintenance_date FROM maintenance_settings WHERE id=1 AND is_active=1").fetchone()
+        maint = conn.execute(text("SELECT maintenance_date FROM maintenance_settings WHERE id=1 AND is_active=1")).fetchone()
         conn.close()
         if maint and maint[0] and maint[0] != 'None':
             maint_date = datetime.fromisoformat(maint[0]).date()
