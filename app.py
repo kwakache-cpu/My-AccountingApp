@@ -12,137 +12,6 @@ import smtplib
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 
-# Check maintenance status
-maintenance_status = check_maintenance_window()
-if maintenance_status == 'maintenance':
-    st.markdown("""
-    <div style='position: fixed; top: 0; left: 0; width: 100%; height: 100%; background-color: #f8f9fa; display: flex; align-items: center; justify-content: center; z-index: 9999;'>
-        <div style='text-align: center; padding: 40px; background: white; border-radius: 15px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); max-width: 500px;'>
-            <h1 style='color: #1f2937; margin-bottom: 20px;'>🏗️ System Upgrade in Progress</h1>
-            <p style='color: #6b7280; font-size: 18px; line-height: 1.6;'>
-                We are currently performing scheduled maintenance to improve your experience. 
-                We will be back online at 02:00 AM GMT. Thank you for your patience.
-            </p>
-        </div>
-    </div>
-    """, unsafe_allow_html=True)
-    st.stop()
-
-# Google Analytics Injection
-def inject_ga():
-    """Inject Google Analytics tracking script."""
-    ga_id = st.secrets.get('GA_MEASUREMENT_ID', '')
-    if not ga_id:
-        return  # Skip if no GA ID
-    
-    demo_event = ""
-    if st.session_state.get('demo_toggle', False) and not st.session_state.get('demo_event_sent', False):
-        demo_event = "gtag('event', 'demo_signup', {});"
-        st.session_state.demo_event_sent = True
-    
-    ga_script = f"""
-    <!-- Google Analytics -->
-    <script async src="https://www.googletagmanager.com/gtag/js?id={ga_id}"></script>
-    <script>
-      window.dataLayer = window.dataLayer || [];
-      function gtag(){{dataLayer.push(arguments);}}
-      gtag('js', new Date());
-      gtag('config', '{ga_id}');
-      {demo_event}
-    </script>
-    """
-    
-    st.components.v1.html(ga_script, height=0)
-
-# Initialize Demo Mode
-if 'demo_mode' not in st.session_state:
-    st.session_state.demo_mode = False
-if 'demo_event_sent' not in st.session_state:
-    st.session_state.demo_event_sent = False
-
-# Payment Verification Logic
-if 'reference' in st.query_params:
-    reference = st.query_params['reference']
-    verification = verify_paystack_payment(reference)
-    if verification.get('verified'):
-        if reference.startswith("ONBOARD-"):
-            # Onboarding payment
-            parts = reference.split("-")
-            company_name = parts[1].replace("_", " ")
-            plan = parts[2]
-            # Determine months based on plan
-            if plan == "Basic":
-                months = 12
-            elif plan == "Premium":
-                months = 18
-            elif plan == "Enterprise":
-                months = 24
-            else:
-                months = 12
-            # Generate a key
-            import uuid
-            company_key = str(uuid.uuid4())[:8].upper()
-            try:
-                conn = get_connection()
-                expiry_date = datetime.now() + relativedelta(months=months)
-                conn.execute(
-                    text("INSERT INTO companies (key, name, admin_email, deployment_status, expiry_date) VALUES (:key, :name, :email, :status, :expiry)"),
-                    {"key": company_key, "name": company_name, "email": verification['email'], "status": "Pending", "expiry": expiry_date.isoformat()}
-                )
-                conn.commit()
-                log_audit_action(conn, company_key, 'System', f'Onboarding payment verified: {reference}', 'Onboarding')
-                st.success(f"Company {company_name} onboarded successfully. Deployment pending.")
-            except Exception as e:
-                st.error(f"Failed to onboard company: {e}")
-                logger.error(f"Onboarding error: {e}")
-        elif reference.startswith("RENEWAL-"):
-            # Renewal payment
-            company_key = reference.split("-")[1]
-            try:
-                conn = get_connection()
-                # Add 12 months to expiry_date
-                new_expiry = datetime.now() + relativedelta(months=12)
-                conn.execute(
-                    text("UPDATE companies SET expiry_date=:expiry WHERE key=:key"),
-                    {"expiry": new_expiry.isoformat(), "key": company_key}
-                )
-                conn.commit()
-                log_audit_action(conn, company_key, 'System', f'License renewal verified: {reference}', 'Renewal')
-                st.success("License Renewed Successfully! Thank you for your continued business.")
-            except Exception as e:
-                st.error(f"Failed to renew license: {e}")
-                logger.error(f"Renewal error: {e}")
-        else:
-            # Existing invoice payment
-            # Find the company_key and amount from sales_invoices
-            try:
-                conn = get_connection()
-                invoice_data = conn.execute(text("SELECT company_key, total_amount FROM sales_invoices WHERE invoice_no=:invoice_no"), {"invoice_no": reference}).fetchone()
-                if invoice_data:
-                    company_key, amount = invoice_data
-                    # Insert Sales voucher
-                    conn.execute(
-                        text("""INSERT INTO vouchers (company_key, date, v_type, ledger, debit, credit, payment_method, narration, ref_no) 
-                                 VALUES (:company_key, :date, :v_type, :ledger, :debit, :credit, :method, :narration, :ref_no)"""),
-                        {
-                            "company_key": company_key, "date": str(datetime.now().date()), "v_type": "Sales", "ledger": "Online Payment",
-                            "debit": 0.0, "credit": amount, "method": "Paystack", "narration": f"Paystack Online Payment: {reference}", "ref_no": reference
-                        }
-                    )
-                    conn.commit()
-                    log_audit_action(conn, company_key, 'System', f'Paystack payment verified: {reference}', 'Payments')
-                    st.balloons()
-                else:
-                    st.error("Invoice not found in database.")
-                conn.close()
-            except Exception as e:
-                st.error(f"Failed to record payment: {e}")
-                logger.error(f"Payment recording error: {e}")
-    else:
-        st.error("Payment verification failed.")
-    # Clear reference from URL
-    st.query_params.clear()
-
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -176,62 +45,28 @@ def check_session_timeout():
             return False
     return True
 
-def enter_demo():
-    """Enter demo mode."""
-    st.session_state.auth = True
-    st.session_state.user = {"key": "DEMO", "name": "Demo Corporation Ltd", "role": "Demo"}
-    st.session_state.demo_mode = True
-    st.session_state.start_time = datetime.now()
-    st.session_state.login_attempts = 0
-    st.rerun()
+def update_activity():
+    """Update last activity timestamp."""
+    st.session_state.last_activity = datetime.now()
 
-def check_license_expiry(company_key):
-    """Check if license is expiring within 7 days. Returns days left or None."""
+def check_maintenance_status():
+    """Check maintenance settings and return status info."""
     try:
         conn = get_connection()
-        expiry = conn.execute("SELECT expiry_date FROM companies WHERE key=?", (company_key,)).fetchone()
+        maint_setting = conn.execute(text("SELECT maintenance_date, is_active FROM maintenance_settings WHERE id = 1")).fetchone()
         conn.close()
-        if expiry and expiry[0]:
-            expiry_date = datetime.fromisoformat(expiry[0])
-            days_left = (expiry_date - datetime.now()).days
-            if days_left <= 7 and days_left >= 0:
-                return days_left
-    except:
-        pass
-    return None
-
-def show_system_status():
-    """Public-facing system status monitoring dashboard."""
-    st.title("🌐 System Status Dashboard")
-    st.markdown("Real-time monitoring of E.K.A Enterprise ERP infrastructure components.")
-    
-    # Status Indicators
-    st.subheader("🟢 System Components")
-    col1, col2, col3 = st.columns(3)
-    
-    with col1:
-        st.metric("API Gateway", "Operational", delta="🟢 Online")
-    with col2:
-        st.metric("Database Engine", "Operational", delta="🟢 Online")
-    with col3:
-        st.metric("Payment Server", "Operational", delta="🟢 Online")
-    
-    st.markdown("---")
-    
-    # Uptime Metric
-    col1, col2 = st.columns(2)
-    with col1:
-        st.subheader("⏱️ Live Uptime")
-        st.metric("System Availability", "99.9%", delta="+0.1% this month")
-    
-    with col2:
-        st.subheader("📋 Past Incidents")
-        incidents_df = pd.DataFrame({
-            'Date': [f"{(datetime.now() - timedelta(days=i)).strftime('%Y-%m-%d')}" for i in range(90)],
-            'Status': ['All Systems Operational'] * 90,
-            'Duration': ['N/A'] * 90
-        })
-        st.dataframe(incidents_df, use_container_width=True, height=300)
+        
+        if maint_setting and maint_setting[1]:  # is_active is True
+            maintenance_date = maint_setting[0]
+            if maintenance_date:
+                return {
+                    'active': True,
+                    'date': maintenance_date
+                }
+        return {'active': False}
+    except Exception as e:
+        logger.error(f"Failed to check maintenance status: {e}")
+        return {'active': False}
 
 def send_maintenance_email(company_email, company_name, message):
     """Send maintenance notice to client."""
@@ -271,60 +106,123 @@ def send_maintenance_email(company_email, company_name, message):
         logger.error(f"Failed to send maintenance email: {e}")
         return False
 
-def check_subscription_expiry():
-    """Check for upcoming subscription expiries and send notices."""
+def check_license_expiry_with_grace(company_key):
+    """Check license expiry with intelligent grace period logic."""
     try:
         conn = get_connection()
-        
-        # Get all companies with subscription expiry dates
-        companies_data = conn.execute("""SELECT key, name, email, subscription_expiry 
-                                     FROM companies WHERE subscription_expiry IS NOT NULL""").fetchall()
-        
-        for company in companies_data:
-            company_key, company_name, company_email, expiry_date = company
-            
-            if expiry_date:
-                expiry = datetime.strptime(expiry_date, '%Y-%m-%d')
-                days_until_expiry = (expiry - datetime.now()).days
-                
-                # Send notice if subscription expires in 30 days or less
-                if days_until_expiry <= 30 and days_until_expiry > 0:
-                    message = f"""
-                    Your E.K.A ERP subscription will expire in {days_until_expiry} days on {expiry_date}.
-                    
-                    Please renew your subscription to avoid service interruption.
-                    
-                    To renew, please contact our support team or login to your client portal.
-                    
-                    Subscription Details:
-                    - Company: {company_name}
-                    - Expiry Date: {expiry_date}
-                    - Days Remaining: {days_until_expiry}
-                    
-                    Thank you for choosing E.K.A Enterprise ERP!
-                    """
-                    
-                    send_maintenance_email(company_email, company_name, message)
-                    
-                    # Log the notice
-                    conn.execute("""INSERT INTO notifications (company_key, notification_type, title, message, priority, expiry_date)
-                                 VALUES (?,?,?,?,?)""",
-                                 (company_key, "Subscription Expiry", "Subscription Renewal Required", 
-                                  message, "High", expiry_date))
-                    conn.commit()
-        
+        company_data = conn.execute(text("SELECT name, subscription_expiry FROM companies WHERE key = :key"), {"key": company_key}).fetchone()
         conn.close()
+        
+        if company_data and company_data[1]:  # subscription_expiry exists
+            expiry_date = datetime.fromisoformat(company_data[1])
+            now = datetime.now()
+            days_until_expiry = (expiry_date - now).days
+            
+            # Return different statuses based on expiry
+            if days_until_expiry < 0:
+                return {
+                    'status': 'expired',
+                    'days_left': abs(days_until_expiry),
+                    'company_name': company_data[0],
+                    'expiry_date': expiry_date
+                }
+            elif days_until_expiry <= 7:
+                return {
+                    'status': 'warning',
+                    'days_left': days_until_expiry,
+                    'company_name': company_data[0],
+                    'expiry_date': expiry_date
+                }
+            else:
+                return {
+                    'status': 'active',
+                    'days_left': days_until_expiry,
+                    'company_name': company_data[0],
+                    'expiry_date': expiry_date
+                }
+        
+        return {'status': 'unknown'}
     except Exception as e:
-        logger.error(f"Failed to check subscription expiry: {e}")
+        logger.error(f"Failed to check license expiry: {e}")
+        return {'status': 'error'}
+
+def submit_payment_reference(company_key, reference, amount, payment_method):
+    """Submit payment reference for admin approval."""
+    try:
+        conn = get_connection()
+        conn.execute(text("""INSERT INTO pending_approvals 
+                         (company_key, payment_reference, amount, payment_method) 
+                         VALUES (:company_key, :reference, :amount, :method)"""),
+                 {"company_key": company_key, "reference": reference, "amount": amount, "method": payment_method})
+        conn.commit()
+        log_audit_action(conn, company_key, 'System', f'Submitted payment reference: {reference}', 'Payment')
+        conn.close()
+        return True
+    except Exception as e:
+        logger.error(f"Failed to submit payment reference: {e}")
+        return False
+
+def update_license_expiry(company_key, months):
+    """Update license expiry date using relativedelta."""
+    try:
+        conn = get_connection()
+        new_expiry = datetime.now() + relativedelta(months=+months)
+        conn.execute(text("UPDATE companies SET subscription_expiry = :expiry WHERE key = :key"),
+                 {"expiry": new_expiry.isoformat(), "key": company_key})
+        conn.commit()
+        log_audit_action(conn, company_key, 'System', f'License extended by {months} months', 'License Management')
+        conn.close()
+        return new_expiry
+    except Exception as e:
+        logger.error(f"Failed to update license expiry: {e}")
+        return None
+
+def enter_demo():
+    """Enter demo mode."""
+    st.session_state.auth = True
+    st.session_state.user = {"key": "DEMO", "name": "Demo Corporation Ltd", "role": "Demo"}
+    st.session_state.demo_mode = True
+    st.session_state.start_time = datetime.now()
+    st.session_state.login_attempts = 0
+    st.rerun()
+
+def show_system_status():
+    """Public-facing system status monitoring dashboard."""
+    st.title("🌐 System Status Dashboard")
+    st.markdown("Real-time monitoring of E.K.A Enterprise ERP infrastructure components.")
+    
+    # Status Indicators
+    st.subheader("🟢 System Components")
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        st.metric("API Gateway", "Operational", delta="🟢 Online")
+    with col2:
+        st.metric("Database Engine", "Operational", delta="🟢 Online")
+    with col3:
+        st.metric("Payment Server", "Operational", delta="🟢 Online")
+    
+    st.markdown("---")
+    
+    # Uptime Metric
+    col1, col2 = st.columns(2)
+    with col1:
+        st.subheader("⏱️ Live Uptime")
+        st.metric("System Availability", "99.9%", delta="+0.1% this month")
+    
+    with col2:
+        st.subheader("📋 Past Incidents")
+        incidents_df = pd.DataFrame({
+            'Date': [f"{(datetime.now() - timedelta(days=i)).strftime('%Y-%m-%d')}" for i in range(90)],
+            'Status': ['All Systems Operational'] * 90,
+            'Duration': ['N/A'] * 90
+        })
+        st.dataframe(incidents_df, use_container_width=True, height=300)
 
 def login_ui():
     """Secure Multi-Tier Authentication Interface with Enhanced Security."""
     st.markdown("<h1 style='text-align: center; color: #1E3A8A;'>🛡️ E.K.A ENTERPRISE ERP</h1>", unsafe_allow_html=True)
     st.markdown("<hr>", unsafe_allow_html=True)
-    
-    # Maintenance Warning Banner
-    if maintenance_status == 'warning':
-        st.info("🛠️ Scheduled Maintenance: We will be upgrading our services soon. The system may be temporarily offline during maintenance window.")
     
     # Check for brute force attempts
     if st.session_state.login_attempts >= 5:
@@ -356,35 +254,56 @@ def login_ui():
                         st.rerun()
                     
                     # Master Admin Check
-                    admin = conn.execute("SELECT key, name FROM companies WHERE key=?", (license_key,)).fetchone()
+                    admin = conn.execute(text("SELECT key, name FROM companies WHERE key = :key"), {"key": license_key}).fetchone()
                     if admin:
-                        st.session_state.auth = True
-                        st.session_state.user = {"key": admin[0], "name": admin[1], "role": "Master Admin"}
-                        log_audit_action(conn, admin[0], "Master Admin", "Successful login", "Authentication")
-                        conn.close()
-                        st.session_state.login_attempts = 0
-                        st.rerun()
-                    
-                    # Sub-Admin/Staff Check
-                    sub = conn.execute("SELECT key, name FROM companies WHERE sub_admin_key=?", (license_key,)).fetchone()
-                    if sub:
-                        st.session_state.auth = True
-                        st.session_state.user = {"key": sub[0], "name": sub[1], "role": "Sub-Admin"}
-                        log_audit_action(conn, sub[0], "Sub-Admin", "Successful login", "Authentication")
-                        conn.close()
-                        st.session_state.login_attempts = 0
-                        st.rerun()
+                        # Check license expiry with grace period
+                        license_status = check_license_expiry_with_grace(admin[0])
                         
-                    if license_key.endswith("-staff"):
-                        pure_k = license_key.replace("-staff", "")
-                        staff = conn.execute("SELECT key, name FROM companies WHERE key=?", (pure_k,)).fetchone()
-                        if staff:
+                        # Allow login if not expired
+                        if license_status['status'] != 'expired':
                             st.session_state.auth = True
-                            st.session_state.user = {"key": staff[0], "name": staff[1], "role": "Staff"}
-                            log_audit_action(conn, staff[0], "Staff", "Successful login", "Authentication")
+                            st.session_state.user = {"key": admin[0], "name": admin[1], "role": "Master Admin"}
+                            log_audit_action(conn, admin[0], "Master Admin", "Successful login", "Authentication")
                             conn.close()
                             st.session_state.login_attempts = 0
                             st.rerun()
+                        else:
+                            st.error(f"Your license expired {license_status['days_left']} days ago. Please renew to access the system.")
+                    
+                    # Sub-Admin/Staff Check
+                    sub = conn.execute(text("SELECT key, name FROM companies WHERE sub_admin_key = :key"), {"key": license_key}).fetchone()
+                    if sub:
+                        # Check license expiry with grace period
+                        license_status = check_license_expiry_with_grace(sub[0])
+                        
+                        # Allow login if not expired
+                        if license_status['status'] != 'expired':
+                            st.session_state.auth = True
+                            st.session_state.user = {"key": sub[0], "name": sub[1], "role": "Sub-Admin"}
+                            log_audit_action(conn, sub[0], "Sub-Admin", "Successful login", "Authentication")
+                            conn.close()
+                            st.session_state.login_attempts = 0
+                            st.rerun()
+                        else:
+                            st.error(f"Your license expired {license_status['days_left']} days ago. Please renew to access the system.")
+                        
+                    if license_key.endswith("-staff"):
+                        pure_k = license_key.replace("-staff", "")
+                        staff = conn.execute(text("SELECT key, name FROM companies WHERE key = :key"), {"key": pure_k}).fetchone()
+                        if staff:
+                            # Check license expiry with grace period
+                            license_status = check_license_expiry_with_grace(staff[0])
+                            
+                            # Allow login if not expired
+                            if license_status['status'] != 'expired':
+                                st.session_state.auth = True
+                                st.session_state.user = {"key": staff[0], "name": staff[1], "role": "Staff"}
+                                log_audit_action(conn, staff[0], "Staff", "Successful login", "Authentication")
+                                conn.close()
+                                st.session_state.login_attempts = 0
+                                st.rerun()
+                            else:
+                                st.error(f"Your license expired {license_status['days_left']} days ago. Please renew to access the system.")
                     
                     # Failed login attempt
                     st.session_state.login_attempts += 1
@@ -398,6 +317,25 @@ def login_ui():
         elif st.session_state.get('demo_toggle'):
             st.button('🚀 Enter Demo ERP', on_click=enter_demo)
 
+        # License Renewal Section
+        with st.expander("🔄 Renew License", expanded=False):
+            st.subheader("License Renewal Portal")
+            st.info("Submit your payment reference below for manual verification and approval.")
+            
+            payment_ref = st.text_input("Payment Reference", key="renewal_payment_ref")
+            payment_amount = st.number_input("Amount Paid (GHS)", min_value=0.0, key="renewal_amount")
+            payment_method = st.selectbox("Payment Method", ["Bank Transfer", "Mobile Money", "Paystack", "Cash"], key="renewal_method")
+            
+            if st.button("Submit Payment Reference", key="submit_renewal_ref"):
+                if payment_ref and payment_amount > 0:
+                    if submit_payment_reference("TEMP", payment_ref, payment_amount, payment_method):
+                        st.success("Payment reference submitted successfully! Your license will be activated after admin approval.")
+                        st.info("You will receive your Main Admin Passcode via email once payment is verified.")
+                    else:
+                        st.error("Failed to submit payment reference. Please try again.")
+                else:
+                    st.error("Please fill in all required fields.")
+
     with t2:
         st.subheader("Cloud Recovery Protocol")
         rec_name = st.text_input("Company Registered Name", key="v3_rec_name_input")
@@ -405,13 +343,13 @@ def login_ui():
         if st.button("Retrieve Master Key", key="v3_rec_action_btn"):
             try:
                 conn = get_connection()
-                res = conn.execute("SELECT key FROM companies WHERE name=? AND recovery_answer=?", (rec_name, rec_ans)).fetchone()
+                res = conn.execute(text("SELECT key FROM companies WHERE name = :name AND recovery_answer = :answer"), 
+                                {"name": rec_name, "answer": rec_ans}).fetchone()
                 if res: 
                     st.success(f"Identity Verified. Your Master Key is: {res[0]}")
                     log_audit_action(conn, res[0], "Recovery", "Successful key recovery", "Authentication")
                 else: 
                     st.error("Verification failed. Data does not match our records.")
-                    log_audit_action(conn, "SYSTEM", "Recovery", f"Failed recovery attempt for {rec_name}", "Authentication")
                 conn.close()
             except Exception as e:
                 st.error("System error during recovery. Please try again.")
@@ -427,26 +365,150 @@ def login_ui():
     st.markdown("---")
     st.toggle('🚀 Try Demo Mode', key='demo_toggle')
 
-def update_activity():
-    """Update last activity timestamp."""
-    st.session_state.last_activity = datetime.now()
+# Dashboard Module (NEW FUNCTION)
+def show_dashboard(company_key, company_name, role):
+    """Enhanced company dashboard with key metrics and insights."""
+    st.header(f"📊 Business Dashboard: {company_name}")
+    
+    # Check maintenance status and show warning if active
+    maintenance_status = check_maintenance_status()
+    if maintenance_status['active']:
+        st.warning(f"⚠️ UPCOMING MAINTENANCE: {maintenance_status['date']}")
+    
+    # Check license expiry and show info if within 7 days
+    license_status = check_license_expiry_with_grace(company_key)
+    if license_status['status'] == 'warning':
+        st.info(f"Your subscription ends in {license_status['days_left']} days. Please renew to avoid interruption.")
+    elif license_status['status'] == 'expired':
+        st.error(f"Your subscription expired {license_status['days_left']} days ago. Please renew to restore access.")
+    
+    if st.session_state.get('demo_mode', False):
+        # Demo Mode Dashboard
+        col1, col2, col3, col4 = st.columns(4)
+        col1.metric("Inventory Value", "GHS 25,000.00")
+        col2.metric("Month Sales", "GHS 15,000.00")
+        col3.metric("Employees", "5")
+        col4.metric("Asset Value", "GHS 50,000.00")
+        
+        st.markdown("---")
+        
+        # Recent Activity
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.subheader("📈 Recent Transactions")
+            demo_txns = pd.DataFrame({
+                'Date': ['2026-03-15', '2026-03-14', '2026-03-13'],
+                'Type': ['Sales', 'Purchase', 'Sales'],
+                'Description': ['Product Sale', 'Office Supplies', 'Service Revenue'],
+                'Amount': [5000.0, 2000.0, 3000.0]
+            })
+            st.dataframe(demo_txns, use_container_width=True)
+        
+        with col2:
+            st.subheader("📦 Low Stock Items")
+            demo_stock = pd.DataFrame({
+                'Item': ['Product A', 'Product B'],
+                'Quantity': [5, 8],
+                'Unit': ['pcs', 'pcs']
+            })
+            st.dataframe(demo_stock, use_container_width=True)
+        
+        return
+    
+    try:
+        conn = get_connection()
+        
+        # Key Business Metrics
+        col1, col2, col3, col4 = st.columns(4)
+        
+        # Total Inventory Value
+        inv_val = conn.execute(text("SELECT SUM(qty * cost_price) FROM inventory WHERE company_key = :key"), {"key": company_key}).fetchone()[0] or 0
+        col1.metric("Inventory Value", f"GHS {inv_val:.2f}")
+        
+        # Total Sales (Current Month)
+        current_month = datetime.now().strftime('%Y-%m')
+        month_sales = conn.execute(text("""SELECT SUM(credit) FROM vouchers 
+                                    WHERE company_key = :key AND v_type = 'Sales' 
+                                    AND date LIKE :month"""), {"key": company_key, "month": f"{current_month}%"}).fetchone()[0] or 0
+        col2.metric("Month Sales", f"GHS {month_sales:.2f}")
+        
+        # Total Employees
+        emp_count = conn.execute(text("SELECT COUNT(DISTINCT emp_name) FROM payroll WHERE company_key = :key"), {"key": company_key}).fetchone()[0] or 0
+        col3.metric("Employees", str(emp_count))
+        
+        # Fixed Assets Value
+        fa_val = conn.execute(text("SELECT SUM(book_value) FROM fixed_assets WHERE company_key = :key"), {"key": company_key}).fetchone()[0] or 0
+        col4.metric("Asset Value", f"GHS {fa_val:.2f}")
+        
+        st.markdown("---")
+        
+        # Recent Activity
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.subheader("📈 Recent Transactions")
+            recent_data = conn.execute(text("""SELECT date, v_type, narration, 
+                                        CASE WHEN credit > 0 THEN credit ELSE debit END as amount
+                                        FROM vouchers WHERE company_key = :key 
+                                        ORDER BY date DESC LIMIT 10"""), {"key": company_key}).fetchall()
+            
+            if recent_data:
+                recent_txns = pd.DataFrame(recent_data, columns=['Date', 'Type', 'Description', 'Amount'])
+                st.dataframe(recent_txns, use_container_width=True)
+            else:
+                st.info("No recent transactions found.")
+        
+        with col2:
+            st.subheader("📦 Low Stock Items")
+            low_stock_data = conn.execute(text("""SELECT item_name, qty, unit FROM inventory 
+                                           WHERE company_key = :key AND qty <= 10 
+                                           ORDER BY qty ASC LIMIT 10"""), {"key": company_key}).fetchall()
+            
+            if low_stock_data:
+                low_stock = pd.DataFrame(low_stock_data, columns=['Item', 'Quantity', 'Unit'])
+                st.dataframe(low_stock, use_container_width=True)
+            else:
+                st.success("All stock levels are adequate!")
+        
+        # Quick Actions
+        st.subheader("⚡ Quick Actions")
+        col1, col2, col3, col4 = st.columns(4)
+        
+        with col1:
+            if st.button("➕ New Sale", use_container_width=True):
+                st.session_state.selected_module = "POS (Point of Sale)"
+                st.rerun()
+        
+        with col2:
+            if st.button("📦 Add Inventory", use_container_width=True):
+                st.session_state.selected_module = "Inventory & Stock"
+                st.rerun()
+        
+        with col3:
+            if st.button("💰 Process Payroll", use_container_width=True):
+                st.session_state.selected_module = "Ghana Payroll (SSNIT)"
+                st.rerun()
+        
+        with col4:
+            if st.button("📊 View Reports", use_container_width=True):
+                st.session_state.selected_module = "Financial Intelligence"
+                st.rerun()
+        
+        conn.close()
+        
+    except Exception as e:
+        st.error("Failed to load dashboard data")
+        logger.error(f"Dashboard error: {e}")
 
 # Main application flow
 if not st.session_state.auth or not check_session_timeout():
     login_ui()
 else:
     update_activity()  # Update activity on each interaction
-    
-    # Inject Google Analytics
-    inject_ga()
-    
     u = st.session_state.user
     
     if u['role'] == "Dev":
-        # Maintenance Banner
-        if maintenance_status == 'warning':
-            st.info(f"🛠️ Scheduled Maintenance: We will be upgrading our services on [scheduled date] from 12:00 AM to 02:00 AM GMT. The system may be temporarily offline during this window.")
-        
         # Gatekeeper Dashboard with Enhanced Metrics
         st.title("👑 Gatekeeper System Dashboard")
         
@@ -478,31 +540,21 @@ else:
                 m3.metric("Monthly Revenue", f"GHS {monthly_revenue:.2f}")
                 m4.metric("System Uptime", "100%")
                 
-                # Global Forensic Trail (Dev only)
+                # Global Forensic Trail (Dev only) - Enhanced with error handling
                 st.markdown("---")
                 st.subheader("🛡️ Global Forensic Trail")
                 try:
-                    # Wrap the read operation so the app continues even if the table is missing
-                    try:
-                        trail_df = pd.read_sql(
-                            text(
-                                "SELECT timestamp, company_key, \"user\", action, details "
-                                "FROM audit_logs ORDER BY timestamp DESC LIMIT 50"
-                            ),
-                            conn,
-                        )
-                    except Exception as e:
-                        logger.error(f"Failed to read audit_logs table: {e}")
-                        trail_df = pd.DataFrame()
-
-                    if not trail_df.empty:
+                    trail_data = conn.execute(text("""SELECT timestamp, company_key, user_role, action, module_name 
+                                                FROM audit_logs ORDER BY timestamp DESC LIMIT 50""")).fetchall()
+                    
+                    if trail_data:
+                        trail_df = pd.DataFrame(trail_data, columns=['Timestamp', 'Company Key', 'User Role', 'Action', 'Module'])
                         st.dataframe(trail_df, use_container_width=True)
                     else:
                         st.info("No audit activity found.")
                 except Exception as e:
                     logger.error(f"Failed to load audit trail: {e}")
-                    st.info("Unable to load global audit trail.")
-
+                
                 st.markdown("---")
                 st.subheader("🚀 Manual License Deployment")
                 with st.form("manual_deploy"):
@@ -513,19 +565,22 @@ else:
                     if submitted:
                         if company_name:
                             key = hashlib.md5(company_name.encode()).hexdigest()[:10]
-                            expiry_date = (date.today() + relativedelta(months=+duration_months)).isoformat()
-                            try:
-                                conn.execute(
-                                    text("INSERT INTO companies (key, name, expiry_date, status) VALUES (:key, :name, :expiry, :status)"),
-                                    {"key": key, "name": company_name, "expiry": expiry_date, "status": "Active"}
-                                )
-                                conn.commit()
-                                st.success(f"License deployed for {company_name}")
-                                log_audit_action(conn, 'SYSTEM', 'Dev', f'Manual license deployment for {company_name}', 'System Admin')
-                            except Exception as e:
-                                st.error(f"Failed to deploy: {e}")
+                            # Auto-update expiry date using relativedelta
+                            new_expiry = update_license_expiry(key, duration_months)
+                            
+                            if new_expiry:
+                                try:
+                                    conn.execute(text("INSERT INTO companies (key, name, subscription_expiry, status) VALUES (:key, :name, :expiry, :status)"),
+                                             {"key": key, "name": company_name, "expiry": new_expiry.isoformat(), "status": "Active"})
+                                    conn.commit()
+                                    st.success(f"License deployed for {company_name} until {new_expiry.date()}")
+                                    log_audit_action(conn, 'SYSTEM', 'Dev', f'Manual license deployment for {company_name}', 'System Admin')
+                                except Exception as e:
+                                    st.error(f"Failed to deploy license: {e}")
+                            else:
+                                st.error("Failed to calculate expiry date.")
                         else:
-                            st.error("Company Name is required")
+                            st.error("Company Name is required.")
 
                 conn.close()
 
@@ -544,11 +599,11 @@ else:
                                c.created_at AS created_date,
                                c.status AS account_status,
                                c.deployment_status,
-                               c.subscription_end_date,
+                               c.subscription_expiry,
                                COALESCE(SUM(v.credit), 0) AS total_revenue_collected
                         FROM companies c
                         LEFT JOIN vouchers v ON c.key = v.company_key AND v.v_type = 'Sales'
-                        GROUP BY c.key, c.name, c.created_at, c.status, c.deployment_status, c.subscription_end_date
+                        GROUP BY c.key, c.name, c.created_at, c.status, c.deployment_status, c.subscription_expiry
                         ORDER BY c.name
                         """,
                         conn
@@ -567,13 +622,13 @@ else:
                             st.write(f"**{company['company_name']}** - Created: {company['created_date']}")
                         with col2:
                             if st.button(f"🚀 Deploy Now", key=f"deploy_{company['company_name']}"):
-                                conn.execute("UPDATE companies SET deployment_status='Live' WHERE name=?", (company['company_name'],))
+                                conn.execute(text("UPDATE companies SET deployment_status = 'Live' WHERE name = :name"), 
+                                         {"name": company['company_name']})
                                 conn.commit()
                                 st.success(f"Company {company['company_name']} deployed successfully!")
                                 log_audit_action(conn, 'SYSTEM', 'Dev', f'Deployed company: {company["company_name"]}', 'System Admin')
                                 # Simulate email
                                 st.info(f"Success email sent to {company['company_name']} admin.")
-
                 conn.close()
             except Exception as e:
                 st.error(f"Failed to load client portfolio: {e}")
@@ -585,19 +640,20 @@ else:
                 conn = get_connection()
                 # Get all companies with expiry dates
                 try:
-                    companies_df = pd.read_sql("""
-                        SELECT c.key, c.name, c.expiry_date, c.status
-                        FROM companies c
-                        ORDER BY c.expiry_date ASC
-                    """, conn)
+                    companies_df = pd.read_sql(
+                        text("""
+                            SELECT c.key, c.name, c.subscription_expiry, c.status
+                            FROM companies c
+                            ORDER BY c.subscription_expiry ASC
+                        """), conn)
                 except Exception as e:
                     logger.error(f"Failed to read companies_df: {e}")
                     companies_df = pd.DataFrame()
                 
                 # Calculate days remaining
                 now = datetime.now()
-                companies_df['expiry_date'] = pd.to_datetime(companies_df['expiry_date'])
-                companies_df['days_remaining'] = (companies_df['expiry_date'] - now).dt.days
+                companies_df['subscription_expiry'] = pd.to_datetime(companies_df['subscription_expiry'])
+                companies_df['days_remaining'] = (companies_df['subscription_expiry'] - now).dt.days
                 
                 # Color coding function
                 def color_rows(row):
@@ -625,14 +681,13 @@ else:
                 if st.button("Extend License", key="extend_license_btn"):
                     if selected_company:
                         # Get current expiry
-                        current_expiry = companies_df[companies_df['name'] == selected_company]['expiry_date'].iloc[0]
-                        new_expiry = current_expiry + timedelta(days=extend_months * 30)  # Approximate months
+                        current_expiry = companies_df[companies_df['name'] == selected_company]['subscription_expiry'].iloc[0]
+                        new_expiry = update_license_expiry(selected_company, extend_months)
                         
-                        conn.execute("UPDATE companies SET expiry_date=? WHERE name=?", (new_expiry.isoformat(), selected_company))
-                        conn.commit()
-                        st.success(f"License for {selected_company} extended to {new_expiry.date()}")
-                        log_audit_action(conn, 'SYSTEM', 'Dev', f'Manual license extension for {selected_company} by {extend_months} months', 'System Admin')
-                        st.rerun()
+                        if new_expiry:
+                            st.success(f"License for {selected_company} extended to {new_expiry.date()}")
+                            log_audit_action(conn, 'SYSTEM', 'Dev', f'Manual license extension for {selected_company} by {extend_months} months', 'System Admin')
+                            st.rerun()
                 
                 conn.close()
             except Exception as e:
@@ -690,11 +745,11 @@ else:
         """, unsafe_allow_html=True)
         
         # License Expiry Check
-        days_left = check_license_expiry(u['key'])
-        if days_left is not None:
+        days_left = check_license_expiry_with_grace(u['key'])
+        if days_left['status'] == 'warning':
             col1, col2 = st.columns([4, 1])
             with col1:
-                st.warning(f"⚠️ Your license expires in {days_left} days. Please renew to avoid service interruption.")
+                st.warning(f"⚠️ Your license expires in {days_left['days_left']} days. Please renew to avoid service interruption.")
             with col2:
                 if st.button("Renew Now", key="renew_license"):
                     # Trigger renewal payment
@@ -753,96 +808,3 @@ else:
         st.session_state.user = None
         st.session_state.login_attempts = 0
         st.rerun()
-
-# Dashboard Module (NEW FUNCTION)
-def show_dashboard(company_key, company_name, role):
-    """Enhanced company dashboard with key metrics and insights."""
-    st.header(f"📊 Business Dashboard: {company_name}")
-    
-    try:
-        conn = get_connection()
-        
-        # Key Business Metrics
-        col1, col2, col3, col4 = st.columns(4)
-        
-        # Total Inventory Value
-        inv_val = conn.execute("SELECT SUM(qty * cost_price) FROM inventory WHERE company_key=?", (company_key,)).fetchone()[0] or 0
-        col1.metric("Inventory Value", f"GHS {inv_val:.2f}")
-        
-        # Total Sales (Current Month)
-        current_month = datetime.now().strftime('%Y-%m')
-        month_sales = conn.execute("""SELECT SUM(credit) FROM vouchers 
-                                    WHERE company_key=? AND v_type='Sales' 
-                                    AND date LIKE ?""", (company_key, f"{current_month}%")).fetchone()[0] or 0
-        col2.metric("Month Sales", f"GHS {month_sales:.2f}")
-        
-        # Total Employees
-        emp_count = conn.execute("SELECT COUNT(DISTINCT emp_name) FROM payroll WHERE company_key=?", (company_key,)).fetchone()[0] or 0
-        col3.metric("Employees", str(emp_count))
-        
-        # Fixed Assets Value
-        fa_val = conn.execute("SELECT SUM(book_value) FROM fixed_assets WHERE company_key=?", (company_key,)).fetchone()[0] or 0
-        col4.metric("Asset Value", f"GHS {fa_val:.2f}")
-        
-        st.markdown("---")
-        
-        # Recent Activity
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            st.subheader("📈 Recent Transactions")
-            # FIXED: Use direct SQL instead of pd.read_sql
-            recent_data = conn.execute("""SELECT date, v_type, narration, 
-                                        CASE WHEN credit > 0 THEN credit ELSE debit END as amount
-                                        FROM vouchers WHERE company_key=? 
-                                        ORDER BY date DESC LIMIT 10""", (company_key,)).fetchall()
-            
-            if recent_data:
-                # Convert to DataFrame manually
-                recent_txns = pd.DataFrame(recent_data, columns=['Date', 'Type', 'Description', 'Amount'])
-                st.dataframe(recent_txns, use_container_width=True)
-            else:
-                st.info("No recent transactions found.")
-        
-        with col2:
-            st.subheader("📦 Low Stock Items")
-            # FIXED: Use direct SQL instead of pd.read_sql
-            low_stock_data = conn.execute("""SELECT item_name, qty, unit FROM inventory 
-                                           WHERE company_key=? AND qty <= 10 
-                                           ORDER BY qty ASC LIMIT 10""", (company_key,)).fetchall()
-            
-            if low_stock_data:
-                low_stock = pd.DataFrame(low_stock_data, columns=['Item', 'Quantity', 'Unit'])
-                st.dataframe(low_stock, use_container_width=True)
-            else:
-                st.success("All stock levels are adequate!")
-        
-        # Quick Actions
-        st.subheader("⚡ Quick Actions")
-        col1, col2, col3, col4 = st.columns(4)
-        
-        with col1:
-            if st.button("➕ New Sale", use_container_width=True):
-                st.session_state.selected_module = "POS (Point of Sale)"
-                st.rerun()
-        
-        with col2:
-            if st.button("📦 Add Inventory", use_container_width=True):
-                st.session_state.selected_module = "Inventory & Stock"
-                st.rerun()
-        
-        with col3:
-            if st.button("💰 Process Payroll", use_container_width=True):
-                st.session_state.selected_module = "Ghana Payroll (SSNIT)"
-                st.rerun()
-        
-        with col4:
-            if st.button("📊 View Reports", use_container_width=True):
-                st.session_state.selected_module = "Financial Intelligence"
-                st.rerun()
-        
-        conn.close()
-        
-    except sqlite3.Error as e:
-        st.error("Failed to load dashboard data")
-        logger.error(f"Dashboard error: {e}")

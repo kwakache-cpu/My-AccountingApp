@@ -3,6 +3,7 @@ import sqlite3
 import os
 from datetime import datetime
 import logging
+from sqlalchemy import text
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -21,8 +22,8 @@ def get_connection():
 def log_audit_action(conn, company_key, user_role, action, module_name):
     """Log audit trail entries for security and compliance."""
     try:
-        conn.execute("""INSERT INTO audit_logs (company_key, user_role, action, module_name) 
-                     VALUES (?,?,?,?)""", (company_key, user_role, action, module_name))
+        conn.execute(text("""INSERT INTO audit_logs (company_key, user_role, action, module_name) 
+                     VALUES (?,?,?,?)"""), (company_key, user_role, action, module_name))
         conn.commit()
     except sqlite3.Error as e:
         logger.error(f"Audit logging error: {e}")
@@ -243,6 +244,27 @@ def init_db():
                       is_read BOOLEAN DEFAULT 0,
                       expiry_date TEXT,
                       created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                      FOREIGN KEY (company_key) REFERENCES companies(key))''')
+
+        # 15. Maintenance Settings (NEW for Gatekeeper)
+        c.execute('''CREATE TABLE IF NOT EXISTS maintenance_settings 
+                     (id INTEGER PRIMARY KEY,
+                      maintenance_date TEXT,
+                      is_active BOOLEAN DEFAULT 0,
+                      created_at DATETIME DEFAULT CURRENT_TIMESTAMP)''')
+
+        # 16. Pending Approvals (NEW for Payment References)
+        c.execute('''CREATE TABLE IF NOT EXISTS pending_approvals 
+                     (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                      company_key TEXT,
+                      payment_reference TEXT,
+                      amount REAL,
+                      payment_method TEXT,
+                      submitted_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                      status TEXT DEFAULT 'Pending',
+                      approved_at DATETIME,
+                      approved_by TEXT,
+                      notes TEXT,
                       FOREIGN KEY (company_key) REFERENCES companies(key))''')
 
         conn.commit()
