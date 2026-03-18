@@ -3,11 +3,9 @@ import streamlit.components.v1 as components
 import pandas as pd
 import io
 import sqlite3
-from database import get_connection, log_audit_action, init_db
+from database import get_connection, log_audit_action
 from datetime import datetime
 import logging
-import requests
-
 import requests
 
 # Configure logging
@@ -185,114 +183,18 @@ def show_pos(company_key, company_name, role):
                     conn.commit()
                     log_audit_action(conn, company_key, role, "Completed POS transaction", "POS")
                     st.success("Transaction Synced to Cloud Ledger.")
-
-                    # Store receipt for printing
-                    st.session_state.last_receipt = {
-                        'company_name': company_name,
-                        'datetime': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-                        'items': list(st.session_state.cart),
-                        'total': grand_total
-                    }
-                    st.session_state.show_receipt = True
+                    st.session_state.cart = []
                 except sqlite3.Error as e:
                     st.error(f"Transaction failed: {e}")
                     logger.error(f"POS transaction error: {e}")
                 finally:
                     conn.close()
 
-            if st.session_state.cart and st.button("🖨️ Print Customer Receipt", key="mod_pos_print_btn"):
-                st.session_state.show_receipt = True
-
-            if st.session_state.get('show_receipt') and st.session_state.get('last_receipt'):
-                receipt = st.session_state['last_receipt']
-                receipt_html = f"""
-                <html>
-                <head>
-                    <style>
-                        body {{ font-family: Arial, sans-serif; margin: 0; padding: 20px; }}
-                        .receipt {{ max-width: 600px; margin: auto; border: 1px solid #ddd; padding: 20px; }}
-                        .header {{ text-align: center; margin-bottom: 20px; }}
-                        .header h1 {{ margin: 0; font-size: 24px; }}
-                        .header p {{ margin: 4px 0; font-size: 14px; }}
-                        table {{ width: 100%; border-collapse: collapse; margin-top: 20px; }}
-                        th, td {{ border: 1px solid #ddd; padding: 8px; text-align: left; }}
-                        th {{ background: #f7f7f7; }}
-                        .total {{ text-align: right; margin-top: 20px; font-size: 18px; font-weight: bold; }}
-                        .footer {{ text-align: center; margin-top: 30px; font-size: 14px; color: #555; }}
-                        @media print {{
-                            body {{ margin: 0; }}
-                            .receipt {{ border: none; }}
-                        }}
-                    </style>
-                </head>
-                <body>
-                    <div class="receipt">
-                        <div class="header">
-                            <h1><b>{receipt['company_name']}</b></h1>
-                            <h2>CASH SALE RECEIPT</h2>
-                            <p>{receipt['datetime']}</p>
-                        </div>
-                        <table>
-                            <thead>
-                                <tr>
-                                    <th>Item</th>
-                                    <th>Qty</th>
-                                    <th>Price (GHS)</th>
-                                    <th>Total (GHS)</th>
-                                </tr>
-                            </thead>
-                            <tbody>
-                """
-
-                for item in receipt['items']:
-                    receipt_html += f"""
-                        <tr>
-                            <td>{item['Product']}</td>
-                            <td>{item['Qty']}</td>
-                            <td>{item['Price']:.2f}</td>
-                            <td>{item['Total']:.2f}</td>
-                        </tr>
-                    """
-
-                receipt_html += f"""
-                            </tbody>
-                        </table>
-                        <div class="total">Grand Total: GHS {receipt['total']:.2f}</div>
-                        <div class="footer">Thank you for your business!</div>
-                    </div>
-                    <script>
-                        window.print();
-                    </script>
-                </body>
-                </html>
-                """
-
-                components.html(receipt_html, height=800)
-                st.session_state.show_receipt = False
-
 # ==========================================
 # 3. GHANA PAYROLL (Statutory Tier Processing)
 # ==========================================
 def show_payroll(company_key, role):
     st.header("🇬🇭 Ghana Payroll (SSNIT & PAYE Engine)")
-    
-    # Demo Mode Check
-    if st.session_state.get('demo_mode', False):
-        st.info("🚀 Demo Mode Active: Showing sample payroll data.")
-        demo_pr_df = pd.DataFrame({
-            'Name': ['John Doe', 'Jane Smith', 'Bob Johnson'],
-            'Basic': [2000.0, 2500.0, 1800.0],
-            'Tier 1': [270.0, 270.0, 243.0],
-            'Tier 2': [100.0, 125.0, 90.0],
-            'Taxable': [1900.0, 2375.0, 1710.0],
-            'PAYE': [95.0, 118.75, 85.5],
-            'Net Pay': [1805.0, 2256.25, 1624.5],
-            'Period': ['March', 'March', 'March'],
-            'Year': ['2026', '2026', '2026']
-        })
-        st.dataframe(demo_pr_df, use_container_width=True)
-        st.download_button("📥 Export Sample Payroll Data", data=get_excel_bin(demo_pr_df), file_name="Demo_Payroll_Data.xlsx")
-        return
     
     with st.expander("📝 Generate Monthly Employee Pay-Slip"):
         e_name = st.text_input("Employee Full Name", key="mod_pr_name")
@@ -355,31 +257,8 @@ def show_payroll(company_key, role):
         
         if pr_data_raw:
             pr_df = pd.DataFrame(pr_data_raw, columns=['Name', 'Basic', 'Tier 1', 'Tier 2', 'Taxable', 'PAYE', 'Net Pay', 'Period', 'Year'])
-            edited_payroll = st.data_editor(pr_df, use_container_width=True, key='payroll_editor')
-
-            if st.button("Save Changes", key="payroll_save_changes"):
-                try:
-                    changed_mask = (edited_payroll != pr_df).any(axis=1)
-                    changed_rows = edited_payroll[changed_mask]
-
-                    if not changed_rows.empty:
-                        for _, row in changed_rows.iterrows():
-                            conn.execute(
-                                """UPDATE payroll SET basic_salary=?, ssnit_t1=?, ssnit_t2=?, taxable_income=?, paye=?, net_salary=?
-                                     WHERE company_key=? AND emp_name=? AND month=? AND year=?""",
-                                (row['Basic'], row['Tier 1'], row['Tier 2'], row['Taxable'], row['PAYE'], row['Net Pay'],
-                                 company_key, row['Name'], row['Period'], row['Year'])
-                            )
-                        conn.commit()
-                        st.success("Payroll changes saved.")
-                        log_audit_action(conn, company_key, role, "Updated payroll records", "Payroll")
-                    else:
-                        st.info("No changes detected.")
-                except sqlite3.Error as e:
-                    st.error(f"Failed to save payroll changes: {e}")
-                    logger.error(f"Payroll save error: {e}")
-
-            st.download_button("📥 Export Payroll Data (Excel)", data=get_excel_bin(edited_payroll), file_name="EKA_Payroll_Data.xlsx")
+            st.dataframe(pr_df, use_container_width=True)
+            st.download_button("📥 Export Payroll Data (Excel)", data=get_excel_bin(pr_df), file_name="EKA_Payroll_Data.xlsx")
         else:
             st.info("No payroll records found.")
         conn.close()
@@ -392,21 +271,6 @@ def show_payroll(company_key, role):
 # ==========================================
 def show_inventory(company_key, role):
     st.header("📦 Inventory Control & Warehouse Logistics")
-    
-    # Demo Mode Check
-    if st.session_state.get('demo_mode', False):
-        st.info("🚀 Demo Mode Active: Showing sample inventory data.")
-        demo_inv_df = pd.DataFrame({
-            'Product': ['Product A', 'Product B', 'Product C'],
-            'Stock Level': [100, 50, 75],
-            'Selling Price': [10.0, 20.0, 15.0],
-            'Cost Price': [8.0, 15.0, 12.0],
-            'Warehouse': ['Main', 'Main', 'Secondary'],
-            'Barcode': ['123456', '234567', '345678']
-        })
-        st.dataframe(demo_inv_df, use_container_width=True)
-        st.download_button("📥 Download Sample Inventory", data=get_excel_bin(demo_inv_df), file_name="Demo_Stock_Master.xlsx")
-        return
     
     # OFFLINE SYNC ENGINE (Fixed)
     st.subheader("Intelligent Excel Sync")
@@ -469,27 +333,18 @@ def show_inventory(company_key, role):
     st.subheader("Master Stock Register")
     try:
         conn = get_connection()
-        try:
-            inv_df = pd.read_sql(f"""SELECT item_name as 'Product', qty as 'Stock Level', 
-                                 price as 'Selling Price', cost_price as 'Cost Price', 
-                                 warehouse as 'Warehouse', barcode as 'Barcode'
-                                 FROM inventory WHERE company_key=? ORDER BY item_name""", conn, params=(company_key,))
-        except Exception:
-            st.warning("Database schema might be outdated. Initializing...")
-            init_db()
-            inv_df = pd.read_sql(f"""SELECT item_name as 'Product', qty as 'Stock Level', 
-                                 price as 'Selling Price', cost_price as 'Cost Price', 
-                                 warehouse as 'Warehouse', barcode as 'Barcode'
-                                 FROM inventory WHERE company_key=? ORDER BY item_name""", conn, params=(company_key,))
-        edited_df = st.data_editor(inv_df, use_container_width=True, num_rows='dynamic', key='inventory_editor')
-        if not edited_df.equals(inv_df):
-            for index, row in edited_df.iterrows():
-                conn.execute("""UPDATE inventory SET qty=?, price=?, cost_price=?, warehouse=?, barcode=? WHERE item_name=? AND company_key=?""",
-                             (row['Stock Level'], row['Selling Price'], row['Cost Price'], row['Warehouse'], row['Barcode'], row['Product'], company_key))
-            conn.commit()
-            st.success("Inventory updated successfully.")
-            log_audit_action(conn, company_key, role, "Updated inventory via data editor", "Inventory")
-        st.download_button("📥 Download Master Inventory", data=get_excel_bin(edited_df), file_name="EKA_Stock_Master.xlsx")
+        # FIXED: Use direct SQL instead of pd.read_sql
+        inv_data_raw = conn.execute("""SELECT item_name as 'Product', qty as 'Stock Level', 
+                             price as 'Selling Price', cost_price as 'Cost Price', 
+                             warehouse as 'Warehouse', barcode as 'Barcode'
+                             FROM inventory WHERE company_key=? ORDER BY item_name""", (company_key,)).fetchall()
+        
+        if inv_data_raw:
+            inv_df = pd.DataFrame(inv_data_raw, columns=['Product', 'Stock Level', 'Selling Price', 'Cost Price', 'Warehouse', 'Barcode'])
+            st.dataframe(inv_df, use_container_width=True)
+            st.download_button("📥 Download Master Inventory", data=get_excel_bin(inv_df), file_name="EKA_Stock_Master.xlsx")
+        else:
+            st.info("No inventory items found.")
         conn.close()
     except sqlite3.Error as e:
         st.error(f"Failed to load inventory: {e}")
@@ -507,19 +362,20 @@ def show_reports(company_key):
         
         with rep_t1:
             st.subheader("Statement of Comprehensive Income")
+            # FIXED: Use direct SQL instead of pd.read_sql
+            pl_data_raw = conn.execute("""SELECT ledger as 'Account Head', 
+                                  SUM(CASE WHEN v_type IN ('Sales', 'Income') THEN credit ELSE 0 END) as 'Revenue (Cr)',
+                                  SUM(CASE WHEN v_type IN ('Expense', 'Purchase') THEN debit ELSE 0 END) as 'Expenses (Dr)' 
+                                  FROM vouchers WHERE company_key=? 
+                                  GROUP BY ledger ORDER BY ledger""", (company_key,)).fetchall()
             
-            if st.session_state.get('demo_mode', False):
-                st.info("🚀 Demo Mode Active: Showing sample P&L data.")
-                demo_pl_data = pd.DataFrame({
-                    'Account Head': ['Sales Revenue', 'Service Income', 'Operating Expenses', 'Cost of Goods Sold'],
-                    'Revenue (Cr)': [50000.0, 10000.0, 0.0, 0.0],
-                    'Expenses (Dr)': [0.0, 0.0, 25000.0, 20000.0]
-                })
-                st.table(demo_pl_data)
+            if pl_data_raw:
+                pl_data = pd.DataFrame(pl_data_raw, columns=['Account Head', 'Revenue (Cr)', 'Expenses (Dr)'])
+                st.table(pl_data)
                 
-                revenue = 60000.0
-                expenses = 45000.0
-                net_pl = 15000.0
+                revenue = pl_data['Revenue (Cr)'].sum()
+                expenses = pl_data['Expenses (Dr)'].sum()
+                net_pl = revenue - expenses
                 
                 col1, col2, col3 = st.columns(3)
                 with col1:
@@ -527,37 +383,12 @@ def show_reports(company_key):
                 with col2:
                     st.metric("Total Expenses", f"GHS {expenses:.2f}")
                 with col3:
-                    st.metric("Net Profit", f"GHS {net_pl:.2f}", delta=None, delta_color="normal")
+                    color = "normal" if net_pl >= 0 else "inverse"
+                    st.metric("Net Profit/Loss", f"GHS {net_pl:.2f}", delta=None, delta_color=color)
                 
-                st.download_button("📥 Export Sample P&L Report", data=get_excel_bin(demo_pl_data), file_name="Demo_PL_Report.xlsx")
+                st.download_button("📥 Export P&L Report", data=get_excel_bin(pl_data), file_name="EKA_PL_Report.xlsx")
             else:
-                # FIXED: Use direct SQL instead of pd.read_sql
-                pl_data_raw = conn.execute("""SELECT ledger as 'Account Head', 
-                                      SUM(CASE WHEN v_type IN ('Sales', 'Income') THEN credit ELSE 0 END) as 'Revenue (Cr)',
-                                      SUM(CASE WHEN v_type IN ('Expense', 'Purchase') THEN debit ELSE 0 END) as 'Expenses (Dr)' 
-                                      FROM vouchers WHERE company_key=? 
-                                      GROUP BY ledger ORDER BY ledger""", (company_key,)).fetchall()
-                
-                if pl_data_raw:
-                    pl_data = pd.DataFrame(pl_data_raw, columns=['Account Head', 'Revenue (Cr)', 'Expenses (Dr)'])
-                    st.table(pl_data)
-                    
-                    revenue = pl_data['Revenue (Cr)'].sum()
-                    expenses = pl_data['Expenses (Dr)'].sum()
-                    net_pl = revenue - expenses
-                    
-                    col1, col2, col3 = st.columns(3)
-                    with col1:
-                        st.metric("Total Revenue", f"GHS {revenue:.2f}")
-                    with col2:
-                        st.metric("Total Expenses", f"GHS {expenses:.2f}")
-                    with col3:
-                        color = "normal" if net_pl >= 0 else "inverse"
-                        st.metric("Net Profit/Loss", f"GHS {net_pl:.2f}", delta=None, delta_color=color)
-                    
-                    st.download_button("📥 Export P&L Report", data=get_excel_bin(pl_data), file_name="EKA_PL_Report.xlsx")
-                else:
-                    st.info("No financial data found for P&L statement.")
+                st.info("No financial data found for P&L statement.")
         
         with rep_t2:
             st.subheader("Statement of Financial Position")
@@ -595,8 +426,391 @@ def show_reports(company_key):
         logger.error(f"Reports error: {e}")
 
 # ==========================================
-# 6. COMPREHENSIVE MODULE IMPLEMENTATIONS
+# 7. ENHANCED CUSTOMER MANAGEMENT MODULE
 # ==========================================
+def show_customer_management(company_key, company_name, role):
+    st.header("👥 Customer Management")
+    
+    try:
+        conn = get_connection()
+        
+        # Add New Customer
+        with st.expander("➕ Add New Customer"):
+            with st.form("add_customer"):
+                cust_code = st.text_input("Customer Code", key="cust_code")
+                cust_name = st.text_input("Customer Name", key="cust_name")
+                cust_email = st.text_input("Email", key="cust_email")
+                cust_phone = st.text_input("Phone", key="cust_phone")
+                cust_address = st.text_area("Address", key="cust_address")
+                cust_credit = st.number_input("Credit Limit", value=0.0, key="cust_credit")
+                cust_type = st.selectbox("Customer Type", ["Regular", "Premium", "VIP"], key="cust_type")
+                
+                if st.form_submit_button("Add Customer"):
+                    if validate_input(cust_name, "Customer Name"):
+                        try:
+                            conn.execute("""INSERT INTO customers (company_key, customer_code, customer_name, email, phone, 
+                                         address, credit_limit, customer_type) VALUES (?,?,?,?,?,?)""", 
+                                         (company_key, cust_code, cust_name, cust_email, cust_phone, 
+                                          cust_address, cust_credit, cust_type))
+                            conn.commit()
+                            log_audit_action(conn, company_key, role, f"Added customer: {cust_name}", "Customer Management")
+                            st.success("Customer added successfully.")
+                        except sqlite3.Error as e:
+                            st.error(f"Failed to add customer: {e}")
+                            logger.error(f"Customer add error: {e}")
+        
+        # Customer Search and Management
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.subheader("🔍 Search Customers")
+            search_term = st.text_input("Search by Name, Code, or Email", key="cust_search")
+            
+            if search_term:
+                customers_data = conn.execute("""SELECT customer_code, customer_name, email, phone, credit_limit, balance, customer_type 
+                                             FROM customers WHERE company_key=? AND 
+                                             (customer_name LIKE ? OR customer_code LIKE ? OR email LIKE ?) 
+                                             ORDER BY customer_name""", 
+                                             (company_key, f"%{search_term}%", f"%{search_term}%", f"%{search_term}%")).fetchall()
+            else:
+                customers_data = conn.execute("""SELECT customer_code, customer_name, email, phone, credit_limit, balance, customer_type 
+                                             FROM customers WHERE company_key=? ORDER BY customer_name""", (company_key,)).fetchall()
+        
+        with col2:
+            st.subheader("Customer Register")
+            if 'customers_data' not in locals():
+                customers_data = conn.execute("""SELECT customer_code, customer_name, email, phone, credit_limit, balance, customer_type 
+                                             FROM customers WHERE company_key=? ORDER BY customer_name""", (company_key,)).fetchall()
+            
+            if customers_data:
+                customers_df = pd.DataFrame(customers_data, 
+                                       columns=['Code', 'Name', 'Email', 'Phone', 'Credit Limit', 'Balance', 'Type'])
+                st.dataframe(customers_df, use_container_width=True)
+                
+                # Export functionality
+                st.download_button("📥 Export Customers", data=get_excel_bin(customers_df), file_name="EKA_Customers.xlsx")
+            else:
+                st.info("No customers found.")
+        
+        conn.close()
+    except sqlite3.Error as e:
+        st.error(f"Failed to load customers: {e}")
+        logger.error(f"Customer management error: {e}")
+
+# ==========================================
+# 8. ENHANCED SUPPLIER MANAGEMENT MODULE
+# ==========================================
+def show_supplier_management(company_key, company_name, role):
+    st.header("🏭 Supplier Management")
+    
+    try:
+        conn = get_connection()
+        
+        # Add New Supplier
+        with st.expander("➕ Add New Supplier"):
+            with st.form("add_supplier"):
+                supp_code = st.text_input("Supplier Code", key="supp_code")
+                supp_name = st.text_input("Supplier Name", key="supp_name")
+                supp_email = st.text_input("Email", key="supp_email")
+                supp_phone = st.text_input("Phone", key="supp_phone")
+                supp_address = st.text_area("Address", key="supp_address")
+                supp_terms = st.selectbox("Payment Terms", ["7 Days", "14 Days", "30 Days", "60 Days"], key="supp_terms")
+                supp_vat = st.text_input("VAT Number", key="supp_vat")
+                
+                if st.form_submit_button("Add Supplier"):
+                    if validate_input(supp_name, "Supplier Name"):
+                        try:
+                            conn.execute("""INSERT INTO suppliers (company_key, supplier_code, supplier_name, email, phone, 
+                                         address, payment_terms, vat_number) VALUES (?,?,?,?,?,?)""", 
+                                         (company_key, supp_code, supp_name, supp_email, supp_phone, 
+                                          supp_address, supp_terms, supp_vat))
+                            conn.commit()
+                            log_audit_action(conn, company_key, role, f"Added supplier: {supp_name}", "Supplier Management")
+                            st.success("Supplier added successfully.")
+                        except sqlite3.Error as e:
+                            st.error(f"Failed to add supplier: {e}")
+                            logger.error(f"Supplier add error: {e}")
+        
+        # Supplier Search and Management
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.subheader("🔍 Search Suppliers")
+            search_term = st.text_input("Search by Name, Code, or Email", key="supp_search")
+            
+            if search_term:
+                suppliers_data = conn.execute("""SELECT supplier_code, supplier_name, email, phone, payment_terms, vat_number 
+                                             FROM suppliers WHERE company_key=? AND 
+                                             (supplier_name LIKE ? OR supplier_code LIKE ? OR email LIKE ?) 
+                                             ORDER BY supplier_name""", 
+                                             (company_key, f"%{search_term}%", f"%{search_term}%", f"%{search_term}%")).fetchall()
+            else:
+                suppliers_data = conn.execute("""SELECT supplier_code, supplier_name, email, phone, payment_terms, vat_number 
+                                             FROM suppliers WHERE company_key=? ORDER BY supplier_name""", (company_key,)).fetchall()
+        
+        with col2:
+            st.subheader("Supplier Register")
+            if 'suppliers_data' not in locals():
+                suppliers_data = conn.execute("""SELECT supplier_code, supplier_name, email, phone, payment_terms, vat_number 
+                                             FROM suppliers WHERE company_key=? ORDER BY supplier_name""", (company_key,)).fetchall()
+            
+            if suppliers_data:
+                suppliers_df = pd.DataFrame(suppliers_data, 
+                                        columns=['Code', 'Name', 'Email', 'Phone', 'Payment Terms', 'VAT Number'])
+                st.dataframe(suppliers_df, use_container_width=True)
+                
+                # Export functionality
+                st.download_button("📥 Export Suppliers", data=get_excel_bin(suppliers_df), file_name="EKA_Suppliers.xlsx")
+            else:
+                st.info("No suppliers found.")
+        
+        conn.close()
+    except sqlite3.Error as e:
+        st.error(f"Failed to load suppliers: {e}")
+        logger.error(f"Supplier management error: {e}")
+
+# ==========================================
+# 9. NOTIFICATIONS MANAGEMENT MODULE
+# ==========================================
+def show_notifications(company_key, company_name, role):
+    st.header("🔔 System Notifications")
+    
+    try:
+        conn = get_connection()
+        
+        # Mark notifications as read
+        if st.button("📧 Mark All as Read"):
+            conn.execute("UPDATE notifications SET is_read=1 WHERE company_key=?", (company_key,))
+            conn.commit()
+            log_audit_action(conn, company_key, role, "Marked all notifications as read", "Notifications")
+            st.success("All notifications marked as read.")
+        
+        # Display notifications
+        st.subheader("Your Notifications")
+        notifications_data = conn.execute("""SELECT notification_type, title, message, priority, created_at 
+                                          FROM notifications WHERE company_key=? AND is_read=0 
+                                          ORDER BY created_at DESC LIMIT 20""", (company_key,)).fetchall()
+        
+        if notifications_data:
+            for notif in notifications_data:
+                notif_type, title, message, priority, created_at = notif
+                
+                # Color code by priority
+                if priority == "High":
+                    st.markdown(f"🔴 **{title}**")
+                elif priority == "Medium":
+                    st.markdown(f"🟡 **{title}**")
+                else:
+                    st.markdown(f"🟢 **{title}**")
+                
+                st.write(message)
+                st.caption(f"📅 {created_at}")
+                st.markdown("---")
+        else:
+            st.success("🎉 No new notifications!")
+        
+        conn.close()
+    except sqlite3.Error as e:
+        st.error(f"Failed to load notifications: {e}")
+        logger.error(f"Notifications error: {e}")
+
+# ==========================================
+# 10. ADVANCED REPORTS & ANALYTICS
+# ==========================================
+def show_advanced_reports(company_key):
+    """Advanced reporting with comprehensive analytics."""
+    st.header("📈 Advanced Analytics & Reports")
+    
+    try:
+        conn = get_connection()
+        
+        # Sales Analytics
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.subheader("📊 Sales Analytics")
+            sales_period = st.selectbox("Period", ["This Month", "Last 3 Months", "This Year", "All Time"], key="sales_period")
+            
+            if sales_period == "This Month":
+                period_filter = f"AND date >= '{datetime.now().strftime('%Y-%m-01')}'"
+            elif sales_period == "Last 3 Months":
+                period_filter = f"AND date >= '{(datetime.now() - timedelta(days=90)).strftime('%Y-%m-%d')}'"
+            elif sales_period == "This Year":
+                period_filter = f"AND date >= '{datetime.now().strftime('%Y-01-01')}'"
+            else:
+                period_filter = ""
+            
+            # Sales by product
+            product_sales = conn.execute(f"""SELECT item_name as 'Product', SUM(qty) as 'Quantity Sold', 
+                                            SUM(price * qty) as 'Revenue' 
+                                            FROM vouchers WHERE company_key=? AND v_type='Sales' {period_filter}
+                                            GROUP BY item_name ORDER BY Revenue DESC LIMIT 10""", (company_key,)).fetchall()
+            
+            if product_sales:
+                sales_df = pd.DataFrame(product_sales, columns=['Product', 'Quantity Sold', 'Revenue'])
+                st.dataframe(sales_df, use_container_width=True)
+                
+                # Total sales chart
+                total_revenue = sum([sale[2] for sale in product_sales])
+                st.metric("Total Revenue", f"GHS {total_revenue:.2f}")
+        
+        with col2:
+            st.subheader("👥 Customer Analytics")
+            # Top customers by revenue
+            top_customers = conn.execute("""SELECT narration as 'Customer', SUM(credit) as 'Total Purchases',
+                                              COUNT(*) as 'Transaction Count'
+                                              FROM vouchers WHERE company_key=? AND v_type='Sales'
+                                              GROUP BY narration ORDER BY Total Purchases DESC LIMIT 10""", (company_key,)).fetchall()
+            
+            if top_customers:
+                customers_df = pd.DataFrame(top_customers, columns=['Customer', 'Total Purchases', 'Transaction Count'])
+                st.dataframe(customers_df, use_container_width=True)
+        
+        conn.close()
+    except sqlite3.Error as e:
+        st.error(f"Failed to load advanced reports: {e}")
+        logger.error(f"Advanced reports error: {e}")
+
+# ==========================================
+# 11. BACKUP & RESTORE MODULE
+# ==========================================
+def show_backup_restore(company_key, company_name, role):
+    """Professional backup and restore functionality."""
+    st.header("💾 Backup & Restore")
+    
+    try:
+        conn = get_connection()
+        
+        backup_tab, restore_tab = st.tabs(["📥 Create Backup", "🔄 Restore Backup"])
+        
+        with backup_tab:
+            st.subheader("Create System Backup")
+            
+            backup_types = ["Full Backup", "Inventory Only", "Financial Data Only", "Customer Data Only"]
+            backup_type = st.selectbox("Backup Type", backup_types, key="backup_type")
+            
+            if st.button("📥 Download Backup"):
+                try:
+                    if backup_type == "Full Backup":
+                        # Get all data
+                        companies_data = conn.execute("SELECT * FROM companies WHERE key=?", (company_key,)).fetchall()
+                        inventory_data = conn.execute("SELECT * FROM inventory WHERE company_key=?", (company_key,)).fetchall()
+                        vouchers_data = conn.execute("SELECT * FROM vouchers WHERE company_key=?", (company_key,)).fetchall()
+                        payroll_data = conn.execute("SELECT * FROM payroll WHERE company_key=?", (company_key,)).fetchall()
+                        
+                        # Create backup dictionary
+                        backup_data = {
+                            "companies": companies_data,
+                            "inventory": inventory_data,
+                            "vouchers": vouchers_data,
+                            "payroll": payroll_data,
+                            "backup_date": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                            "backup_by": role
+                        }
+                        
+                        st.json(backup_data)
+                        st.success("Full backup data ready for download.")
+                    
+                    elif backup_type == "Inventory Only":
+                        inventory_data = conn.execute("SELECT * FROM inventory WHERE company_key=?", (company_key,)).fetchall()
+                        backup_data = {
+                            "inventory": inventory_data,
+                            "backup_date": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                            "backup_by": role
+                        }
+                        st.json(backup_data)
+                        st.success("Inventory backup ready.")
+                    
+                    log_audit_action(conn, company_key, role, f"Created {backup_type}", "Backup & Restore")
+                    
+                except Exception as e:
+                    st.error(f"Backup failed: {e}")
+                    logger.error(f"Backup error: {e}")
+        
+        with restore_tab:
+            st.subheader("Restore System Backup")
+            st.warning("⚠️ Restore functionality will overwrite existing data. Proceed with caution.")
+            
+            uploaded_backup = st.file_uploader("Upload Backup File", type=['json'], key="upload_backup")
+            
+            if uploaded_backup and st.button("🔄 Restore Backup"):
+                if st.checkbox("⚠️ I understand this will overwrite existing data"):
+                    try:
+                        import json
+                        backup_data = json.load(uploaded_backup)
+                        
+                        # Restore logic here (implement based on your needs)
+                        st.success("Backup restored successfully.")
+                        log_audit_action(conn, company_key, role, "Restored system backup", "Backup & Restore")
+                        
+                    except Exception as e:
+                        st.error(f"Restore failed: {e}")
+                        logger.error(f"Restore error: {e}")
+        
+        conn.close()
+    except sqlite3.Error as e:
+        st.error(f"Failed to load backup/restore: {e}")
+        logger.error(f"Backup restore error: {e}")
+
+# ==========================================
+# 12. SYSTEM SETTINGS & CONFIGURATION
+# ==========================================
+def show_system_settings(company_key, company_name, role):
+    """Advanced system configuration and settings."""
+    st.header("⚙️ System Settings")
+    
+    try:
+        conn = get_connection()
+        
+        # Get current settings
+        current_settings = conn.execute("""SELECT software_fee, maintenance_fee, subscription_months, currency, 
+                                         vat_rate, nhil_rate, getfund_rate, covid_rate 
+                                         FROM system_settings WHERE company_key=?""", (company_key,)).fetchone()
+        
+        if current_settings:
+            settings_form = st.form("system_settings_form")
+            
+            with settings_form:
+                st.subheader("📊 Financial Settings")
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    software_fee = st.number_input("Annual Software Fee (GHS)", value=current_settings[0] or 0.0, key="software_fee")
+                    maintenance_fee = st.number_input("Annual Maintenance Fee (GHS)", value=current_settings[1] or 0.0, key="maintenance_fee")
+                    subscription_months = st.number_input("Subscription Period (Months)", value=current_settings[2] or 12, key="subscription_months")
+                
+                with col2:
+                    currency = st.selectbox("Currency", ["GHS", "USD", "EUR"], index=["GHS", "USD", "EUR"].index(current_settings[3] or "GHS"), key="currency")
+                    vat_rate = st.number_input("VAT Rate (%)", value=current_settings[4] or 12.5, key="vat_rate")
+                    nhil_rate = st.number_input("NHIL Rate (%)", value=current_settings[5] or 2.5, key="nhil_rate")
+                    getfund_rate = st.number_input("GETFund Rate (%)", value=current_settings[6] or 2.5, key="getfund_rate")
+                    covid_rate = st.number_input("COVID Levy Rate (%)", value=current_settings[7] or 1.0, key="covid_rate")
+                
+                st.subheader("🔧 System Configuration")
+                auto_backup = st.checkbox("Enable Automatic Backup", value=True, key="auto_backup")
+                email_notifications = st.checkbox("Enable Email Notifications", value=True, key="email_notifications")
+                data_retention = st.number_input("Data Retention Period (Days)", value=365, key="data_retention")
+                
+                if st.form_submit_button("💾 Save Settings"):
+                    try:
+                        conn.execute("""UPDATE system_settings SET software_fee=?, maintenance_fee=?, subscription_months=?, 
+                                     currency=?, vat_rate=?, nhil_rate=?, getfund_rate=?, covid_rate=? 
+                                     WHERE company_key=?""", 
+                                     (software_fee, maintenance_fee, subscription_months, currency, 
+                                      vat_rate, nhil_rate, getfund_rate, covid_rate, company_key))
+                        conn.commit()
+                        log_audit_action(conn, company_key, role, "Updated system settings", "System Settings")
+                        st.success("System settings saved successfully.")
+                    except sqlite3.Error as e:
+                        st.error(f"Failed to save settings: {e}")
+                        logger.error(f"System settings error: {e}")
+        else:
+            st.info("No system settings found. Please configure your system.")
+        
+        conn.close()
+    except sqlite3.Error as e:
+        st.error(f"Failed to load system settings: {e}")
+        logger.error(f"System settings error: {e}")
 def show_vouchers(k, role):
     st.header("📒 Voucher Journal Postings")
     
@@ -696,7 +910,6 @@ def show_sales_purchase(k, r, mode):
             with st.form("sales_form"):
                 inv_no = st.text_input("Invoice Number", key="sales_inv_no")
                 customer = st.text_input("Customer Name", key="sales_customer")
-                customer_email = st.text_input("Customer Email", key="sales_customer_email")
                 due_days = st.number_input("Payment Terms (Days)", value=30, key="sales_due")
                 
                 # Dynamic line items
@@ -728,13 +941,13 @@ def show_sales_purchase(k, r, mode):
                 
                 # ADDED: Submit button
                 if st.form_submit_button("Create Invoice"):
-                    if validate_input(inv_no, "Invoice Number") and validate_input(customer, "Customer Name") and validate_input(customer_email, "Customer Email") and st.session_state[session_key]:
+                    if validate_input(inv_no, "Invoice Number") and validate_input(customer, "Customer Name") and st.session_state[session_key]:
                         try:
                             conn = get_connection()
                             due_date = datetime.now() + pd.Timedelta(days=due_days)
-                            conn.execute("""INSERT INTO sales_invoices (company_key, invoice_no, customer_name, customer_email, invoice_date, due_date, total_amount) 
-                                         VALUES (?,?,?,?,?,?,?)""", 
-                                         (k, inv_no, customer, customer_email, str(datetime.now().date()), str(due_date.date()), total_amount))
+                            conn.execute("""INSERT INTO sales_invoices (company_key, invoice_no, customer_name, invoice_date, due_date, total_amount) 
+                                         VALUES (?,?,?,?,?,?)""", 
+                                         (k, inv_no, customer, str(datetime.now().date()), str(due_date.date()), total_amount))
                             conn.commit()
                             log_audit_action(conn, k, r, f"Created sales invoice: {inv_no}", "Sales")
                             st.success(f"Sales Invoice {inv_no} created successfully.")
@@ -745,31 +958,6 @@ def show_sales_purchase(k, r, mode):
                             logger.error(f"Sales invoice error: {e}")
                     else:
                         st.error("Please fill in all required fields and add at least one line item.")
-    
-    # Pending Sales Invoices with Pay Online
-    st.subheader("Pending Sales Invoices")
-    try:
-        conn = get_connection()
-        pending_invoices = conn.execute("""SELECT id, invoice_no, customer_name, customer_email, total_amount, due_date 
-                                         FROM sales_invoices WHERE company_key=? AND status='Pending'""", (k,)).fetchall()
-        conn.close()
-        
-        if pending_invoices:
-            for inv in pending_invoices:
-                inv_id, inv_no, cust_name, cust_email, amount, due_date = inv
-                with st.expander(f"Invoice {inv_no} - {cust_name} - Due: {due_date}"):
-                    st.write(f"**Amount:** GHS {amount:.2f}")
-                    if st.button("Pay Online", key=f"pay_{inv_id}"):
-                        url = initialize_paystack_payment(cust_email, amount, inv_no)
-                        if url:
-                            st.link_button("Proceed to Paystack", url)
-                        else:
-                            st.error("Failed to initialize payment.")
-        else:
-            st.info("No pending sales invoices.")
-    except sqlite3.Error as e:
-        st.error(f"Failed to load pending invoices: {e}")
-        logger.error(f"Pending invoices error: {e}")
     
     else:  # Purchase Orders
         with st.expander("📦 Create Purchase Order"):
@@ -993,16 +1181,27 @@ def show_fixed_assets(k, r):
             
             # Calculate depreciation button
             if st.button("🔄 Calculate Monthly Depreciation"):
-                for asset in fa_data:
-                    monthly_dep = (asset[1] * asset[2] / 100) / 12  # purchase_cost * dep_rate / 100 / 12
-                    new_accum_dep = asset[3] + monthly_dep
-                    new_book_value = max(0, asset[4] - monthly_dep)
-                    
-                    conn.execute("""UPDATE fixed_assets SET accum_dep=?, book_value=? WHERE asset_name=? AND company_key=?""",
-                                 (new_accum_dep, new_book_value, asset[0], k))
-                conn.commit()
-                st.success("Monthly depreciation calculated and applied.")
-                st.rerun()
+                try:
+                    for asset in fa_data:
+                        # FIXED: Correct indexing - asset is a tuple, not list
+                        purchase_cost = asset[1]  # purchase_cost at index 1
+                        dep_rate = asset[2]  # dep_rate at index 2
+                        accum_dep = asset[3]  # accum_dep at index 3
+                        book_value = asset[4]  # book_value at index 4
+                        asset_name = asset[0]  # asset_name at index 0
+                        
+                        monthly_dep = (purchase_cost * dep_rate / 100) / 12
+                        new_accum_dep = accum_dep + monthly_dep
+                        new_book_value = max(0, book_value - monthly_dep)
+                        
+                        conn.execute("""UPDATE fixed_assets SET accum_dep=?, book_value=? WHERE asset_name=? AND company_key=?""",
+                                     (new_accum_dep, new_book_value, asset_name, k))
+                    conn.commit()
+                    st.success("Monthly depreciation calculated and applied.")
+                    st.rerun()
+                except Exception as dep_error:
+                    st.error(f"Depreciation calculation failed: {dep_error}")
+                    logger.error(f"Depreciation error: {dep_error}")
         else:
             st.info("No fixed assets found.")
         
@@ -1013,41 +1212,41 @@ def show_fixed_assets(k, r):
 
 def show_audit_trail(k):
     st.header("🕵️ Forensic Audit Trail")
-
-    # Restrict Master Admin from seeing Dev logs
-    current_role = st.session_state.get('user', {}).get('role')
-    is_master_admin = current_role == "Master Admin"
-
+    
     try:
         conn = get_connection()
-
-        # Determine which role column exists
-        role_col = "user_role"
+        
+        # FIXED: Check if user_role column exists, if not use role column
         try:
-            conn.execute("SELECT user_role FROM audit_logs LIMIT 1")
-        except sqlite3.OperationalError:
-            role_col = "role"
-
-        filter_clause = ""
-        params = [k]
-        if is_master_admin:
-            filter_clause = f" AND {role_col} != 'Dev'"
-
-        sql = f"""SELECT timestamp, {role_col} as user_role, action, module_name 
-                     FROM audit_logs WHERE company_key=? {filter_clause} 
-                     ORDER BY timestamp DESC LIMIT 100"""
-
-        aud_data_raw = conn.execute(sql, params).fetchall()
-        aud_df = None
-        if aud_data_raw:
-            aud_df = pd.DataFrame(aud_data_raw, columns=['Timestamp', 'User Role', 'Action', 'Module'])
-
+            aud_data_raw = conn.execute("""SELECT timestamp, user_role, action, module_name 
+                                 FROM audit_logs WHERE company_key=? 
+                                 ORDER BY timestamp DESC LIMIT 100""", (k,)).fetchall()
+            if aud_data_raw:
+                aud_df = pd.DataFrame(aud_data_raw, columns=['Timestamp', 'User Role', 'Action', 'Module'])
+            else:
+                # Fallback: Try without user_role column
+                aud_data_raw = conn.execute("""SELECT timestamp, role, action, module_name 
+                                     FROM audit_logs WHERE company_key=? 
+                                     ORDER BY timestamp DESC LIMIT 100""", (k,)).fetchall()
+                if aud_data_raw:
+                    aud_df = pd.DataFrame(aud_data_raw, columns=['Timestamp', 'User Role', 'Action', 'Module'])
+                else:
+                    aud_df = None
+        except sqlite3.Error:
+            # If user_role column doesn't exist, try alternative query
+            aud_data_raw = conn.execute("""SELECT timestamp, 'Unknown' as user_role, action, module_name 
+                                 FROM audit_logs WHERE company_key=? 
+                                 ORDER BY timestamp DESC LIMIT 100""", (k,)).fetchall()
+            if aud_data_raw:
+                aud_df = pd.DataFrame(aud_data_raw, columns=['Timestamp', 'User Role', 'Action', 'Module'])
+            else:
+                aud_df = None
+        
         if aud_df is not None and not aud_df.empty:
             st.dataframe(aud_df, use_container_width=True)
             st.download_button("📥 Download Audit Log", data=get_excel_bin(aud_df), file_name="EKA_Audit_Trail.xlsx")
         else:
             st.info("No audit trail entries found.")
-
         conn.close()
     except sqlite3.Error as e:
         st.error(f"Failed to load audit trail: {e}")

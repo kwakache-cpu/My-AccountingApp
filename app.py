@@ -1,5 +1,5 @@
 import streamlit as st
-import pandas as pd  # <-- ADD THIS IMPORT
+import pandas as pd
 from database import get_connection, init_db, log_audit_action
 from modules import *
 from modules import check_maintenance_window
@@ -8,6 +8,9 @@ from datetime import date, datetime, timedelta
 import hashlib
 from dateutil.relativedelta import relativedelta
 from sqlalchemy import text
+import smtplib
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
 
 # Check maintenance status
 maintenance_status = check_maintenance_window()
@@ -137,10 +140,8 @@ if 'reference' in st.query_params:
                 logger.error(f"Payment recording error: {e}")
     else:
         st.error("Payment verification failed.")
-    # Clear the reference from URL
+    # Clear reference from URL
     st.query_params.clear()
-
-# Check Maintenance Window (moved after function definition)
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -175,10 +176,6 @@ def check_session_timeout():
             return False
     return True
 
-def update_activity():
-    """Update last activity timestamp."""
-    st.session_state.last_activity = datetime.now()
-
 def enter_demo():
     """Enter demo mode."""
     st.session_state.auth = True
@@ -199,30 +196,6 @@ def check_license_expiry(company_key):
             days_left = (expiry_date - datetime.now()).days
             if days_left <= 7 and days_left >= 0:
                 return days_left
-    except:
-        pass
-    return None
-
-def check_maintenance_window():
-    """Check maintenance status. Returns 'maintenance' if in window, 'warning' if within 3 days, None otherwise."""
-    try:
-        conn = get_connection()
-        maint = conn.execute("SELECT maintenance_date FROM maintenance_settings WHERE id=1").fetchone()
-        conn.close()
-        if maint and maint[0]:
-            maint_date = datetime.fromisoformat(maint[0]).date()
-            now = datetime.now()
-            current_date = now.date()
-            current_time = now.time()
-            
-            # Check if in maintenance window
-            if current_date == maint_date and current_time >= datetime.strptime("00:00", "%H:%M").time() and current_time <= datetime.strptime("02:00", "%H:%M").time():
-                return 'maintenance'
-            
-            # Check if within 3 days
-            days_diff = (maint_date - current_date).days
-            if 0 <= days_diff <= 3:
-                return 'warning', maint_date
     except:
         pass
     return None
@@ -260,6 +233,90 @@ def show_system_status():
         })
         st.dataframe(incidents_df, use_container_width=True, height=300)
 
+def send_maintenance_email(company_email, company_name, message):
+    """Send maintenance notice to client."""
+    try:
+        # Email configuration (you'll need to set up your SMTP settings)
+        smtp_server = "smtp.gmail.com"  # Change to your SMTP server
+        smtp_port = 587
+        sender_email = "your-email@gmail.com"  # Change to your email
+        sender_password = "your-app-password"  # Change to your app password
+        
+        msg = MIMEMultipart()
+        msg['From'] = sender_email
+        msg['To'] = company_email
+        msg['Subject'] = f"E.K.A ERP - Maintenance Notice for {company_name}"
+        
+        body = f"""
+        Dear {company_name},
+        
+        {message}
+        
+        This is an automated message from E.K.A Cloud ERP System.
+        
+        Best regards,
+        E.K.A Support Team
+        """
+        
+        msg.attach(MIMEText(body, 'plain'))
+        
+        server = smtplib.SMTP(smtp_server, smtp_port)
+        server.starttls()
+        server.login(sender_email, sender_password)
+        server.send_message(msg)
+        server.quit()
+        
+        return True
+    except Exception as e:
+        logger.error(f"Failed to send maintenance email: {e}")
+        return False
+
+def check_subscription_expiry():
+    """Check for upcoming subscription expiries and send notices."""
+    try:
+        conn = get_connection()
+        
+        # Get all companies with subscription expiry dates
+        companies_data = conn.execute("""SELECT key, name, email, subscription_expiry 
+                                     FROM companies WHERE subscription_expiry IS NOT NULL""").fetchall()
+        
+        for company in companies_data:
+            company_key, company_name, company_email, expiry_date = company
+            
+            if expiry_date:
+                expiry = datetime.strptime(expiry_date, '%Y-%m-%d')
+                days_until_expiry = (expiry - datetime.now()).days
+                
+                # Send notice if subscription expires in 30 days or less
+                if days_until_expiry <= 30 and days_until_expiry > 0:
+                    message = f"""
+                    Your E.K.A ERP subscription will expire in {days_until_expiry} days on {expiry_date}.
+                    
+                    Please renew your subscription to avoid service interruption.
+                    
+                    To renew, please contact our support team or login to your client portal.
+                    
+                    Subscription Details:
+                    - Company: {company_name}
+                    - Expiry Date: {expiry_date}
+                    - Days Remaining: {days_until_expiry}
+                    
+                    Thank you for choosing E.K.A Enterprise ERP!
+                    """
+                    
+                    send_maintenance_email(company_email, company_name, message)
+                    
+                    # Log the notice
+                    conn.execute("""INSERT INTO notifications (company_key, notification_type, title, message, priority, expiry_date)
+                                 VALUES (?,?,?,?,?)""",
+                                 (company_key, "Subscription Expiry", "Subscription Renewal Required", 
+                                  message, "High", expiry_date))
+                    conn.commit()
+        
+        conn.close()
+    except Exception as e:
+        logger.error(f"Failed to check subscription expiry: {e}")
+
 def login_ui():
     """Secure Multi-Tier Authentication Interface with Enhanced Security."""
     st.markdown("<h1 style='text-align: center; color: #1E3A8A;'>🛡️ E.K.A ENTERPRISE ERP</h1>", unsafe_allow_html=True)
@@ -267,7 +324,7 @@ def login_ui():
     
     # Maintenance Warning Banner
     if maintenance_status == 'warning':
-        st.info("🛠️ Scheduled Maintenance: We will be upgrading our services soon. The system may be temporarily offline during the maintenance window.")
+        st.info("🛠️ Scheduled Maintenance: We will be upgrading our services soon. The system may be temporarily offline during maintenance window.")
     
     # Check for brute force attempts
     if st.session_state.login_attempts >= 5:
@@ -370,140 +427,9 @@ def login_ui():
     st.markdown("---")
     st.toggle('🚀 Try Demo Mode', key='demo_toggle')
 
-# Dashboard Module (NEW FUNCTION)
-def show_dashboard(company_key, company_name, role):
-    """Enhanced company dashboard with key metrics and insights."""
-    st.header(f"📊 Business Dashboard: {company_name}")
-    
-    if st.session_state.get('demo_mode', False):
-        # Maintenance Banner
-        if maintenance_status == 'warning':
-            st.info(f"🛠️ Scheduled Maintenance: We will be upgrading our services on [scheduled date] from 12:00 AM to 02:00 AM GMT. The system may be temporarily offline during this window.")
-        
-        # Demo Mode Dashboard
-        col1, col2, col3, col4 = st.columns(4)
-        col1.metric("Inventory Value", "GHS 25,000.00")
-        col2.metric("Month Sales", "GHS 15,000.00")
-        col3.metric("Employees", "5")
-        col4.metric("Asset Value", "GHS 50,000.00")
-        
-        st.markdown("---")
-        
-        # Recent Activity
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            st.subheader("📈 Recent Transactions")
-            demo_txns = pd.DataFrame({
-                'Date': ['2026-03-15', '2026-03-14', '2026-03-13'],
-                'Type': ['Sales', 'Purchase', 'Sales'],
-                'Description': ['Product Sale', 'Office Supplies', 'Service Revenue'],
-                'Amount': [5000.0, 2000.0, 3000.0]
-            })
-            st.dataframe(demo_txns, use_container_width=True)
-        
-        with col2:
-            st.subheader("📦 Low Stock Items")
-            demo_stock = pd.DataFrame({
-                'Item': ['Product A', 'Product B'],
-                'Quantity': [5, 8],
-                'Unit': ['pcs', 'pcs']
-            })
-            st.dataframe(demo_stock, use_container_width=True)
-        
-        return
-    
-    # Maintenance Banner for Regular Users
-    if maintenance_status == 'warning':
-        st.info(f"🛠️ Scheduled Maintenance: We will be upgrading our services on [scheduled date] from 12:00 AM to 02:00 AM GMT. The system may be temporarily offline during this window.")
-    
-    try:
-        conn = get_connection()
-        
-        # Key Business Metrics
-        col1, col2, col3, col4 = st.columns(4)
-        
-        # Total Inventory Value
-        inv_val = conn.execute("SELECT SUM(qty * cost_price) FROM inventory WHERE company_key=?", (company_key,)).fetchone()[0] or 0
-        col1.metric("Inventory Value", f"GHS {inv_val:.2f}")
-        
-        # Total Sales (Current Month)
-        current_month = datetime.now().strftime('%Y-%m')
-        month_sales = conn.execute("""SELECT SUM(credit) FROM vouchers 
-                                    WHERE company_key=? AND v_type='Sales' 
-                                    AND date LIKE ?""", (company_key, f"{current_month}%")).fetchone()[0] or 0
-        col2.metric("Month Sales", f"GHS {month_sales:.2f}")
-        
-        # Total Employees
-        emp_count = conn.execute("SELECT COUNT(DISTINCT emp_name) FROM payroll WHERE company_key=?", (company_key,)).fetchone()[0] or 0
-        col3.metric("Employees", str(emp_count))
-        
-        # Fixed Assets Value
-        fa_val = conn.execute("SELECT SUM(book_value) FROM fixed_assets WHERE company_key=?", (company_key,)).fetchone()[0] or 0
-        col4.metric("Asset Value", f"GHS {fa_val:.2f}")
-        
-        st.markdown("---")
-        
-        # Recent Activity
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            st.subheader("📈 Recent Transactions")
-            # FIXED: Use direct SQL instead of pd.read_sql
-            recent_data = conn.execute("""SELECT date, v_type, narration, 
-                                        CASE WHEN credit > 0 THEN credit ELSE debit END as amount
-                                        FROM vouchers WHERE company_key=? 
-                                        ORDER BY date DESC LIMIT 10""", (company_key,)).fetchall()
-            
-            if recent_data:
-                # Convert to DataFrame manually
-                recent_txns = pd.DataFrame(recent_data, columns=['Date', 'Type', 'Description', 'Amount'])
-                st.dataframe(recent_txns, use_container_width=True)
-            else:
-                st.info("No recent transactions found.")
-        
-        with col2:
-            st.subheader("📦 Low Stock Items")
-            # FIXED: Use direct SQL instead of pd.read_sql
-            low_stock_data = conn.execute("""SELECT item_name, qty, unit FROM inventory 
-                                           WHERE company_key=? AND qty <= 10 
-                                           ORDER BY qty ASC LIMIT 10""", (company_key,)).fetchall()
-            
-            if low_stock_data:
-                low_stock = pd.DataFrame(low_stock_data, columns=['Item', 'Quantity', 'Unit'])
-                st.dataframe(low_stock, use_container_width=True)
-            else:
-                st.success("All stock levels are adequate!")
-        
-        # Quick Actions
-        st.subheader("⚡ Quick Actions")
-        col1, col2, col3, col4 = st.columns(4)
-        
-        with col1:
-            if st.button("➕ New Sale", use_container_width=True):
-                st.session_state.selected_module = "POS (Point of Sale)"
-                st.rerun()
-        
-        with col2:
-            if st.button("📦 Add Inventory", use_container_width=True):
-                st.session_state.selected_module = "Inventory & Stock"
-                st.rerun()
-        
-        with col3:
-            if st.button("💰 Process Payroll", use_container_width=True):
-                st.session_state.selected_module = "Ghana Payroll (SSNIT)"
-                st.rerun()
-        
-        with col4:
-            if st.button("📊 View Reports", use_container_width=True):
-                st.session_state.selected_module = "Financial Intelligence"
-                st.rerun()
-        
-        conn.close()
-        
-    except Exception as e:
-        st.error("Failed to load dashboard data")
-        logger.error(f"Dashboard error: {e}")
+def update_activity():
+    """Update last activity timestamp."""
+    st.session_state.last_activity = datetime.now()
 
 # Main application flow
 if not st.session_state.auth or not check_session_timeout():
@@ -544,6 +470,13 @@ else:
                     monthly_revenue = conn.execute(text("SELECT SUM(software_fee) FROM system_settings")).fetchone()[0] or 0
                 except Exception:
                     monthly_revenue = 0
+                
+                # Display metrics
+                m1, m2, m3, m4 = st.columns(4)
+                m1.metric("Total Licenses", str(total_companies))
+                m2.metric("Active Subscriptions", str(active_subscriptions))
+                m3.metric("Monthly Revenue", f"GHS {monthly_revenue:.2f}")
+                m4.metric("System Uptime", "100%")
                 
                 # Global Forensic Trail (Dev only)
                 st.markdown("---")
@@ -601,62 +534,6 @@ else:
                 logger.error(f"Dashboard metrics error: {e}")
 
             st.markdown("---")
-            st.subheader("🏢 Enterprise Instance Manager")
-            try:
-                conn = get_connection()
-                try:
-                    instance_df = pd.read_sql(
-                        """
-                        SELECT c.key AS company_key,
-                               c.name AS company_name,
-                               s.software_fee,
-                               s.subscription_months
-                        FROM companies c
-                        LEFT JOIN system_settings s ON c.key = s.company_key
-                        ORDER BY c.name
-                        """,
-                        conn
-                    )
-                except Exception as e:
-                    logger.error(f"Failed to read instance_df: {e}")
-                    instance_df = pd.DataFrame()
-                
-                edited_instances = st.data_editor(
-                    instance_df,
-                    use_container_width=True,
-                    num_rows='dynamic',
-                    key='enterprise_instance_editor',
-                    column_config={
-                        'company_key': st.column_config.TextColumn(label='Company Key', disabled=True)
-                    } if hasattr(st, 'column_config') else None
-                )
-
-                if st.button('Sync Changes', key='enterprise_sync_changes'):
-                    changed_mask = (edited_instances != instance_df).any(axis=1)
-                    changed_rows = edited_instances[changed_mask]
-
-                    if not changed_rows.empty:
-                        for _, row in changed_rows.iterrows():
-                            conn.execute(
-                            "UPDATE companies SET name=? WHERE key=?",
-                            (row['company_name'], row['company_key'])
-                        )
-                        conn.execute(
-                            "UPDATE system_settings SET software_fee=?, subscription_months=? WHERE company_key=?",
-                            (row['software_fee'], row['subscription_months'], row['company_key'])
-                        )
-                    conn.commit()
-                    st.success('Enterprise instances synced successfully.')
-                    log_audit_action(conn, 'SYSTEM', 'Dev', 'Synced enterprise instance settings', 'System Admin')
-                else:
-                    st.info('No changes to sync.')
-
-                conn.close()
-            except Exception as e:
-                st.error(f"Failed to load enterprise instances: {e}")
-                logger.error(f"Instance manager error: {e}")
-
-            st.markdown("---")
             st.subheader("📂 Client Portfolio Manager")
             try:
                 conn = get_connection()
@@ -680,36 +557,6 @@ else:
                     logger.error(f"Failed to read portfolio_df: {e}")
                     portfolio_df = pd.DataFrame()
 
-                edited_portfolio = st.data_editor(
-                    portfolio_df,
-                    use_container_width=True,
-                    key='client_portfolio_editor',
-                    column_config={
-                        'company_name': st.column_config.TextColumn(label='Company Name', disabled=True),
-                        'created_date': st.column_config.TextColumn(label='Created Date', disabled=True),
-                        'total_revenue_collected': st.column_config.NumberColumn(label='Total Revenue Collected (GHS)', disabled=True),
-                        'account_status': st.column_config.SelectboxColumn(label='Account Status', options=['Active', 'Suspended']),
-                        'deployment_status': st.column_config.TextColumn(label='Deployment Status', disabled=True),
-                        'subscription_end_date': st.column_config.DateColumn(label='Subscription End Date')
-                    } if hasattr(st, 'column_config') else None
-                )
-
-                if st.button('Update Client Portfolio', key='portfolio_update_changes'):
-                    changed_mask = (edited_portfolio != portfolio_df).any(axis=1)
-                    changed_rows = edited_portfolio[changed_mask]
-
-                    if not changed_rows.empty:
-                        for _, row in changed_rows.iterrows():
-                            conn.execute(
-                                "UPDATE companies SET status=?, subscription_end_date=? WHERE name=?",
-                                (row['account_status'], row['subscription_end_date'], row['company_name'])
-                            )
-                        conn.commit()
-                        st.success('Client portfolio updated successfully.')
-                        log_audit_action(conn, 'SYSTEM', 'Dev', 'Updated client portfolio', 'System Admin')
-                    else:
-                        st.info('No changes to update.')
-
                 # Deploy Pending Companies
                 pending_companies = portfolio_df[portfolio_df['deployment_status'] == 'Pending']
                 if not pending_companies.empty:
@@ -731,62 +578,6 @@ else:
             except Exception as e:
                 st.error(f"Failed to load client portfolio: {e}")
                 logger.error(f"Portfolio manager error: {e}")
-            col1, col2 = st.columns(2)
-            with col2:
-                if st.button("📊 System Health Check", key="dev_health_check"):
-                    try:
-                        conn = get_connection()
-                        
-                        # Check database integrity
-                        tables = ["companies", "system_settings", "inventory", "vouchers", "payroll", "fixed_assets", "audit_logs"]
-                        health_status = {}
-                        
-                        for table in tables:
-                            try:
-                                count = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
-                                health_status[table] = f"✅ OK ({count} records)"
-                            except Exception:
-                                health_status[table] = "❌ Error"
-                        
-                        st.json(health_status)
-                        conn.close()
-                    except Exception as e:
-                        st.error(f"Health check failed: {e}")
-                        logger.error(f"Health check error: {e}")
-        
-            # Maintenance Configuration
-            st.markdown("---")
-            st.subheader("🛠️ Maintenance Configuration")
-            try:
-                conn = get_connection()
-                maint_settings = conn.execute("SELECT maintenance_date FROM maintenance_settings WHERE id=1").fetchone()
-                current_maint_date = maint_settings[0] if maint_settings else None
-                
-                with st.form("maintenance_config_form"):
-                    maint_date_input = st.date_input(
-                        "Scheduled Maintenance Date",
-                        value=datetime.strptime(current_maint_date, '%Y-%m-%d').date() if current_maint_date else None,
-                        key="maint_date_input"
-                    )
-                    maint_time = st.time_input("Maintenance Start Time (GMT)", value=datetime.strptime("00:00", "%H:%M").time(), key="maint_time_input")
-                    
-                    if st.form_submit_button("Schedule Maintenance"):
-                        # Combine date and time
-                        maint_datetime = datetime.combine(maint_date_input, maint_time).isoformat()
-                        
-                        if maint_settings:
-                            conn.execute("UPDATE maintenance_settings SET maintenance_date=? WHERE id=1", (maint_datetime,))
-                        else:
-                            conn.execute("INSERT INTO maintenance_settings (id, maintenance_date) VALUES (1, ?)", (maint_datetime,))
-                        
-                        conn.commit()
-                        st.success(f"Maintenance scheduled for {maint_date_input} at {maint_time} GMT.")
-                        log_audit_action(conn, 'SYSTEM', 'Dev', f'Scheduled maintenance: {maint_datetime}', 'System Admin')
-                
-                conn.close()
-            except Exception as e:
-                st.error(f"Failed to load maintenance settings: {e}")
-                logger.error(f"Maintenance config error: {e}")
         
         with tab2:
             st.subheader("📅 License Management")
@@ -962,3 +753,96 @@ else:
         st.session_state.user = None
         st.session_state.login_attempts = 0
         st.rerun()
+
+# Dashboard Module (NEW FUNCTION)
+def show_dashboard(company_key, company_name, role):
+    """Enhanced company dashboard with key metrics and insights."""
+    st.header(f"📊 Business Dashboard: {company_name}")
+    
+    try:
+        conn = get_connection()
+        
+        # Key Business Metrics
+        col1, col2, col3, col4 = st.columns(4)
+        
+        # Total Inventory Value
+        inv_val = conn.execute("SELECT SUM(qty * cost_price) FROM inventory WHERE company_key=?", (company_key,)).fetchone()[0] or 0
+        col1.metric("Inventory Value", f"GHS {inv_val:.2f}")
+        
+        # Total Sales (Current Month)
+        current_month = datetime.now().strftime('%Y-%m')
+        month_sales = conn.execute("""SELECT SUM(credit) FROM vouchers 
+                                    WHERE company_key=? AND v_type='Sales' 
+                                    AND date LIKE ?""", (company_key, f"{current_month}%")).fetchone()[0] or 0
+        col2.metric("Month Sales", f"GHS {month_sales:.2f}")
+        
+        # Total Employees
+        emp_count = conn.execute("SELECT COUNT(DISTINCT emp_name) FROM payroll WHERE company_key=?", (company_key,)).fetchone()[0] or 0
+        col3.metric("Employees", str(emp_count))
+        
+        # Fixed Assets Value
+        fa_val = conn.execute("SELECT SUM(book_value) FROM fixed_assets WHERE company_key=?", (company_key,)).fetchone()[0] or 0
+        col4.metric("Asset Value", f"GHS {fa_val:.2f}")
+        
+        st.markdown("---")
+        
+        # Recent Activity
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.subheader("📈 Recent Transactions")
+            # FIXED: Use direct SQL instead of pd.read_sql
+            recent_data = conn.execute("""SELECT date, v_type, narration, 
+                                        CASE WHEN credit > 0 THEN credit ELSE debit END as amount
+                                        FROM vouchers WHERE company_key=? 
+                                        ORDER BY date DESC LIMIT 10""", (company_key,)).fetchall()
+            
+            if recent_data:
+                # Convert to DataFrame manually
+                recent_txns = pd.DataFrame(recent_data, columns=['Date', 'Type', 'Description', 'Amount'])
+                st.dataframe(recent_txns, use_container_width=True)
+            else:
+                st.info("No recent transactions found.")
+        
+        with col2:
+            st.subheader("📦 Low Stock Items")
+            # FIXED: Use direct SQL instead of pd.read_sql
+            low_stock_data = conn.execute("""SELECT item_name, qty, unit FROM inventory 
+                                           WHERE company_key=? AND qty <= 10 
+                                           ORDER BY qty ASC LIMIT 10""", (company_key,)).fetchall()
+            
+            if low_stock_data:
+                low_stock = pd.DataFrame(low_stock_data, columns=['Item', 'Quantity', 'Unit'])
+                st.dataframe(low_stock, use_container_width=True)
+            else:
+                st.success("All stock levels are adequate!")
+        
+        # Quick Actions
+        st.subheader("⚡ Quick Actions")
+        col1, col2, col3, col4 = st.columns(4)
+        
+        with col1:
+            if st.button("➕ New Sale", use_container_width=True):
+                st.session_state.selected_module = "POS (Point of Sale)"
+                st.rerun()
+        
+        with col2:
+            if st.button("📦 Add Inventory", use_container_width=True):
+                st.session_state.selected_module = "Inventory & Stock"
+                st.rerun()
+        
+        with col3:
+            if st.button("💰 Process Payroll", use_container_width=True):
+                st.session_state.selected_module = "Ghana Payroll (SSNIT)"
+                st.rerun()
+        
+        with col4:
+            if st.button("📊 View Reports", use_container_width=True):
+                st.session_state.selected_module = "Financial Intelligence"
+                st.rerun()
+        
+        conn.close()
+        
+    except sqlite3.Error as e:
+        st.error("Failed to load dashboard data")
+        logger.error(f"Dashboard error: {e}")
