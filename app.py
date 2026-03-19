@@ -6,6 +6,8 @@ from modules import *
 import logging
 from datetime import date, datetime, timedelta
 import hashlib
+import random
+import string
 from dateutil.relativedelta import relativedelta
 import smtplib
 from email.mime.multipart import MIMEMultipart
@@ -580,32 +582,47 @@ else:
                 
                 st.markdown("---")
                 st.subheader("🚀 Manual License Deployment")
+                if "manual_key_input" not in st.session_state:
+                    st.session_state.manual_key_input = ""
                 with st.form("manual_deploy"):
                     company_name = st.text_input("Company Name")
                     plan_type = st.selectbox("Plan Type", ["Basic", "Premium", "Enterprise"])
                     duration_months = st.number_input("Duration (Months)", min_value=1, max_value=24, value=12)
+                    key_col, button_col = st.columns([3, 1])
+                    with key_col:
+                        manual_key = st.text_input("System License Key", key="manual_key_input")
+                    with button_col:
+                        st.write("")
+                        st.write("")
+                        generate_key = st.form_submit_button("Generate Key")
                     submitted = st.form_submit_button("Deploy License")
+
+                    if generate_key:
+                        generated_key = (
+                            f"EKA-"
+                            f"{''.join(random.choices(string.ascii_uppercase, k=4))}-"
+                            f"{''.join(random.choices(string.digits, k=4))}"
+                        )
+                        st.session_state.manual_key_input = generated_key
+                        st.rerun()
+
                     if submitted:
-                        if company_name:
-                            key = hashlib.md5(company_name.encode()).hexdigest()[:10]
-                            # Auto-update expiry date using relativedelta
-                            new_expiry = update_license_expiry(key, duration_months)
-                            
-                            if new_expiry:
-                                try:
-                                    conn.execute(
-                                        "INSERT INTO companies (key, name, subscription_expiry, status) VALUES (?, ?, ?, ?)",
-                                        (key, company_name, new_expiry.isoformat(), "Active"),
-                                    )
-                                    conn.commit()
-                                    st.success(f"License deployed for {company_name} until {new_expiry.date()}")
-                                    log_audit_action(conn, 'SYSTEM', 'Dev', f'Manual license deployment for {company_name}', 'System Admin')
-                                except Exception as e:
-                                    st.error(f"Failed to deploy license: {e}")
-                            else:
-                                st.error("Failed to calculate expiry date.")
+                        if company_name and manual_key:
+                            new_expiry = datetime.now() + relativedelta(months=+duration_months)
+                            try:
+                                conn.execute(
+                                    """INSERT INTO companies
+                                       (key, name, subscription_expiry, status, deployment_status)
+                                       VALUES (?, ?, ?, ?, ?)""",
+                                    (manual_key, company_name, new_expiry.isoformat(), "Active", "Live"),
+                                )
+                                conn.commit()
+                                st.success(f"License deployed for {company_name} until {new_expiry.date()}")
+                                log_audit_action(conn, 'SYSTEM', 'Dev', f'Manual license deployment for {company_name}', 'System Admin')
+                            except Exception as e:
+                                st.error(f"Failed to deploy license: {e}")
                         else:
-                            st.error("Company Name is required.")
+                            st.error("Company Name and System License Key are required.")
 
                 conn.close()
 
