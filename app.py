@@ -367,158 +367,158 @@ def login_ui():
 # Dashboard Module (NEW FUNCTION)
 def show_dashboard(company_key, company_name, role):
     """Enhanced company dashboard with key metrics and insights."""
-    st.header(f"📊 Business Dashboard: {company_name}")
-    
-    # Check maintenance status and show warning if active
-    maintenance_status = check_maintenance_status()
-    if maintenance_status['active']:
-        st.warning(f"⚠️ UPCOMING MAINTENANCE: {maintenance_status['date']}")
-    
-    # Check license expiry and show info if within 7 days
-    license_status = check_license_expiry_with_grace(company_key)
-    if license_status['status'] == 'warning':
-        st.info(f"Your subscription ends in {license_status['days_left']} days. Please renew to avoid interruption.")
-    elif license_status['status'] == 'expired':
-        st.error(f"Your subscription expired {license_status['days_left']} days ago. Please renew to restore access.")
-    
-    if st.session_state.get('demo_mode', False):
-        # Demo Mode Dashboard
-        col1, col2, col3, col4 = st.columns(4)
-        col1.metric("Inventory Value", "GHS 25,000.00")
-        col2.metric("Month Sales", "GHS 15,000.00")
-        col3.metric("Employees", "5")
-        col4.metric("Asset Value", "GHS 50,000.00")
-        
-        st.markdown("---")
-        
-        # Recent Activity
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            st.subheader("📈 Recent Transactions")
-            demo_txns = pd.DataFrame({
-                'Date': ['2026-03-15', '2026-03-14', '2026-03-13'],
-                'Type': ['Sales', 'Purchase', 'Sales'],
-                'Description': ['Product Sale', 'Office Supplies', 'Service Revenue'],
-                'Amount': [5000.0, 2000.0, 3000.0]
-            })
-            st.dataframe(demo_txns, width='stretch')
-        
-        with col2:
-            st.subheader("📦 Low Stock Items")
-            demo_stock = pd.DataFrame({
-                'Item': ['Product A', 'Product B'],
-                'Quantity': [5, 8],
-                'Unit': ['pcs', 'pcs']
-            })
-            st.dataframe(demo_stock, width='stretch')
-        
-        return
-    
-    conn = None
     try:
-        conn = get_connection()
-        
-        # Key Business Metrics
-        col1, col2, col3, col4 = st.columns(4)
-        
-        # Total Inventory Value
-        inv_val = conn.execute(
-            "SELECT COALESCE(SUM(qty * cost_price), 0) FROM inventory WHERE company_key = ?",
-            (company_key,),
-        ).fetchone()[0]
-        col1.metric("Inventory Value", f"GHS {inv_val:.2f}")
-        
-        # Total Sales (Current Month)
-        current_month = datetime.now().strftime('%Y-%m')
-        month_sales = conn.execute(
-            """SELECT COALESCE(SUM(credit), 0) FROM vouchers
-               WHERE company_key = ? AND v_type = 'Sales'
-               AND date LIKE ?""",
-            (company_key, f"{current_month}%"),
-        ).fetchone()[0]
-        col2.metric("Month Sales", f"GHS {month_sales:.2f}")
-        
-        # Total Employees
-        emp_count = conn.execute(
-            "SELECT COUNT(DISTINCT emp_name) FROM payroll WHERE company_key = ?",
-            (company_key,),
-        ).fetchone()[0] or 0
-        col3.metric("Employees", str(emp_count))
-        
-        # Fixed Assets Value
-        fa_val = conn.execute(
-            "SELECT SUM(book_value) FROM fixed_assets WHERE company_key = ?",
-            (company_key,),
-        ).fetchone()[0] or 0
-        col4.metric("Asset Value", f"GHS {fa_val:.2f}")
-        
-        st.markdown("---")
-        
-        # Recent Activity
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            st.subheader("📈 Recent Transactions")
-            recent_data = conn.execute(
-                """SELECT date, v_type, narration,
-                   CASE WHEN credit > 0 THEN credit ELSE debit END AS amount
-                   FROM vouchers WHERE company_key = ?
-                   ORDER BY date DESC LIMIT 10""",
+        st.header(f"Business Dashboard: {company_name}")
+
+        maintenance_status = check_maintenance_status()
+        if maintenance_status['active']:
+            st.warning(f"UPCOMING MAINTENANCE: {maintenance_status['date']}")
+
+        license_status = check_license_expiry_with_grace(company_key)
+        if license_status['status'] == 'warning':
+            st.info(
+                f"Your subscription ends in {license_status['days_left']} days. "
+                "Please renew to avoid interruption."
+            )
+        elif license_status['status'] == 'expired':
+            st.error(
+                f"Your subscription expired {license_status['days_left']} days ago. "
+                "Please renew to restore access."
+            )
+
+        if st.session_state.get('demo_mode', False):
+            col1, col2, col3, col4 = st.columns(4)
+            col1.metric("Inventory Value", "GHS 25,000.00")
+            col2.metric("Month Sales", "GHS 15,000.00")
+            col3.metric("Employees", "5")
+            col4.metric("Asset Value", "GHS 50,000.00")
+
+            st.markdown("---")
+            col1, col2 = st.columns(2)
+
+            with col1:
+                st.subheader("Recent Transactions")
+                demo_txns = pd.DataFrame({
+                    'Date': ['2026-03-15', '2026-03-14', '2026-03-13'],
+                    'Type': ['Sales', 'Purchase', 'Sales'],
+                    'Description': ['Product Sale', 'Office Supplies', 'Service Revenue'],
+                    'Amount': [5000.0, 2000.0, 3000.0],
+                })
+                st.dataframe(demo_txns, width='stretch')
+
+            with col2:
+                st.subheader("Low Stock Items")
+                demo_stock = pd.DataFrame({
+                    'Item': ['Product A', 'Product B'],
+                    'Quantity': [5, 8],
+                    'Unit': ['pcs', 'pcs'],
+                })
+                st.dataframe(demo_stock, width='stretch')
+
+            return
+
+        conn = None
+        try:
+            conn = get_connection()
+
+            col1, col2, col3, col4 = st.columns(4)
+
+            inv_val = conn.execute(
+                "SELECT COALESCE(SUM(qty * cost_price), 0) FROM inventory WHERE company_key = ?",
                 (company_key,),
-            ).fetchall()
-            
-            if recent_data:
-                recent_txns = pd.DataFrame(recent_data, columns=['Date', 'Type', 'Description', 'Amount'])
-                st.dataframe(recent_txns, width='stretch')
-            else:
-                st.info("No recent transactions found.")
-        
-        with col2:
-            st.subheader("📦 Low Stock Items")
-            low_stock_data = conn.execute(
-                """SELECT item_name, qty, unit FROM inventory
-                   WHERE company_key = ? AND qty <= 10
-                   ORDER BY qty ASC LIMIT 10""",
+            ).fetchone()[0]
+            col1.metric("Inventory Value", f"GHS {inv_val:.2f}")
+
+            current_month = datetime.now().strftime('%Y-%m')
+            month_sales = conn.execute(
+                """SELECT COALESCE(SUM(credit), 0) FROM vouchers
+                   WHERE company_key = ? AND v_type = 'Sales'
+                   AND date LIKE ?""",
+                (company_key, f"{current_month}%"),
+            ).fetchone()[0]
+            col2.metric("Month Sales", f"GHS {month_sales:.2f}")
+
+            emp_count = conn.execute(
+                "SELECT COUNT(DISTINCT emp_name) FROM payroll WHERE company_key = ?",
                 (company_key,),
-            ).fetchall()
-            
-            if low_stock_data:
-                low_stock = pd.DataFrame(low_stock_data, columns=['Item', 'Quantity', 'Unit'])
-                st.dataframe(low_stock, width='stretch')
-            else:
-                st.success("All stock levels are adequate!")
-        
-        # Quick Actions
-        st.subheader("⚡ Quick Actions")
-        col1, col2, col3, col4 = st.columns(4)
-        
-        with col1:
-            if st.button("➕ New Sale", width='stretch'):
-                st.session_state.selected_module = "POS (Point of Sale)"
-                st.rerun()
-        
-        with col2:
-            if st.button("📦 Add Inventory", width='stretch'):
-                st.session_state.selected_module = "Inventory & Stock"
-                st.rerun()
-        
-        with col3:
-            if st.button("💰 Process Payroll", width='stretch'):
-                st.session_state.selected_module = "Ghana Payroll (SSNIT)"
-                st.rerun()
-        
-        with col4:
-            if st.button("📊 View Reports", width='stretch'):
-                st.session_state.selected_module = "Financial Intelligence"
-                st.rerun()
-        
+            ).fetchone()[0] or 0
+            col3.metric("Employees", str(emp_count))
+
+            fa_val = conn.execute(
+                "SELECT COALESCE(SUM(book_value), 0) FROM fixed_assets WHERE company_key = ?",
+                (company_key,),
+            ).fetchone()[0]
+            col4.metric("Asset Value", f"GHS {fa_val:.2f}")
+
+            st.markdown("---")
+            col1, col2 = st.columns(2)
+
+            with col1:
+                st.subheader("Recent Transactions")
+                recent_data = conn.execute(
+                    """SELECT date, v_type, narration,
+                       CASE WHEN credit > 0 THEN credit ELSE debit END AS amount
+                       FROM vouchers WHERE company_key = ?
+                       ORDER BY date DESC LIMIT 10""",
+                    (company_key,),
+                ).fetchall()
+
+                if recent_data:
+                    recent_txns = pd.DataFrame(
+                        recent_data,
+                        columns=['Date', 'Type', 'Description', 'Amount'],
+                    )
+                    st.dataframe(recent_txns, width='stretch')
+                else:
+                    st.info("No recent transactions found.")
+
+            with col2:
+                st.subheader("Low Stock Items")
+                low_stock_data = conn.execute(
+                    """SELECT item_name, qty, unit FROM inventory
+                       WHERE company_key = ? AND qty <= 10
+                       ORDER BY qty ASC LIMIT 10""",
+                    (company_key,),
+                ).fetchall()
+
+                if low_stock_data:
+                    low_stock = pd.DataFrame(
+                        low_stock_data,
+                        columns=['Item', 'Quantity', 'Unit'],
+                    )
+                    st.dataframe(low_stock, width='stretch')
+                else:
+                    st.success("All stock levels are adequate!")
+
+            st.subheader("Quick Actions")
+            col1, col2, col3, col4 = st.columns(4)
+
+            with col1:
+                if st.button("New Sale", width='stretch'):
+                    st.session_state.selected_module = "POS (Point of Sale)"
+                    st.rerun()
+
+            with col2:
+                if st.button("Add Inventory", width='stretch'):
+                    st.session_state.selected_module = "Inventory & Stock"
+                    st.rerun()
+
+            with col3:
+                if st.button("Process Payroll", width='stretch'):
+                    st.session_state.selected_module = "Ghana Payroll (SSNIT)"
+                    st.rerun()
+
+            with col4:
+                if st.button("View Reports", width='stretch'):
+                    st.session_state.selected_module = "Financial Intelligence"
+                    st.rerun()
+
+        finally:
+            if conn:
+                conn.close()
+
     except Exception as e:
-        st.error("Failed to load dashboard data")
-        logger.error(f"Dashboard error: {e}")
-    finally:
-        if conn:
-            conn.close()
+        st.error(f"Dashboard Error: {e}")
 
 # Main application flow
 if not st.session_state.auth or not check_session_timeout():
