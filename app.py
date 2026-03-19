@@ -53,7 +53,7 @@ def check_maintenance_status():
     """Check maintenance settings and return status info."""
     try:
         conn = get_connection()
-        maint_setting = conn.execute(text("SELECT maintenance_date, is_active FROM maintenance_settings WHERE id = 1")).fetchone()
+        maint_setting = conn.execute("SELECT maintenance_date, is_active FROM maintenance_settings WHERE id = 1").fetchone()
         conn.close()
         
         if maint_setting and maint_setting[1]:  # is_active is True

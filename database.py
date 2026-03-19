@@ -23,7 +23,8 @@ def log_audit_action(conn, company_key, user_role, action, module_name):
     """Log audit trail entries for security and compliance."""
     try:
         conn.execute(text("""INSERT INTO audit_logs (company_key, user_role, action, module_name) 
-                     VALUES (?,?,?,?)"""), (company_key, user_role, action, module_name))
+                     VALUES (:company_key, :user_role, :action, :module_name)"""), 
+                     {"company_key": company_key, "user_role": user_role, "action": action, "module_name": module_name})
         conn.commit()
     except Exception as e:
         logger.error(f"Audit logging error: {e}")
