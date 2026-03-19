@@ -624,6 +624,52 @@ else:
                         else:
                             st.error("Company Name and System License Key are required.")
 
+                st.markdown("---")
+                st.subheader("🛠️ Global Maintenance Management")
+                m_date = st.date_input("Scheduled Maintenance Date", key="gatekeeper_maintenance_date")
+                m_msg = st.text_area(
+                    "Maintenance Message",
+                    value="E.K.A ERP will be down for scheduled maintenance...",
+                    key="gatekeeper_maintenance_message",
+                )
+
+                if st.button("Update & Notify All Clients", key="update_notify_clients"):
+                    try:
+                        conn.execute(
+                            """UPDATE maintenance_settings
+                               SET maintenance_date = ?, message = ?, is_active = 1
+                               WHERE id = 1""",
+                            (m_date.isoformat(), m_msg),
+                        )
+                        conn.commit()
+
+                        clients = conn.execute(
+                            """SELECT name, contact_email
+                               FROM companies
+                               WHERE contact_email IS NOT NULL AND contact_email != ''"""
+                        ).fetchall()
+
+                        sent_count = 0
+                        for client in clients:
+                            company_name = client[0]
+                            company_email = client[1]
+                            if send_maintenance_email(company_email, company_name, m_msg):
+                                sent_count += 1
+
+                        st.success(
+                            f"Maintenance updated for {m_date.isoformat()}. "
+                            f"Notifications sent to {sent_count} client(s)."
+                        )
+                        log_audit_action(
+                            conn,
+                            'SYSTEM',
+                            'Dev',
+                            f'Maintenance scheduled for {m_date.isoformat()} and notifications sent',
+                            'System Admin',
+                        )
+                    except Exception as e:
+                        st.error(f"Failed to update maintenance settings: {e}")
+
                 conn.close()
 
             except Exception as e:
