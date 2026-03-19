@@ -5,26 +5,6 @@ from pathlib import Path
 DB_PATH = Path(__file__).resolve().parent / "database.db"
 
 
-def ensure_company_columns(cursor):
-    existing_columns = {
-        row[1] for row in cursor.execute("PRAGMA table_info(companies)").fetchall()
-    }
-
-    columns_to_add = [
-        ("subscription_expiry", "ALTER TABLE companies ADD COLUMN subscription_expiry TEXT"),
-        (
-            "deployment_status",
-            "ALTER TABLE companies ADD COLUMN deployment_status TEXT DEFAULT 'Pending'",
-        ),
-        ("key", "ALTER TABLE companies ADD COLUMN key TEXT"),
-    ]
-
-    for column_name, sql in columns_to_add:
-        if column_name not in existing_columns:
-            cursor.execute(sql)
-            print(f"Added missing column: {column_name}")
-
-
 def main():
     print(f"Opening database at: {DB_PATH}")
 
@@ -32,18 +12,16 @@ def main():
     cursor = conn.cursor()
     cursor.execute("PRAGMA foreign_keys = ON;")
 
+    print("Checking Table companies...")
     cursor.execute(
         """
         CREATE TABLE IF NOT EXISTS companies (
-            key TEXT PRIMARY KEY,
             name TEXT NOT NULL UNIQUE,
             sub_admin_key TEXT,
             staff_key TEXT,
             recovery_answer TEXT,
             tin TEXT,
-            subscription_expiry TEXT,
             status TEXT DEFAULT 'Active',
-            deployment_status TEXT DEFAULT 'Pending',
             plan_type TEXT DEFAULT 'Basic',
             contact_email TEXT,
             phone_number TEXT,
@@ -57,8 +35,13 @@ def main():
         """
     )
 
-    ensure_company_columns(cursor)
+    for col in [('subscription_expiry', 'TEXT'), ('deployment_status', 'TEXT'), ('key', 'TEXT')]:
+        try:
+            cursor.execute(f"ALTER TABLE companies ADD COLUMN {col[0]} {col[1]}")
+        except:
+            pass  # Column already exists
 
+    print("Checking Table inventory...")
     cursor.execute(
         """
         CREATE TABLE IF NOT EXISTS inventory (
@@ -77,14 +60,12 @@ def main():
             warehouse_location TEXT,
             is_active INTEGER DEFAULT 1,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (company_key) REFERENCES companies (key) ON DELETE CASCADE
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
         """
     )
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_inv_comp ON inventory(company_key)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_inv_name ON inventory(item_name)")
 
+    print("Checking Table vouchers...")
     cursor.execute(
         """
         CREATE TABLE IF NOT EXISTS vouchers (
@@ -101,13 +82,12 @@ def main():
             narration TEXT,
             is_cleared INTEGER DEFAULT 1,
             created_by TEXT,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (company_key) REFERENCES companies (key) ON DELETE CASCADE
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
         """
     )
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_vouch_date ON vouchers(date)")
 
+    print("Checking Table payroll...")
     cursor.execute(
         """
         CREATE TABLE IF NOT EXISTS payroll (
@@ -127,12 +107,12 @@ def main():
             month TEXT NOT NULL,
             year TEXT NOT NULL,
             payment_status TEXT DEFAULT 'Unpaid',
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (company_key) REFERENCES companies (key) ON DELETE CASCADE
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
         """
     )
 
+    print("Checking Table fixed_assets...")
     cursor.execute(
         """
         CREATE TABLE IF NOT EXISTS fixed_assets (
@@ -146,12 +126,12 @@ def main():
             accumulated_depreciation REAL DEFAULT 0,
             book_value REAL NOT NULL,
             location TEXT,
-            status TEXT DEFAULT 'Active',
-            FOREIGN KEY (company_key) REFERENCES companies (key) ON DELETE CASCADE
+            status TEXT DEFAULT 'Active'
         )
         """
     )
 
+    print("Checking Table audit_logs...")
     cursor.execute(
         """
         CREATE TABLE IF NOT EXISTS audit_logs (
@@ -167,6 +147,7 @@ def main():
         """
     )
 
+    print("Checking Table maintenance_settings...")
     cursor.execute(
         """
         CREATE TABLE IF NOT EXISTS maintenance_settings (
@@ -181,6 +162,7 @@ def main():
         """
     )
 
+    print("Checking Table pending_approvals...")
     cursor.execute(
         """
         CREATE TABLE IF NOT EXISTS pending_approvals (
@@ -192,8 +174,7 @@ def main():
             plan_requested TEXT,
             status TEXT DEFAULT 'Pending',
             admin_notes TEXT,
-            timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (company_key) REFERENCES companies (key)
+            timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
         """
     )
