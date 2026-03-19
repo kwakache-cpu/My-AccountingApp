@@ -1,296 +1,270 @@
-import streamlit as st
 import sqlite3
-import os
-from datetime import datetime
 import logging
-from sqlalchemy import text
+from datetime import datetime
+import os
 
-# Configure logging
-logging.basicConfig(level=logging.INFO)
+# =================================================================
+# 1. SYSTEM LOGGING & CONFIGURATION
+# =================================================================
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
 logger = logging.getLogger(__name__)
 
+# Primary Database Path
+DB_NAME = "eka_enterprise_v3.db"
+
+# =================================================================
+# 2. CORE CONNECTION ENGINE
+# =================================================================
 def get_connection():
-    """Establish a professional connection to the E.K.A Enterprise Database."""
+    """
+    Establishes a high-performance native SQLite connection.
+    Includes Row Factory for dictionary-style access and PRAGMA 
+    settings for data integrity.
+    """
     try:
-        conn = sqlite3.connect("eka_enterprise_v3.db", check_same_thread=False)
-        conn.execute("PRAGMA foreign_keys = ON")  # Enable foreign key constraints
+        # check_same_thread=False is essential for Streamlit's architecture
+        conn = sqlite3.connect(DB_NAME, check_same_thread=False, timeout=20)
+        conn.row_factory = sqlite3.Row
+        
+        # Enable Foreign Key Constraints for referential integrity
+        conn.execute("PRAGMA foreign_keys = ON;")
+        # Set Journal Mode to WAL for better concurrency in Cloud environments
+        conn.execute("PRAGMA journal_mode = WAL;")
+        
         return conn
-    except Exception as e:
-        logger.error(f"Database connection error: {e}")
-        raise
+    except sqlite3.Error as e:
+        logger.critical(f"DATABASE CONNECTION FAILURE: {e}")
+        return None
 
-def log_audit_action(conn, company_key, user_role, action, module_name):
-    """NATIVE SQLITE FIX: No text() wrapper"""
-    try:
-        conn.execute("INSERT INTO audit_logs (company_key, user_role, action, module_name) VALUES (?, ?, ?, ?)", 
-                     (company_key, user_role, action, module_name))
-        conn.commit()
-    except Exception as e:
-        logger.error(f"Audit logging error: {e}")
-
+# =================================================================
+# 3. DATABASE INITIALIZATION (FULL SCHEMA DEPLOYMENT)
+# =================================================================
 def init_db():
-    """Initialize the full multi-module schema for Ghana compliance."""
+    """
+    Deploys the complete ERP database architecture.
+    Includes all 8 core tables with full constraints and indexing.
+    """
     conn = get_connection()
-    c = conn.cursor()
-    
+    if not conn:
+        return
+
     try:
-        # 1. Company Identity & Security Keys
-        c.execute('''CREATE TABLE IF NOT EXISTS companies 
-                     (key TEXT PRIMARY KEY, 
-                      name TEXT, 
-                      tin TEXT, 
-                      sub_admin_key TEXT, 
-                      staff_key TEXT, 
-                      recovery_answer TEXT,
-                      email TEXT,
-                      phone TEXT,
-                      address TEXT,
-                      subscription_expiry DATE,
-                      maintenance_mode BOOLEAN DEFAULT 0,
-                      status TEXT DEFAULT 'Active',
-                      deployment_status TEXT DEFAULT 'Pending',
-                      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP)''')
-        
-        # 2. System Fees & Gatekeeper Settings
-        c.execute('''CREATE TABLE IF NOT EXISTS system_settings 
-                     (id INTEGER PRIMARY KEY, 
-                      company_key TEXT,
-                      software_fee REAL DEFAULT 0.0, 
-                      maintenance_fee REAL DEFAULT 0.0, 
-                      subscription_months INTEGER DEFAULT 12,
-                      currency TEXT DEFAULT 'GHS',
-                      vat_rate REAL DEFAULT 12.5,
-                      nhil_rate REAL DEFAULT 2.5,
-                      getfund_rate REAL DEFAULT 2.5,
-                      covid_rate REAL DEFAULT 1.0,
-                      FOREIGN KEY (company_key) REFERENCES companies(key))''')
+        cursor = conn.cursor()
 
-        # 3. Inventory & Warehouse Management
-        c.execute('''CREATE TABLE IF NOT EXISTS inventory 
-                     (id INTEGER PRIMARY KEY AUTOINCREMENT, 
-                      company_key TEXT, 
-                      item_name TEXT, 
-                      unit TEXT, 
-                      qty REAL DEFAULT 0.0, 
-                      price REAL DEFAULT 0.0, 
-                      cost_price REAL DEFAULT 0.0, 
-                      warehouse TEXT DEFAULT 'Main',
-                      barcode TEXT,
-                      min_stock_level REAL DEFAULT 0.0,
-                      supplier_name TEXT,
-                      category TEXT,
-                      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                      FOREIGN KEY (company_key) REFERENCES companies(key))''')
+        # --- TABLE 1: CORPORATE ENTITIES & LICENSING ---
+        # Stores master account data, license keys, and security answers
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS companies (
+                key TEXT PRIMARY KEY,
+                name TEXT NOT NULL UNIQUE,
+                sub_admin_key TEXT,
+                staff_key TEXT,
+                recovery_answer TEXT,
+                tin TEXT,
+                subscription_expiry TEXT,
+                status TEXT DEFAULT 'Active',
+                deployment_status TEXT DEFAULT 'Pending',
+                plan_type TEXT DEFAULT 'Basic',
+                contact_email TEXT,
+                phone_number TEXT,
+                physical_address TEXT,
+                industry TEXT,
+                currency TEXT DEFAULT 'GHS',
+                logo_url TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
 
-        # 4. Universal Voucher Journal (With Payment Methods)
-        c.execute('''CREATE TABLE IF NOT EXISTS vouchers 
-                     (id INTEGER PRIMARY KEY AUTOINCREMENT, 
-                      company_key TEXT, 
-                      date TEXT, 
-                      v_type TEXT, 
-                      ledger TEXT, 
-                      debit REAL DEFAULT 0.0, 
-                      credit REAL DEFAULT 0.0, 
-                      payment_method TEXT, 
-                      narration TEXT, 
-                      ref_no TEXT,
-                      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                      FOREIGN KEY (company_key) REFERENCES companies(key))''')
+        # --- TABLE 2: INVENTORY & STOCK MASTER ---
+        # Manages product levels, costs, and warehouse locations
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS inventory (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                company_key TEXT NOT NULL,
+                item_name TEXT NOT NULL,
+                item_code TEXT,
+                category TEXT,
+                description TEXT,
+                qty REAL DEFAULT 0,
+                min_stock_level REAL DEFAULT 10,
+                unit TEXT DEFAULT 'pcs',
+                cost_price REAL DEFAULT 0,
+                price REAL DEFAULT 0,
+                tax_rate REAL DEFAULT 0,
+                warehouse_location TEXT,
+                is_active INTEGER DEFAULT 1,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (company_key) REFERENCES companies (key) ON DELETE CASCADE
+            )
+        """)
+        # Indexes for fast product searching
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_inv_comp ON inventory(company_key);")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_inv_name ON inventory(item_name);")
 
-        # 5. Ghana Payroll Tiers (SSNIT & PAYE)
-        c.execute('''CREATE TABLE IF NOT EXISTS payroll 
-                     (id INTEGER PRIMARY KEY AUTOINCREMENT, 
-                      company_key TEXT, 
-                      emp_name TEXT, 
-                      emp_id TEXT,
-                      emp_department TEXT,
-                      basic_salary REAL, 
-                      ssnit_t1 REAL, 
-                      ssnit_t2 REAL, 
-                      ssnit_t3 REAL DEFAULT 0.0,
-                      taxable_income REAL, 
-                      paye REAL, 
-                      net_salary REAL, 
-                      month TEXT, 
-                      year TEXT,
-                      bank_account TEXT,
-                      payment_method TEXT,
-                      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                      FOREIGN KEY (company_key) REFERENCES companies(key))''')
+        # --- TABLE 3: FINANCIAL VOUCHERS & GENERAL LEDGER ---
+        # Central ledger for POS sales, expenses, and journals
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS vouchers (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                company_key TEXT NOT NULL,
+                date TEXT NOT NULL,
+                v_type TEXT NOT NULL, -- Sales, Purchase, Expense, Journal
+                ledger TEXT NOT NULL,
+                debit REAL DEFAULT 0,
+                credit REAL DEFAULT 0,
+                balance_after REAL DEFAULT 0,
+                payment_method TEXT, -- Cash, MoMo, Bank, Cheque
+                reference_no TEXT,
+                narration TEXT,
+                is_cleared INTEGER DEFAULT 1,
+                created_by TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (company_key) REFERENCES companies (key) ON DELETE CASCADE
+            )
+        """)
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_vouch_date ON vouchers(date);")
 
-        # 6. Fixed Asset Register
-        c.execute('''CREATE TABLE IF NOT EXISTS fixed_assets 
-                     (id INTEGER PRIMARY KEY AUTOINCREMENT, 
-                      company_key TEXT, 
-                      asset_name TEXT, 
-                      asset_category TEXT,
-                      purchase_cost REAL, 
-                      dep_rate REAL, 
-                      accum_dep REAL DEFAULT 0.0, 
-                      book_value REAL, 
-                      purchase_date TEXT,
-                      disposal_date TEXT,
-                      location TEXT,
-                      responsible_person TEXT,
-                      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                      FOREIGN KEY (company_key) REFERENCES companies(key))''')
+        # --- TABLE 4: GHANA STATUTORY PAYROLL ENGINE ---
+        # Handles SSNIT Tier 1 & 2 and Ghana Revenue Authority PAYE
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS payroll (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                company_key TEXT NOT NULL,
+                emp_name TEXT NOT NULL,
+                emp_id TEXT,
+                bank_name TEXT,
+                account_number TEXT,
+                basic_salary REAL NOT NULL,
+                allowances REAL DEFAULT 0,
+                ssnit_t1 REAL DEFAULT 0,
+                ssnit_t2 REAL DEFAULT 0,
+                taxable_income REAL DEFAULT 0,
+                paye REAL DEFAULT 0,
+                net_salary REAL DEFAULT 0,
+                month TEXT NOT NULL,
+                year TEXT NOT NULL,
+                payment_status TEXT DEFAULT 'Unpaid',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (company_key) REFERENCES companies (key) ON DELETE CASCADE
+            )
+        """)
 
-        # 7. Security Audit Trail
-        c.execute('''CREATE TABLE IF NOT EXISTS audit_logs 
-                     (id INTEGER PRIMARY KEY AUTOINCREMENT, 
-                      timestamp DATETIME DEFAULT CURRENT_TIMESTAMP, 
-                      company_key TEXT, 
-                      user_role TEXT, 
-                      action TEXT, 
-                      module_name TEXT,
-                      ip_address TEXT,
-                      FOREIGN KEY (company_key) REFERENCES companies(key))''')
+        # --- TABLE 5: FIXED ASSET REGISTER ---
+        # Tracking long-term assets and depreciation
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS fixed_assets (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                company_key TEXT NOT NULL,
+                asset_name TEXT NOT NULL,
+                asset_category TEXT,
+                purchase_date TEXT,
+                cost REAL NOT NULL,
+                depreciation_rate REAL DEFAULT 0,
+                accumulated_depreciation REAL DEFAULT 0,
+                book_value REAL NOT NULL,
+                location TEXT,
+                status TEXT DEFAULT 'Active',
+                FOREIGN KEY (company_key) REFERENCES companies (key) ON DELETE CASCADE
+            )
+        """)
 
-        # 8. Chart of Accounts (NEW)
-        c.execute('''CREATE TABLE IF NOT EXISTS chart_of_accounts 
-                     (id INTEGER PRIMARY KEY AUTOINCREMENT,
-                      company_key TEXT,
-                      account_code TEXT,
-                      account_name TEXT,
-                      account_type TEXT,
-                      balance REAL DEFAULT 0.0,
-                      parent_account TEXT,
-                      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                      FOREIGN KEY (company_key) REFERENCES companies(key))''')
+        # --- TABLE 6: FORENSIC AUDIT TRAIL ---
+        # Security table for tracking all user actions
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS audit_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                company_key TEXT,
+                user_role TEXT,
+                action TEXT NOT NULL,
+                module_name TEXT,
+                details TEXT,
+                ip_address TEXT
+            )
+        """)
 
-        # 9. Sales Invoices (NEW)
-        c.execute('''CREATE TABLE IF NOT EXISTS sales_invoices 
-                     (id INTEGER PRIMARY KEY AUTOINCREMENT,
-                      company_key TEXT,
-                      invoice_no TEXT,
-                      customer_name TEXT,
-                      customer_email TEXT,
-                      customer_phone TEXT,
-                      invoice_date TEXT,
-                      due_date TEXT,
-                      total_amount REAL,
-                      vat_amount REAL,
-                      status TEXT DEFAULT 'Pending',
-                      payment_status TEXT DEFAULT 'Unpaid',
-                      sales_person TEXT,
-                      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                      FOREIGN KEY (company_key) REFERENCES companies(key))''')
+        # --- TABLE 7: MAINTENANCE & SYSTEM SETTINGS ---
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS maintenance_settings (
+                id INTEGER PRIMARY KEY,
+                maintenance_date TEXT,
+                start_time TEXT,
+                end_time TEXT,
+                is_active INTEGER DEFAULT 0,
+                message TEXT,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        cursor.execute("INSERT OR IGNORE INTO maintenance_settings (id, is_active) VALUES (1, 0)")
 
-        # 10. Purchase Orders (NEW)
-        c.execute('''CREATE TABLE IF NOT EXISTS purchase_orders 
-                     (id INTEGER PRIMARY KEY AUTOINCREMENT,
-                      company_key TEXT,
-                      po_no TEXT,
-                      supplier_name TEXT,
-                      supplier_email TEXT,
-                      order_date TEXT,
-                      delivery_date TEXT,
-                      total_amount REAL,
-                      status TEXT DEFAULT 'Pending',
-                      approved_by TEXT,
-                      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                      FOREIGN KEY (company_key) REFERENCES companies(key))''')
-
-        # 11. Customer Management (NEW)
-        c.execute('''CREATE TABLE IF NOT EXISTS customers 
-                     (id INTEGER PRIMARY KEY AUTOINCREMENT,
-                      company_key TEXT,
-                      customer_code TEXT,
-                      customer_name TEXT,
-                      email TEXT,
-                      phone TEXT,
-                      address TEXT,
-                      credit_limit REAL DEFAULT 0.0,
-                      balance REAL DEFAULT 0.0,
-                      customer_type TEXT DEFAULT 'Regular',
-                      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                      FOREIGN KEY (company_key) REFERENCES companies(key))''')
-
-        # 12. Supplier Management (NEW)
-        c.execute('''CREATE TABLE IF NOT EXISTS suppliers 
-                     (id INTEGER PRIMARY KEY AUTOINCREMENT,
-                      company_key TEXT,
-                      supplier_code TEXT,
-                      supplier_name TEXT,
-                      email TEXT,
-                      phone TEXT,
-                      address TEXT,
-                      payment_terms TEXT DEFAULT '30 Days',
-                      vat_number TEXT,
-                      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                      FOREIGN KEY (company_key) REFERENCES companies(key))''')
-
-        # 13. Maintenance Notices (NEW)
-        c.execute('''CREATE TABLE IF NOT EXISTS maintenance_notices 
-                     (id INTEGER PRIMARY KEY AUTOINCREMENT,
-                      company_key TEXT,
-                      notice_type TEXT,
-                      title TEXT,
-                      message TEXT,
-                      start_date TEXT,
-                      end_date TEXT,
-                      status TEXT DEFAULT 'Scheduled',
-                      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                      FOREIGN KEY (company_key) REFERENCES companies(key))''')
-
-        # 14. System Notifications (NEW)
-        c.execute('''CREATE TABLE IF NOT EXISTS notifications 
-                     (id INTEGER PRIMARY KEY AUTOINCREMENT,
-                      company_key TEXT,
-                      notification_type TEXT,
-                      title TEXT,
-                      message TEXT,
-                      priority TEXT DEFAULT 'Medium',
-                      is_read BOOLEAN DEFAULT 0,
-                      expiry_date TEXT,
-                      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                      FOREIGN KEY (company_key) REFERENCES companies(key))''')
-
-        # 15. Maintenance Settings (NEW for Gatekeeper)
-        c.execute('''CREATE TABLE IF NOT EXISTS maintenance_settings 
-                     (id INTEGER PRIMARY KEY,
-                      maintenance_date TEXT,
-                      is_active BOOLEAN DEFAULT 0,
-                      created_at DATETIME DEFAULT CURRENT_TIMESTAMP)''')
-
-        # 16. Pending Approvals (NEW for Payment References)
-        c.execute('''CREATE TABLE IF NOT EXISTS pending_approvals 
-                     (id INTEGER PRIMARY KEY AUTOINCREMENT,
-                      company_key TEXT,
-                      payment_reference TEXT,
-                      amount REAL,
-                      payment_method TEXT,
-                      submitted_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                      status TEXT DEFAULT 'Pending',
-                      approved_at DATETIME,
-                      approved_by TEXT,
-                      notes TEXT,
-                      FOREIGN KEY (company_key) REFERENCES companies(key))''')
-
-        # Ensure missing columns exist in existing databases
-        try:
-            # Add status column if it doesn't exist
-            c.execute(text("ALTER TABLE companies ADD COLUMN status TEXT DEFAULT 'Active'"))
-        except:
-            pass  # Column already exists
-        
-        try:
-            # Add deployment_status column if it doesn't exist
-            c.execute(text("ALTER TABLE companies ADD COLUMN deployment_status TEXT DEFAULT 'Pending'"))
-        except:
-            pass  # Column already exists
+        # --- TABLE 8: PENDING APPROVALS QUEUE ---
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS pending_approvals (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                company_key TEXT,
+                payment_reference TEXT UNIQUE,
+                amount REAL,
+                payment_method TEXT,
+                plan_requested TEXT,
+                status TEXT DEFAULT 'Pending',
+                admin_notes TEXT,
+                timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (company_key) REFERENCES companies (key)
+            )
+        """)
 
         conn.commit()
-        logger.info("Database structure verified and initialized.")
-        
-    except Exception as e:
-        logger.error(f"Database initialization error: {e}")
+        logger.info("E.K.A CLOUD DATABASE: Full Architectural Sync Complete.")
+    except sqlite3.Error as e:
+        logger.error(f"DATABASE INITIALIZATION ERROR: {e}")
         conn.rollback()
-        raise
     finally:
         conn.close()
 
+# =================================================================
+# 4. UTILITY FUNCTIONS
+# =================================================================
+
+def log_audit_action(conn, company_key, user_role, action, module_name, details=None):
+    """Logs security events to the audit trail."""
+    try:
+        conn.execute("""
+            INSERT INTO audit_logs (company_key, user_role, action, module_name, details)
+            VALUES (?, ?, ?, ?, ?)
+        """, (company_key, user_role, action, module_name, details))
+        conn.commit()
+    except Exception as e:
+        logger.warning(f"Audit log failed: {e}")
+
+def get_company_data(company_key):
+    """Retrieves full profile for a specific license."""
+    conn = get_connection()
+    try:
+        return conn.execute("SELECT * FROM companies WHERE key = ?", (company_key,)).fetchone()
+    finally:
+        conn.close()
+
+def run_manual_query(query, params=(), commit=False):
+    """Executes custom SQL for maintenance or debugging."""
+    conn = get_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute(query, params)
+        if commit:
+            conn.commit()
+            return True
+        return cursor.fetchall()
+    except sqlite3.Error as e:
+        logger.error(f"Manual Query Error: {e}")
+        return None
+    finally:
+        conn.close()
+
+# Start Database on Script Load
 if __name__ == "__main__":
     init_db()

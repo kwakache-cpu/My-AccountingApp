@@ -1,13 +1,12 @@
 import streamlit as st
 import pandas as pd
-from database import get_connection, init_db, log_audit_action
+from database import get_connection
+from database import init_db, log_audit_action
 from modules import *
-from modules import check_maintenance_window
 import logging
 from datetime import date, datetime, timedelta
 import hashlib
 from dateutil.relativedelta import relativedelta
-from sqlalchemy import text
 import smtplib
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -50,18 +49,21 @@ def update_activity():
     st.session_state.last_activity = datetime.now()
 
 def check_maintenance_status():
-    """NATIVE SQLITE FIX: No text() wrapper"""
+    """NATIVE SQLITE FIX: No  wrapper"""
+    conn = None
     try:
         conn = get_connection()
         cursor = conn.cursor()
         cursor.execute("SELECT maintenance_date, is_active FROM maintenance_settings WHERE id = 1")
         maint_setting = cursor.fetchone()
-        conn.close()
         if maint_setting and maint_setting[1]:
             return {'active': True, 'date': maint_setting[0]}
         return {'active': False}
     except Exception as e:
         return {'active': False}
+    finally:
+        if conn:
+            conn.close()
 
 def send_maintenance_email(company_email, company_name, message):
     """Send maintenance notice to client."""
@@ -102,13 +104,13 @@ def send_maintenance_email(company_email, company_name, message):
         return False
 
 def check_license_expiry_with_grace(company_key):
-    """NATIVE SQLITE FIX: No text() wrapper"""
+    """NATIVE SQLITE FIX: No  wrapper"""
+    conn = None
     try:
         conn = get_connection()
         cursor = conn.cursor()
         cursor.execute("SELECT name, subscription_expiry FROM companies WHERE key = ?", (company_key,))
         company_data = cursor.fetchone()
-        conn.close()
         if company_data and company_data[1]:
             expiry_date = datetime.fromisoformat(company_data[1])
             days_until_expiry = (expiry_date - datetime.now()).days
@@ -118,18 +120,23 @@ def check_license_expiry_with_grace(company_key):
         return {'status': 'unknown'}
     except Exception as e:
         return {'status': 'error'}
+    finally:
+        if conn:
+            conn.close()
 
 def submit_payment_reference(company_key, reference, amount, payment_method):
     """Submit payment reference for admin approval."""
+    conn = None
     try:
         conn = get_connection()
-        conn.execute(text("""INSERT INTO pending_approvals 
-                         (company_key, payment_reference, amount, payment_method) 
-                         VALUES (:company_key, :reference, :amount, :method)"""),
-                 {"company_key": company_key, "reference": reference, "amount": amount, "method": payment_method})
+        conn.execute(
+            """INSERT INTO pending_approvals
+               (company_key, payment_reference, amount, payment_method)
+               VALUES (?, ?, ?, ?)""",
+            (company_key, reference, amount, payment_method),
+        )
         conn.commit()
         log_audit_action(conn, company_key, 'System', f'Submitted payment reference: {reference}', 'Payment')
-        conn.close()
         
         # Show success notification
         st.success(f"Payment reference {reference} submitted successfully!")
@@ -141,21 +148,29 @@ def submit_payment_reference(company_key, reference, amount, payment_method):
     except Exception as e:
         logger.error(f"Failed to submit payment reference: {e}")
         return False
+    finally:
+        if conn:
+            conn.close()
 
 def update_license_expiry(company_key, months):
     """Update license expiry date using relativedelta."""
+    conn = None
     try:
         conn = get_connection()
         new_expiry = datetime.now() + relativedelta(months=+months)
-        conn.execute(text("UPDATE companies SET subscription_expiry = :expiry WHERE key = :key"),
-                 {"expiry": new_expiry.isoformat(), "key": company_key})
+        conn.execute(
+            "UPDATE companies SET subscription_expiry = ? WHERE key = ?",
+            (new_expiry.isoformat(), company_key),
+        )
         conn.commit()
         log_audit_action(conn, company_key, 'System', f'License extended by {months} months', 'License Management')
-        conn.close()
         return new_expiry
     except Exception as e:
         logger.error(f"Failed to update license expiry: {e}")
         return None
+    finally:
+        if conn:
+            conn.close()
 
 def enter_demo():
     """Enter demo mode."""
@@ -234,7 +249,7 @@ def login_ui():
                         st.rerun()
                     
                     # Master Admin Check
-                    admin = conn.execute(text("SELECT key, name FROM companies WHERE key = :key"), {"key": license_key}).fetchone()
+                    admin = conn.execute("SELECT key, name FROM companies WHERE key = ?", (license_key,)).fetchone()
                     if admin:
                         # Check license expiry with grace period
                         license_status = check_license_expiry_with_grace(admin[0])
@@ -251,7 +266,7 @@ def login_ui():
                             st.error(f"Your license expired {license_status['days_left']} days ago. Please renew to access the system.")
                     
                     # Sub-Admin/Staff Check
-                    sub = conn.execute(text("SELECT key, name FROM companies WHERE sub_admin_key = :key"), {"key": license_key}).fetchone()
+                    sub = conn.execute("SELECT key, name FROM companies WHERE sub_admin_key = ?", (license_key,)).fetchone()
                     if sub:
                         # Check license expiry with grace period
                         license_status = check_license_expiry_with_grace(sub[0])
@@ -269,7 +284,7 @@ def login_ui():
                         
                     if license_key.endswith("-staff"):
                         pure_k = license_key.replace("-staff", "")
-                        staff = conn.execute(text("SELECT key, name FROM companies WHERE key = :key"), {"key": pure_k}).fetchone()
+                        staff = conn.execute("SELECT key, name FROM companies WHERE key = ?", (pure_k,)).fetchone()
                         if staff:
                             # Check license expiry with grace period
                             license_status = check_license_expiry_with_grace(staff[0])
@@ -323,8 +338,10 @@ def login_ui():
         if st.button("Retrieve Master Key", key="v3_rec_action_btn"):
             try:
                 conn = get_connection()
-                res = conn.execute(text("SELECT key FROM companies WHERE name = :name AND recovery_answer = :answer"), 
-                                {"name": rec_name, "answer": rec_ans}).fetchone()
+                res = conn.execute(
+                    "SELECT key FROM companies WHERE name = ? AND recovery_answer = ?",
+                    (rec_name, rec_ans),
+                ).fetchone()
                 if res: 
                     st.success(f"Identity Verified. Your Master Key is: {res[0]}")
                     log_audit_action(conn, res[0], "Recovery", "Successful key recovery", "Authentication")
@@ -396,6 +413,7 @@ def show_dashboard(company_key, company_name, role):
         
         return
     
+    conn = None
     try:
         conn = get_connection()
         
@@ -403,22 +421,34 @@ def show_dashboard(company_key, company_name, role):
         col1, col2, col3, col4 = st.columns(4)
         
         # Total Inventory Value
-        inv_val = conn.execute(text("SELECT SUM(qty * cost_price) FROM inventory WHERE company_key = :key"), {"key": company_key}).fetchone()[0] or 0
+        inv_val = conn.execute(
+            "SELECT COALESCE(SUM(qty * cost_price), 0) FROM inventory WHERE company_key = ?",
+            (company_key,),
+        ).fetchone()[0]
         col1.metric("Inventory Value", f"GHS {inv_val:.2f}")
         
         # Total Sales (Current Month)
         current_month = datetime.now().strftime('%Y-%m')
-        month_sales = conn.execute(text("""SELECT SUM(credit) FROM vouchers 
-                                    WHERE company_key = :key AND v_type = 'Sales' 
-                                    AND date LIKE :month"""), {"key": company_key, "month": f"{current_month}%"}).fetchone()[0] or 0
+        month_sales = conn.execute(
+            """SELECT COALESCE(SUM(credit), 0) FROM vouchers
+               WHERE company_key = ? AND v_type = 'Sales'
+               AND date LIKE ?""",
+            (company_key, f"{current_month}%"),
+        ).fetchone()[0]
         col2.metric("Month Sales", f"GHS {month_sales:.2f}")
         
         # Total Employees
-        emp_count = conn.execute(text("SELECT COUNT(DISTINCT emp_name) FROM payroll WHERE company_key = :key"), {"key": company_key}).fetchone()[0] or 0
+        emp_count = conn.execute(
+            "SELECT COUNT(DISTINCT emp_name) FROM payroll WHERE company_key = ?",
+            (company_key,),
+        ).fetchone()[0] or 0
         col3.metric("Employees", str(emp_count))
         
         # Fixed Assets Value
-        fa_val = conn.execute(text("SELECT SUM(book_value) FROM fixed_assets WHERE company_key = :key"), {"key": company_key}).fetchone()[0] or 0
+        fa_val = conn.execute(
+            "SELECT SUM(book_value) FROM fixed_assets WHERE company_key = ?",
+            (company_key,),
+        ).fetchone()[0] or 0
         col4.metric("Asset Value", f"GHS {fa_val:.2f}")
         
         st.markdown("---")
@@ -428,10 +458,13 @@ def show_dashboard(company_key, company_name, role):
         
         with col1:
             st.subheader("📈 Recent Transactions")
-            recent_data = conn.execute(text("""SELECT date, v_type, narration, 
-                                        CASE WHEN credit > 0 THEN credit ELSE debit END as amount
-                                        FROM vouchers WHERE company_key = :key 
-                                        ORDER BY date DESC LIMIT 10"""), {"key": company_key}).fetchall()
+            recent_data = conn.execute(
+                """SELECT date, v_type, narration,
+                   CASE WHEN credit > 0 THEN credit ELSE debit END AS amount
+                   FROM vouchers WHERE company_key = ?
+                   ORDER BY date DESC LIMIT 10""",
+                (company_key,),
+            ).fetchall()
             
             if recent_data:
                 recent_txns = pd.DataFrame(recent_data, columns=['Date', 'Type', 'Description', 'Amount'])
@@ -441,9 +474,12 @@ def show_dashboard(company_key, company_name, role):
         
         with col2:
             st.subheader("📦 Low Stock Items")
-            low_stock_data = conn.execute(text("""SELECT item_name, qty, unit FROM inventory 
-                                           WHERE company_key = :key AND qty <= 10 
-                                           ORDER BY qty ASC LIMIT 10"""), {"key": company_key}).fetchall()
+            low_stock_data = conn.execute(
+                """SELECT item_name, qty, unit FROM inventory
+                   WHERE company_key = ? AND qty <= 10
+                   ORDER BY qty ASC LIMIT 10""",
+                (company_key,),
+            ).fetchall()
             
             if low_stock_data:
                 low_stock = pd.DataFrame(low_stock_data, columns=['Item', 'Quantity', 'Unit'])
@@ -475,11 +511,12 @@ def show_dashboard(company_key, company_name, role):
                 st.session_state.selected_module = "Financial Intelligence"
                 st.rerun()
         
-        conn.close()
-        
     except Exception as e:
         st.error("Failed to load dashboard data")
         logger.error(f"Dashboard error: {e}")
+    finally:
+        if conn:
+            conn.close()
 
 # Main application flow
 if not st.session_state.auth or not check_session_timeout():
@@ -501,15 +538,19 @@ else:
                 
                 # Get actual metrics from database
                 try:
-                    total_companies = conn.execute(text("SELECT COUNT(*) FROM companies")).fetchone()[0]
+                    total_companies = conn.execute("SELECT COUNT(*) FROM companies").fetchone()[0]
                 except Exception:
                     total_companies = 0
                 try:
-                    active_subscriptions = conn.execute(text("SELECT COUNT(*) FROM system_settings WHERE subscription_months > 0")).fetchone()[0]
+                    active_subscriptions = conn.execute(
+                        "SELECT COUNT(*) FROM system_settings WHERE subscription_months > 0"
+                    ).fetchone()[0]
                 except Exception:
                     active_subscriptions = 0
                 try:
-                    monthly_revenue = conn.execute(text("SELECT SUM(software_fee) FROM system_settings")).fetchone()[0] or 0
+                    monthly_revenue = conn.execute(
+                        "SELECT SUM(software_fee) FROM system_settings"
+                    ).fetchone()[0] or 0
                 except Exception:
                     monthly_revenue = 0
                 
@@ -524,8 +565,10 @@ else:
                 st.markdown("---")
                 st.subheader("🛡️ Global Forensic Trail")
                 try:
-                    trail_data = conn.execute(text("""SELECT timestamp, company_key, user_role, action, module_name 
-                                                FROM audit_logs ORDER BY timestamp DESC LIMIT 50""")).fetchall()
+                    trail_data = conn.execute(
+                        """SELECT timestamp, company_key, user_role, action, module_name
+                           FROM audit_logs ORDER BY timestamp DESC LIMIT 50"""
+                    ).fetchall()
                     
                     if trail_data:
                         trail_df = pd.DataFrame(trail_data, columns=['Timestamp', 'Company Key', 'User Role', 'Action', 'Module'])
@@ -550,8 +593,10 @@ else:
                             
                             if new_expiry:
                                 try:
-                                    conn.execute(text("INSERT INTO companies (key, name, subscription_expiry, status) VALUES (:key, :name, :expiry, :status)"),
-                                             {"key": key, "name": company_name, "expiry": new_expiry.isoformat(), "status": "Active"})
+                                    conn.execute(
+                                        "INSERT INTO companies (key, name, subscription_expiry, status) VALUES (?, ?, ?, ?)",
+                                        (key, company_name, new_expiry.isoformat(), "Active"),
+                                    )
                                     conn.commit()
                                     st.success(f"License deployed for {company_name} until {new_expiry.date()}")
                                     log_audit_action(conn, 'SYSTEM', 'Dev', f'Manual license deployment for {company_name}', 'System Admin')
@@ -602,8 +647,10 @@ else:
                             st.write(f"**{company['company_name']}** - Created: {company['created_date']}")
                         with col2:
                             if st.button(f"🚀 Deploy Now", key=f"deploy_{company['company_name']}"):
-                                conn.execute(text("UPDATE companies SET deployment_status = 'Live' WHERE name = :name"), 
-                                         {"name": company['company_name']})
+                                conn.execute(
+                                    "UPDATE companies SET deployment_status = 'Live' WHERE name = ?",
+                                    (company['company_name'],),
+                                )
                                 conn.commit()
                                 st.success(f"Company {company['company_name']} deployed successfully!")
                                 log_audit_action(conn, 'SYSTEM', 'Dev', f'Deployed company: {company["company_name"]}', 'System Admin')
@@ -621,11 +668,13 @@ else:
                 # Get all companies with expiry dates
                 try:
                     companies_df = pd.read_sql(
-                        text("""
+                        """
                             SELECT c.key, c.name, c.subscription_expiry, c.status
                             FROM companies c
                             ORDER BY c.subscription_expiry ASC
-                        """), conn)
+                        """,
+                        conn,
+                    )
                 except Exception as e:
                     logger.error(f"Failed to read companies_df: {e}")
                     companies_df = pd.DataFrame()
