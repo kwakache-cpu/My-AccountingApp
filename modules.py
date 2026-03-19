@@ -257,7 +257,7 @@ def show_payroll(company_key, role):
         
         if pr_data_raw:
             pr_df = pd.DataFrame(pr_data_raw, columns=['Name', 'Basic', 'Tier 1', 'Tier 2', 'Taxable', 'PAYE', 'Net Pay', 'Period', 'Year'])
-            st.dataframe(pr_df, use_container_width=True)
+            st.dataframe(pr_df, width='stretch')
             st.download_button("📥 Export Payroll Data (Excel)", data=get_excel_bin(pr_df), file_name="EKA_Payroll_Data.xlsx")
         else:
             st.info("No payroll records found.")
@@ -341,7 +341,7 @@ def show_inventory(company_key, role):
         
         if inv_data_raw:
             inv_df = pd.DataFrame(inv_data_raw, columns=['Product', 'Stock Level', 'Selling Price', 'Cost Price', 'Warehouse', 'Barcode'])
-            st.dataframe(inv_df, use_container_width=True)
+            st.dataframe(inv_df, width='stretch')
             st.download_button("📥 Download Master Inventory", data=get_excel_bin(inv_df), file_name="EKA_Stock_Master.xlsx")
         else:
             st.info("No inventory items found.")
@@ -416,7 +416,7 @@ def show_reports(company_key):
             
             if cash_data_raw:
                 cash_data = pd.DataFrame(cash_data_raw, columns=['Date', 'Payment Method', 'Cash In', 'Cash Out'])
-                st.dataframe(cash_data, use_container_width=True)
+                st.dataframe(cash_data, width='stretch')
             else:
                 st.info("No cash flow data found.")
             
@@ -485,7 +485,7 @@ def show_customer_management(company_key, company_name, role):
             if customers_data:
                 customers_df = pd.DataFrame(customers_data, 
                                        columns=['Code', 'Name', 'Email', 'Phone', 'Credit Limit', 'Balance', 'Type'])
-                st.dataframe(customers_df, use_container_width=True)
+                st.dataframe(customers_df, width='stretch')
                 
                 # Export functionality
                 st.download_button("📥 Export Customers", data=get_excel_bin(customers_df), file_name="EKA_Customers.xlsx")
@@ -557,7 +557,7 @@ def show_supplier_management(company_key, company_name, role):
             if suppliers_data:
                 suppliers_df = pd.DataFrame(suppliers_data, 
                                         columns=['Code', 'Name', 'Email', 'Phone', 'Payment Terms', 'VAT Number'])
-                st.dataframe(suppliers_df, use_container_width=True)
+                st.dataframe(suppliers_df, width='stretch')
                 
                 # Export functionality
                 st.download_button("📥 Export Suppliers", data=get_excel_bin(suppliers_df), file_name="EKA_Suppliers.xlsx")
@@ -648,7 +648,7 @@ def show_advanced_reports(company_key):
             
             if product_sales:
                 sales_df = pd.DataFrame(product_sales, columns=['Product', 'Quantity Sold', 'Revenue'])
-                st.dataframe(sales_df, use_container_width=True)
+                st.dataframe(sales_df, width='stretch')
                 
                 # Total sales chart
                 total_revenue = sum([sale[2] for sale in product_sales])
@@ -664,7 +664,7 @@ def show_advanced_reports(company_key):
             
             if top_customers:
                 customers_df = pd.DataFrame(top_customers, columns=['Customer', 'Total Purchases', 'Transaction Count'])
-                st.dataframe(customers_df, use_container_width=True)
+                st.dataframe(customers_df, width='stretch')
         
         conn.close()
     except sqlite3.Error as e:
@@ -849,7 +849,7 @@ def show_vouchers(k, role):
         
         if v_data:
             v_df = pd.DataFrame(v_data, columns=['Date', 'Type', 'Ledger', 'Debit', 'Credit', 'Payment Method', 'Narration'])
-            st.dataframe(v_df, use_container_width=True)
+            st.dataframe(v_df, width='stretch')
             st.download_button("📥 Download Voucher Data", data=get_excel_bin(v_df), file_name="EKA_Vouchers.xlsx")
         else:
             st.info("No voucher transactions found.")
@@ -889,7 +889,7 @@ def show_chart_of_accounts(k, r):
         
         if coa_data:
             coa_df = pd.DataFrame(coa_data, columns=['Account Code', 'Account Name', 'Account Type', 'Balance'])
-            st.dataframe(coa_df, use_container_width=True)
+            st.dataframe(coa_df, width='stretch')
         else:
             st.info("No accounts found in chart of accounts.")
         conn.close()
@@ -1027,7 +1027,7 @@ def show_banking(k, r):
         
         if balance_data:
             balance_df = pd.DataFrame(balance_data, columns=['Payment Method', 'Total In', 'Total Out', 'Balance'])
-            st.dataframe(balance_df, use_container_width=True)
+            st.dataframe(balance_df, width='stretch')
         else:
             st.info("No banking transactions found.")
         
@@ -1039,7 +1039,7 @@ def show_banking(k, r):
         
         if recent_data:
             recent_df = pd.DataFrame(recent_data, columns=['Date', 'Payment Method', 'Type', 'Description', 'Amount', 'Transaction Type'])
-            st.dataframe(recent_df, use_container_width=True)
+            st.dataframe(recent_df, width='stretch')
         else:
             st.info("No recent transactions found.")
         
@@ -1068,7 +1068,7 @@ def show_aging(k, mode):
             
             if aging_data:
                 aging_df = pd.DataFrame(aging_data, columns=['Customer', 'Invoice No', 'Due Date', 'Amount', 'Aging Bucket'])
-                st.dataframe(aging_df, use_container_width=True)
+                st.dataframe(aging_df, width='stretch')
             else:
                 st.info("No receivables found.")
             conn.close()
@@ -1091,7 +1091,7 @@ def show_aging(k, mode):
             
             if aging_data:
                 aging_df = pd.DataFrame(aging_data, columns=['Supplier', 'PO No', 'Order Date', 'Amount', 'Aging Bucket'])
-                st.dataframe(aging_df, use_container_width=True)
+                st.dataframe(aging_df, width='stretch')
             else:
                 st.info("No payables found.")
             conn.close()
@@ -1177,7 +1177,7 @@ def show_fixed_assets(k, r):
         
         if fa_data:
             fa_df = pd.DataFrame(fa_data, columns=['Asset Name', 'Purchase Cost', 'Dep Rate %', 'Accumulated Depreciation', 'Book Value', 'Purchase Date'])
-            st.dataframe(fa_df, use_container_width=True)
+            st.dataframe(fa_df, width='stretch')
             
             # Calculate depreciation button
             if st.button("🔄 Calculate Monthly Depreciation"):

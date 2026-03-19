@@ -214,7 +214,7 @@ def show_system_status():
             'Status': ['All Systems Operational'] * 90,
             'Duration': ['N/A'] * 90
         })
-        st.dataframe(incidents_df, use_container_width=True, height=300)
+        st.dataframe(incidents_df, width='stretch', height=300)
 
 def login_ui():
     """Secure Multi-Tier Authentication Interface with Enhanced Security."""
@@ -653,7 +653,7 @@ else:
                     FROM companies c ORDER BY c.name
                 """
                 portfolio_df = pd.read_sql(query, conn)
-                st.dataframe(portfolio_df, use_container_width=True)
+                st.dataframe(portfolio_df, width='stretch')
                 conn.close()
             except Exception as e:
                 st.error(f'Portfolio Error: {e}')
@@ -772,7 +772,7 @@ else:
         elif choice == "System Audit Trail": show_audit_trail(u['key'])
 
     st.sidebar.markdown("---")
-    if st.sidebar.button("🔴 Secure Logout", use_container_width=True, key="v3_final_logout"):
+    if st.sidebar.button("🔴 Secure Logout", width='stretch', key="v3_final_logout"):
         try:
             conn = get_connection()
             log_audit_action(conn, u.get('key', 'SYSTEM'), u['role'], "User logout", "Authentication")
