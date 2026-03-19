@@ -544,15 +544,11 @@ else:
                 except Exception:
                     total_companies = 0
                 try:
-                    active_subscriptions = conn.execute(
-                        "SELECT COUNT(*) FROM system_settings WHERE subscription_months > 0"
-                    ).fetchone()[0]
+                    active_subscriptions = conn.execute("SELECT COUNT(*) FROM companies WHERE status='Active'").fetchone()[0]
                 except Exception:
                     active_subscriptions = 0
                 try:
-                    monthly_revenue = conn.execute(
-                        "SELECT SUM(software_fee) FROM system_settings"
-                    ).fetchone()[0] or 0
+                    monthly_revenue = conn.execute("SELECT SUM(amount) FROM pending_approvals WHERE status='Approved'").fetchone()[0] or 0
                 except Exception:
                     monthly_revenue = 0
                 
@@ -626,49 +622,19 @@ else:
 
                 st.markdown("---")
                 st.subheader("🛠️ Global Maintenance Management")
-                m_date = st.date_input("Scheduled Maintenance Date", key="gatekeeper_maintenance_date")
-                m_msg = st.text_area(
-                    "Maintenance Message",
-                    value="E.K.A ERP will be down for scheduled maintenance...",
-                    key="gatekeeper_maintenance_message",
-                )
+                col_m1, col_m2, col_m3 = st.columns(3)
+                m_date = col_m1.date_input('Maintenance Date')
+                m_start = col_m2.time_input('Start Time')
+                m_end = col_m3.time_input('End Time')
+                m_msg = st.text_area('Notice Message', f'System maintenance on {m_date} from {m_start} to {m_end}.')
 
-                if st.button("Update & Notify All Clients", key="update_notify_clients"):
-                    try:
-                        conn.execute(
-                            """UPDATE maintenance_settings
-                               SET maintenance_date = ?, message = ?, is_active = 1
-                               WHERE id = 1""",
-                            (m_date.isoformat(), m_msg),
-                        )
-                        conn.commit()
-
-                        clients = conn.execute(
-                            """SELECT name, contact_email
-                               FROM companies
-                               WHERE contact_email IS NOT NULL AND contact_email != ''"""
-                        ).fetchall()
-
-                        sent_count = 0
-                        for client in clients:
-                            company_name = client[0]
-                            company_email = client[1]
-                            if send_maintenance_email(company_email, company_name, m_msg):
-                                sent_count += 1
-
-                        st.success(
-                            f"Maintenance updated for {m_date.isoformat()}. "
-                            f"Notifications sent to {sent_count} client(s)."
-                        )
-                        log_audit_action(
-                            conn,
-                            'SYSTEM',
-                            'Dev',
-                            f'Maintenance scheduled for {m_date.isoformat()} and notifications sent',
-                            'System Admin',
-                        )
-                    except Exception as e:
-                        st.error(f"Failed to update maintenance settings: {e}")
+                if st.button('Update & Notify All'):
+                    conn = get_connection()
+                    time_window = f"{m_start.strftime('%H:%M')} - {m_end.strftime('%H:%M')}"
+                    conn.execute('UPDATE maintenance_settings SET maintenance_date=?, is_active=1 WHERE id=1', (f"{m_date} ({time_window})",))
+                    conn.commit()
+                    st.success(f'Maintenance scheduled for {m_date} during {time_window}')
+                    conn.close()
 
                 conn.close()
 
@@ -681,21 +647,7 @@ else:
             try:
                 conn = get_connection()
                 try:
-                    portfolio_df = pd.read_sql(
-                        """
-                        SELECT c.name AS company_name,
-                               c.created_at AS created_date,
-                               c.status AS account_status,
-                               c.deployment_status,
-                               c.subscription_expiry,
-                               COALESCE(SUM(v.credit), 0) AS total_revenue_collected
-                        FROM companies c
-                        LEFT JOIN vouchers v ON c.key = v.company_key AND v.v_type = 'Sales'
-                        GROUP BY c.key, c.name, c.created_at, c.status, c.deployment_status, c.subscription_expiry
-                        ORDER BY c.name
-                        """,
-                        conn
-                    )
+                    portfolio_df = pd.read_sql("SELECT name, created_at, status, deployment_status, subscription_expiry FROM companies ORDER BY name", conn)
                 except Exception as e:
                     logger.error(f"Failed to read portfolio_df: {e}")
                     portfolio_df = pd.DataFrame()
@@ -707,18 +659,18 @@ else:
                     for _, company in pending_companies.iterrows():
                         col1, col2 = st.columns([3, 1])
                         with col1:
-                            st.write(f"**{company['company_name']}** - Created: {company['created_date']}")
+                            st.write(f"**{company['name']}** - Created: {company['created_at']}")
                         with col2:
-                            if st.button(f"🚀 Deploy Now", key=f"deploy_{company['company_name']}"):
+                            if st.button(f"🚀 Deploy Now", key=f"deploy_{company['name']}"):
                                 conn.execute(
                                     "UPDATE companies SET deployment_status = 'Live' WHERE name = ?",
-                                    (company['company_name'],),
+                                    (company['name'],),
                                 )
                                 conn.commit()
-                                st.success(f"Company {company['company_name']} deployed successfully!")
-                                log_audit_action(conn, 'SYSTEM', 'Dev', f'Deployed company: {company["company_name"]}', 'System Admin')
+                                st.success(f"Company {company['name']} deployed successfully!")
+                                log_audit_action(conn, 'SYSTEM', 'Dev', f'Deployed company: {company["name"]}', 'System Admin')
                                 # Simulate email
-                                st.info(f"Success email sent to {company['company_name']} admin.")
+                                st.info(f"Success email sent to {company['name']} admin.")
                 conn.close()
             except Exception as e:
                 st.error(f"Failed to load client portfolio: {e}")
@@ -732,9 +684,9 @@ else:
                 try:
                     companies_df = pd.read_sql(
                         """
-                            SELECT c.key, c.name, c.subscription_expiry, c.status
-                            FROM companies c
-                            ORDER BY c.subscription_expiry ASC
+                            SELECT key, name, subscription_expiry, status
+                            FROM companies
+                            ORDER BY subscription_expiry ASC
                         """,
                         conn,
                     )
