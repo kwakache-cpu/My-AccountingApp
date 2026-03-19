@@ -157,6 +157,13 @@ def submit_payment_reference(company_key, reference, amount, payment_method):
         conn.commit()
         log_audit_action(conn, company_key, 'System', f'Submitted payment reference: {reference}', 'Payment')
         conn.close()
+        
+        # Show success notification
+        st.success(f"Payment reference {reference} submitted successfully!")
+        st.toast("Payment reference received. Awaiting admin approval.", icon="✅")
+        
+        # TODO: Trigger smtplib to send payment_ref to admin email for Passcode generation.
+        
         return True
     except Exception as e:
         logger.error(f"Failed to submit payment reference: {e}")

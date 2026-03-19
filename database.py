@@ -272,13 +272,13 @@ def init_db():
         # Ensure missing columns exist in existing databases
         try:
             # Add status column if it doesn't exist
-            c.execute("ALTER TABLE companies ADD COLUMN status TEXT DEFAULT 'Active'")
+            c.execute(text("ALTER TABLE companies ADD COLUMN status TEXT DEFAULT 'Active'"))
         except:
             pass  # Column already exists
         
         try:
             # Add deployment_status column if it doesn't exist
-            c.execute("ALTER TABLE companies ADD COLUMN deployment_status TEXT DEFAULT 'Pending'")
+            c.execute(text("ALTER TABLE companies ADD COLUMN deployment_status TEXT DEFAULT 'Pending'"))
         except:
             pass  # Column already exists
 
