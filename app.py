@@ -50,22 +50,17 @@ def update_activity():
     st.session_state.last_activity = datetime.now()
 
 def check_maintenance_status():
-    """Check maintenance settings and return status info."""
+    """NATIVE SQLITE FIX: No text() wrapper"""
     try:
         conn = get_connection()
-        maint_setting = conn.execute("SELECT maintenance_date, is_active FROM maintenance_settings WHERE id = 1").fetchone()
+        cursor = conn.cursor()
+        cursor.execute("SELECT maintenance_date, is_active FROM maintenance_settings WHERE id = 1")
+        maint_setting = cursor.fetchone()
         conn.close()
-        
-        if maint_setting and maint_setting[1]:  # is_active is True
-            maintenance_date = maint_setting[0]
-            if maintenance_date:
-                return {
-                    'active': True,
-                    'date': maintenance_date
-                }
+        if maint_setting and maint_setting[1]:
+            return {'active': True, 'date': maint_setting[0]}
         return {'active': False}
     except Exception as e:
-        logger.error(f"Failed to check maintenance status: {e}")
         return {'active': False}
 
 def send_maintenance_email(company_email, company_name, message):
@@ -107,43 +102,21 @@ def send_maintenance_email(company_email, company_name, message):
         return False
 
 def check_license_expiry_with_grace(company_key):
-    """Check license expiry with intelligent grace period logic."""
+    """NATIVE SQLITE FIX: No text() wrapper"""
     try:
         conn = get_connection()
-        company_data = conn.execute(text("SELECT name, subscription_expiry FROM companies WHERE key = :key"), {"key": company_key}).fetchone()
+        cursor = conn.cursor()
+        cursor.execute("SELECT name, subscription_expiry FROM companies WHERE key = ?", (company_key,))
+        company_data = cursor.fetchone()
         conn.close()
-        
-        if company_data and company_data[1]:  # subscription_expiry exists
+        if company_data and company_data[1]:
             expiry_date = datetime.fromisoformat(company_data[1])
-            now = datetime.now()
-            days_until_expiry = (expiry_date - now).days
-            
-            # Return different statuses based on expiry
-            if days_until_expiry < 0:
-                return {
-                    'status': 'expired',
-                    'days_left': abs(days_until_expiry),
-                    'company_name': company_data[0],
-                    'expiry_date': expiry_date
-                }
-            elif days_until_expiry <= 7:
-                return {
-                    'status': 'warning',
-                    'days_left': days_until_expiry,
-                    'company_name': company_data[0],
-                    'expiry_date': expiry_date
-                }
-            else:
-                return {
-                    'status': 'active',
-                    'days_left': days_until_expiry,
-                    'company_name': company_data[0],
-                    'expiry_date': expiry_date
-                }
-        
+            days_until_expiry = (expiry_date - datetime.now()).days
+            if days_until_expiry < 0: return {'status': 'expired', 'days_left': abs(days_until_expiry)}
+            if days_until_expiry <= 7: return {'status': 'warning', 'days_left': days_until_expiry}
+            return {'status': 'active', 'days_left': days_until_expiry}
         return {'status': 'unknown'}
     except Exception as e:
-        logger.error(f"Failed to check license expiry: {e}")
         return {'status': 'error'}
 
 def submit_payment_reference(company_key, reference, amount, payment_method):
