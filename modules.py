@@ -1265,32 +1265,68 @@ def show_audit_trail(k):
 # ONBOARDING & PAYMENT MODULE
 # ==========================================
 def show_onboarding_payment():
-    st.header("🏢 New Client Onboarding")
-    
+    st.header("New Client Onboarding")
+
     plans = {
         "Basic": 500,
         "Premium": 1000,
         "Enterprise": 2000
     }
-    
+
     with st.form("onboarding_form"):
         company_name = st.text_input("Company Name")
         admin_email = st.text_input("Admin Email")
+        tin_number = st.text_input("TIN Number")
         selected_plan = st.selectbox("Select Plan", list(plans.keys()))
-        
-        submitted = st.form_submit_button("Pay to Initialize ERP")
-        
+        duration_months = st.number_input("Duration (Months)", min_value=1, value=1, step=1)
+        price_per_month = st.number_input(
+            "Price Per Month (GHS)",
+            min_value=0.0,
+            value=float(plans[selected_plan]),
+            step=50.0,
+        )
+
+        submitted = st.form_submit_button("Pay to Access ERP")
+
         if submitted:
-            if validate_input(company_name, "Company Name") and validate_input(admin_email, "Admin Email"):
-                amount = plans[selected_plan]
-                reference = f"ONBOARD-{company_name.replace(' ', '_')}-{selected_plan}"
-                url = initialize_paystack_payment(admin_email, amount, reference)
-                if url:
-                    st.link_button("Proceed to Paystack", url)
-                else:
-                    st.error("Failed to initialize payment.")
-            else:
-                st.error("Please fill in all required fields.")
+            safe_duration = int(duration_months or 1)
+            safe_price_per_month = float(price_per_month or 0.0)
+
+            if not company_name or not admin_email or not tin_number:
+                st.error("Company Name, Email, and TIN are required.")
+                return
+
+            if (
+                validate_input(company_name, "Company Name")
+                and validate_input(admin_email, "Admin Email")
+                and validate_input(tin_number, "TIN Number")
+            ):
+                try:
+                    expiry_date = datetime.now() + relativedelta(months=+int(safe_duration))
+                    amount = safe_duration * safe_price_per_month
+                    reference = f"ONBOARD-{company_name.replace(' ', '_')}-{selected_plan}"
+
+                    print(f"Payment Successful for {company_name}")
+                    logger.info(
+                        f"Payment Successful for {company_name} | "
+                        f"Plan: {selected_plan} | Duration: {safe_duration} | "
+                        f"Price/Month: {safe_price_per_month:.2f} | "
+                        f"Expiry: {expiry_date.date().isoformat()}"
+                    )
+
+                    url = initialize_paystack_payment(admin_email, amount, reference)
+                    if url:
+                        st.success(f"Payment Successful for {company_name}")
+                        st.info(
+                            f"Planned subscription expiry: {expiry_date.date().isoformat()} | "
+                            f"Total amount: GHS {amount:.2f}"
+                        )
+                        st.link_button("Proceed to Paystack", url)
+                    else:
+                        st.error("Failed to initialize payment.")
+                except Exception as e:
+                    st.error(f"Onboarding payment error: {e}")
+                    logger.error(f"Onboarding payment error: {e}")
 
 # ==========================================
 # MAINTENANCE SYSTEM
