@@ -310,6 +310,21 @@ def get_financial_metrics(company_key=None):
     return metrics
 
 
+def get_demo_financial_metrics():
+    """Temporary in-memory metrics for dashboard demo mode."""
+    metrics = {
+        "total_revenue": 5000.0,
+        "total_payables": 1200.0,
+        "net_position": 3800.0,
+        "has_data": True,
+    }
+    comparison_df = pd.DataFrame(
+        {"Amount": [metrics["total_revenue"], metrics["total_payables"]]},
+        index=["Income", "Expenses"],
+    )
+    return metrics, comparison_df
+
+
 def load_demo_financial_data(company_key):
     """Insert sample revenue and payable records for instant dashboard testing."""
     conn = None
@@ -753,7 +768,20 @@ def show_dashboard(company_key, company_name, role):
     """Enhanced company dashboard with key metrics and insights."""
     try:
         st.header(f"Business Dashboard: {company_name}")
-        financial_metrics = get_financial_metrics(company_key)
+        financial_demo_mode = st.session_state.get("financial_demo_mode", False)
+        if financial_demo_mode:
+            financial_metrics, comparison_df = get_demo_financial_metrics()
+        else:
+            financial_metrics = get_financial_metrics(company_key)
+            comparison_df = pd.DataFrame(
+                {
+                    "Amount": [
+                        financial_metrics["total_revenue"],
+                        financial_metrics["total_payables"],
+                    ]
+                },
+                index=["Income", "Expenses"],
+            )
         st.session_state.financial_metrics = financial_metrics
 
         health_delta = "Good" if financial_metrics["net_position"] >= 0 else "Needs Attention"
@@ -786,15 +814,6 @@ def show_dashboard(company_key, company_name, role):
             if not financial_metrics["has_data"]:
                 st.caption("Add your first invoice to see health metrics.")
 
-        comparison_df = pd.DataFrame(
-            {
-                "Amount": [
-                    financial_metrics["total_revenue"],
-                    financial_metrics["total_payables"],
-                ]
-            },
-            index=["Income", "Expenses"],
-        )
         st.bar_chart(comparison_df)
         st.markdown("---")
 
@@ -814,7 +833,7 @@ def show_dashboard(company_key, company_name, role):
                 "Please renew to restore access."
             )
 
-        if st.session_state.get('demo_mode', False):
+        if st.session_state.get('demo_mode', False) or financial_demo_mode:
             col1, col2, col3, col4 = st.columns(4)
             col1.metric("Inventory Value", "GH₵ 25,000.00")
             col2.metric("Month Sales", "GH₵ 15,000.00")
@@ -1086,6 +1105,27 @@ def run_startup_db_patch():
 
 def main():
     run_startup_db_patch()
+    st.markdown(
+        """
+        <style>
+        .main .block-container {
+            padding-top: 1.25rem;
+            padding-bottom: 2rem;
+        }
+        [data-testid="stMetric"] {
+            background: linear-gradient(180deg, #ffffff 0%, #f8fbff 100%);
+            border: 1px solid #dbe7f3;
+            border-radius: 18px;
+            padding: 1rem 1.1rem;
+            box-shadow: 0 10px 30px rgba(15, 23, 42, 0.06);
+        }
+        [data-testid="stMetricLabel"] {
+            font-weight: 700;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
 # Main application flow
@@ -1437,14 +1477,7 @@ else:
         elif choice == "System Audit Trail": show_audit_trail(u['key'])
 
     st.sidebar.markdown("---")
-    if st.sidebar.button("🚀 Load Demo Data", width='stretch', key="load_demo_financial_data_btn"):
-        demo_company_key = u.get('key', 'DEMO') if st.session_state.auth and st.session_state.user else "DEMO"
-        success, message = load_demo_financial_data(demo_company_key)
-        if success:
-            st.success("Demo Data Loaded! Refreshing...")
-            st.rerun()
-        else:
-            st.sidebar.error(message)
+    st.sidebar.toggle("Enable Demo Mode", key="financial_demo_mode")
 
     st.sidebar.markdown("---")
     if st.sidebar.button("🔴 Secure Logout", width='stretch', key="v3_final_logout"):
