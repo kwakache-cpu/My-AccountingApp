@@ -21,7 +21,9 @@ logger = logging.getLogger(__name__)
 
 GATEKEEPER_SYSTEM_PROMPT = (
     "You are the Gatekeeper Accounting Expert. Explain accounting terms like Accounts "
-    "Payable and Chart of Accounts simply for Ghanaian businesses."
+    "Payable and Chart of Accounts simply for Ghanaian businesses. When financial "
+    "health metrics are provided, use them to answer questions about the company's "
+    "financial health."
 )
 client = Groq(api_key=st.secrets["GROQ_API_KEY"])
 
@@ -204,6 +206,74 @@ E.K.A Support Team
     logger.info(f"Renewal email preview generated for {company_name} <{recipient}>")
     return True
 
+
+def get_financial_metrics(company_key=None):
+    """Aggregate revenue, payables, and net position for the dashboard."""
+    metrics = {
+        "total_revenue": 1.0,
+        "total_payables": 1.0,
+        "net_position": 0.0,
+    }
+
+    conn = None
+    try:
+        conn = get_connection()
+        if not conn:
+            return metrics
+
+        sales_table_count = int(conn.execute("SELECT COUNT(*) FROM sales_invoices").fetchone()[0] or 0)
+        payables_table_count = int(conn.execute("SELECT COUNT(*) FROM accounts_payable").fetchone()[0] or 0)
+
+        revenue_sum = None
+        payables_sum = None
+
+        if company_key and company_key != "DEMO":
+            try:
+                revenue_sum = conn.execute(
+                    "SELECT SUM(amount) FROM sales_invoices WHERE status = 'Paid' AND company_key = ?",
+                    (company_key,),
+                ).fetchone()[0]
+            except sqlite3.OperationalError:
+                revenue_sum = conn.execute(
+                    "SELECT SUM(total_amount) FROM sales_invoices WHERE status = 'Paid' AND company_key = ?",
+                    (company_key,),
+                ).fetchone()[0]
+
+            try:
+                payables_sum = conn.execute(
+                    "SELECT SUM(amount) FROM accounts_payable WHERE status = 'Unpaid' AND company_key = ?",
+                    (company_key,),
+                ).fetchone()[0]
+            except sqlite3.OperationalError:
+                payables_sum = conn.execute(
+                    "SELECT SUM(amount) FROM accounts_payable WHERE status = 'Unpaid'",
+                ).fetchone()[0]
+        else:
+            try:
+                revenue_sum = conn.execute(
+                    "SELECT SUM(amount) FROM sales_invoices WHERE status = 'Paid'"
+                ).fetchone()[0]
+            except sqlite3.OperationalError:
+                revenue_sum = conn.execute(
+                    "SELECT SUM(total_amount) FROM sales_invoices WHERE status = 'Paid'"
+                ).fetchone()[0]
+
+            payables_sum = conn.execute(
+                "SELECT SUM(amount) FROM accounts_payable WHERE status = 'Unpaid'"
+            ).fetchone()[0]
+
+        metrics["total_revenue"] = 1.0 if sales_table_count == 0 else float(revenue_sum or 0)
+        metrics["total_payables"] = 1.0 if payables_table_count == 0 else float(payables_sum or 0)
+
+        metrics["net_position"] = metrics["total_revenue"] - metrics["total_payables"]
+    except sqlite3.OperationalError as metrics_error:
+        logger.warning(f"Financial metrics unavailable: {metrics_error}")
+    finally:
+        if conn:
+            conn.close()
+
+    return metrics
+
 def ask_gatekeeper_ai(menu_selection, chat_history):
     """Call Groq for a real Gatekeeper AI answer."""
     messages = [{"role": "system", "content": GATEKEEPER_SYSTEM_PROMPT}]
@@ -213,6 +283,20 @@ def ask_gatekeeper_ai(menu_selection, chat_history):
             "content": f"The user is currently viewing the {menu_selection} module.",
         }
     )
+    financial_metrics = st.session_state.get("financial_metrics")
+    if financial_metrics:
+        messages.append(
+            {
+                "role": "system",
+                "content": (
+                    "Current financial health snapshot: "
+                    f"Total Revenue = GHS {financial_metrics['total_revenue']:.2f}, "
+                    f"Outstanding Payables = GHS {financial_metrics['total_payables']:.2f}, "
+                    f"Net Financial Health = GHS {financial_metrics['net_position']:.2f}. "
+                    "If the user asks about financial health, answer using these figures."
+                ),
+            }
+        )
     messages.extend(chat_history[-8:])
 
     try:
@@ -237,7 +321,8 @@ def render_gatekeeper_ai_chat(menu_selection):
             }
         ]
 
-    with st.sidebar.expander("Gatekeeper AI", expanded=False):
+    with st.sidebar.container(border=True):
+        st.markdown("### Gatekeeper AI")
         st.caption(f"Active module: {menu_selection}")
 
         for message in st.session_state.messages[-6:]:
@@ -590,6 +675,45 @@ def show_dashboard(company_key, company_name, role):
     """Enhanced company dashboard with key metrics and insights."""
     try:
         st.header(f"Business Dashboard: {company_name}")
+        financial_metrics = get_financial_metrics(company_key)
+        st.session_state.financial_metrics = financial_metrics
+
+        health_delta = "Good" if financial_metrics["net_position"] >= 0 else "Needs Attention"
+        payables_delta = "Good" if financial_metrics["total_payables"] <= financial_metrics["total_revenue"] else "Needs Attention"
+
+        with st.container():
+            metric_col1, metric_col2, metric_col3 = st.columns([1, 1, 1])
+            with metric_col1:
+                st.metric(
+                    "💰 Total Revenue",
+                    f"₵ {financial_metrics['total_revenue']:.2f}",
+                    delta="Good" if financial_metrics["total_revenue"] >= financial_metrics["total_payables"] else "Needs Attention",
+                )
+            with metric_col2:
+                st.metric(
+                    "📉 Outstanding Payables",
+                    f"₵ {financial_metrics['total_payables']:.2f}",
+                    delta=payables_delta,
+                    delta_color="inverse",
+                )
+            with metric_col3:
+                st.metric(
+                    "⚖️ Net Financial Health",
+                    f"₵ {financial_metrics['net_position']:.2f}",
+                    delta=health_delta,
+                )
+
+        comparison_df = pd.DataFrame(
+            {
+                "Category": ["Income", "Expenses"],
+                "Amount": [
+                    financial_metrics["total_revenue"],
+                    financial_metrics["total_payables"],
+                ],
+            }
+        ).set_index("Category")
+        st.bar_chart(comparison_df)
+        st.markdown("---")
 
         maintenance_status = check_maintenance_status()
         if maintenance_status['active']:
