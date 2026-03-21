@@ -105,6 +105,18 @@ def send_maintenance_email(company_email, company_name, message):
         logger.error(f"Failed to send maintenance email: {e}")
         return False
 
+
+def print_subscription_email(company_email, company_name, new_expiry_date):
+    """Print a renewal email preview to the terminal/logs."""
+    recipient = company_email or "no-email-on-file@example.com"
+    message = (
+        f"[EMAIL PREVIEW] To: {recipient} | "
+        f"Subject: Subscription Renewed | "
+        f"Body: Hello {company_name}, your subscription is now active until {new_expiry_date}."
+    )
+    print(message)
+    logger.info(message)
+
 def check_license_expiry_with_grace(company_key):
     """NATIVE SQLITE FIX: No  wrapper"""
     conn = None
@@ -535,10 +547,10 @@ else:
     
     if u['role'] == "Dev":
         # Gatekeeper Dashboard with Enhanced Metrics
-        st.title("👑 Gatekeeper System Dashboard")
+        st.title("Gatekeeper System Dashboard")
         
         # Tabs for different sections
-        tab1, tab2 = st.tabs(["📊 System Overview", "📅 License Management"])
+        tab1, tab2 = st.tabs(["System Overview", "License Management"])
         
         with tab1:
             try:
@@ -573,7 +585,7 @@ else:
                 
                 # Global Forensic Trail (Dev only) - Enhanced with error handling
                 st.markdown("---")
-                st.subheader("🛡️ Global Forensic Trail")
+                st.subheader("Global Forensic Trail")
                 try:
                     trail_data = conn.execute(
                         """SELECT timestamp, company_key, user_role, action, module_name
@@ -589,7 +601,7 @@ else:
                     logger.error(f"Failed to load audit trail: {e}")
                 
                 st.markdown("---")
-                st.subheader("🚀 Manual License Deployment")
+                st.subheader("Manual License Deployment")
                 if "manual_key_input" not in st.session_state:
                     st.session_state.manual_key_input = ""
                 with st.form("manual_deploy"):
@@ -633,7 +645,7 @@ else:
                             st.error("Company Name and System License Key are required.")
 
                 st.markdown("---")
-                st.subheader("🛠️ Global Maintenance Management")
+                st.subheader("Global Maintenance Management")
                 col_m1, col_m2, col_m3 = st.columns(3)
                 m_date = col_m1.date_input('Maintenance Date')
                 m_start = col_m2.time_input('Start Time')
@@ -655,7 +667,7 @@ else:
                 logger.error(f"Dashboard metrics error: {e}")
 
             st.markdown("---")
-            st.subheader("?? Client Portfolio Manager")
+            st.subheader("Client Portfolio Manager")
             try:
                 conn = get_connection()
                 query = """
@@ -690,12 +702,12 @@ else:
                 st.error(f'Portfolio Error: {e}')
         
         with tab2:
-            st.subheader("?? License Management")
+            st.subheader("License Management")
             try:
                 conn = get_connection()
                 companies_df = pd.read_sql(
                     """
-                    SELECT key, name, subscription_expiry, status, deployment_status
+                    SELECT key, name, subscription_expiry, status, deployment_status, contact_email
                     FROM companies
                     ORDER BY name
                     """,
@@ -720,6 +732,7 @@ else:
                     selected_row = companies_df.loc[
                         companies_df["name"] == selected_company
                     ].iloc[0]
+                    company_email = selected_row.get("contact_email")
                     default_expiry = selected_row["subscription_expiry"]
                     if pd.isna(default_expiry):
                         default_expiry = datetime.now().date()
@@ -739,6 +752,11 @@ else:
                                 (new_expiry_date.isoformat(), selected_company),
                             )
                             conn.commit()
+                            print_subscription_email(
+                                company_email,
+                                selected_company,
+                                new_expiry_date.isoformat(),
+                            )
                             st.success(
                                 f"Subscription updated for {selected_company} until {new_expiry_date.isoformat()}."
                             )

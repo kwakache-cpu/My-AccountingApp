@@ -43,6 +43,7 @@ def main():
         )
         """
     )
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_companies_name ON companies(name)")
 
     print("Checking Table inventory...")
     cursor.execute(
