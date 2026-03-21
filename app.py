@@ -1,167 +1,47 @@
 import os
-import sqlite3
 from datetime import datetime
 
-import pandas as pd
 import streamlit as st
 from dateutil.relativedelta import relativedelta
 from groq import Groq
 
 from modules import (
-    show_accounts_payable_page,
-    show_chart_of_accounts_page,
-    show_sales_invoices_page,
-    show_vouchers_page,
+    DB_NAME,
+    get_connection,
+    get_system_health_snapshot,
+    init_db,
+    log_system_event,
+    show_company_registration_module,
+    show_license_renewal_module,
+    show_system_health_module,
+    show_vault_dashboard_module,
 )
 
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DB_PATH = os.path.join(BASE_DIR, "database.db")
+APP_TITLE = "EKA ERP | GATEKEEPER"
 SYSTEM_PROMPT = (
-    "You are the Gatekeeper Accounting Expert. Explain accounting terms simply for Ghanaian "
-    "businesses and use the current dashboard figures when asked about financial health."
+    "You are the Gatekeeper ERP Assistant for EKA Vault Management. Help Master Admin and "
+    "client users understand the vault dashboard, company onboarding, license renewal, and "
+    "system health in simple business language."
 )
-USER_ROLES = ["Master Admin", "Client"]
-
-
-def get_connection():
-    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-    return conn
-
-
-def init_db():
-    conn = get_connection()
-    try:
-        cursor = conn.cursor()
-        cursor.execute(
-            """
-            CREATE TABLE IF NOT EXISTS sales_invoices (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                customer_name TEXT,
-                amount REAL,
-                status TEXT,
-                date TEXT
-            )
-            """
-        )
-        cursor.execute(
-            """
-            CREATE TABLE IF NOT EXISTS accounts_payable (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                supplier_name TEXT,
-                amount REAL,
-                status TEXT,
-                date TEXT
-            )
-            """
-        )
-        cursor.execute(
-            """
-            CREATE TABLE IF NOT EXISTS chart_of_accounts (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                account_name TEXT,
-                account_type TEXT,
-                balance REAL
-            )
-            """
-        )
-        cursor.execute(
-            """
-            CREATE TABLE IF NOT EXISTS vouchers (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                narration TEXT,
-                amount REAL,
-                ref_no TEXT,
-                date TEXT
-            )
-            """
-        )
-        conn.commit()
-    finally:
-        conn.close()
-
-
-def reset_to_clean_state():
-    if os.path.exists(DB_PATH):
-        os.remove(DB_PATH)
-    init_db()
-
-
-def format_money(value):
-    return f"GH₵ {value:,.2f}"
-
-
-def get_real_financial_metrics():
-    conn = get_connection()
-    try:
-        revenue = conn.execute(
-            "SELECT COALESCE(SUM(amount), 0) FROM sales_invoices WHERE status = 'Paid'"
-        ).fetchone()[0] or 0.0
-        payables = conn.execute(
-            "SELECT COALESCE(SUM(amount), 0) FROM accounts_payable WHERE status = 'Unpaid'"
-        ).fetchone()[0] or 0.0
-        has_data = (
-            (conn.execute("SELECT COUNT(*) FROM sales_invoices").fetchone()[0] or 0)
-            + (conn.execute("SELECT COUNT(*) FROM accounts_payable").fetchone()[0] or 0)
-        ) > 0
-    finally:
-        conn.close()
-
-    metrics = {
-        "revenue": float(revenue),
-        "payables": float(payables),
-        "net_health": float(revenue) - float(payables),
-        "has_data": has_data,
-    }
-    chart_df = pd.DataFrame(
-        {"Amount": [metrics["revenue"], metrics["payables"]]},
-        index=["Income", "Expenses"],
-    )
-    return metrics, chart_df
-
-
-def get_demo_financial_metrics():
-    metrics = {
-        "revenue": 12500.0,
-        "payables": 4200.0,
-        "net_health": 8300.0,
-        "has_data": True,
-    }
-    chart_df = pd.DataFrame(
-        {"Amount": [metrics["revenue"], metrics["payables"]]},
-        index=["Income", "Expenses"],
-    )
-    return metrics, chart_df
 
 
 def get_ai_client():
     return Groq(api_key=st.secrets["GROQ_API_KEY"])
 
 
-def ask_gatekeeper_ai(menu_name, chat_history, metrics, demo_on):
-    context = (
-        f"Dashboard snapshot: Revenue {format_money(metrics['revenue'])}, "
-        f"Payables {format_money(metrics['payables'])}, "
-        f"Net Health {format_money(metrics['net_health'])}. "
-        f"Demo mode is {'ON' if demo_on else 'OFF'}."
-    )
-    messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "system", "content": f"Current page: {menu_name}. {context}"},
-    ]
-    messages.extend(chat_history[-8:])
-
-    try:
-        client = get_ai_client()
-        response = client.chat.completions.create(
-            model="llama-3.1-8b-instant",
-            messages=messages,
-            temperature=0.3,
-        )
-        return response.choices[0].message.content.strip()
-    except Exception as error:
-        return f"Gatekeeper AI is unavailable right now: {error}"
+def ensure_session_state():
+    if "logged_in" not in st.session_state:
+        st.session_state.logged_in = False
+    if "user" not in st.session_state:
+        st.session_state.user = {"name": "", "role": "Client"}
+    if "ai_messages" not in st.session_state:
+        st.session_state.ai_messages = [
+            {
+                "role": "assistant",
+                "content": "Welcome to EKA ERP | GATEKEEPER. Ask about vault health, onboarding, or license renewal.",
+            }
+        ]
 
 
 def inject_css():
@@ -174,19 +54,35 @@ def inject_css():
             padding-left: 1.5rem;
             padding-right: 1.5rem;
         }
+        .gatekeeper-hero {
+            background: linear-gradient(135deg, #0f172a 0%, #1e3a8a 100%);
+            color: white;
+            border-radius: 18px;
+            padding: 1.2rem 1.4rem;
+            margin-bottom: 1rem;
+            box-shadow: 0 20px 40px rgba(15, 23, 42, 0.18);
+        }
         [data-testid="stMetric"] {
             background: #ffffff;
-            border: 1px solid #e6edf5;
+            border: 1px solid #dbe7f3;
             border-radius: 16px;
             padding: 15px;
-            box-shadow: 0 10px 30px rgba(15, 23, 42, 0.08);
+            box-shadow: 0 10px 26px rgba(15, 23, 42, 0.08);
+        }
+        .sidebar-user-card {
+            background: #f8fafc;
+            border: 1px solid #e2e8f0;
+            border-radius: 14px;
+            padding: 14px;
+            margin-bottom: 12px;
         }
         .sidebar-chat-shell {
             position: sticky;
             bottom: 0;
-            padding-top: 0.75rem;
-            border-top: 1px solid #e5e7eb;
             background: linear-gradient(180deg, rgba(255,255,255,0.96), #ffffff);
+            border-top: 1px solid #e2e8f0;
+            padding-top: 0.75rem;
+            margin-top: 1rem;
         }
         .logout-wrap button {
             background: #b91c1c !important;
@@ -199,38 +95,72 @@ def inject_css():
     )
 
 
-def ensure_session_state():
-    if 'logged_in' not in st.session_state:
-        st.session_state.logged_in = False
-    if 'current_user' not in st.session_state:
-        st.session_state.current_user = {"name": "", "role": "Client"}
+def render_brand_header():
+    st.markdown(
+        f"""
+        <div class="gatekeeper-hero">
+            <div style="font-size:12px; letter-spacing:0.08em; opacity:0.85;">VAULT MANAGEMENT SYSTEM</div>
+            <div style="font-size:28px; font-weight:800; margin-top:4px;">{APP_TITLE}</div>
+            <div style="opacity:0.9; margin-top:6px;">
+                Enterprise onboarding, licensing, vault visibility, and platform health in one command center.
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
 def render_login_gate():
-    st.markdown("## Gatekeeper Login")
-    st.caption("Sign in to access the finance command center.")
+    render_brand_header()
+    st.subheader("Gatekeeper Login")
+    st.caption(f"Secure access to `{DB_NAME}`")
 
     with st.form("gatekeeper_login_form"):
         username = st.text_input("Username")
-        role = st.selectbox("Role", USER_ROLES)
+        role = st.selectbox("Role", ["Master Admin", "Client"])
         submitted = st.form_submit_button("Login")
-
         if submitted:
             display_name = username.strip() or role
             st.session_state.logged_in = True
-            st.session_state.current_user = {"name": display_name, "role": role}
+            st.session_state.user = {"name": display_name, "role": role}
+            log_system_event("INFO", "Authentication", f"User logged in as {role}: {display_name}")
             st.rerun()
 
 
-def render_sidebar(current_page):
-    user = st.session_state.current_user
-    st.sidebar.title("Gatekeeper")
+def ask_gatekeeper_ai(active_module, health_snapshot):
+    messages = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {
+            "role": "system",
+            "content": (
+                f"Active module: {active_module}. "
+                f"Vault snapshot: API {health_snapshot['api_status']}, DB {health_snapshot['db_status']}, "
+                f"companies {health_snapshot['company_count']}, active licenses {health_snapshot['active_licenses']}."
+            ),
+        },
+    ]
+    messages.extend(st.session_state.ai_messages[-8:])
+
+    try:
+        response = get_ai_client().chat.completions.create(
+            model="llama-3.1-8b-instant",
+            messages=messages,
+            temperature=0.3,
+        )
+        return response.choices[0].message.content.strip()
+    except Exception as error:
+        return f"Gatekeeper AI is unavailable right now: {error}"
+
+
+def render_sidebar(active_module, health_snapshot):
+    user = st.session_state.user
+    st.sidebar.title("EKA Gatekeeper")
     st.sidebar.markdown(
         f"""
-        <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:14px;padding:14px;margin-bottom:12px;">
-            <div style="font-size:12px;color:#64748b;">Current User</div>
-            <div style="font-size:18px;font-weight:700;color:#0f172a;">{user['name']}</div>
-            <div style="font-size:13px;color:#334155;">Role: {user['role']}</div>
+        <div class="sidebar-user-card">
+            <div style="font-size:12px; color:#64748b;">Current User</div>
+            <div style="font-size:18px; font-weight:700; color:#0f172a;">{user['name']}</div>
+            <div style="font-size:13px; color:#334155;">Role: {user['role']}</div>
         </div>
         """,
         unsafe_allow_html=True,
@@ -239,109 +169,105 @@ def render_sidebar(current_page):
     demo_on = st.sidebar.toggle("Enterprise Demo Mode")
 
     if user["role"] == "Master Admin":
-        if st.sidebar.button("Reset Clean Database", width="stretch"):
-            reset_to_clean_state()
-            st.success("Database reset complete.")
-            st.rerun()
-
-    page = st.sidebar.radio(
-        "Module Navigation",
-        ["Dashboard", "Sales Invoices", "Accounts Payable", "Chart of Accounts", "Vouchers"],
-        index=["Dashboard", "Sales Invoices", "Accounts Payable", "Chart of Accounts", "Vouchers"].index(current_page)
-        if current_page in ["Dashboard", "Sales Invoices", "Accounts Payable", "Chart of Accounts", "Vouchers"]
-        else 0,
-    )
-
-    st.sidebar.markdown("---")
-    st.sidebar.markdown('<div class="logout-wrap">', unsafe_allow_html=True)
-    logout = st.sidebar.button("Secure Logout", width="stretch")
-    st.sidebar.markdown("</div>", unsafe_allow_html=True)
-    if logout:
-        st.session_state.clear()
-        st.rerun()
-
-    return demo_on, page
-
-
-def render_financial_dashboard(metrics, chart_df):
-    revenue_delta = "Healthy" if metrics["revenue"] >= metrics["payables"] else "Watch"
-    payables_delta = "Controlled" if metrics["payables"] <= metrics["revenue"] else "High"
-    health_delta = "Good" if metrics["net_health"] >= 0 else "Needs Attention"
-
-    st.header("Financial Health Command Center")
-    with st.container():
-        col1, col2, col3 = st.columns(3)
-        col1.metric("Total Revenue", format_money(metrics["revenue"]), revenue_delta)
-        col2.metric("Outstanding Payables", format_money(metrics["payables"]), payables_delta, delta_color="inverse")
-        col3.metric("Net Health", format_money(metrics["net_health"]), health_delta)
-        if not metrics["has_data"]:
-            st.caption("Add your first invoice to see health metrics.")
-
-    st.bar_chart(chart_df)
-
-
-def render_sidebar_chat(menu_name, demo_on, metrics):
-    if "messages" not in st.session_state:
-        st.session_state.messages = [
-            {
-                "role": "assistant",
-                "content": "Ask about your financial health, chart of accounts, payables, or invoices.",
-            }
+        navigation = [
+            "EKA Vault / Dashboard",
+            "New Company Registration",
+            "System Health & Logs",
+            "Renew License",
+            "Sales Invoices",
+            "Accounts Payable",
+            "Chart of Accounts",
+            "Vouchers",
         ]
+    else:
+        navigation = [
+            "EKA Vault / Dashboard",
+            "System Health & Logs",
+            "Sales Invoices",
+            "Accounts Payable",
+            "Chart of Accounts",
+            "Vouchers",
+        ]
+
+    selected = st.sidebar.radio("Module Navigation", navigation, index=navigation.index(active_module) if active_module in navigation else 0)
 
     st.sidebar.markdown('<div class="sidebar-chat-shell">', unsafe_allow_html=True)
     st.sidebar.markdown("### Gatekeeper AI")
-    st.sidebar.caption(f"Current view: {menu_name}")
-
-    for message in st.session_state.messages[-6:]:
+    st.sidebar.caption(f"Active module: {selected}")
+    for message in st.session_state.ai_messages[-6:]:
         with st.sidebar:
             with st.chat_message(message["role"]):
                 st.markdown(message["content"])
 
     question = st.sidebar.chat_input("Ask Gatekeeper AI...")
     if question:
-        st.session_state.messages.append({"role": "user", "content": question})
-        answer = ask_gatekeeper_ai(menu_name, st.session_state.messages, metrics, demo_on)
-        st.session_state.messages.append({"role": "assistant", "content": answer})
+        st.session_state.ai_messages.append({"role": "user", "content": question})
+        answer = ask_gatekeeper_ai(selected, health_snapshot)
+        st.session_state.ai_messages.append({"role": "assistant", "content": answer})
         st.rerun()
-
     st.sidebar.markdown("</div>", unsafe_allow_html=True)
+
+    st.sidebar.markdown("---")
+    st.sidebar.markdown('<div class="logout-wrap">', unsafe_allow_html=True)
+    if st.sidebar.button("Secure Logout", width="stretch"):
+        st.session_state.clear()
+        st.rerun()
+    st.sidebar.markdown("</div>", unsafe_allow_html=True)
+
+    return demo_on, selected
 
 
 def main():
-    st.set_page_config(page_title="Gatekeeper Finance", layout="wide", initial_sidebar_state="expanded")
+    st.set_page_config(page_title=APP_TITLE, layout="wide", initial_sidebar_state="expanded")
     inject_css()
     ensure_session_state()
     init_db()
+
     if not st.session_state.logged_in:
         render_login_gate()
         return
 
-    demo_on, page = render_sidebar("Dashboard")
+    health_snapshot = get_system_health_snapshot()
+    demo_on, active_module = render_sidebar("EKA Vault / Dashboard", health_snapshot)
 
-    if demo_on:
-        metrics, chart_df = get_demo_financial_metrics()
-    else:
-        metrics, chart_df = get_real_financial_metrics()
+    render_brand_header()
 
-    if page == "Dashboard":
-        render_financial_dashboard(metrics, chart_df)
-    else:
+    if active_module == "EKA Vault / Dashboard":
+        show_vault_dashboard_module(demo_on)
+    elif active_module == "New Company Registration":
+        show_company_registration_module()
+    elif active_module == "System Health & Logs":
+        show_system_health_module()
+    elif active_module == "Renew License":
+        show_license_renewal_module()
+    elif active_module == "Sales Invoices":
         conn = None if demo_on else get_connection()
         try:
-            if page == "Sales Invoices":
-                show_sales_invoices_page(conn, demo_on)
-            elif page == "Accounts Payable":
-                show_accounts_payable_page(conn, demo_on)
-            elif page == "Chart of Accounts":
-                show_chart_of_accounts_page(conn, demo_on)
-            elif page == "Vouchers":
-                show_vouchers_page(conn, demo_on)
+            show_sales_invoices_page(conn, demo_on)
         finally:
             if conn:
                 conn.close()
-
-    render_sidebar_chat(page, demo_on, metrics)
+    elif active_module == "Accounts Payable":
+        conn = None if demo_on else get_connection()
+        try:
+            show_accounts_payable_page(conn, demo_on)
+        finally:
+            if conn:
+                conn.close()
+    elif active_module == "Chart of Accounts":
+        conn = None if demo_on else get_connection()
+        try:
+            show_chart_of_accounts_page(conn, demo_on)
+        finally:
+            if conn:
+                conn.close()
+    elif active_module == "Vouchers":
+        conn = None if demo_on else get_connection()
+        try:
+            show_vouchers_page(conn, demo_on)
+        finally:
+            if conn:
+                conn.close()
 
 
 if __name__ == "__main__":

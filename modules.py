@@ -9,6 +9,104 @@ from dateutil.relativedelta import relativedelta
 from groq import Groq
 
 
+DB_NAME = "eka_vault.db"
+DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), DB_NAME)
+
+
+def get_connection():
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def init_db():
+    conn = get_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS companies (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                company_name TEXT,
+                admin_name TEXT,
+                contact_email TEXT,
+                status TEXT DEFAULT 'Active',
+                subscription_expiry TEXT,
+                created_at TEXT
+            )
+            """
+        )
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS sales_invoices (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                customer_name TEXT,
+                amount REAL,
+                status TEXT,
+                date TEXT
+            )
+            """
+        )
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS accounts_payable (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                supplier_name TEXT,
+                amount REAL,
+                status TEXT,
+                date TEXT
+            )
+            """
+        )
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS chart_of_accounts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                account_name TEXT,
+                account_type TEXT,
+                balance REAL
+            )
+            """
+        )
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS vouchers (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                narration TEXT,
+                amount REAL,
+                ref_no TEXT,
+                date TEXT
+            )
+            """
+        )
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS system_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT,
+                level TEXT,
+                module_name TEXT,
+                message TEXT
+            )
+            """
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def log_system_event(level, module_name, message):
+    conn = get_connection()
+    try:
+        conn.execute(
+            "INSERT INTO system_logs (timestamp, level, module_name, message) VALUES (?, ?, ?, ?)",
+            (datetime.now().isoformat(timespec="seconds"), level, module_name, message),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def get_excel_bin(df):
     try:
         output = BytesIO()
@@ -19,12 +117,224 @@ def get_excel_bin(df):
         return b""
 
 
+def get_financial_metrics():
+    conn = get_connection()
+    try:
+        revenue = conn.execute(
+            "SELECT COALESCE(SUM(amount), 0) FROM sales_invoices WHERE status = 'Paid'"
+        ).fetchone()[0] or 0.0
+        payables = conn.execute(
+            "SELECT COALESCE(SUM(amount), 0) FROM accounts_payable WHERE status = 'Unpaid'"
+        ).fetchone()[0] or 0.0
+        has_data = (
+            (conn.execute("SELECT COUNT(*) FROM sales_invoices").fetchone()[0] or 0)
+            + (conn.execute("SELECT COUNT(*) FROM accounts_payable").fetchone()[0] or 0)
+        ) > 0
+    finally:
+        conn.close()
+
+    metrics = {
+        "revenue": float(revenue),
+        "payables": float(payables),
+        "net_health": float(revenue) - float(payables),
+        "has_data": has_data,
+    }
+    chart_df = pd.DataFrame(
+        {"Amount": [metrics["revenue"], metrics["payables"]]},
+        index=["Income", "Expenses"],
+    )
+    return metrics, chart_df
+
+
+def get_demo_financial_metrics():
+    metrics = {
+        "revenue": 12500.0,
+        "payables": 4200.0,
+        "net_health": 8300.0,
+        "has_data": True,
+    }
+    chart_df = pd.DataFrame(
+        {"Amount": [metrics["revenue"], metrics["payables"]]},
+        index=["Income", "Expenses"],
+    )
+    return metrics, chart_df
+
+
+def get_system_health_snapshot():
+    conn = get_connection()
+    try:
+        company_count = conn.execute("SELECT COUNT(*) FROM companies").fetchone()[0] or 0
+        active_licenses = conn.execute(
+            "SELECT COUNT(*) FROM companies WHERE status = 'Active'"
+        ).fetchone()[0] or 0
+        db_status = "Online"
+    except Exception:
+        company_count = 0
+        active_licenses = 0
+        db_status = "Offline"
+    finally:
+        conn.close()
+
+    return {
+        "api_status": "Operational",
+        "db_status": db_status,
+        "company_count": company_count,
+        "active_licenses": active_licenses,
+    }
+
+
 def _demo_notice():
-    st.info("Enterprise Demo Mode is active. These figures are temporary and are not saved.")
+    st.info("Enterprise Demo Mode is active. These values are virtual and are not written to the vault database.")
+
+
+def format_money(value):
+    return f"GH₵ {value:,.2f}"
+
+
+def show_vault_dashboard_module(demo_on):
+    st.subheader("EKA Vault / Dashboard")
+    metrics, chart_df = get_demo_financial_metrics() if demo_on else get_financial_metrics()
+
+    with st.container():
+        col1, col2, col3 = st.columns(3)
+        col1.metric("Total Revenue", format_money(metrics["revenue"]), "Healthy")
+        col2.metric("Outstanding Payables", format_money(metrics["payables"]), "Controlled", delta_color="inverse")
+        col3.metric("Net Health", format_money(metrics["net_health"]), "Good")
+        if not metrics["has_data"] and not demo_on:
+            st.caption("Add your first invoice to activate vault metrics.")
+
+    st.bar_chart(chart_df)
+
+    if demo_on:
+        _demo_notice()
+
+
+def show_company_registration_module():
+    st.subheader("New Company Registration")
+    with st.form("company_registration_form"):
+        company_name = st.text_input("Company Name")
+        admin_name = st.text_input("Admin Contact")
+        contact_email = st.text_input("Contact Email")
+        duration_months = st.number_input("Subscription Length (Months)", min_value=1, value=12)
+        submitted = st.form_submit_button("Register Company")
+
+        if submitted and company_name and admin_name:
+            expiry_date = datetime.now() + relativedelta(months=+int(duration_months))
+            conn = get_connection()
+            try:
+                conn.execute(
+                    """
+                    INSERT INTO companies (company_name, admin_name, contact_email, status, subscription_expiry, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        company_name,
+                        admin_name,
+                        contact_email,
+                        "Active",
+                        expiry_date.date().isoformat(),
+                        datetime.now().date().isoformat(),
+                    ),
+                )
+                conn.commit()
+                st.success(f"{company_name} registered successfully.")
+                log_system_event("INFO", "New Company Registration", f"Registered company: {company_name}")
+                st.rerun()
+            finally:
+                conn.close()
+
+    conn = get_connection()
+    try:
+        rows = conn.execute(
+            "SELECT company_name, admin_name, contact_email, status, subscription_expiry FROM companies ORDER BY id DESC"
+        ).fetchall()
+    finally:
+        conn.close()
+
+    if rows:
+        st.dataframe(
+            pd.DataFrame(rows, columns=["Company Name", "Admin Contact", "Contact Email", "Status", "Subscription Expiry"]),
+            width="stretch",
+        )
+    else:
+        st.caption("No companies registered yet.")
+
+
+def show_system_health_module():
+    st.subheader("System Health & Logs")
+    snapshot = get_system_health_snapshot()
+
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("API Status", snapshot["api_status"])
+    col2.metric("Database Status", snapshot["db_status"])
+    col3.metric("Companies", str(snapshot["company_count"]))
+    col4.metric("Active Licenses", str(snapshot["active_licenses"]))
+
+    conn = get_connection()
+    try:
+        logs = conn.execute(
+            "SELECT timestamp, level, module_name, message FROM system_logs ORDER BY id DESC LIMIT 50"
+        ).fetchall()
+    finally:
+        conn.close()
+
+    if logs:
+        logs_df = pd.DataFrame(logs, columns=["Timestamp", "Level", "Module", "Message"])
+        st.dataframe(logs_df, width="stretch")
+        excel_bin = get_excel_bin(logs_df)
+        if excel_bin:
+            st.download_button("Export Logs", data=excel_bin, file_name="eka_gatekeeper_logs.xlsx")
+    else:
+        st.caption("System logs will appear here after activity begins.")
+
+
+def show_license_renewal_module():
+    st.subheader("Renew License")
+    conn = get_connection()
+    try:
+        companies = conn.execute(
+            "SELECT id, company_name, status, subscription_expiry FROM companies ORDER BY company_name"
+        ).fetchall()
+    finally:
+        conn.close()
+
+    if not companies:
+        st.info("No companies are available for renewal yet.")
+        return
+
+    companies_df = pd.DataFrame(companies, columns=["ID", "Company Name", "Status", "Subscription Expiry"])
+    st.dataframe(companies_df, width="stretch")
+
+    selected_name = st.selectbox("Select Company", companies_df["Company Name"].tolist())
+    duration_months = st.number_input("Extend By (Months)", min_value=1, value=12, key="renew_duration_months")
+
+    if st.button("Renew License", key="renew_license_action"):
+        selected_row = companies_df.loc[companies_df["Company Name"] == selected_name].iloc[0]
+        existing_expiry = selected_row["Subscription Expiry"]
+        base_date = datetime.now()
+        if existing_expiry:
+            try:
+                base_date = datetime.fromisoformat(str(existing_expiry))
+            except ValueError:
+                base_date = datetime.now()
+        new_expiry = base_date + relativedelta(months=+int(duration_months))
+
+        conn = get_connection()
+        try:
+            conn.execute(
+                "UPDATE companies SET subscription_expiry = ?, status = 'Active' WHERE id = ?",
+                (new_expiry.date().isoformat(), int(selected_row["ID"])),
+            )
+            conn.commit()
+            st.success(f"License renewed for {selected_name} until {new_expiry.date().isoformat()}.")
+            log_system_event("INFO", "Renew License", f"Renewed license for {selected_name}")
+            st.rerun()
+        finally:
+            conn.close()
 
 
 def show_sales_invoices_page(conn, demo_on):
-    st.header("Sales Invoices")
+    st.subheader("Sales Invoices")
     if demo_on:
         _demo_notice()
         demo_df = pd.DataFrame(
@@ -45,22 +355,20 @@ def show_sales_invoices_page(conn, demo_on):
                 (customer_name, amount, status, invoice_date.isoformat()),
             )
             conn.commit()
+            log_system_event("INFO", "Sales Invoices", f"Saved invoice for {customer_name}")
             st.success("Invoice saved.")
             st.rerun()
 
     rows = conn.execute("SELECT customer_name, amount, status, date FROM sales_invoices ORDER BY date DESC, id DESC").fetchall()
-    df = pd.DataFrame(rows, columns=["Customer Name", "Amount", "Status", "Date"]) if rows else pd.DataFrame()
-    if df.empty:
-        st.caption("No invoices yet.")
-    else:
+    if rows:
+        df = pd.DataFrame(rows, columns=["Customer Name", "Amount", "Status", "Date"])
         st.dataframe(df, width="stretch")
-        excel_bin = get_excel_bin(df)
-        if excel_bin:
-            st.download_button("Export Invoices", data=excel_bin, file_name="sales_invoices.xlsx")
+    else:
+        st.caption("No invoices yet.")
 
 
 def show_accounts_payable_page(conn, demo_on):
-    st.header("Accounts Payable")
+    st.subheader("Accounts Payable")
     if demo_on:
         _demo_notice()
         demo_df = pd.DataFrame(
@@ -81,19 +389,20 @@ def show_accounts_payable_page(conn, demo_on):
                 (supplier_name, amount, status, payable_date.isoformat()),
             )
             conn.commit()
+            log_system_event("INFO", "Accounts Payable", f"Saved payable for {supplier_name}")
             st.success("Payable saved.")
             st.rerun()
 
     rows = conn.execute("SELECT supplier_name, amount, status, date FROM accounts_payable ORDER BY date DESC, id DESC").fetchall()
-    df = pd.DataFrame(rows, columns=["Supplier Name", "Amount", "Status", "Date"]) if rows else pd.DataFrame()
-    if df.empty:
-        st.caption("No payables yet.")
-    else:
+    if rows:
+        df = pd.DataFrame(rows, columns=["Supplier Name", "Amount", "Status", "Date"])
         st.dataframe(df, width="stretch")
+    else:
+        st.caption("No payables yet.")
 
 
 def show_chart_of_accounts_page(conn, demo_on):
-    st.header("Chart of Accounts")
+    st.subheader("Chart of Accounts")
     if demo_on:
         _demo_notice()
         demo_df = pd.DataFrame(
@@ -116,19 +425,20 @@ def show_chart_of_accounts_page(conn, demo_on):
                 (account_name, account_type, balance),
             )
             conn.commit()
+            log_system_event("INFO", "Chart of Accounts", f"Added account: {account_name}")
             st.success("Account saved.")
             st.rerun()
 
     rows = conn.execute("SELECT account_name, account_type, balance FROM chart_of_accounts ORDER BY account_name").fetchall()
-    df = pd.DataFrame(rows, columns=["Account Name", "Account Type", "Balance"]) if rows else pd.DataFrame()
-    if df.empty:
-        st.caption("No chart of accounts records yet.")
-    else:
+    if rows:
+        df = pd.DataFrame(rows, columns=["Account Name", "Account Type", "Balance"])
         st.dataframe(df, width="stretch")
+    else:
+        st.caption("No chart of accounts records yet.")
 
 
 def show_vouchers_page(conn, demo_on):
-    st.header("Vouchers")
+    st.subheader("Vouchers")
     if demo_on:
         _demo_notice()
         demo_df = pd.DataFrame(
@@ -149,12 +459,13 @@ def show_vouchers_page(conn, demo_on):
                 (narration, amount, ref_no, voucher_date.isoformat()),
             )
             conn.commit()
+            log_system_event("INFO", "Vouchers", f"Posted voucher: {ref_no or narration}")
             st.success("Voucher saved.")
             st.rerun()
 
     rows = conn.execute("SELECT narration, amount, ref_no, date FROM vouchers ORDER BY date DESC, id DESC").fetchall()
-    df = pd.DataFrame(rows, columns=["Narration", "Amount", "Reference", "Date"]) if rows else pd.DataFrame()
-    if df.empty:
-        st.caption("No vouchers yet.")
-    else:
+    if rows:
+        df = pd.DataFrame(rows, columns=["Narration", "Amount", "Reference", "Date"])
         st.dataframe(df, width="stretch")
+    else:
+        st.caption("No vouchers yet.")
