@@ -20,9 +20,9 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 GATEKEEPER_SYSTEM_PROMPT = (
-    "You are the Gatekeeper Accounting Assistant. You help Ghanaian business owners "
-    "understand their dashboard, explain accounting terms like Accounts Payable, and "
-    "provide guidance on SSNIT/TIN requirements."
+    "You are the Gatekeeper Accounting Expert. Explain accounting terms like Accounts "
+    "Payable and Assets simply. Use Ghanaian business examples (e.g., mentioning GHS, "
+    "GRA, or SSNIT) where relevant."
 )
 client = Groq(api_key=st.secrets["GROQ_API_KEY"])
 
@@ -48,10 +48,10 @@ def init_db():
             "CREATE TABLE IF NOT EXISTS inventory (id INTEGER PRIMARY KEY, company_key TEXT, item_name TEXT, quantity INTEGER, price REAL)"
         )
         cursor.execute(
-            "CREATE TABLE IF NOT EXISTS accounts_payable (id INTEGER PRIMARY KEY, company_key TEXT, vendor TEXT, amount REAL, due_date TEXT, status TEXT)"
+            "CREATE TABLE IF NOT EXISTS accounts_payable (id INTEGER PRIMARY KEY, vendor TEXT, amount REAL, status TEXT, due_date TEXT)"
         )
         cursor.execute(
-            "CREATE TABLE IF NOT EXISTS chart_of_accounts (id INTEGER PRIMARY KEY, company_key TEXT, account_code TEXT, account_name TEXT, account_type TEXT)"
+            "CREATE TABLE IF NOT EXISTS chart_of_accounts (id INTEGER PRIMARY KEY, account_code TEXT, account_name TEXT, account_type TEXT)"
         )
         cursor.execute("PRAGMA table_info(companies)")
         company_columns = {row[1] for row in cursor.fetchall()}
@@ -62,6 +62,15 @@ def init_db():
                 cursor.execute("ALTER TABLE companies ADD COLUMN status TEXT DEFAULT 'Active'")
             if "subscription_expiry" not in company_columns:
                 cursor.execute("ALTER TABLE companies ADD COLUMN subscription_expiry TEXT")
+        chart_count = cursor.execute("SELECT COUNT(*) FROM chart_of_accounts").fetchone()[0]
+        if chart_count == 0:
+            cursor.executemany(
+                "INSERT INTO chart_of_accounts (account_code, account_name, account_type) VALUES (?, ?, ?)",
+                [
+                    ("2000", "Accounts Payable", "Liability"),
+                    ("4000", "Sales Revenue", "Income"),
+                ],
+            )
         conn.commit()
     except sqlite3.Error as init_error:
         logger.error(f"Forced table creation failed: {init_error}")
@@ -802,23 +811,31 @@ def run_startup_db_patch():
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS accounts_payable (
                 id INTEGER PRIMARY KEY,
-                company_key TEXT,
                 vendor TEXT,
                 amount REAL,
-                due_date TEXT,
-                status TEXT
+                status TEXT,
+                due_date TEXT
             )
         """)
 
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS chart_of_accounts (
                 id INTEGER PRIMARY KEY,
-                company_key TEXT,
                 account_code TEXT,
                 account_name TEXT,
                 account_type TEXT
             )
         """)
+
+        chart_count = cursor.execute("SELECT COUNT(*) FROM chart_of_accounts").fetchone()[0]
+        if chart_count == 0:
+            cursor.executemany(
+                "INSERT INTO chart_of_accounts (account_code, account_name, account_type) VALUES (?, ?, ?)",
+                [
+                    ("2000", "Accounts Payable", "Liability"),
+                    ("4000", "Sales Revenue", "Income"),
+                ],
+            )
 
         conn.commit()
     except sqlite3.Error as patch_error:
