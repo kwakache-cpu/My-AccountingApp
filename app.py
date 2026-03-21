@@ -655,29 +655,97 @@ else:
                 logger.error(f"Dashboard metrics error: {e}")
 
             st.markdown("---")
-            st.subheader("📂 Client Portfolio Manager")
+            st.subheader("?? Client Portfolio Manager")
             try:
                 conn = get_connection()
-                # FIXED: Added missing closing parentheses to COUNT and SUM
                 query = """
-                    SELECT c.name, c.created_at, c.status, c.deployment_status, c.subscription_expiry,
+                    SELECT c.key, c.name, c.created_at, c.status, c.deployment_status, c.subscription_expiry,
                     (SELECT COUNT(*) FROM inventory WHERE company_key = c.key) as item_count
                     FROM companies c ORDER BY c.name
                 """
                 portfolio_df = pd.read_sql(query, conn)
                 st.dataframe(portfolio_df, width='stretch')
+
+                try:
+                    if not portfolio_df.empty:
+                        portfolio_choice = st.selectbox(
+                            "Open company profile",
+                            portfolio_df["name"].tolist(),
+                            key="portfolio_company_select",
+                        )
+                        selected_portfolio = portfolio_df.loc[
+                            portfolio_df["name"] == portfolio_choice
+                        ].iloc[0]
+                        st.caption(
+                            f"Portfolio selection: {selected_portfolio['name']} | "
+                            f"Status: {selected_portfolio['status']} | "
+                            f"Deployment: {selected_portfolio['deployment_status']}"
+                        )
+                except Exception as portfolio_click_error:
+                    logger.error(f"Portfolio interaction error: {portfolio_click_error}")
+                    st.warning("Company selection is temporarily unavailable, but the portfolio table is still visible.")
+
                 conn.close()
             except Exception as e:
                 st.error(f'Portfolio Error: {e}')
         
         with tab2:
-            st.subheader("📅 License Management")
+            st.subheader("?? License Management")
             try:
                 conn = get_connection()
-                # FIXED: Corrected SQLite selection
-                companies_df = pd.read_sql("SELECT key, name, subscription_expiry, status FROM companies", conn)
-                companies_df['subscription_expiry'] = pd.to_datetime(companies_df['subscription_expiry'])
-                st.table(companies_df)
+                companies_df = pd.read_sql(
+                    """
+                    SELECT key, name, subscription_expiry, status, deployment_status
+                    FROM companies
+                    ORDER BY name
+                    """,
+                    conn,
+                )
+                companies_df['subscription_expiry'] = pd.to_datetime(
+                    companies_df['subscription_expiry'], errors='coerce'
+                )
+                st.dataframe(companies_df, width='stretch')
+
+                st.markdown("---")
+                st.subheader("Renew/Reactivate Subscription")
+
+                if companies_df.empty:
+                    st.info("No companies available for renewal yet.")
+                else:
+                    selected_company = st.selectbox(
+                        "Select Company",
+                        companies_df["name"].tolist(),
+                        key="reactivate_company_select",
+                    )
+                    selected_row = companies_df.loc[
+                        companies_df["name"] == selected_company
+                    ].iloc[0]
+                    default_expiry = selected_row["subscription_expiry"]
+                    if pd.isna(default_expiry):
+                        default_expiry = datetime.now().date()
+                    else:
+                        default_expiry = default_expiry.date()
+
+                    new_expiry_date = st.date_input(
+                        "New Expiry Date",
+                        value=default_expiry,
+                        key="reactivate_expiry_date",
+                    )
+
+                    if st.button("Extend Subscription", key="extend_subscription_btn"):
+                        try:
+                            conn.execute(
+                                "UPDATE companies SET subscription_expiry = ?, status = 'Active' WHERE name = ?",
+                                (new_expiry_date.isoformat(), selected_company),
+                            )
+                            conn.commit()
+                            st.success(
+                                f"Subscription updated for {selected_company} until {new_expiry_date.isoformat()}."
+                            )
+                            st.rerun()
+                        except Exception as renew_error:
+                            st.error(f"Failed to extend subscription: {renew_error}")
+
                 conn.close()
             except Exception as e:
                 st.error(f'License Table Error: {e}')
