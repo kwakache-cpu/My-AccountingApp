@@ -106,16 +106,38 @@ def send_maintenance_email(company_email, company_name, message):
         return False
 
 
-def print_subscription_email(company_email, company_name, new_expiry_date):
-    """Print a renewal email preview to the terminal/logs."""
-    recipient = company_email or "no-email-on-file@example.com"
-    message = (
-        f"[EMAIL PREVIEW] To: {recipient} | "
-        f"Subject: Subscription Renewed | "
-        f"Body: Hello {company_name}, your subscription is now active until {new_expiry_date}."
-    )
-    print(message)
-    logger.info(message)
+def send_renewal_email(company_name, email, new_expiry):
+    """Mock renewal email sender that prints the full email content."""
+    recipient = email or "no-email-on-file@example.com"
+    sender_email = "noreply@eka-erp.local"
+
+    msg = MIMEMultipart()
+    msg["From"] = sender_email
+    msg["To"] = recipient
+    msg["Subject"] = f"E.K.A Gatekeeper Renewal Confirmation - {company_name}"
+
+    body = f"""
+Dear {company_name},
+
+Congratulations on successfully renewing your subscription with E.K.A Cloud ERP.
+
+Your new expiry date is: {new_expiry}
+
+Access to the Gatekeeper System has been fully restored, and your organization can continue operating without interruption.
+
+Thank you for choosing E.K.A Solutions.
+
+Best regards,
+E.K.A Support Team
+"""
+
+    msg.attach(MIMEText(body.strip(), "plain"))
+
+    print("===== RENEWAL EMAIL PREVIEW =====")
+    print(msg.as_string())
+    print("===== END EMAIL PREVIEW =====")
+    logger.info(f"Renewal email preview generated for {company_name} <{recipient}>")
+    return True
 
 def check_license_expiry_with_grace(company_key):
     """NATIVE SQLITE FIX: No  wrapper"""
@@ -732,6 +754,7 @@ else:
                     selected_row = companies_df.loc[
                         companies_df["name"] == selected_company
                     ].iloc[0]
+                    company_key = selected_row["key"]
                     company_email = selected_row.get("contact_email")
                     default_expiry = selected_row["subscription_expiry"]
                     if pd.isna(default_expiry):
@@ -752,14 +775,23 @@ else:
                                 (new_expiry_date.isoformat(), selected_company),
                             )
                             conn.commit()
-                            print_subscription_email(
-                                company_email,
-                                selected_company,
-                                new_expiry_date.isoformat(),
+                            log_audit_action(
+                                conn,
+                                company_key,
+                                "Dev",
+                                "Subscription Renewed",
+                                "License Management",
+                                f"Renewed until {new_expiry_date.isoformat()}",
                             )
                             st.success(
                                 f"Subscription updated for {selected_company} until {new_expiry_date.isoformat()}."
                             )
+                            send_renewal_email(
+                                selected_company,
+                                company_email,
+                                new_expiry_date.isoformat(),
+                            )
+                            st.balloons()
                             st.rerun()
                         except Exception as renew_error:
                             st.error(f"Failed to extend subscription: {renew_error}")
