@@ -450,6 +450,12 @@ def show_dashboard(company_key, company_name, role):
             ).fetchone()[0]
             col4.metric("Asset Value", f"GHS {fa_val:.2f}")
 
+            if inv_val == 0 and month_sales == 0 and emp_count == 0 and fa_val == 0:
+                st.info(
+                    "Welcome to your dashboard. Your company is set up and ready. "
+                    "Add inventory, record sales, or process payroll to start seeing live metrics."
+                )
+
             st.markdown("---")
             col1, col2 = st.columns(2)
 
@@ -558,6 +564,12 @@ else:
                 m2.metric("Active Subscriptions", str(active_subscriptions))
                 m3.metric("Monthly Revenue", f"GHS {monthly_revenue:.2f}")
                 m4.metric("System Uptime", "100%")
+
+                if total_companies == 0 and active_subscriptions == 0 and monthly_revenue == 0:
+                    st.info(
+                        "Welcome to the admin dashboard. Seed sample data or deploy your first "
+                        "license to bring these system metrics to life."
+                    )
                 
                 # Global Forensic Trail (Dev only) - Enhanced with error handling
                 st.markdown("---")

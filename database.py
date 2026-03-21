@@ -13,7 +13,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Primary Database Path
-DB_NAME = "eka_enterprise_v3.db"
+DB_NAME = "database.db"
 
 # =================================================================
 # 2. CORE CONNECTION ENGINE
