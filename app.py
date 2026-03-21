@@ -210,9 +210,10 @@ E.K.A Support Team
 def get_financial_metrics(company_key=None):
     """Aggregate revenue, payables, and net position for the dashboard."""
     metrics = {
-        "total_revenue": 1.0,
-        "total_payables": 1.0,
+        "total_revenue": 0.0,
+        "total_payables": 0.0,
         "net_position": 0.0,
+        "has_data": False,
     }
 
     conn = None
@@ -221,8 +222,16 @@ def get_financial_metrics(company_key=None):
         if not conn:
             return metrics
 
-        sales_table_count = int(conn.execute("SELECT COUNT(*) FROM sales_invoices").fetchone()[0] or 0)
-        payables_table_count = int(conn.execute("SELECT COUNT(*) FROM accounts_payable").fetchone()[0] or 0)
+        if company_key and company_key != "DEMO":
+            sales_table_count = int(
+                conn.execute("SELECT COUNT(*) FROM sales_invoices WHERE company_key = ?", (company_key,)).fetchone()[0] or 0
+            )
+            payables_table_count = int(
+                conn.execute("SELECT COUNT(*) FROM accounts_payable WHERE company_key = ?", (company_key,)).fetchone()[0] or 0
+            )
+        else:
+            sales_table_count = int(conn.execute("SELECT COUNT(*) FROM sales_invoices").fetchone()[0] or 0)
+            payables_table_count = int(conn.execute("SELECT COUNT(*) FROM accounts_payable").fetchone()[0] or 0)
 
         revenue_sum = None
         payables_sum = None
@@ -262,10 +271,10 @@ def get_financial_metrics(company_key=None):
                 "SELECT SUM(amount) FROM accounts_payable WHERE status = 'Unpaid'"
             ).fetchone()[0]
 
-        metrics["total_revenue"] = 1.0 if sales_table_count == 0 else float(revenue_sum or 0)
-        metrics["total_payables"] = 1.0 if payables_table_count == 0 else float(payables_sum or 0)
-
+        metrics["total_revenue"] = float(revenue_sum or 0)
+        metrics["total_payables"] = float(payables_sum or 0)
         metrics["net_position"] = metrics["total_revenue"] - metrics["total_payables"]
+        metrics["has_data"] = (sales_table_count + payables_table_count) > 0
     except sqlite3.OperationalError as metrics_error:
         logger.warning(f"Financial metrics unavailable: {metrics_error}")
     finally:
@@ -679,29 +688,34 @@ def show_dashboard(company_key, company_name, role):
         st.session_state.financial_metrics = financial_metrics
 
         health_delta = "Good" if financial_metrics["net_position"] >= 0 else "Needs Attention"
+        revenue_delta = "Good" if financial_metrics["total_revenue"] >= financial_metrics["total_payables"] else "Needs Attention"
         payables_delta = "Good" if financial_metrics["total_payables"] <= financial_metrics["total_revenue"] else "Needs Attention"
 
-        with st.container():
+        with st.container(border=True):
+            st.subheader("Financial Health Command Center")
             metric_col1, metric_col2, metric_col3 = st.columns([1, 1, 1])
             with metric_col1:
                 st.metric(
-                    "💰 Total Revenue",
-                    f"₵ {financial_metrics['total_revenue']:.2f}",
-                    delta="Good" if financial_metrics["total_revenue"] >= financial_metrics["total_payables"] else "Needs Attention",
+                    label="💰 Total Revenue",
+                    value=f"GH₵ {financial_metrics['total_revenue']:.2f}",
+                    delta=revenue_delta,
                 )
             with metric_col2:
                 st.metric(
-                    "📉 Outstanding Payables",
-                    f"₵ {financial_metrics['total_payables']:.2f}",
+                    label="📉 Outstanding Payables",
+                    value=f"GH₵ {financial_metrics['total_payables']:.2f}",
                     delta=payables_delta,
                     delta_color="inverse",
                 )
             with metric_col3:
                 st.metric(
-                    "⚖️ Net Financial Health",
-                    f"₵ {financial_metrics['net_position']:.2f}",
+                    label="⚖️ Net Financial Health",
+                    value=f"GH₵ {financial_metrics['net_position']:.2f}",
                     delta=health_delta,
                 )
+
+            if not financial_metrics["has_data"]:
+                st.caption("Add your first invoice to see health metrics.")
 
         comparison_df = pd.DataFrame(
             {
