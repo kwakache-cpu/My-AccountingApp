@@ -139,6 +139,78 @@ E.K.A Support Team
     logger.info(f"Renewal email preview generated for {company_name} <{recipient}>")
     return True
 
+
+def render_gatekeeper_ai_guide(menu_selection):
+    """Render a context-aware sidebar guide for the active module."""
+    module_help = {
+        "Inventory": (
+            "Set the Min Stock Level to the quantity where you want the system to warn you before stock runs too low. "
+            "When current quantity falls to or below that threshold, the dashboard flags the item for attention."
+        ),
+        "Inventory & Stock": (
+            "Set the Min Stock Level to the quantity where you want the system to warn you before stock runs too low. "
+            "When current quantity falls to or below that threshold, the dashboard flags the item for attention."
+        ),
+        "Payroll": (
+            "Enter the employee's core salary details and the system calculates Net Salary automatically after SSNIT and tax deductions. "
+            "That means you should focus on entering accurate gross pay inputs rather than manually computing take-home pay."
+        ),
+        "Ghana Payroll (SSNIT)": (
+            "Enter the employee's core salary details and the system calculates Net Salary automatically after SSNIT and tax deductions. "
+            "That means you should focus on entering accurate gross pay inputs rather than manually computing take-home pay."
+        ),
+        "Fixed Asset Register": (
+            "Depreciation Rate is the percentage used to reduce an asset's value over time as it is used. "
+            "Book Value is the remaining value of the asset after depreciation has been applied."
+        ),
+        "Fixed Assets": (
+            "Depreciation Rate is the percentage used to reduce an asset's value over time as it is used. "
+            "Book Value is the remaining value of the asset after depreciation has been applied."
+        ),
+    }
+
+    module_responses = {
+        "Inventory": "Enter the item name, quantity, selling price, cost price, and warehouse details so the stock record is complete. Add a realistic Min Stock Level so the system can trigger alerts before the item runs low.",
+        "Inventory & Stock": "Enter the item name, quantity, selling price, cost price, and warehouse details so the stock record is complete. Add a realistic Min Stock Level so the system can trigger alerts before the item runs low.",
+        "Payroll": "Input the employee name, salary amount, month, and year with care because the payroll engine uses those values to calculate deductions. You do not need to type Net Salary manually because the system computes it after SSNIT and tax.",
+        "Ghana Payroll (SSNIT)": "Input the employee name, salary amount, month, and year with care because the payroll engine uses those values to calculate deductions. You do not need to type Net Salary manually because the system computes it after SSNIT and tax.",
+        "Fixed Asset Register": "Enter the asset name, purchase cost, purchase date, and depreciation rate so the register can track the asset correctly. The system then uses those fields to maintain Book Value over time.",
+        "Fixed Assets": "Enter the asset name, purchase cost, purchase date, and depreciation rate so the register can track the asset correctly. The system then uses those fields to maintain Book Value over time.",
+    }
+
+    help_text = module_help.get(
+        menu_selection,
+        "This AI guide follows the module you are currently viewing and explains the most important fields before you save an entry. Ask a short question below if you want entry help tailored to this screen."
+    )
+
+    with st.sidebar.expander("🤖 Gatekeeper AI Guide", expanded=False):
+        st.markdown(
+            """
+            <div style='background-color:#eef6ff; border-left:4px solid #0f766e; padding:12px; border-radius:10px; margin-bottom:10px;'>
+                <strong>Help</strong><br>
+                Context-aware guidance for the module you are using right now.
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        st.markdown(help_text)
+
+        user_question = st.chat_input("Ask Gatekeeper AI for help", key=f"ai_guide_{menu_selection}")
+        if user_question:
+            ai_response = module_responses.get(
+                menu_selection,
+                "Enter the required fields shown in this module carefully and save only after reviewing the values for accuracy. If you are unsure, start with the main identification fields and the system-calculated fields will guide the rest of the process."
+            )
+            st.markdown(
+                f"""
+                <div style='background-color:#ecfeff; border:1px solid #67e8f9; color:#155e75; padding:12px; border-radius:10px; margin-top:10px;'>
+                    <strong>Help Response</strong><br>
+                    {ai_response}
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
 def check_license_expiry_with_grace(company_key):
     """NATIVE SQLITE FIX: No  wrapper"""
     conn = None
@@ -822,6 +894,7 @@ else:
         
         menu = ["Dashboard", "Inventory", "Payroll", "Sales/Purchase", "Reports", "Banking", "Taxation", "Audit Trail"]
         choice = st.sidebar.selectbox("Navigation", menu)
+        render_gatekeeper_ai_guide(choice)
         
         if choice == "Dashboard":
             show_dashboard("DEMO", "Demo Corporation Ltd", "Demo")
@@ -879,6 +952,7 @@ else:
             menu.insert(1, "Company Setup")
         
         choice = st.sidebar.selectbox("Go to Module:", menu, key="v3_main_nav_dropdown")
+        render_gatekeeper_ai_guide(choice)
         
         # Dashboard Module (NEW)
         if choice == "🏠 Dashboard":
