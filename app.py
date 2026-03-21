@@ -21,8 +21,7 @@ logger = logging.getLogger(__name__)
 
 GATEKEEPER_SYSTEM_PROMPT = (
     "You are the Gatekeeper Accounting Expert. Explain accounting terms like Accounts "
-    "Payable and Assets simply. Use Ghanaian business examples (e.g., mentioning GHS, "
-    "GRA, or SSNIT) where relevant."
+    "Payable and Chart of Accounts simply for Ghanaian businesses."
 )
 client = Groq(api_key=st.secrets["GROQ_API_KEY"])
 
@@ -52,6 +51,9 @@ def init_db():
         )
         cursor.execute(
             "CREATE TABLE IF NOT EXISTS chart_of_accounts (id INTEGER PRIMARY KEY, account_code TEXT, account_name TEXT, account_type TEXT)"
+        )
+        cursor.execute(
+            "CREATE TABLE IF NOT EXISTS purchase_orders (id INTEGER PRIMARY KEY, item TEXT, quantity INTEGER, cost REAL, status TEXT)"
         )
         cursor.execute("PRAGMA table_info(companies)")
         company_columns = {row[1] for row in cursor.fetchall()}
@@ -824,6 +826,16 @@ def run_startup_db_patch():
                 account_code TEXT,
                 account_name TEXT,
                 account_type TEXT
+            )
+        """)
+
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS purchase_orders (
+                id INTEGER PRIMARY KEY,
+                item TEXT,
+                quantity INTEGER,
+                cost REAL,
+                status TEXT
             )
         """)
 
