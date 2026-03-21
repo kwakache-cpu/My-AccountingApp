@@ -1,7 +1,8 @@
 import streamlit as st
 import pandas as pd
 from database import get_connection
-from database import init_db, log_audit_action
+from database import init_db as base_init_db, log_audit_action
+from groq import Groq
 from modules import *
 import logging
 from datetime import date, datetime, timedelta
@@ -18,7 +19,59 @@ from email.mime.text import MIMEText
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+GATEKEEPER_SYSTEM_PROMPT = (
+    "You are the Gatekeeper Accounting Assistant. You help Ghanaian business owners "
+    "understand their dashboard, explain accounting terms like Accounts Payable, and "
+    "provide guidance on SSNIT/TIN requirements."
+)
+client = Groq(api_key=st.secrets["GROQ_API_KEY"])
+
 # 1. Boot System
+def init_db():
+    """Force the requested tables in app.py before the app starts."""
+    base_init_db()
+
+    conn = None
+    try:
+        conn = get_connection()
+        if not conn:
+            return
+
+        cursor = conn.cursor()
+        cursor.execute(
+            "CREATE TABLE IF NOT EXISTS companies (key TEXT PRIMARY KEY, name TEXT, tin TEXT, status TEXT DEFAULT 'Active', subscription_expiry TEXT, deployment_status TEXT DEFAULT 'Pending')"
+        )
+        cursor.execute(
+            "CREATE TABLE IF NOT EXISTS pending_approvals (id INTEGER PRIMARY KEY, company_key TEXT, amount REAL, status TEXT, request_date TEXT)"
+        )
+        cursor.execute(
+            "CREATE TABLE IF NOT EXISTS inventory (id INTEGER PRIMARY KEY, company_key TEXT, item_name TEXT, quantity INTEGER, price REAL)"
+        )
+        cursor.execute(
+            "CREATE TABLE IF NOT EXISTS accounts_payable (id INTEGER PRIMARY KEY, company_key TEXT, vendor TEXT, amount REAL, due_date TEXT, status TEXT)"
+        )
+        cursor.execute(
+            "CREATE TABLE IF NOT EXISTS chart_of_accounts (id INTEGER PRIMARY KEY, company_key TEXT, account_code TEXT, account_name TEXT, account_type TEXT)"
+        )
+        cursor.execute("PRAGMA table_info(companies)")
+        company_columns = {row[1] for row in cursor.fetchall()}
+        if company_columns:
+            if "tin" not in company_columns:
+                cursor.execute("ALTER TABLE companies ADD COLUMN tin TEXT")
+            if "status" not in company_columns:
+                cursor.execute("ALTER TABLE companies ADD COLUMN status TEXT DEFAULT 'Active'")
+            if "subscription_expiry" not in company_columns:
+                cursor.execute("ALTER TABLE companies ADD COLUMN subscription_expiry TEXT")
+        conn.commit()
+    except sqlite3.Error as init_error:
+        logger.error(f"Forced table creation failed: {init_error}")
+        if conn:
+            conn.rollback()
+    finally:
+        if conn:
+            conn.close()
+
+
 init_db()
 st.set_page_config(
     page_title="E.K.A Cloud ERP v3", 
@@ -140,9 +193,59 @@ E.K.A Support Team
     logger.info(f"Renewal email preview generated for {company_name} <{recipient}>")
     return True
 
+def ask_gatekeeper_ai(menu_selection, chat_history):
+    """Call Groq for a real Gatekeeper AI answer."""
+    messages = [{"role": "system", "content": GATEKEEPER_SYSTEM_PROMPT}]
+    messages.append(
+        {
+            "role": "system",
+            "content": f"The user is currently viewing the {menu_selection} module.",
+        }
+    )
+    messages.extend(chat_history[-8:])
+
+    try:
+        completion = client.chat.completions.create(
+            model="llama-3.1-8b-instant",
+            messages=messages,
+            temperature=0.4,
+        )
+        return completion.choices[0].message.content.strip()
+    except Exception as ai_error:
+        logger.error(f"Gatekeeper AI call failed: {ai_error}")
+        return "Gatekeeper AI is currently unavailable. Please check the Groq API connection."
+
+
+def render_gatekeeper_ai_chat(menu_selection):
+    """Render a real interactive sidebar chatbot."""
+    if "messages" not in st.session_state:
+        st.session_state.messages = [
+            {
+                "role": "assistant",
+                "content": "Ask me an accounting question and I will explain it simply for your business.",
+            }
+        ]
+
+    with st.sidebar.expander("Gatekeeper AI", expanded=False):
+        st.caption(f"Active module: {menu_selection}")
+
+        for message in st.session_state.messages[-6:]:
+            with st.chat_message(message["role"]):
+                st.markdown(message["content"])
+
+        user_question = st.chat_input("Ask Gatekeeper AI...", key=f"ai_guide_{menu_selection}")
+        if user_question:
+            st.session_state.messages.append({"role": "user", "content": user_question})
+            with st.spinner("Gatekeeper AI is thinking..."):
+                ai_response = ask_gatekeeper_ai(menu_selection, st.session_state.messages)
+            st.session_state.messages.append({"role": "assistant", "content": ai_response})
+            st.rerun()
+
 
 def render_gatekeeper_ai_guide(menu_selection):
-    """Render a context-aware sidebar guide for the active module."""
+    """Backward-compatible alias to the live chat interface."""
+    render_gatekeeper_ai_chat(menu_selection)
+    return
     module_help = {
         "Inventory": (
             "Set the Min Stock Level to the quantity where you want the system to warn you before stock runs too low. "
@@ -665,67 +768,55 @@ def run_startup_db_patch():
 
         cursor.execute("PRAGMA table_info(companies)")
         company_columns = {row[1] for row in cursor.fetchall()}
-        if company_columns and "status" not in company_columns:
-            cursor.execute("ALTER TABLE companies ADD COLUMN status TEXT DEFAULT 'Active'")
+        if company_columns:
+            if "tin" not in company_columns:
+                cursor.execute("ALTER TABLE companies ADD COLUMN tin TEXT")
+            if "status" not in company_columns:
+                cursor.execute("ALTER TABLE companies ADD COLUMN status TEXT DEFAULT 'Active'")
+            if "subscription_expiry" not in company_columns:
+                cursor.execute("ALTER TABLE companies ADD COLUMN subscription_expiry TEXT")
             cursor.execute(
                 "UPDATE companies SET status = 'Active' WHERE status IS NULL OR TRIM(status) = ''"
             )
-            logger.info("Startup DB patch applied: companies.status added.")
 
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS pending_approvals (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                id INTEGER PRIMARY KEY,
                 company_key TEXT,
-                payment_reference TEXT UNIQUE,
                 amount REAL,
-                payment_method TEXT,
-                plan_requested TEXT,
-                status TEXT DEFAULT 'Pending',
-                admin_notes TEXT,
-                timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (company_key) REFERENCES companies (key)
+                status TEXT,
+                request_date TEXT
             )
         """)
 
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS inventory (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                company_key TEXT NOT NULL,
-                item_name TEXT NOT NULL,
-                item_code TEXT,
-                category TEXT,
-                description TEXT,
-                qty REAL DEFAULT 0,
-                min_stock_level REAL DEFAULT 10,
-                unit TEXT DEFAULT 'pcs',
-                cost_price REAL DEFAULT 0,
-                price REAL DEFAULT 0,
-                tax_rate REAL DEFAULT 0,
-                warehouse_location TEXT,
-                is_active INTEGER DEFAULT 1,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (company_key) REFERENCES companies (key) ON DELETE CASCADE
+                id INTEGER PRIMARY KEY,
+                company_key TEXT,
+                item_name TEXT,
+                quantity INTEGER,
+                price REAL
             )
         """)
 
         cursor.execute("""
-            CREATE TABLE IF NOT EXISTS vouchers (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                company_key TEXT NOT NULL,
-                date TEXT NOT NULL,
-                v_type TEXT NOT NULL,
-                ledger TEXT NOT NULL,
-                debit REAL DEFAULT 0,
-                credit REAL DEFAULT 0,
-                balance_after REAL DEFAULT 0,
-                payment_method TEXT,
-                reference_no TEXT,
-                narration TEXT,
-                is_cleared INTEGER DEFAULT 1,
-                created_by TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (company_key) REFERENCES companies (key) ON DELETE CASCADE
+            CREATE TABLE IF NOT EXISTS accounts_payable (
+                id INTEGER PRIMARY KEY,
+                company_key TEXT,
+                vendor TEXT,
+                amount REAL,
+                due_date TEXT,
+                status TEXT
+            )
+        """)
+
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS chart_of_accounts (
+                id INTEGER PRIMARY KEY,
+                company_key TEXT,
+                account_code TEXT,
+                account_name TEXT,
+                account_type TEXT
             )
         """)
 
@@ -834,7 +925,7 @@ else:
 
                     if submitted:
                         if company_name and manual_key:
-                            new_expiry = datetime.now() + relativedelta(months=+duration_months)
+                            new_expiry = datetime.now() + relativedelta(months=+int(duration_months))
                             try:
                                 conn.execute(
                                     """INSERT INTO companies
@@ -1010,7 +1101,7 @@ else:
         
         menu = ["Dashboard", "Inventory", "Payroll", "Sales/Purchase", "Reports", "Banking", "Taxation", "Audit Trail"]
         choice = st.sidebar.selectbox("Navigation", menu)
-        render_gatekeeper_ai_guide(choice)
+        render_gatekeeper_ai_chat(choice)
         
         if choice == "Dashboard":
             show_dashboard("DEMO", "Demo Corporation Ltd", "Demo")
@@ -1068,7 +1159,7 @@ else:
             menu.insert(1, "Company Setup")
         
         choice = st.sidebar.selectbox("Go to Module:", menu, key="v3_main_nav_dropdown")
-        render_gatekeeper_ai_guide(choice)
+        render_gatekeeper_ai_chat(choice)
         
         # Dashboard Module (NEW)
         if choice == "🏠 Dashboard":
