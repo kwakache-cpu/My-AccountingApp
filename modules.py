@@ -5,6 +5,7 @@ import io
 import sqlite3
 from database import get_connection, log_audit_action
 from datetime import datetime, timedelta
+from dateutil.relativedelta import relativedelta
 import logging
 import requests
 

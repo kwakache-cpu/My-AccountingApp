@@ -57,6 +57,9 @@ def init_db():
         cursor.execute(
             "CREATE TABLE IF NOT EXISTS purchase_orders (id INTEGER PRIMARY KEY, item TEXT, quantity INTEGER, cost REAL, status TEXT)"
         )
+        cursor.execute(
+            "CREATE TABLE IF NOT EXISTS sales_invoices (id INTEGER PRIMARY KEY, company_key TEXT, invoice_no TEXT, customer_name TEXT, amount REAL, total_amount REAL, status TEXT, invoice_date TEXT, due_date TEXT)"
+        )
         cursor.execute("PRAGMA table_info(companies)")
         company_columns = {row[1] for row in cursor.fetchall()}
         if company_columns:
@@ -283,6 +286,66 @@ def get_financial_metrics(company_key=None):
 
     return metrics
 
+
+def load_demo_financial_data(company_key):
+    """Insert sample revenue and payable records for instant dashboard testing."""
+    conn = None
+    try:
+        conn = get_connection()
+        if not conn:
+            return False, "Database connection unavailable."
+
+        cursor = conn.cursor()
+        cursor.execute(
+            "CREATE TABLE IF NOT EXISTS sales_invoices (id INTEGER PRIMARY KEY, company_key TEXT, invoice_no TEXT, customer_name TEXT, amount REAL, total_amount REAL, status TEXT, invoice_date TEXT, due_date TEXT)"
+        )
+        cursor.execute(
+            "CREATE TABLE IF NOT EXISTS accounts_payable (id INTEGER PRIMARY KEY, vendor TEXT, amount REAL, status TEXT, due_date TEXT)"
+        )
+
+        today = datetime.now().date().isoformat()
+        sales_columns = {row[1] for row in cursor.execute("PRAGMA table_info(sales_invoices)").fetchall()}
+        payable_columns = {row[1] for row in cursor.execute("PRAGMA table_info(accounts_payable)").fetchall()}
+
+        sales_data = {
+            "company_key": company_key,
+            "invoice_no": f"DEMO-INV-{datetime.now().strftime('%H%M%S')}",
+            "customer_name": "Demo Client",
+            "amount": 5000.0,
+            "total_amount": 5000.0,
+            "status": "Paid",
+            "invoice_date": today,
+            "due_date": today,
+        }
+        sales_insert_cols = [col for col in sales_data if col in sales_columns]
+        cursor.execute(
+            f"INSERT INTO sales_invoices ({', '.join(sales_insert_cols)}) VALUES ({', '.join(['?'] * len(sales_insert_cols))})",
+            tuple(sales_data[col] for col in sales_insert_cols),
+        )
+
+        payable_data = {
+            "vendor": "Demo Supplier",
+            "amount": 2000.0,
+            "status": "Unpaid",
+            "due_date": today,
+        }
+        payable_insert_cols = [col for col in payable_data if col in payable_columns]
+        cursor.execute(
+            f"INSERT INTO accounts_payable ({', '.join(payable_insert_cols)}) VALUES ({', '.join(['?'] * len(payable_insert_cols))})",
+            tuple(payable_data[col] for col in payable_insert_cols),
+        )
+
+        conn.commit()
+        return True, "Demo financial data loaded successfully."
+    except sqlite3.Error as demo_error:
+        if conn:
+            conn.rollback()
+        logger.error(f"Demo data load failed: {demo_error}")
+        return False, f"Failed to load demo data: {demo_error}"
+    finally:
+        if conn:
+            conn.close()
+
 def ask_gatekeeper_ai(menu_selection, chat_history):
     """Call Groq for a real Gatekeeper AI answer."""
     messages = [{"role": "system", "content": GATEKEEPER_SYSTEM_PROMPT}]
@@ -299,9 +362,9 @@ def ask_gatekeeper_ai(menu_selection, chat_history):
                 "role": "system",
                 "content": (
                     "Current financial health snapshot: "
-                    f"Total Revenue = GHS {financial_metrics['total_revenue']:.2f}, "
-                    f"Outstanding Payables = GHS {financial_metrics['total_payables']:.2f}, "
-                    f"Net Financial Health = GHS {financial_metrics['net_position']:.2f}. "
+                    f"Total Revenue = GH₵ {financial_metrics['total_revenue']:.2f}, "
+                    f"Outstanding Payables = GH₵ {financial_metrics['total_payables']:.2f}, "
+                    f"Net Financial Health = GH₵ {financial_metrics['net_position']:.2f}. "
                     "If the user asks about financial health, answer using these figures."
                 ),
             }
@@ -718,14 +781,9 @@ def show_dashboard(company_key, company_name, role):
                 st.caption("Add your first invoice to see health metrics.")
 
         comparison_df = pd.DataFrame(
-            {
-                "Category": ["Income", "Expenses"],
-                "Amount": [
-                    financial_metrics["total_revenue"],
-                    financial_metrics["total_payables"],
-                ],
-            }
-        ).set_index("Category")
+            {"Amount": [financial_metrics["total_revenue"], financial_metrics["total_payables"]]},
+            index=["Income", "Expenses"],
+        )
         st.bar_chart(comparison_df)
         st.markdown("---")
 
@@ -747,10 +805,10 @@ def show_dashboard(company_key, company_name, role):
 
         if st.session_state.get('demo_mode', False):
             col1, col2, col3, col4 = st.columns(4)
-            col1.metric("Inventory Value", "GHS 25,000.00")
-            col2.metric("Month Sales", "GHS 15,000.00")
+            col1.metric("Inventory Value", "GH₵ 25,000.00")
+            col2.metric("Month Sales", "GH₵ 15,000.00")
             col3.metric("Employees", "5")
-            col4.metric("Asset Value", "GHS 50,000.00")
+            col4.metric("Asset Value", "GH₵ 50,000.00")
 
             st.markdown("---")
             col1, col2 = st.columns(2)
@@ -787,7 +845,7 @@ def show_dashboard(company_key, company_name, role):
                     "SELECT COALESCE(SUM(qty * cost_price), 0) FROM inventory WHERE company_key = ?",
                     (company_key,),
                 ).fetchone()[0]
-                col1.metric("Inventory Value", f"GHS {inv_val:.2f}")
+                col1.metric("Inventory Value", f"GH₵ {inv_val:.2f}")
 
                 current_month = datetime.now().strftime('%Y-%m')
                 month_sales = conn.execute(
@@ -796,7 +854,7 @@ def show_dashboard(company_key, company_name, role):
                        AND date LIKE ?""",
                     (company_key, f"{current_month}%"),
                 ).fetchone()[0]
-                col2.metric("Month Sales", f"GHS {month_sales:.2f}")
+                col2.metric("Month Sales", f"GH₵ {month_sales:.2f}")
 
                 emp_count = conn.execute(
                     "SELECT COUNT(DISTINCT emp_name) FROM payroll WHERE company_key = ?",
@@ -808,7 +866,7 @@ def show_dashboard(company_key, company_name, role):
                     "SELECT COALESCE(SUM(book_value), 0) FROM fixed_assets WHERE company_key = ?",
                     (company_key,),
                 ).fetchone()[0]
-                col4.metric("Asset Value", f"GHS {fa_val:.2f}")
+                col4.metric("Asset Value", f"GH₵ {fa_val:.2f}")
             except sqlite3.OperationalError as db_schema_error:
                 if "no such table" in str(db_schema_error).lower():
                     st.warning(
@@ -1348,6 +1406,16 @@ else:
         elif choice == "Fixed Asset Register": show_fixed_assets(u['key'], u['role'])
         elif choice == "Financial Intelligence": show_reports(u['key'])
         elif choice == "System Audit Trail": show_audit_trail(u['key'])
+
+    st.sidebar.markdown("---")
+    if st.sidebar.button("🚀 Load Demo Data", width='stretch', key="load_demo_financial_data_btn"):
+        demo_company_key = u.get('key', 'DEMO') if st.session_state.auth and st.session_state.user else "DEMO"
+        success, message = load_demo_financial_data(demo_company_key)
+        if success:
+            st.sidebar.success(message)
+            st.rerun()
+        else:
+            st.sidebar.error(message)
 
     st.sidebar.markdown("---")
     if st.sidebar.button("🔴 Secure Logout", width='stretch', key="v3_final_logout"):
