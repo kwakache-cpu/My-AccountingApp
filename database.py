@@ -26,7 +26,7 @@ def get_connection():
     """
     try:
         # check_same_thread=False is essential for Streamlit's architecture
-        conn = sqlite3.connect(DB_NAME, check_same_thread=False, timeout=20)
+        conn = sqlite3.connect('eka_enterprise_v3.db', check_same_thread=False)
         conn.row_factory = sqlite3.Row
         
         # Enable Foreign Key Constraints for referential integrity

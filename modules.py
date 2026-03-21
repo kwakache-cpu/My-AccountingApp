@@ -469,3 +469,111 @@ def show_vouchers_page(conn, demo_on):
         st.dataframe(df, width="stretch")
     else:
         st.caption("No vouchers yet.")
+# ==========================================
+# ONBOARDING & NEW COMPANY REGISTRATION
+# ==========================================
+def show_onboarding_payment():
+    """Handle the onboarding payment process for new companies."""
+    st.header("🏢 New Company Registration")
+    st.info("Complete the registration and onboarding payment to activate your EKA ERP instance.")
+
+    with st.form("onboarding_form"):
+        col1, col2 = st.columns(2)
+        with col1:
+            company_name = st.text_input("Company Name")
+            admin_email = st.text_input("Admin Email Address")
+        with col2:
+            sector = st.selectbox("Business Sector", ["Retail", "Manufacturing", "Services", "Construction", "Other"])
+            package = st.selectbox("ERP Package", ["Standard", "Professional", "Enterprise"])
+
+        amount_map = {"Standard": 500, "Professional": 1200, "Enterprise": 2500}
+        amount = amount_map[package]
+        
+        st.write(f"### Total Due: GH₵ {amount:,.2f}")
+        submit = st.form_submit_button("Proceed to Payment")
+
+        if submit:
+            if not company_name or not admin_email:
+                st.error("Please fill in all required fields.")
+            else:
+                try:
+                    reference = f"ONB-{datetime.now().strftime('%Y%m%d%H%M%S')}"
+                    url = initialize_paystack_payment(admin_email, amount, reference)
+                    if url:
+                        st.success("Payment initialized!")
+                        # Store pending registration in session
+                        st.session_state.pending_reg = {
+                            'company_name': company_name,
+                            'email': admin_email,
+                            'amount': amount,
+                            'reference': reference
+                        }
+                        st.link_button("Proceed to Paystack", url)
+                    else:
+                        st.error("Failed to initialize payment.")
+                except Exception as e:
+                    st.error(f"Onboarding payment error: {e}")
+                    logger.error(f"Onboarding payment error: {e}")
+
+     # ==========================================
+# INVENTORY MANAGEMENT
+# ==========================================
+def show_inventory():
+    st.header("📦 Inventory Management")
+    
+    tabs = st.tabs(["Stock Overview", "Stock In/Out", "Items Management"])
+    
+    with tabs[0]:
+        st.subheader("Current Stock Levels")
+        try:
+            conn = get_connection()
+            query = "SELECT item_code, item_name, category, quantity, unit_price, (quantity * unit_price) as total_value FROM inventory"
+            df = pd.read_sql_query(query, conn)
+            conn.close()
+            
+            if not df.empty:
+                st.dataframe(df, use_container_width=True)
+                
+                col1, col2, col3 = st.columns(3)
+                col1.metric("Total Items", len(df))
+                col2.metric("Total Value", f"GH₵ {df['total_value'].sum():,.2f}")
+                col3.metric("Low Stock Alerts", len(df[df['quantity'] < 10]))
+            else:
+                st.info("No items in inventory.")
+        except Exception as e:
+            st.error(f"Error loading inventory: {e}")
+
+            # ==========================================
+# VOUCHERS & TRANSACTIONS
+# ==========================================
+def show_vouchers():
+    st.header("📑 Vouchers")
+    
+    with st.expander("➕ Create New Voucher", expanded=True):
+        with st.form("voucher_form"):
+            col1, col2 = st.columns(2)
+            with col1:
+                v_type = st.selectbox("Voucher Type", ["Payment", "Receipt", "Journal"])
+                narration = st.text_area("Narration")
+            with col2:
+                amount = st.number_input("Amount (GH₵)", min_value=0.0, step=0.01)
+                ref_no = st.text_input("Reference Number")
+                v_date = st.date_input("Date", datetime.now())
+            
+            if st.form_submit_button("Post Voucher"):
+                if amount <= 0 or not narration:
+                    st.warning("Please provide a valid amount and narration.")
+                else:
+                    try:
+                        conn = get_connection()
+                        conn.execute('''
+                            INSERT INTO vouchers (voucher_type, narration, amount, reference_no, date, created_by)
+                            VALUES (?, ?, ?, ?, ?, ?)
+                        ''', (v_type, narration, amount, ref_no, v_date.isoformat(), st.session_state.user['username']))
+                        conn.commit()
+                        conn.close()
+                        st.success("Voucher posted successfully!")
+                        log_audit_action("Voucher Created", f"Posted {v_type} voucher: {ref_no}")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Error posting voucher: {e}")
