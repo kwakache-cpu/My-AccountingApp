@@ -652,7 +652,99 @@ def show_dashboard(company_key, company_name, role):
     except Exception as e:
         st.error(f"Dashboard Error: {e}")
 
+# Startup self-healing database patch
+def run_startup_db_patch():
+    """Repair older local databases automatically on app startup."""
+    conn = None
+    try:
+        conn = get_connection()
+        if not conn:
+            return
+
+        cursor = conn.cursor()
+
+        cursor.execute("PRAGMA table_info(companies)")
+        company_columns = {row[1] for row in cursor.fetchall()}
+        if company_columns and "status" not in company_columns:
+            cursor.execute("ALTER TABLE companies ADD COLUMN status TEXT DEFAULT 'Active'")
+            cursor.execute(
+                "UPDATE companies SET status = 'Active' WHERE status IS NULL OR TRIM(status) = ''"
+            )
+            logger.info("Startup DB patch applied: companies.status added.")
+
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS pending_approvals (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                company_key TEXT,
+                payment_reference TEXT UNIQUE,
+                amount REAL,
+                payment_method TEXT,
+                plan_requested TEXT,
+                status TEXT DEFAULT 'Pending',
+                admin_notes TEXT,
+                timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (company_key) REFERENCES companies (key)
+            )
+        """)
+
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS inventory (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                company_key TEXT NOT NULL,
+                item_name TEXT NOT NULL,
+                item_code TEXT,
+                category TEXT,
+                description TEXT,
+                qty REAL DEFAULT 0,
+                min_stock_level REAL DEFAULT 10,
+                unit TEXT DEFAULT 'pcs',
+                cost_price REAL DEFAULT 0,
+                price REAL DEFAULT 0,
+                tax_rate REAL DEFAULT 0,
+                warehouse_location TEXT,
+                is_active INTEGER DEFAULT 1,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (company_key) REFERENCES companies (key) ON DELETE CASCADE
+            )
+        """)
+
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS vouchers (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                company_key TEXT NOT NULL,
+                date TEXT NOT NULL,
+                v_type TEXT NOT NULL,
+                ledger TEXT NOT NULL,
+                debit REAL DEFAULT 0,
+                credit REAL DEFAULT 0,
+                balance_after REAL DEFAULT 0,
+                payment_method TEXT,
+                reference_no TEXT,
+                narration TEXT,
+                is_cleared INTEGER DEFAULT 1,
+                created_by TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (company_key) REFERENCES companies (key) ON DELETE CASCADE
+            )
+        """)
+
+        conn.commit()
+    except sqlite3.Error as patch_error:
+        logger.error(f"Startup DB patch failed: {patch_error}")
+        if conn:
+            conn.rollback()
+    finally:
+        if conn:
+            conn.close()
+
+
+def main():
+    run_startup_db_patch()
+
+
 # Main application flow
+main()
 if not st.session_state.auth or not check_session_timeout():
     login_ui()
 else:
