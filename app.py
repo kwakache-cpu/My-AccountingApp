@@ -21,6 +21,7 @@ SYSTEM_PROMPT = (
     "You are the Gatekeeper Accounting Expert. Explain accounting terms simply for Ghanaian "
     "businesses and use the current dashboard figures when asked about financial health."
 )
+USER_ROLES = ["Master Admin", "Client"]
 
 
 def get_connection():
@@ -187,10 +188,79 @@ def inject_css():
             border-top: 1px solid #e5e7eb;
             background: linear-gradient(180deg, rgba(255,255,255,0.96), #ffffff);
         }
+        .logout-wrap button {
+            background: #b91c1c !important;
+            color: white !important;
+            border: none !important;
+        }
         </style>
         """,
         unsafe_allow_html=True,
     )
+
+
+def ensure_session_state():
+    if 'logged_in' not in st.session_state:
+        st.session_state.logged_in = False
+    if 'current_user' not in st.session_state:
+        st.session_state.current_user = {"name": "", "role": "Client"}
+
+
+def render_login_gate():
+    st.markdown("## Gatekeeper Login")
+    st.caption("Sign in to access the finance command center.")
+
+    with st.form("gatekeeper_login_form"):
+        username = st.text_input("Username")
+        role = st.selectbox("Role", USER_ROLES)
+        submitted = st.form_submit_button("Login")
+
+        if submitted:
+            display_name = username.strip() or role
+            st.session_state.logged_in = True
+            st.session_state.current_user = {"name": display_name, "role": role}
+            st.rerun()
+
+
+def render_sidebar(current_page):
+    user = st.session_state.current_user
+    st.sidebar.title("Gatekeeper")
+    st.sidebar.markdown(
+        f"""
+        <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:14px;padding:14px;margin-bottom:12px;">
+            <div style="font-size:12px;color:#64748b;">Current User</div>
+            <div style="font-size:18px;font-weight:700;color:#0f172a;">{user['name']}</div>
+            <div style="font-size:13px;color:#334155;">Role: {user['role']}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    demo_on = st.sidebar.toggle("Enterprise Demo Mode")
+
+    if user["role"] == "Master Admin":
+        if st.sidebar.button("Reset Clean Database", width="stretch"):
+            reset_to_clean_state()
+            st.success("Database reset complete.")
+            st.rerun()
+
+    page = st.sidebar.radio(
+        "Module Navigation",
+        ["Dashboard", "Sales Invoices", "Accounts Payable", "Chart of Accounts", "Vouchers"],
+        index=["Dashboard", "Sales Invoices", "Accounts Payable", "Chart of Accounts", "Vouchers"].index(current_page)
+        if current_page in ["Dashboard", "Sales Invoices", "Accounts Payable", "Chart of Accounts", "Vouchers"]
+        else 0,
+    )
+
+    st.sidebar.markdown("---")
+    st.sidebar.markdown('<div class="logout-wrap">', unsafe_allow_html=True)
+    logout = st.sidebar.button("Secure Logout", width="stretch")
+    st.sidebar.markdown("</div>", unsafe_allow_html=True)
+    if logout:
+        st.session_state.clear()
+        st.rerun()
+
+    return demo_on, page
 
 
 def render_financial_dashboard(metrics, chart_df):
@@ -241,20 +311,13 @@ def render_sidebar_chat(menu_name, demo_on, metrics):
 def main():
     st.set_page_config(page_title="Gatekeeper Finance", layout="wide", initial_sidebar_state="expanded")
     inject_css()
+    ensure_session_state()
     init_db()
+    if not st.session_state.logged_in:
+        render_login_gate()
+        return
 
-    st.sidebar.title("Gatekeeper")
-    demo_on = st.sidebar.toggle("Enterprise Demo Mode")
-
-    if st.sidebar.button("Reset Clean Database", width="stretch"):
-        reset_to_clean_state()
-        st.success("Database reset complete.")
-        st.rerun()
-
-    page = st.sidebar.radio(
-        "Navigation",
-        ["Dashboard", "Sales Invoices", "Accounts Payable", "Chart of Accounts", "Vouchers"],
-    )
+    demo_on, page = render_sidebar("Dashboard")
 
     if demo_on:
         metrics, chart_df = get_demo_financial_metrics()

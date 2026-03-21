@@ -6,6 +6,7 @@ from io import BytesIO
 import pandas as pd
 import streamlit as st
 from dateutil.relativedelta import relativedelta
+from groq import Groq
 
 
 def get_excel_bin(df):
