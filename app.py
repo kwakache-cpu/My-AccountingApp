@@ -28,6 +28,65 @@ GATEKEEPER_SYSTEM_PROMPT = (
 client = Groq(api_key=st.secrets["GROQ_API_KEY"])
 
 # 1. Boot System
+def rebuild_database():
+    """Emergency rebuild for the core finance tables."""
+    conn = None
+    try:
+        conn = get_connection()
+        if not conn:
+            return False, "Database connection unavailable."
+
+        cursor = conn.cursor()
+        for table_name in ("sales_invoices", "accounts_payable", "chart_of_accounts", "vouchers"):
+            cursor.execute(f"DROP TABLE IF EXISTS {table_name}")
+
+        cursor.execute("""
+            CREATE TABLE sales_invoices (
+                id INTEGER PRIMARY KEY,
+                customer_name TEXT,
+                amount REAL,
+                status TEXT,
+                date TEXT
+            )
+        """)
+        cursor.execute("""
+            CREATE TABLE accounts_payable (
+                id INTEGER PRIMARY KEY,
+                supplier_name TEXT,
+                amount REAL,
+                status TEXT,
+                date TEXT
+            )
+        """)
+        cursor.execute("""
+            CREATE TABLE chart_of_accounts (
+                id INTEGER PRIMARY KEY,
+                account_name TEXT,
+                account_type TEXT,
+                balance REAL
+            )
+        """)
+        cursor.execute("""
+            CREATE TABLE vouchers (
+                id INTEGER PRIMARY KEY,
+                narration TEXT,
+                amount REAL,
+                ref_no TEXT,
+                date TEXT
+            )
+        """)
+        conn.commit()
+        return True, "Database rebuilt successfully."
+    except sqlite3.Error as rebuild_error:
+        if conn:
+            conn.rollback()
+        logger.error(f"Database rebuild failed: {rebuild_error}")
+        return False, f"Database rebuild failed: {rebuild_error}"
+    finally:
+        if conn:
+            conn.close()
+
+
 def init_db():
     """Force the requested tables in app.py before the app starts."""
     base_init_db()
@@ -49,16 +108,16 @@ def init_db():
             "CREATE TABLE IF NOT EXISTS inventory (id INTEGER PRIMARY KEY, company_key TEXT, item_name TEXT, quantity INTEGER, price REAL)"
         )
         cursor.execute(
-            "CREATE TABLE IF NOT EXISTS accounts_payable (id INTEGER PRIMARY KEY, vendor TEXT, amount REAL, status TEXT, due_date TEXT)"
+            "CREATE TABLE IF NOT EXISTS accounts_payable (id INTEGER PRIMARY KEY, supplier_name TEXT, amount REAL, status TEXT, date TEXT)"
         )
         cursor.execute(
-            "CREATE TABLE IF NOT EXISTS chart_of_accounts (id INTEGER PRIMARY KEY, account_code TEXT, account_name TEXT, account_type TEXT)"
+            "CREATE TABLE IF NOT EXISTS chart_of_accounts (id INTEGER PRIMARY KEY, account_name TEXT, account_type TEXT, balance REAL)"
         )
         cursor.execute(
             "CREATE TABLE IF NOT EXISTS purchase_orders (id INTEGER PRIMARY KEY, item TEXT, quantity INTEGER, cost REAL, status TEXT)"
         )
         cursor.execute(
-            "CREATE TABLE IF NOT EXISTS sales_invoices (id INTEGER PRIMARY KEY, company_key TEXT, invoice_no TEXT, customer_name TEXT, amount REAL, total_amount REAL, status TEXT, invoice_date TEXT, due_date TEXT)"
+            "CREATE TABLE IF NOT EXISTS sales_invoices (id INTEGER PRIMARY KEY, customer_name TEXT, amount REAL, status TEXT, date TEXT)"
         )
         cursor.execute("PRAGMA table_info(companies)")
         company_columns = {row[1] for row in cursor.fetchall()}
@@ -72,10 +131,10 @@ def init_db():
         chart_count = cursor.execute("SELECT COUNT(*) FROM chart_of_accounts").fetchone()[0]
         if chart_count == 0:
             cursor.executemany(
-                "INSERT INTO chart_of_accounts (account_code, account_name, account_type) VALUES (?, ?, ?)",
+                "INSERT INTO chart_of_accounts (account_name, account_type, balance) VALUES (?, ?, ?)",
                 [
-                    ("2000", "Accounts Payable", "Liability"),
-                    ("4000", "Sales Revenue", "Income"),
+                    ("Accounts Payable", "Liability", 0),
+                    ("Sales Revenue", "Income", 0),
                 ],
             )
         conn.commit()
@@ -225,54 +284,18 @@ def get_financial_metrics(company_key=None):
         if not conn:
             return metrics
 
-        if company_key and company_key != "DEMO":
-            sales_table_count = int(
-                conn.execute("SELECT COUNT(*) FROM sales_invoices WHERE company_key = ?", (company_key,)).fetchone()[0] or 0
-            )
-            payables_table_count = int(
-                conn.execute("SELECT COUNT(*) FROM accounts_payable WHERE company_key = ?", (company_key,)).fetchone()[0] or 0
-            )
-        else:
-            sales_table_count = int(conn.execute("SELECT COUNT(*) FROM sales_invoices").fetchone()[0] or 0)
-            payables_table_count = int(conn.execute("SELECT COUNT(*) FROM accounts_payable").fetchone()[0] or 0)
+        sales_table_count = int(conn.execute("SELECT COUNT(*) FROM sales_invoices").fetchone()[0] or 0)
+        payables_table_count = int(conn.execute("SELECT COUNT(*) FROM accounts_payable").fetchone()[0] or 0)
 
         revenue_sum = None
         payables_sum = None
 
-        if company_key and company_key != "DEMO":
-            try:
-                revenue_sum = conn.execute(
-                    "SELECT SUM(amount) FROM sales_invoices WHERE status = 'Paid' AND company_key = ?",
-                    (company_key,),
-                ).fetchone()[0]
-            except sqlite3.OperationalError:
-                revenue_sum = conn.execute(
-                    "SELECT SUM(total_amount) FROM sales_invoices WHERE status = 'Paid' AND company_key = ?",
-                    (company_key,),
-                ).fetchone()[0]
-
-            try:
-                payables_sum = conn.execute(
-                    "SELECT SUM(amount) FROM accounts_payable WHERE status = 'Unpaid' AND company_key = ?",
-                    (company_key,),
-                ).fetchone()[0]
-            except sqlite3.OperationalError:
-                payables_sum = conn.execute(
-                    "SELECT SUM(amount) FROM accounts_payable WHERE status = 'Unpaid'",
-                ).fetchone()[0]
-        else:
-            try:
-                revenue_sum = conn.execute(
-                    "SELECT SUM(amount) FROM sales_invoices WHERE status = 'Paid'"
-                ).fetchone()[0]
-            except sqlite3.OperationalError:
-                revenue_sum = conn.execute(
-                    "SELECT SUM(total_amount) FROM sales_invoices WHERE status = 'Paid'"
-                ).fetchone()[0]
-
-            payables_sum = conn.execute(
-                "SELECT SUM(amount) FROM accounts_payable WHERE status = 'Unpaid'"
-            ).fetchone()[0]
+        revenue_sum = conn.execute(
+            "SELECT SUM(amount) FROM sales_invoices WHERE status = 'Paid'"
+        ).fetchone()[0]
+        payables_sum = conn.execute(
+            "SELECT SUM(amount) FROM accounts_payable WHERE status = 'Unpaid'"
+        ).fetchone()[0]
 
         metrics["total_revenue"] = float(revenue_sum or 0)
         metrics["total_payables"] = float(payables_sum or 0)
@@ -291,49 +314,32 @@ def load_demo_financial_data(company_key):
     """Insert sample revenue and payable records for instant dashboard testing."""
     conn = None
     try:
+        rebuild_ok, rebuild_message = rebuild_database()
+        if not rebuild_ok:
+            return False, rebuild_message
+
         conn = get_connection()
         if not conn:
             return False, "Database connection unavailable."
 
         cursor = conn.cursor()
-        cursor.execute(
-            "CREATE TABLE IF NOT EXISTS sales_invoices (id INTEGER PRIMARY KEY, company_key TEXT, invoice_no TEXT, customer_name TEXT, amount REAL, total_amount REAL, status TEXT, invoice_date TEXT, due_date TEXT)"
-        )
-        cursor.execute(
-            "CREATE TABLE IF NOT EXISTS accounts_payable (id INTEGER PRIMARY KEY, vendor TEXT, amount REAL, status TEXT, due_date TEXT)"
-        )
-
         today = datetime.now().date().isoformat()
-        sales_columns = {row[1] for row in cursor.execute("PRAGMA table_info(sales_invoices)").fetchall()}
-        payable_columns = {row[1] for row in cursor.execute("PRAGMA table_info(accounts_payable)").fetchall()}
 
-        sales_data = {
-            "company_key": company_key,
-            "invoice_no": f"DEMO-INV-{datetime.now().strftime('%H%M%S')}",
-            "customer_name": "Demo Client",
-            "amount": 5000.0,
-            "total_amount": 5000.0,
-            "status": "Paid",
-            "invoice_date": today,
-            "due_date": today,
-        }
-        sales_insert_cols = [col for col in sales_data if col in sales_columns]
         cursor.execute(
-            f"INSERT INTO sales_invoices ({', '.join(sales_insert_cols)}) VALUES ({', '.join(['?'] * len(sales_insert_cols))})",
-            tuple(sales_data[col] for col in sales_insert_cols),
+            "INSERT INTO sales_invoices (customer_name, amount, status, date) VALUES (?, ?, ?, ?)",
+            ("Demo Client", 5000.0, "Paid", today),
         )
         conn.commit()
 
-        payable_data = {
-            "vendor": "Demo Supplier",
-            "amount": 2000.0,
-            "status": "Unpaid",
-            "due_date": today,
-        }
-        payable_insert_cols = [col for col in payable_data if col in payable_columns]
         cursor.execute(
-            f"INSERT INTO accounts_payable ({', '.join(payable_insert_cols)}) VALUES ({', '.join(['?'] * len(payable_insert_cols))})",
-            tuple(payable_data[col] for col in payable_insert_cols),
+            "INSERT INTO accounts_payable (supplier_name, amount, status, date) VALUES (?, ?, ?, ?)",
+            ("Demo Supplier", 2000.0, "Unpaid", today),
+        )
+        conn.commit()
+
+        cursor.execute(
+            "INSERT INTO vouchers (narration, amount, ref_no, date) VALUES (?, ?, ?, ?)",
+            ("Demo revenue entry", 5000.0, "DEMO-REF-001", today),
         )
         conn.commit()
         return True, "Demo financial data loaded successfully."
@@ -854,10 +860,10 @@ def show_dashboard(company_key, company_name, role):
 
                 current_month = datetime.now().strftime('%Y-%m')
                 month_sales = conn.execute(
-                    """SELECT COALESCE(SUM(credit), 0) FROM vouchers
-                       WHERE company_key = ? AND v_type = 'Sales'
+                    """SELECT COALESCE(SUM(amount), 0) FROM sales_invoices
+                       WHERE status = 'Paid'
                        AND date LIKE ?""",
-                    (company_key, f"{current_month}%"),
+                    (f"{current_month}%",),
                 ).fetchone()[0]
                 col2.metric("Month Sales", f"GH₵ {month_sales:.2f}")
 
@@ -895,11 +901,9 @@ def show_dashboard(company_key, company_name, role):
                 with col1:
                     st.subheader("Recent Transactions")
                     recent_data = conn.execute(
-                        """SELECT date, v_type, narration,
-                           CASE WHEN credit > 0 THEN credit ELSE debit END AS amount
-                           FROM vouchers WHERE company_key = ?
+                        """SELECT date, 'Voucher' AS entry_type, narration, amount
+                           FROM vouchers
                            ORDER BY date DESC LIMIT 10""",
-                        (company_key,),
                     ).fetchall()
 
                     if recent_data:
@@ -1014,19 +1018,39 @@ def run_startup_db_patch():
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS accounts_payable (
                 id INTEGER PRIMARY KEY,
-                vendor TEXT,
+                supplier_name TEXT,
                 amount REAL,
                 status TEXT,
-                due_date TEXT
+                date TEXT
+            )
+        """)
+
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS sales_invoices (
+                id INTEGER PRIMARY KEY,
+                customer_name TEXT,
+                amount REAL,
+                status TEXT,
+                date TEXT
             )
         """)
 
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS chart_of_accounts (
                 id INTEGER PRIMARY KEY,
-                account_code TEXT,
                 account_name TEXT,
-                account_type TEXT
+                account_type TEXT,
+                balance REAL
+            )
+        """)
+
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS vouchers (
+                id INTEGER PRIMARY KEY,
+                narration TEXT,
+                amount REAL,
+                ref_no TEXT,
+                date TEXT
             )
         """)
 
@@ -1043,10 +1067,10 @@ def run_startup_db_patch():
         chart_count = cursor.execute("SELECT COUNT(*) FROM chart_of_accounts").fetchone()[0]
         if chart_count == 0:
             cursor.executemany(
-                "INSERT INTO chart_of_accounts (account_code, account_name, account_type) VALUES (?, ?, ?)",
+                "INSERT INTO chart_of_accounts (account_name, account_type, balance) VALUES (?, ?, ?)",
                 [
-                    ("2000", "Accounts Payable", "Liability"),
-                    ("4000", "Sales Revenue", "Income"),
+                    ("Accounts Payable", "Liability", 0),
+                    ("Sales Revenue", "Income", 0),
                 ],
             )
 

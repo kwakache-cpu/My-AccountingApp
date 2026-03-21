@@ -817,24 +817,22 @@ def show_vouchers(k, role):
     
     with st.expander("📝 Post New Transaction"):
         with st.form("mod_v_form"):
-            v_ledger = st.text_input("Account/Ledger Name", key="mod_v_ledger")
-            v_type = st.selectbox("Transaction Type", ["Sales", "Purchase", "Expense", "Income"], key="mod_v_type")
-            v_dr = st.number_input("Debit Amount (GHS)", min_value=0.0, key="mod_v_dr")
-            v_cr = st.number_input("Credit Amount (GHS)", min_value=0.0, key="mod_v_cr")
-            v_meth = st.selectbox("Payment Method", ["Cash", "Bank Transfer", "Mobile Money"], key="mod_v_meth")
             v_narr = st.text_area("Narration / Purpose", key="mod_v_narr")
+            v_amount = st.number_input("Amount (GH₵)", min_value=0.0, key="mod_v_amount")
             v_ref = st.text_input("Reference Number", key="mod_v_ref")
             
             # ADDED: Submit button to fix missing submit button error
             if st.form_submit_button("Post Transaction to GL"):
-                if validate_input(v_ledger, "Ledger Name") and (v_dr > 0 or v_cr > 0):
+                if validate_input(v_narr, "Narration") and v_amount > 0:
                     try:
                         conn = get_connection()
-                        conn.execute("""INSERT INTO vouchers (company_key, date, v_type, ledger, debit, credit, payment_method, narration, ref_no) 
-                                     VALUES (?,?,?,?,?,?,?,?,?)""", 
-                                     (k, str(datetime.now().date()), v_type, v_ledger, v_dr, v_cr, v_meth, v_narr, v_ref))
+                        conn.execute(
+                            """INSERT INTO vouchers (narration, amount, ref_no, date)
+                               VALUES (?, ?, ?, ?)""",
+                            (v_narr, v_amount, v_ref, str(datetime.now().date())),
+                        )
                         conn.commit()
-                        log_audit_action(conn, k, role, f"Posted voucher: {v_ledger}", "Vouchers")
+                        log_audit_action(conn, k, role, f"Posted voucher: {v_ref or v_narr}", "Vouchers")
                         st.success("Posted successfully to General Ledger.")
                         conn.close()
                     except sqlite3.Error as e:
@@ -845,11 +843,13 @@ def show_vouchers(k, role):
     try:
         conn = get_connection()
         # FIXED: Use direct SQL to avoid pandas import issues
-        v_data = conn.execute("""SELECT date, v_type, ledger, debit, credit, payment_method, narration 
-                           FROM vouchers WHERE company_key=? ORDER BY date DESC LIMIT 50""", (k,)).fetchall()
+        v_data = conn.execute(
+            """SELECT date, narration, amount, ref_no
+               FROM vouchers ORDER BY date DESC LIMIT 50"""
+        ).fetchall()
         
         if v_data:
-            v_df = pd.DataFrame(v_data, columns=['Date', 'Type', 'Ledger', 'Debit', 'Credit', 'Payment Method', 'Narration'])
+            v_df = pd.DataFrame(v_data, columns=['Date', 'Narration', 'Amount', 'Reference'])
             st.dataframe(v_df, width='stretch')
             st.download_button("📥 Download Voucher Data", data=get_excel_bin(v_df), file_name="EKA_Vouchers.xlsx")
         else:
@@ -864,17 +864,20 @@ def show_chart_of_accounts(k, r):
     
     with st.expander("➕ Add New Account"):
         with st.form("coa_form"):
-            acct_code = st.text_input("Account Code", key="coa_code")
             acct_name = st.text_input("Account Name", key="coa_name")
             acct_type = st.selectbox("Account Type", ["Asset", "Liability", "Equity", "Revenue", "Expense"], key="coa_type")
+            opening_balance = st.number_input("Opening Balance", value=0.0, key="coa_balance")
             
             # ADDED: Submit button
             if st.form_submit_button("Add Account"):
-                if validate_input(acct_code, "Account Code") and validate_input(acct_name, "Account Name"):
+                if validate_input(acct_name, "Account Name"):
                     try:
                         conn = get_connection()
-                        conn.execute("""INSERT INTO chart_of_accounts (company_key, account_code, account_name, account_type) 
-                                     VALUES (?,?,?,?)""", (k, acct_code, acct_name, acct_type))
+                        conn.execute(
+                            """INSERT INTO chart_of_accounts (account_name, account_type, balance)
+                               VALUES (?, ?, ?)""",
+                            (acct_name, acct_type, opening_balance),
+                        )
                         conn.commit()
                         log_audit_action(conn, k, r, f"Added account: {acct_name}", "Chart of Accounts")
                         st.success("Account added successfully.")
@@ -886,10 +889,12 @@ def show_chart_of_accounts(k, r):
     st.subheader("Account Register")
     try:
         conn = get_connection()
-        coa_data = conn.execute("SELECT account_code, account_name, account_type, balance FROM chart_of_accounts WHERE company_key=? ORDER BY account_code", (k,)).fetchall()
+        coa_data = conn.execute(
+            "SELECT account_name, account_type, balance FROM chart_of_accounts ORDER BY account_name"
+        ).fetchall()
         
         if coa_data:
-            coa_df = pd.DataFrame(coa_data, columns=['Account Code', 'Account Name', 'Account Type', 'Balance'])
+            coa_df = pd.DataFrame(coa_data, columns=['Account Name', 'Account Type', 'Balance'])
             st.dataframe(coa_df, width='stretch')
         else:
             st.info("No accounts found in chart of accounts.")
@@ -909,9 +914,7 @@ def show_sales_purchase(k, r, mode):
     if mode == "Sales":
         with st.expander("🛒 Create Sales Invoice"):
             with st.form("sales_form"):
-                inv_no = st.text_input("Invoice Number", key="sales_inv_no")
                 customer = st.text_input("Customer Name", key="sales_customer")
-                due_days = st.number_input("Payment Terms (Days)", value=30, key="sales_due")
                 
                 # Dynamic line items
                 col1, col2, col3 = st.columns(3)
@@ -942,16 +945,17 @@ def show_sales_purchase(k, r, mode):
                 
                 # ADDED: Submit button
                 if st.form_submit_button("Create Invoice"):
-                    if validate_input(inv_no, "Invoice Number") and validate_input(customer, "Customer Name") and st.session_state[session_key]:
+                    if validate_input(customer, "Customer Name") and st.session_state[session_key]:
                         try:
                             conn = get_connection()
-                            due_date = datetime.now() + pd.Timedelta(days=due_days)
-                            conn.execute("""INSERT INTO sales_invoices (company_key, invoice_no, customer_name, invoice_date, due_date, total_amount) 
-                                         VALUES (?,?,?,?,?,?)""", 
-                                         (k, inv_no, customer, str(datetime.now().date()), str(due_date.date()), total_amount))
+                            conn.execute(
+                                """INSERT INTO sales_invoices (customer_name, amount, status, date)
+                                   VALUES (?, ?, ?, ?)""",
+                                (customer, total_amount, "Paid", str(datetime.now().date())),
+                            )
                             conn.commit()
-                            log_audit_action(conn, k, r, f"Created sales invoice: {inv_no}", "Sales")
-                            st.success(f"Sales Invoice {inv_no} created successfully.")
+                            log_audit_action(conn, k, r, f"Created sales invoice for {customer}", "Sales")
+                            st.success(f"Sales invoice created successfully for {customer}.")
                             st.session_state[session_key] = []
                             conn.close()
                         except sqlite3.Error as e:
@@ -1057,18 +1061,18 @@ def show_aging(k, mode):
         # Calculate aging from sales invoices
         try:
             conn = get_connection()
-            aging_data = conn.execute("""SELECT customer_name, invoice_no, due_date, total_amount,
+            aging_data = conn.execute("""SELECT customer_name, date, amount,
                                      CASE 
-                                       WHEN julianday('now') - julianday(due_date) <= 0 THEN 'Current'
-                                       WHEN julianday('now') - julianday(due_date) <= 30 THEN '1-30 Days'
-                                       WHEN julianday('now') - julianday(due_date) <= 60 THEN '31-60 Days'
-                                       WHEN julianday('now') - julianday(due_date) <= 90 THEN '61-90 Days'
+                                       WHEN julianday('now') - julianday(date) <= 0 THEN 'Current'
+                                       WHEN julianday('now') - julianday(date) <= 30 THEN '1-30 Days'
+                                       WHEN julianday('now') - julianday(date) <= 60 THEN '31-60 Days'
+                                       WHEN julianday('now') - julianday(date) <= 90 THEN '61-90 Days'
                                        ELSE '90+ Days'
                                      END as aging_bucket
-                                     FROM sales_invoices WHERE company_key=? AND status='Pending'""", (k,)).fetchall()
+                                     FROM sales_invoices WHERE status='Pending'""").fetchall()
             
             if aging_data:
-                aging_df = pd.DataFrame(aging_data, columns=['Customer', 'Invoice No', 'Due Date', 'Amount', 'Aging Bucket'])
+                aging_df = pd.DataFrame(aging_data, columns=['Customer', 'Date', 'Amount', 'Aging Bucket'])
                 st.dataframe(aging_df, width='stretch')
             else:
                 st.info("No receivables found.")
@@ -1081,17 +1085,17 @@ def show_aging(k, mode):
         # Similar logic for payables from purchase orders
         try:
             conn = get_connection()
-            aging_data = conn.execute("""SELECT supplier_name, po_no, order_date, total_amount,
+            aging_data = conn.execute("""SELECT supplier_name, date, amount,
                                      CASE 
-                                       WHEN julianday('now') - julianday(order_date) <= 30 THEN 'Current'
-                                       WHEN julianday('now') - julianday(order_date) <= 60 THEN '31-60 Days'
-                                       WHEN julianday('now') - julianday(order_date) <= 90 THEN '61-90 Days'
+                                       WHEN julianday('now') - julianday(date) <= 30 THEN 'Current'
+                                       WHEN julianday('now') - julianday(date) <= 60 THEN '31-60 Days'
+                                       WHEN julianday('now') - julianday(date) <= 90 THEN '61-90 Days'
                                        ELSE '90+ Days'
                                      END as aging_bucket
-                                     FROM purchase_orders WHERE company_key=? AND status='Pending'""", (k,)).fetchall()
+                                     FROM accounts_payable WHERE status='Unpaid'""").fetchall()
             
             if aging_data:
-                aging_df = pd.DataFrame(aging_data, columns=['Supplier', 'PO No', 'Order Date', 'Amount', 'Aging Bucket'])
+                aging_df = pd.DataFrame(aging_data, columns=['Supplier', 'Date', 'Amount', 'Aging Bucket'])
                 st.dataframe(aging_df, width='stretch')
             else:
                 st.info("No payables found.")
