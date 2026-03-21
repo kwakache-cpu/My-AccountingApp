@@ -10,6 +10,7 @@ import random
 import string
 from dateutil.relativedelta import relativedelta
 import smtplib
+import sqlite3
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 
@@ -527,34 +528,44 @@ def show_dashboard(company_key, company_name, role):
         try:
             conn = get_connection()
 
-            col1, col2, col3, col4 = st.columns(4)
+            try:
+                col1, col2, col3, col4 = st.columns(4)
 
-            inv_val = conn.execute(
-                "SELECT COALESCE(SUM(qty * cost_price), 0) FROM inventory WHERE company_key = ?",
-                (company_key,),
-            ).fetchone()[0]
-            col1.metric("Inventory Value", f"GHS {inv_val:.2f}")
+                inv_val = conn.execute(
+                    "SELECT COALESCE(SUM(qty * cost_price), 0) FROM inventory WHERE company_key = ?",
+                    (company_key,),
+                ).fetchone()[0]
+                col1.metric("Inventory Value", f"GHS {inv_val:.2f}")
 
-            current_month = datetime.now().strftime('%Y-%m')
-            month_sales = conn.execute(
-                """SELECT COALESCE(SUM(credit), 0) FROM vouchers
-                   WHERE company_key = ? AND v_type = 'Sales'
-                   AND date LIKE ?""",
-                (company_key, f"{current_month}%"),
-            ).fetchone()[0]
-            col2.metric("Month Sales", f"GHS {month_sales:.2f}")
+                current_month = datetime.now().strftime('%Y-%m')
+                month_sales = conn.execute(
+                    """SELECT COALESCE(SUM(credit), 0) FROM vouchers
+                       WHERE company_key = ? AND v_type = 'Sales'
+                       AND date LIKE ?""",
+                    (company_key, f"{current_month}%"),
+                ).fetchone()[0]
+                col2.metric("Month Sales", f"GHS {month_sales:.2f}")
 
-            emp_count = conn.execute(
-                "SELECT COUNT(DISTINCT emp_name) FROM payroll WHERE company_key = ?",
-                (company_key,),
-            ).fetchone()[0] or 0
-            col3.metric("Employees", str(emp_count))
+                emp_count = conn.execute(
+                    "SELECT COUNT(DISTINCT emp_name) FROM payroll WHERE company_key = ?",
+                    (company_key,),
+                ).fetchone()[0] or 0
+                col3.metric("Employees", str(emp_count))
 
-            fa_val = conn.execute(
-                "SELECT COALESCE(SUM(book_value), 0) FROM fixed_assets WHERE company_key = ?",
-                (company_key,),
-            ).fetchone()[0]
-            col4.metric("Asset Value", f"GHS {fa_val:.2f}")
+                fa_val = conn.execute(
+                    "SELECT COALESCE(SUM(book_value), 0) FROM fixed_assets WHERE company_key = ?",
+                    (company_key,),
+                ).fetchone()[0]
+                col4.metric("Asset Value", f"GHS {fa_val:.2f}")
+            except sqlite3.OperationalError as db_schema_error:
+                if "no such table" in str(db_schema_error).lower():
+                    st.warning(
+                        "Your dashboard data tables are not fully available yet. "
+                        "Please run `python fix_db.py` to complete the Safety Sync, then reload the app."
+                    )
+                    logger.warning(f"Dashboard schema issue: {db_schema_error}")
+                    return
+                raise
 
             if inv_val == 0 and month_sales == 0 and emp_count == 0 and fa_val == 0:
                 st.info(
@@ -565,42 +576,51 @@ def show_dashboard(company_key, company_name, role):
             st.markdown("---")
             col1, col2 = st.columns(2)
 
-            with col1:
-                st.subheader("Recent Transactions")
-                recent_data = conn.execute(
-                    """SELECT date, v_type, narration,
-                       CASE WHEN credit > 0 THEN credit ELSE debit END AS amount
-                       FROM vouchers WHERE company_key = ?
-                       ORDER BY date DESC LIMIT 10""",
-                    (company_key,),
-                ).fetchall()
+            try:
+                with col1:
+                    st.subheader("Recent Transactions")
+                    recent_data = conn.execute(
+                        """SELECT date, v_type, narration,
+                           CASE WHEN credit > 0 THEN credit ELSE debit END AS amount
+                           FROM vouchers WHERE company_key = ?
+                           ORDER BY date DESC LIMIT 10""",
+                        (company_key,),
+                    ).fetchall()
 
-                if recent_data:
-                    recent_txns = pd.DataFrame(
-                        recent_data,
-                        columns=['Date', 'Type', 'Description', 'Amount'],
+                    if recent_data:
+                        recent_txns = pd.DataFrame(
+                            recent_data,
+                            columns=['Date', 'Type', 'Description', 'Amount'],
+                        )
+                        st.dataframe(recent_txns, width='stretch')
+                    else:
+                        st.info("No recent transactions found.")
+
+                with col2:
+                    st.subheader("Low Stock Items")
+                    low_stock_data = conn.execute(
+                        """SELECT item_name, qty, unit FROM inventory
+                           WHERE company_key = ? AND qty <= 10
+                           ORDER BY qty ASC LIMIT 10""",
+                        (company_key,),
+                    ).fetchall()
+
+                    if low_stock_data:
+                        low_stock = pd.DataFrame(
+                            low_stock_data,
+                            columns=['Item', 'Quantity', 'Unit'],
+                        )
+                        st.dataframe(low_stock, width='stretch')
+                    else:
+                        st.success("All stock levels are adequate!")
+            except sqlite3.OperationalError as activity_error:
+                if "no such table" in str(activity_error).lower():
+                    st.info(
+                        "Some activity tables are still being prepared. Run `python fix_db.py` to complete the Safety Sync."
                     )
-                    st.dataframe(recent_txns, width='stretch')
+                    logger.warning(f"Dashboard activity schema issue: {activity_error}")
                 else:
-                    st.info("No recent transactions found.")
-
-            with col2:
-                st.subheader("Low Stock Items")
-                low_stock_data = conn.execute(
-                    """SELECT item_name, qty, unit FROM inventory
-                       WHERE company_key = ? AND qty <= 10
-                       ORDER BY qty ASC LIMIT 10""",
-                    (company_key,),
-                ).fetchall()
-
-                if low_stock_data:
-                    low_stock = pd.DataFrame(
-                        low_stock_data,
-                        columns=['Item', 'Quantity', 'Unit'],
-                    )
-                    st.dataframe(low_stock, width='stretch')
-                else:
-                    st.success("All stock levels are adequate!")
+                    raise
 
             st.subheader("Quick Actions")
             col1, col2, col3, col4 = st.columns(4)

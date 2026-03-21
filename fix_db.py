@@ -1,4 +1,3 @@
-import os
 import sqlite3
 from pathlib import Path
 
@@ -9,10 +8,6 @@ DB_PATH = Path(__file__).resolve().parent / "database.db"
 def main():
     db_path_str = str(DB_PATH)
     print(f"Opening database at: {db_path_str}")
-
-    if os.path.exists(db_path_str):
-        os.remove(db_path_str)
-        print("Existing database deleted.")
 
     conn = sqlite3.connect(db_path_str)
     cursor = conn.cursor()
@@ -197,6 +192,20 @@ def main():
         )
         """
     )
+    existing_pending_cols = {
+        row[1] for row in cursor.execute("PRAGMA table_info(pending_approvals)").fetchall()
+    }
+    for column_sql in [
+        ("company_key", "ALTER TABLE pending_approvals ADD COLUMN company_key TEXT"),
+        ("amount", "ALTER TABLE pending_approvals ADD COLUMN amount REAL"),
+        ("status", "ALTER TABLE pending_approvals ADD COLUMN status TEXT DEFAULT 'Pending'"),
+        (
+            "timestamp",
+            "ALTER TABLE pending_approvals ADD COLUMN timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
+        ),
+    ]:
+        if column_sql[0] not in existing_pending_cols:
+            cursor.execute(column_sql[1])
 
     cursor.execute(
         """
