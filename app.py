@@ -322,6 +322,7 @@ def load_demo_financial_data(company_key):
             f"INSERT INTO sales_invoices ({', '.join(sales_insert_cols)}) VALUES ({', '.join(['?'] * len(sales_insert_cols))})",
             tuple(sales_data[col] for col in sales_insert_cols),
         )
+        conn.commit()
 
         payable_data = {
             "vendor": "Demo Supplier",
@@ -334,7 +335,6 @@ def load_demo_financial_data(company_key):
             f"INSERT INTO accounts_payable ({', '.join(payable_insert_cols)}) VALUES ({', '.join(['?'] * len(payable_insert_cols))})",
             tuple(payable_data[col] for col in payable_insert_cols),
         )
-
         conn.commit()
         return True, "Demo financial data loaded successfully."
     except sqlite3.Error as demo_error:
@@ -781,7 +781,12 @@ def show_dashboard(company_key, company_name, role):
                 st.caption("Add your first invoice to see health metrics.")
 
         comparison_df = pd.DataFrame(
-            {"Amount": [financial_metrics["total_revenue"], financial_metrics["total_payables"]]},
+            {
+                "Amount": [
+                    financial_metrics["total_revenue"],
+                    financial_metrics["total_payables"],
+                ]
+            },
             index=["Income", "Expenses"],
         )
         st.bar_chart(comparison_df)
@@ -1412,7 +1417,7 @@ else:
         demo_company_key = u.get('key', 'DEMO') if st.session_state.auth and st.session_state.user else "DEMO"
         success, message = load_demo_financial_data(demo_company_key)
         if success:
-            st.sidebar.success(message)
+            st.success("Demo Data Loaded! Refreshing...")
             st.rerun()
         else:
             st.sidebar.error(message)
