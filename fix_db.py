@@ -39,6 +39,21 @@ def main():
         """
     )
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_companies_name ON companies(name)")
+    existing_company_cols = {
+        row[1] for row in cursor.execute("PRAGMA table_info(companies)").fetchall()
+    }
+    for column_sql in [
+        ("status", "ALTER TABLE companies ADD COLUMN status TEXT DEFAULT 'Active'"),
+        (
+            "deployment_status",
+            "ALTER TABLE companies ADD COLUMN deployment_status TEXT DEFAULT 'Pending'",
+        ),
+        ("subscription_expiry", "ALTER TABLE companies ADD COLUMN subscription_expiry TEXT"),
+        ("plan_type", "ALTER TABLE companies ADD COLUMN plan_type TEXT DEFAULT 'Basic'"),
+    ]:
+        if column_sql[0] not in existing_company_cols:
+            cursor.execute(column_sql[1])
+    cursor.execute("UPDATE companies SET status = 'Active' WHERE status IS NULL OR TRIM(status) = ''")
 
     print("Checking Table inventory...")
     cursor.execute(

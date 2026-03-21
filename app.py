@@ -785,7 +785,9 @@ else:
             try:
                 conn = get_connection()
                 query = """
-                    SELECT c.key, c.name, c.created_at, c.status, c.deployment_status, c.subscription_expiry,
+                    SELECT c.key, c.name, c.created_at,
+                    COALESCE(NULLIF(c.status, ''), 'Active') as status,
+                    c.deployment_status, c.subscription_expiry,
                     (SELECT COUNT(*) FROM inventory WHERE company_key = c.key) as item_count
                     FROM companies c ORDER BY c.name
                 """
@@ -821,7 +823,9 @@ else:
                 conn = get_connection()
                 companies_df = pd.read_sql(
                     """
-                    SELECT key, name, subscription_expiry, status, deployment_status, contact_email
+                    SELECT key, name, subscription_expiry,
+                           COALESCE(NULLIF(status, ''), 'Active') as status,
+                           deployment_status, contact_email
                     FROM companies
                     ORDER BY name
                     """,
