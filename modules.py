@@ -4,11 +4,31 @@ from datetime import datetime
 from io import BytesIO
 
 import pandas as pd
+import requests
 import streamlit as st
 from dateutil.relativedelta import relativedelta
 from groq import Groq
 
+# Setup Logger
+logger = logging.getLogger(__name__)
 
+def initialize_paystack_payment(email, amount, reference):
+    """Initialize a payment with Paystack."""
+    # This function uses 'requests', which will make your dimmed line brighten!
+    url = "https://api.paystack.co/transaction/initialize"
+    headers = {
+        "Authorization": f"Bearer {st.secrets['paystack_secret_key']}",
+        "Content-Type": "application/json"
+    }
+    data = {"email": email, "amount": int(amount * 100), "reference": reference}
+    try:
+        response = requests.post(url, headers=headers, json=data)
+        response_data = response.json()
+        if response_data.get('status'):
+            return response_data['data']['authorization_url']
+    except Exception as e:
+        logger.error(f"Paystack error: {e}")
+    return None
 DB_NAME = "eka_vault.db"
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), DB_NAME)
 
@@ -577,3 +597,25 @@ def show_vouchers():
                         st.rerun()
                     except Exception as e:
                         st.error(f"Error posting voucher: {e}")
+
+def initialize_paystack_payment(email, amount, reference):
+    """Initialize a payment with Paystack."""
+    url = "https://api.paystack.co/transaction/initialize"
+    headers = {
+        "Authorization": f"Bearer {st.secrets['paystack_secret_key']}",
+        "Content-Type": "application/json"
+    }
+    data = {
+        "email": email,
+        "amount": int(amount * 100),  # Paystack uses pesewas/kobo
+        "reference": reference
+    }
+    try:
+        # This line below is what "brightens" the import requests line!
+        response = requests.post(url, headers=headers, json=data)
+        response_data = response.json()
+        if response_data['status']:
+            return response_data['data']['authorization_url']
+    except Exception as e:
+        st.error(f"Paystack connection error: {e}")
+    return None                     
