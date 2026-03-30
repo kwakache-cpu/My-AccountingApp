@@ -126,6 +126,35 @@ if 'auth' not in st.session_state:
     st.session_state.company_id = None
     st.session_state.login_attempts = 0
     st.session_state.last_activity = datetime.now()
+if 'page' not in st.session_state:
+    st.session_state.page = None
+
+PAGE_LABELS = {
+    "pos": "🛒 Point of Sale",
+    "inventory": "📦 Inventory Management",
+    "payroll": "💳 Payroll & Salaries",
+    "reports": "📊 Data Analytics",
+    "settings": "⚙️ System Configuration",
+}
+
+PAGE_ALIASES = {
+    "POS (Point of Sale)": PAGE_LABELS["pos"],
+    "🛒 Point of Sale": PAGE_LABELS["pos"],
+    "Inventory & Stock": PAGE_LABELS["inventory"],
+    "📦 Inventory Management": PAGE_LABELS["inventory"],
+    "Payroll": PAGE_LABELS["payroll"],
+    "Ghana Payroll (SSNIT)": PAGE_LABELS["payroll"],
+    "💳 Payroll & Salaries": PAGE_LABELS["payroll"],
+    "Reports": PAGE_LABELS["reports"],
+    "Financial Intelligence": PAGE_LABELS["reports"],
+    "📊 Data Analytics": PAGE_LABELS["reports"],
+    "Company Setup": PAGE_LABELS["settings"],
+    "⚙️ System Configuration": PAGE_LABELS["settings"],
+}
+
+
+def normalize_page_label(page_name):
+    return PAGE_ALIASES.get(page_name, page_name)
 
 # Session timeout (30 minutes)
 SESSION_TIMEOUT = 30  # minutes
@@ -852,23 +881,23 @@ def show_dashboard(company_key, company_name, role):
             col1, col2, col3, col4 = st.columns(4)
 
             with col1:
-                if st.button("New Sale", width='stretch'):
-                    st.session_state.selected_module = "POS (Point of Sale)"
+                if st.button("🛒 New Sale", width='stretch'):
+                    st.session_state.page = PAGE_LABELS["pos"]
                     st.rerun()
 
             with col2:
-                if st.button("Add Inventory", width='stretch'):
-                    st.session_state.selected_module = "Inventory & Stock"
+                if st.button("📦 Add Inventory", width='stretch'):
+                    st.session_state.page = PAGE_LABELS["inventory"]
                     st.rerun()
 
             with col3:
-                if st.button("Process Payroll", width='stretch'):
-                    st.session_state.selected_module = "Ghana Payroll (SSNIT)"
+                if st.button("💳 Process Payroll", width='stretch'):
+                    st.session_state.page = PAGE_LABELS["payroll"]
                     st.rerun()
 
             with col4:
-                if st.button("View Reports", width='stretch'):
-                    st.session_state.selected_module = "Financial Intelligence"
+                if st.button("📊 View Reports", width='stretch'):
+                    st.session_state.page = PAGE_LABELS["reports"]
                     st.rerun()
 
         finally:
@@ -1367,7 +1396,10 @@ else:
         """, unsafe_allow_html=True)
         
         menu = ["Dashboard", "📦 Inventory Management", "💳 Payroll & Salaries", "Sales/Purchase", "📊 Data Analytics", "Banking", "Taxation", "🤖 Gatekeeper Admin", "Audit Trail"]
-        choice = st.sidebar.selectbox("Navigation", menu)
+        current_page = normalize_page_label(st.session_state.get("page")) or "Dashboard"
+        selected_index = menu.index(current_page) if current_page in menu else 0
+        choice = st.sidebar.selectbox("Navigation", menu, index=selected_index)
+        st.session_state.page = choice
         render_gatekeeper_ai_chat(choice)
         
         if choice == "Dashboard":
@@ -1427,7 +1459,10 @@ else:
         if u['role'] == "Master Admin":
             menu.insert(1, "⚙️ System Configuration")
         
-        choice = st.sidebar.selectbox("Go to Module:", menu, key="v3_main_nav_dropdown")
+        current_page = normalize_page_label(st.session_state.get("page")) or "🏠 Dashboard"
+        selected_index = menu.index(current_page) if current_page in menu else 0
+        choice = st.sidebar.selectbox("Go to Module:", menu, index=selected_index, key="v3_main_nav_dropdown")
+        st.session_state.page = choice
         render_gatekeeper_ai_chat(choice)
         
         # Dashboard Module (NEW)
