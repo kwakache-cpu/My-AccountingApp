@@ -403,6 +403,44 @@ def _build_receipt(company_name, items, total_amount, sale_date):
     return "\n".join(lines)
 
 
+def _calculate_payroll_values(basic_salary, allowances, deductions=0.0):
+    ssnit_t1_rate = 0.055
+    ssnit_t2_rate = 0.05
+    bands = [
+        (319, 0.0),
+        (110, 0.05),
+        (130, 0.10),
+        (3000, 0.175),
+        (16441, 0.25),
+        (float("inf"), 0.30),
+    ]
+
+    taxable = max(float(basic_salary) + float(allowances) - float(deductions), 0.0)
+    ssnit_t1 = float(basic_salary) * ssnit_t1_rate
+    ssnit_t2 = float(basic_salary) * ssnit_t2_rate
+    chargeable = max(taxable - ssnit_t1, 0.0)
+
+    monthly_taxable = chargeable / 12 if chargeable > 0 else 0.0
+    paye = 0.0
+    remaining = monthly_taxable
+    for band, rate in bands:
+        if remaining <= 0:
+            break
+        chunk = min(remaining, band)
+        paye += chunk * rate
+        remaining -= chunk
+    paye *= 12
+    net_salary = float(basic_salary) + float(allowances) - float(deductions) - ssnit_t1 - paye
+
+    return {
+        "ssnit_t1": ssnit_t1,
+        "ssnit_t2": ssnit_t2,
+        "taxable_income": taxable,
+        "paye": paye,
+        "net_salary": net_salary,
+    }
+
+
 def _import_inventory_from_excel(conn, company_key, file_obj):
     imported_df = pd.read_excel(file_obj)
     if imported_df.empty:
@@ -414,36 +452,63 @@ def _import_inventory_from_excel(conn, company_key, file_obj):
     if missing:
         raise ValueError(f"Missing required columns: {', '.join(missing)}")
 
-    added_rows = 0
+    changed_rows = 0
     for _, row in imported_df.iterrows():
+        row_id = row[column_map["id"]] if "id" in column_map and not pd.isna(row[column_map["id"]]) else None
         item_name = str(row[column_map["item_name"]]).strip()
         if not item_name:
             continue
         category = str(row[column_map["category"]]).strip()
+        opening_column = column_map.get("opening_stock") or column_map.get("opening_balance")
         qty = float(row[column_map["quantity"]] or 0)
+        opening_balance = float(row[opening_column] or qty) if opening_column else qty
         price_column = column_map.get("selling_price") or column_map.get("unit_price") or column_map.get("price")
         cost_column = column_map.get("cost_price")
         price = float(row[price_column] or 0) if price_column else 0.0
         cost_price = float(row[cost_column] or 0) if cost_column else 0.0
+        if row_id is not None:
+            existing = conn.execute(
+                "SELECT id FROM inventory WHERE company_key = ? AND id = ?",
+                (company_key, int(row_id)),
+            ).fetchone()
+            if existing:
+                conn.execute(
+                    """
+                    UPDATE inventory
+                    SET item_name = ?, category = ?, opening_balance = ?, qty = ?, price = ?, cost_price = ?
+                    WHERE company_key = ? AND id = ?
+                    """,
+                    (item_name, category, opening_balance, qty, price, cost_price, company_key, int(row_id)),
+                )
+                changed_rows += 1
+                continue
         existing = conn.execute(
             """
-            SELECT 1 FROM inventory
+            SELECT id FROM inventory
             WHERE company_key = ? AND item_name = ? AND COALESCE(category, '') = ?
-              AND COALESCE(price, 0) = ? AND COALESCE(cost_price, 0) = ?
             """,
-            (company_key, item_name, category, price, cost_price),
+            (company_key, item_name, category),
         ).fetchone()
         if existing:
+            conn.execute(
+                """
+                UPDATE inventory
+                SET opening_balance = ?, qty = ?, price = ?, cost_price = ?
+                WHERE company_key = ? AND id = ?
+                """,
+                (opening_balance, qty, price, cost_price, company_key, existing["id"]),
+            )
+            changed_rows += 1
             continue
         conn.execute(
             """
-            INSERT INTO inventory (company_key, item_name, category, qty, price, cost_price)
-            VALUES (?, ?, ?, ?, ?, ?)
+            INSERT INTO inventory (company_key, item_name, category, opening_balance, qty, price, cost_price)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
-            (company_key, item_name, category, qty, price, cost_price),
+            (company_key, item_name, category, opening_balance, qty, price, cost_price),
         )
-        added_rows += 1
-    return added_rows
+        changed_rows += 1
+    return changed_rows
 
 
 def _import_sales_from_excel(conn, company_key, doc_type, file_obj, created_by):
@@ -457,23 +522,49 @@ def _import_sales_from_excel(conn, company_key, doc_type, file_obj, created_by):
     if missing:
         raise ValueError(f"Missing required columns: {', '.join(missing)}")
 
-    added_rows = 0
+    changed_rows = 0
     ledger = "Sales Revenue" if doc_type == "Sales" else "Accounts Payable"
     for _, row in imported_df.iterrows():
+        row_id = row[column_map["id"]] if "id" in column_map and not pd.isna(row[column_map["id"]]) else None
         tx_date = pd.to_datetime(row[column_map["date"]], errors="coerce")
         narration = str(row[column_map["description"]]).strip()
         amount = float(row[column_map["amount"]] or 0)
         if pd.isna(tx_date) or not narration or amount <= 0:
             continue
         tx_date_str = tx_date.date().isoformat()
+        if row_id is not None:
+            existing = conn.execute(
+                "SELECT id FROM vouchers WHERE company_key = ? AND id = ?",
+                (company_key, int(row_id)),
+            ).fetchone()
+            if existing:
+                conn.execute(
+                    """
+                    UPDATE vouchers
+                    SET date = ?, v_type = ?, ledger = ?, credit = ?, narration = ?, created_by = ?
+                    WHERE company_key = ? AND id = ?
+                    """,
+                    (tx_date_str, doc_type, ledger, amount, narration, created_by, company_key, int(row_id)),
+                )
+                changed_rows += 1
+                continue
         existing = conn.execute(
             """
-            SELECT 1 FROM vouchers
-            WHERE company_key = ? AND v_type = ? AND date = ? AND narration = ? AND COALESCE(credit, 0) = ?
+            SELECT id FROM vouchers
+            WHERE company_key = ? AND v_type = ? AND date = ? AND narration = ?
             """,
-            (company_key, doc_type, tx_date_str, narration, amount),
+            (company_key, doc_type, tx_date_str, narration),
         ).fetchone()
         if existing:
+            conn.execute(
+                """
+                UPDATE vouchers
+                SET credit = ?, created_by = ?
+                WHERE company_key = ? AND id = ?
+                """,
+                (amount, created_by, company_key, existing["id"]),
+            )
+            changed_rows += 1
             continue
         conn.execute(
             """
@@ -482,8 +573,8 @@ def _import_sales_from_excel(conn, company_key, doc_type, file_obj, created_by):
             """,
             (company_key, tx_date_str, doc_type, ledger, amount, narration, created_by),
         )
-        added_rows += 1
-    return added_rows
+        changed_rows += 1
+    return changed_rows
 
 
 def get_financial_metrics():
@@ -915,8 +1006,8 @@ def show_inventory(company_key, role):
                 })
             else:
                 query = """
-                    SELECT item_code, item_name, category, qty as quantity,
-                           price as unit_price, (qty * price) as total_value
+                    SELECT id, item_code, item_name, category, qty as quantity,
+                           price as unit_price, cost_price, (qty * price) as total_value
                     FROM inventory WHERE company_key = ?
                 """
                 df = pd.read_sql_query(query, conn, params=(company_key,))
@@ -937,6 +1028,43 @@ def show_inventory(company_key, role):
                 col1.metric("Total Items", len(df))
                 col2.metric("Total Value", f"GH₵ {df['total_value'].sum():,.2f}")
                 col3.metric("Low Stock Alerts", len(df[df['quantity'] < 10]))
+                if role in ("Master Admin", "Bookkeeper", "Sub-Admin") and "id" in df.columns:
+                    st.markdown("Edit Stock Item")
+                    selected_edit_key = f"inventory_edit_selected_{company_key}"
+                    for _, stock_row in df.iterrows():
+                        name_col, button_col = st.columns([4, 1])
+                        name_col.caption(
+                            f"{stock_row['item_name']} | Qty {float(stock_row['quantity']):,.2f} | "
+                            f"Sell GH₵ {float(stock_row['unit_price']):,.2f}"
+                        )
+                        if button_col.button("Edit", key=f"inventory_edit_btn_{company_key}_{int(stock_row['id'])}"):
+                            st.session_state[selected_edit_key] = int(stock_row["id"])
+                    edit_item_id = st.session_state.get(selected_edit_key, int(df["id"].iloc[0]))
+                    edit_row = df.loc[df["id"] == edit_item_id].iloc[0]
+                    with st.form(f"inventory_edit_form_{company_key}_{edit_item_id}"):
+                        edit_category = st.text_input("Category", value=str(edit_row["category"] or ""))
+                        edit_qty = st.number_input("Quantity", min_value=0.0, value=float(edit_row["quantity"] or 0.0))
+                        edit_price = st.number_input("Selling Price (GH₵)", min_value=0.0, value=float(edit_row["unit_price"] or 0.0))
+                        edit_cost_price = st.number_input("Cost Price (GH₵)", min_value=0.0, value=float(edit_row["cost_price"] or 0.0))
+                        if st.form_submit_button("Edit Item"):
+                            try:
+                                conn = get_connection()
+                                conn.execute(
+                                    """
+                                    UPDATE inventory
+                                    SET category = ?, qty = ?, price = ?, cost_price = ?
+                                    WHERE id = ? AND company_key = ?
+                                    """,
+                                    (edit_category, edit_qty, edit_price, edit_cost_price, int(edit_item_id), company_key),
+                                )
+                                conn.commit()
+                                log_audit_action(conn, company_key, role, "Inventory Item Updated", "Inventory", f"Updated item ID {int(edit_item_id)}")
+                                conn.close()
+                                st.session_state.pop(selected_edit_key, None)
+                                st.success("Entry Updated")
+                                st.rerun()
+                            except Exception as exc:
+                                st.error(f"Inventory update failed: {exc}")
             else:
                 st.info("No items in inventory.")
         except Exception as e:
@@ -954,7 +1082,7 @@ def show_inventory(company_key, role):
         with st.form("add_inventory_form", clear_on_submit=True):
             item_name = st.text_input("Item Name")
             category = st.text_input("Category")
-            qty = st.number_input("Quantity", min_value=0.0, value=0.0)
+            opening_stock = st.number_input("Opening Stock", min_value=0.0, value=0.0)
             price = st.number_input("Selling Price (GH₵)", min_value=0.0, value=0.0)
             cost_price = st.number_input("Cost Price (GH₵)", min_value=0.0, value=0.0)
             submitted = st.form_submit_button("Add Item")
@@ -962,8 +1090,11 @@ def show_inventory(company_key, role):
                 try:
                     conn = get_connection()
                     conn.execute(
-                        "INSERT INTO inventory (company_key, item_name, category, qty, price, cost_price) VALUES (?, ?, ?, ?, ?, ?)",
-                        (company_key, item_name, category, qty, price, cost_price),
+                        """
+                        INSERT INTO inventory (company_key, item_name, category, opening_balance, qty, price, cost_price)
+                        VALUES (?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (company_key, item_name, category, opening_stock, opening_stock, price, cost_price),
                     )
                     conn.commit()
                     conn.close()
@@ -1037,13 +1168,45 @@ def show_vouchers(company_key, role):
             df = pd.DataFrame(rows)
         else:
             data = conn.execute(
-                "SELECT date, v_type, narration, credit, reference_no FROM vouchers WHERE company_key = ? ORDER BY date DESC LIMIT 100",
+                "SELECT id, date, v_type, narration, credit, reference_no FROM vouchers WHERE company_key = ? ORDER BY date DESC LIMIT 100",
                 (company_key,),
             ).fetchall()
-            df = pd.DataFrame(data, columns=["Date", "Type", "Narration", "Amount", "Ref"]) if data else pd.DataFrame()
+            df = pd.DataFrame(data, columns=["ID", "Date", "Type", "Narration", "Amount", "Ref"]) if data else pd.DataFrame()
         conn.close()
         if not df.empty:
             st.dataframe(df, use_container_width=True)
+            if role in ("Master Admin", "Bookkeeper", "Sub-Admin") and "ID" in df.columns:
+                expense_rows = df[df["Type"] == "Expense"]
+                if not expense_rows.empty:
+                    selected_expense_key = f"expense_edit_selected_{company_key}"
+                    for _, expense_list_row in expense_rows.iterrows():
+                        name_col, button_col = st.columns([4, 1])
+                        name_col.caption(
+                            f"{expense_list_row['Narration']} | GH₵ {float(expense_list_row['Amount']):,.2f}"
+                        )
+                        if button_col.button("Edit", key=f"expense_edit_btn_{company_key}_{int(expense_list_row['ID'])}"):
+                            st.session_state[selected_expense_key] = int(expense_list_row["ID"])
+                    expense_edit_id = st.session_state.get(selected_expense_key, int(expense_rows["ID"].iloc[0]))
+                    expense_row = expense_rows.loc[expense_rows["ID"] == expense_edit_id].iloc[0]
+                    with st.form(f"expense_edit_form_{company_key}_{expense_edit_id}", clear_on_submit=True):
+                        edit_narration = st.text_area("Narration", value=str(expense_row["Narration"] or ""))
+                        edit_amount = st.number_input("Amount (GH₵)", min_value=0.0, value=float(expense_row["Amount"] or 0.0))
+                        if st.form_submit_button("Update Expense"):
+                            conn = get_connection()
+                            conn.execute(
+                                """
+                                UPDATE vouchers
+                                SET narration = ?, credit = ?
+                                WHERE id = ? AND company_key = ?
+                                """,
+                                (edit_narration, edit_amount, int(expense_edit_id), company_key),
+                            )
+                            conn.commit()
+                            log_audit_action(conn, company_key, role, "Expense Updated", "Expenses", f"Voucher {int(expense_edit_id)} updated")
+                            conn.close()
+                            st.session_state.pop(selected_expense_key, None)
+                            st.success("Entry Updated")
+                            st.rerun()
         else:
             st.info("No vouchers found.")
     except Exception as e:
@@ -1112,6 +1275,46 @@ def show_company_setup(company_key, company_name, role):
                 st.text_input("Subscription Expiry", value=str(expiry_value), disabled=True)
                 st.text_input("Status", value=company_data.get("status", "Active"), disabled=True)
                 st.text_input("Contact Email", value=str(company_data.get("contact_email") or company_data.get("admin_email") or ""), disabled=True)
+
+            if role in ("Master Admin", "Sub-Admin"):
+                edit_settings_key = f"company_settings_edit_{company_key}"
+                settings_col, button_col = st.columns([4, 1])
+                settings_col.caption(
+                    f"{company_data.get('name')} | {company_data.get('contact_email') or company_data.get('admin_email') or 'No email'}"
+                )
+                if button_col.button("Edit", key=f"company_settings_edit_btn_{company_key}"):
+                    st.session_state[edit_settings_key] = True
+                if st.session_state.get(edit_settings_key):
+                    with st.form(f"company_settings_form_{company_key}", clear_on_submit=True):
+                        updated_contact_email = st.text_input(
+                            "Edit Contact Email",
+                            value=str(company_data.get("contact_email") or company_data.get("admin_email") or ""),
+                        )
+                        updated_plan_type = st.text_input(
+                            "Edit Plan Type",
+                            value=str(company_data.get("plan_type") or "Basic"),
+                        )
+                        if st.form_submit_button("Update Client Settings"):
+                            conn.execute(
+                                """
+                                UPDATE companies
+                                SET contact_email = ?, plan_type = ?, updated_at = CURRENT_TIMESTAMP
+                                WHERE key = ?
+                                """,
+                                (updated_contact_email, updated_plan_type, company_key),
+                            )
+                            conn.commit()
+                            log_audit_action(
+                                conn,
+                                company_key,
+                                role,
+                                "Client Settings Updated",
+                                "Company Setup",
+                                f"contact_email={updated_contact_email}, plan_type={updated_plan_type}",
+                            )
+                            st.session_state.pop(edit_settings_key, None)
+                            st.success("Entry Updated")
+                            st.rerun()
 
             if role == "Master Admin":
                 st.markdown("---")
@@ -1188,6 +1391,7 @@ def show_company_setup(company_key, company_name, role):
 def show_pos(company_key, company_name, role):
     st.header("🛒 Point of Sale")
     receipt_key = f"pos_receipt_{company_key}"
+    draft_key = f"pos_draft_{company_key}"
     if role == "Demo":
         _demo_notice()
         st.info("Demo POS: Select items and process a mock sale.")
@@ -1237,19 +1441,31 @@ def show_pos(company_key, company_name, role):
         total = sum(item["qty"] * item["price"] for item in line_items)
 
         def process_pos_sale(print_receipt=False):
-            if not selected_item or total <= 0:
+            sale_payload = st.session_state.get(
+                draft_key,
+                {
+                    "selected_item": selected_item,
+                    "qty": qty_to_sell,
+                    "total": total,
+                    "line_items": line_items,
+                    "inventory_item_id": inventory_item_id,
+                    "available_qty": available_qty,
+                    "payment_method": payment_method,
+                },
+            )
+            if not sale_payload["selected_item"] or float(sale_payload["total"]) <= 0:
                 st.warning("Enter a valid item and price before processing the sale.")
                 return
-            if inventory_item_id is not None and qty_to_sell > available_qty:
+            if sale_payload["inventory_item_id"] is not None and float(sale_payload["qty"]) > float(sale_payload["available_qty"]):
                 st.error("Insufficient stock.")
                 return
 
             try:
                 conn = get_connection()
-                if inventory_item_id is not None:
+                if sale_payload["inventory_item_id"] is not None:
                     conn.execute(
                         "UPDATE inventory SET qty = qty - ? WHERE id = ? AND company_key = ?",
-                        (qty_to_sell, inventory_item_id, company_key),
+                        (sale_payload["qty"], sale_payload["inventory_item_id"], company_key),
                     )
                 conn.execute(
                     """INSERT INTO vouchers (company_key, date, v_type, ledger, credit, payment_method, narration, created_by)
@@ -1257,31 +1473,104 @@ def show_pos(company_key, company_name, role):
                     (
                         company_key,
                         datetime.now().date().isoformat(),
-                        total,
-                        payment_method,
-                        f"POS Sale: {selected_item} x{qty_to_sell}",
+                        sale_payload["total"],
+                        sale_payload["payment_method"],
+                        f"POS Sale: {sale_payload['selected_item']} x{sale_payload['qty']}",
                         role,
                     ),
                 )
                 conn.commit()
-                log_audit_action(conn, company_key, role, "POS Sale", "POS", f"Sold {selected_item} x{qty_to_sell} for GH₵{total:.2f}")
+                log_audit_action(
+                    conn,
+                    company_key,
+                    role,
+                    "POS Sale",
+                    "POS",
+                    f"Sold {sale_payload['selected_item']} x{sale_payload['qty']} for GH₵{float(sale_payload['total']):.2f}",
+                )
                 conn.close()
-                st.success(f"Sale processed! Total: GH₵ {total:,.2f}")
+                st.success(f"Sale processed! Total: GH₵ {float(sale_payload['total']):,.2f}")
                 if print_receipt:
                     st.session_state[receipt_key] = _build_receipt(
                         company_label,
-                        line_items,
-                        total,
+                        sale_payload["line_items"],
+                        sale_payload["total"],
                         datetime.now().strftime("%Y-%m-%d %H:%M"),
                     )
+                st.session_state.pop(draft_key, None)
+                for state_key in (
+                    f"pos_item_mode_{company_key}",
+                    f"pos_item_{company_key}",
+                    f"pos_qty_{company_key}",
+                    f"manual_pos_item_{company_key}",
+                    f"manual_pos_price_{company_key}",
+                    f"manual_pos_qty_{company_key}",
+                ):
+                    st.session_state.pop(state_key, None)
             except Exception as e:
                 st.error(f"Error processing sale: {e}")
 
-        btn_col1, btn_col2 = st.columns(2)
-        if btn_col1.button("Process Sale", key=f"process_sale_{company_key}"):
-            process_pos_sale(print_receipt=False)
-        if btn_col2.button("Save and Print", key=f"save_print_sale_{company_key}"):
-            process_pos_sale(print_receipt=True)
+        if st.button("Review Transaction", key=f"review_sale_{company_key}"):
+            st.session_state[draft_key] = {
+                "selected_item": selected_item,
+                "qty": qty_to_sell,
+                "total": total,
+                "line_items": line_items,
+                "inventory_item_id": inventory_item_id,
+                "available_qty": available_qty,
+                "payment_method": payment_method,
+            }
+
+        draft_sale = st.session_state.get(draft_key)
+        if draft_sale:
+            st.subheader("Pending Transaction Review")
+            with st.form(f"pos_review_form_{company_key}"):
+                review_item = st.text_input("Item", value=str(draft_sale["selected_item"]))
+                review_qty = st.number_input("Quantity", min_value=1, value=int(draft_sale["qty"]))
+                review_price = st.number_input(
+                    "Unit Price (GH₵)",
+                    min_value=0.0,
+                    value=float(draft_sale["line_items"][0]["price"]),
+                )
+                review_payment_method = st.selectbox(
+                    "Payment Method",
+                    ["Cash", "Mobile Money", "Bank Transfer", "Cheque"],
+                    index=["Cash", "Mobile Money", "Bank Transfer", "Cheque"].index(draft_sale["payment_method"]),
+                )
+                review_total = float(review_qty) * float(review_price)
+                st.caption(f"Review Total: GH₵ {review_total:,.2f}")
+                save_review = st.form_submit_button("Update Draft")
+                if save_review:
+                    draft_sale.update(
+                        {
+                            "selected_item": review_item,
+                            "qty": review_qty,
+                            "payment_method": review_payment_method,
+                            "total": review_total,
+                            "line_items": [{"name": review_item, "qty": review_qty, "price": review_price}],
+                        }
+                    )
+                    st.session_state[draft_key] = draft_sale
+                    st.success("Draft transaction updated.")
+
+            action_col1, action_col2, action_col3 = st.columns(3)
+            if action_col1.button("Void Transaction", key=f"void_sale_{company_key}"):
+                st.session_state.pop(draft_key, None)
+                for state_key in (
+                    f"pos_item_mode_{company_key}",
+                    f"pos_item_{company_key}",
+                    f"pos_qty_{company_key}",
+                    f"manual_pos_item_{company_key}",
+                    f"manual_pos_price_{company_key}",
+                    f"manual_pos_qty_{company_key}",
+                ):
+                    st.session_state.pop(state_key, None)
+                st.warning("Pending transaction voided.")
+                st.rerun()
+            if action_col2.button("Process Sale", key=f"process_sale_{company_key}"):
+                process_pos_sale(print_receipt=False)
+            if action_col3.button("Save and Print", key=f"save_print_sale_{company_key}"):
+                process_pos_sale(print_receipt=True)
 
         if st.session_state.get(receipt_key):
             st.subheader("Receipt Preview")
@@ -1494,27 +1783,6 @@ def show_taxation(company_key):
 # ==========================================
 def show_payroll(company_key, role):
     st.header("👷 Ghana Payroll (SSNIT)")
-    SSNIT_T1_RATE = 0.055
-    SSNIT_T2_RATE = 0.05
-
-    def calc_paye(taxable):
-        """Calculate Ghana PAYE tax based on GRA bands."""
-        bands = [
-            (319, 0.0),
-            (110, 0.05),
-            (130, 0.10),
-            (3000, 0.175),
-            (16441, 0.25),
-            (float('inf'), 0.30),
-        ]
-        tax = 0.0
-        for band, rate in bands:
-            if taxable <= 0:
-                break
-            chunk = min(taxable, band)
-            tax += chunk * rate
-            taxable -= chunk
-        return tax
 
     if role == "Demo":
         _demo_notice()
@@ -1536,6 +1804,7 @@ def show_payroll(company_key, role):
                 emp_name = st.text_input("Employee Name")
                 basic_salary = st.number_input("Basic Salary (GH₵)", min_value=0.0, step=0.01)
                 allowances = st.number_input("Allowances (GH₵)", min_value=0.0, step=0.01)
+                deductions = st.number_input("Deductions (GH₵)", min_value=0.0, step=0.01)
             with col2:
                 month = st.selectbox("Month", ["January","February","March","April","May","June",
                                                "July","August","September","October","November","December"])
@@ -1545,46 +1814,108 @@ def show_payroll(company_key, role):
 
             submitted = st.form_submit_button("Calculate & Save")
             if submitted and emp_name and basic_salary > 0:
-                ssnit_t1 = basic_salary * SSNIT_T1_RATE
-                ssnit_t2 = basic_salary * SSNIT_T2_RATE
-                taxable_income = basic_salary + allowances - ssnit_t1
-                paye = calc_paye(taxable_income / 12) * 12 if taxable_income > 0 else 0.0
-                net_salary = basic_salary + allowances - ssnit_t1 - paye
+                payroll_values = _calculate_payroll_values(basic_salary, allowances, deductions)
                 try:
                     conn = get_connection()
                     conn.execute(
                         """INSERT INTO payroll
                            (company_key, emp_name, basic_salary, allowances, ssnit_t1, ssnit_t2,
-                            taxable_income, paye, net_salary, month, year, payment_status)
-                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                        (company_key, emp_name, basic_salary, allowances, ssnit_t1, ssnit_t2,
-                         taxable_income, paye, net_salary, month, year, payment_status),
+                            taxable_income, paye, net_salary, deductions, month, year, payment_status)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        (
+                            company_key,
+                            emp_name,
+                            basic_salary,
+                            allowances,
+                            payroll_values["ssnit_t1"],
+                            payroll_values["ssnit_t2"],
+                            payroll_values["taxable_income"],
+                            payroll_values["paye"],
+                            payroll_values["net_salary"],
+                            deductions,
+                            month,
+                            year,
+                            payment_status,
+                        ),
                     )
                     conn.commit()
                     log_audit_action(conn, company_key, role, "Payroll Entry Added", "Payroll", f"{emp_name} - {month} {year}")
                     conn.close()
-                    st.success(f"Payroll saved. Net Salary: GH₵ {net_salary:,.2f}")
+                    st.success(f"Payroll saved. Net Salary: GH₵ {payroll_values['net_salary']:,.2f}")
                     st.rerun()
                 except Exception as e:
                     st.error(f"Error saving payroll: {e}")
 
     st.subheader("Payroll Register")
+    conn = None
     try:
         conn = get_connection()
         data = conn.execute(
-            """SELECT emp_name, basic_salary, allowances, ssnit_t1, paye, net_salary, month, year, payment_status
+            """SELECT id, emp_name, basic_salary, allowances, deductions, ssnit_t1, paye, net_salary, month, year, payment_status
                FROM payroll WHERE company_key = ? ORDER BY year DESC, month DESC""",
             (company_key,),
         ).fetchall()
-        conn.close()
         if data:
-            df = pd.DataFrame(data, columns=["Employee", "Basic Salary", "Allowances",
+            df = pd.DataFrame(data, columns=["ID", "Employee", "Basic Salary", "Allowances", "Deductions",
                                               "SSNIT T1", "PAYE", "Net Salary", "Month", "Year", "Status"])
             st.dataframe(df, use_container_width=True)
+            if role == "Master Admin":
+                selected_payroll_key = f"payroll_edit_selected_{company_key}"
+                for _, payroll_list_row in df.iterrows():
+                    name_col, button_col = st.columns([4, 1])
+                    name_col.caption(
+                        f"{payroll_list_row['Employee']} | Salary GH₵ {float(payroll_list_row['Basic Salary']):,.2f} | "
+                        f"Net GH₵ {float(payroll_list_row['Net Salary']):,.2f}"
+                    )
+                    if button_col.button("Edit", key=f"payroll_edit_btn_{company_key}_{int(payroll_list_row['ID'])}"):
+                        st.session_state[selected_payroll_key] = int(payroll_list_row["ID"])
+                payroll_record_id = st.session_state.get(selected_payroll_key, int(df["ID"].iloc[0]))
+                edit_row = df.loc[df["ID"] == payroll_record_id].iloc[0]
+                with st.form(f"payroll_edit_form_{company_key}_{payroll_record_id}"):
+                    edit_salary = st.number_input("Salary", min_value=0.0, value=float(edit_row["Basic Salary"] or 0.0))
+                    edit_bonus = st.number_input("Bonus", min_value=0.0, value=float(edit_row["Allowances"] or 0.0))
+                    edit_deductions = st.number_input("Deductions", min_value=0.0, value=float(edit_row["Deductions"] or 0.0))
+                    edit_status = st.selectbox("Payment Status", ["Paid", "Unpaid"], index=0 if edit_row["Status"] == "Paid" else 1)
+                    if st.form_submit_button("Update Payroll"):
+                        updated_values = _calculate_payroll_values(edit_salary, edit_bonus, edit_deductions)
+                        details = (
+                            f"{edit_row['Employee']} salary {float(edit_row['Basic Salary']):,.2f}->{edit_salary:,.2f}; "
+                            f"bonus {float(edit_row['Allowances']):,.2f}->{edit_bonus:,.2f}; "
+                            f"deductions {float(edit_row['Deductions']):,.2f}->{edit_deductions:,.2f}"
+                        )
+                        conn.execute(
+                            """
+                            UPDATE payroll
+                            SET basic_salary = ?, allowances = ?, ssnit_t1 = ?, ssnit_t2 = ?,
+                                taxable_income = ?, paye = ?, net_salary = ?, deductions = ?, payment_status = ?
+                            WHERE id = ? AND company_key = ?
+                            """,
+                            (
+                                edit_salary,
+                                edit_bonus,
+                                updated_values["ssnit_t1"],
+                                updated_values["ssnit_t2"],
+                                updated_values["taxable_income"],
+                                updated_values["paye"],
+                                updated_values["net_salary"],
+                                edit_deductions,
+                                edit_status,
+                                int(payroll_record_id),
+                                company_key,
+                            ),
+                        )
+                        conn.commit()
+                        log_audit_action(conn, company_key, role, "Payroll Updated", "Payroll", details)
+                        st.session_state.pop(selected_payroll_key, None)
+                        st.success("Entry Updated")
+                        st.rerun()
         else:
             st.info("No payroll records found.")
     except Exception as e:
         st.error(f"Error loading payroll: {e}")
+    finally:
+        if conn:
+            conn.close()
 
 
 # ==========================================
@@ -1607,7 +1938,7 @@ def show_fixed_assets(company_key, role):
         return
 
     with st.expander("➕ Add Fixed Asset", expanded=True):
-        with st.form("fixed_asset_form"):
+        with st.form("fixed_asset_form", clear_on_submit=True):
             col1, col2 = st.columns(2)
             with col1:
                 asset_name = st.text_input("Asset Name")
@@ -1615,26 +1946,27 @@ def show_fixed_assets(company_key, role):
                 purchase_date = st.date_input("Purchase Date", datetime.now().date())
             with col2:
                 cost = st.number_input("Cost (GH₵)", min_value=0.0, step=0.01)
+                opening_book_value = st.number_input("Opening Book Value", min_value=0.0, step=0.01)
                 depreciation_rate = st.number_input("Depreciation Rate (%)", min_value=0.0, max_value=100.0, step=0.1)
                 location = st.text_input("Location")
 
             submitted = st.form_submit_button("Add Asset")
             if submitted and asset_name and cost > 0:
-                book_value = cost  # Initial book value equals cost
+                book_value = opening_book_value if opening_book_value > 0 else cost
                 try:
                     conn = get_connection()
                     conn.execute(
                         """INSERT INTO fixed_assets
                            (company_key, asset_name, asset_category, purchase_date, cost,
-                            depreciation_rate, accumulated_depreciation, book_value, location)
-                           VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?)""",
+                            opening_book_value, depreciation_rate, accumulated_depreciation, book_value, location)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?)""",
                         (company_key, asset_name, asset_category, purchase_date.isoformat(),
-                         cost, depreciation_rate, book_value, location),
+                         cost, book_value, depreciation_rate, book_value, location),
                     )
                     conn.commit()
                     log_audit_action(conn, company_key, role, "Fixed Asset Added", "Fixed Assets", f"{asset_name} - GH₵{cost:,.2f}")
                     conn.close()
-                    st.success(f"Asset '{asset_name}' added. Book Value: GH₵ {book_value:,.2f}")
+                    st.success("Entry Updated")
                     st.rerun()
                 except Exception as e:
                     st.error(f"Error adding asset: {e}")
@@ -1643,27 +1975,73 @@ def show_fixed_assets(company_key, role):
     try:
         conn = get_connection()
         data = conn.execute(
-            """SELECT asset_name, asset_category, purchase_date, cost,
+            """SELECT id, asset_name, asset_category, purchase_date, cost, opening_book_value,
                       depreciation_rate, accumulated_depreciation, book_value, location, status
                FROM fixed_assets WHERE company_key = ? ORDER BY asset_name""",
             (company_key,),
         ).fetchall()
-        conn.close()
         if data:
-            df = pd.DataFrame(data, columns=["Asset Name", "Category", "Purchase Date", "Cost (GH₵)",
-                                              "Dep. Rate (%)", "Accum. Dep.", "Book Value (GH₵)", "Location", "Status"])
+            df = pd.DataFrame(data, columns=["ID", "Asset Name", "Category", "Purchase Date", "Cost (GH₵)",
+                                              "Opening Book Value", "Dep. Rate (%)", "Accum. Dep.", "Current Value", "Location", "Status"])
             st.dataframe(df, use_container_width=True)
 
             total_cost = df["Cost (GH₵)"].sum()
-            total_book = df["Book Value (GH₵)"].sum()
+            total_book = df["Current Value"].sum()
             col1, col2, col3 = st.columns(3)
             col1.metric("Total Assets", len(df))
             col2.metric("Total Cost", f"GH₵ {total_cost:,.2f}")
             col3.metric("Total Book Value", f"GH₵ {total_book:,.2f}")
+            if role in ("Master Admin", "Bookkeeper", "Sub-Admin"):
+                selected_asset_key = f"asset_edit_selected_{company_key}"
+                for _, asset_row in df.iterrows():
+                    name_col, button_col = st.columns([4, 1])
+                    name_col.caption(
+                        f"{asset_row['Asset Name']} | Current GH₵ {float(asset_row['Current Value']):,.2f} | "
+                        f"Purchase Date {asset_row['Purchase Date']}"
+                    )
+                    if button_col.button("Edit", key=f"asset_edit_btn_{company_key}_{int(asset_row['ID'])}"):
+                        st.session_state[selected_asset_key] = int(asset_row["ID"])
+                edit_asset_id = st.session_state.get(selected_asset_key, int(df["ID"].iloc[0]))
+                edit_asset_row = df.loc[df["ID"] == edit_asset_id].iloc[0]
+                with st.form(f"asset_edit_form_{company_key}_{edit_asset_id}", clear_on_submit=True):
+                    edit_asset_name = st.text_input("Asset Name", value=str(edit_asset_row["Asset Name"] or ""))
+                    edit_purchase_date = st.date_input("Purchase Date", value=pd.to_datetime(edit_asset_row["Purchase Date"]).date())
+                    edit_cost = st.number_input("Cost (GH₵)", min_value=0.0, value=float(edit_asset_row["Cost (GH₵)"] or 0.0))
+                    edit_opening_book = st.number_input("Opening Book Value", min_value=0.0, value=float(edit_asset_row["Opening Book Value"] or 0.0))
+                    edit_depr_rate = st.number_input("Depreciation Rate (%)", min_value=0.0, max_value=100.0, value=float(edit_asset_row["Dep. Rate (%)"] or 0.0))
+                    edit_location = st.text_input("Location", value=str(edit_asset_row["Location"] or ""))
+                    if st.form_submit_button("Update Asset"):
+                        conn.execute(
+                            """
+                            UPDATE fixed_assets
+                            SET asset_name = ?, purchase_date = ?, cost = ?, opening_book_value = ?,
+                                depreciation_rate = ?, book_value = ?, location = ?
+                            WHERE id = ? AND company_key = ?
+                            """,
+                            (
+                                edit_asset_name,
+                                edit_purchase_date.isoformat(),
+                                edit_cost,
+                                edit_opening_book,
+                                edit_depr_rate,
+                                edit_opening_book if edit_opening_book > 0 else edit_cost,
+                                edit_location,
+                                int(edit_asset_id),
+                                company_key,
+                            ),
+                        )
+                        conn.commit()
+                        log_audit_action(conn, company_key, role, "Fixed Asset Updated", "Fixed Assets", f"Updated asset ID {int(edit_asset_id)}")
+                        st.session_state.pop(selected_asset_key, None)
+                        st.success("Entry Updated")
+                        st.rerun()
         else:
             st.info("No fixed assets registered yet.")
     except Exception as e:
         st.error(f"Error loading fixed assets: {e}")
+    finally:
+        if 'conn' in locals() and conn:
+            conn.close()
 
 
 # ==========================================

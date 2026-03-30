@@ -159,6 +159,7 @@ def init_db():
             "item_code": "TEXT",
             "category": "TEXT",
             "description": "TEXT",
+            "opening_balance": "REAL DEFAULT 0",
             "qty": "REAL DEFAULT 0",
             "min_stock_level": "REAL DEFAULT 10",
             "unit": "TEXT DEFAULT 'pcs'",
@@ -259,6 +260,7 @@ def init_db():
             "bank_name": "TEXT",
             "account_number": "TEXT",
             "allowances": "REAL DEFAULT 0",
+            "deductions": "REAL DEFAULT 0",
             "payment_status": "TEXT DEFAULT 'Unpaid'",
             "created_at": "TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
         }
@@ -291,6 +293,7 @@ def init_db():
             "asset_category": "TEXT",
             "purchase_date": "TEXT",
             "cost": "REAL DEFAULT 0",
+            "opening_book_value": "REAL DEFAULT 0",
             "depreciation_rate": "REAL DEFAULT 0",
             "accumulated_depreciation": "REAL DEFAULT 0",
             "book_value": "REAL DEFAULT 0",
@@ -300,6 +303,8 @@ def init_db():
         for column_name, column_def in fixed_asset_column_defs.items():
             if column_name not in fixed_asset_columns:
                 cursor.execute(f"ALTER TABLE fixed_assets ADD COLUMN {column_name} {column_def}")
+        if "opening_book_value" not in fixed_asset_columns and "book_value" in (fixed_asset_columns | set(fixed_asset_column_defs)):
+            cursor.execute("UPDATE fixed_assets SET opening_book_value = COALESCE(book_value, cost, 0)")
         if "purchase_cost" in fixed_asset_columns and "cost" in (fixed_asset_columns | set(fixed_asset_column_defs)):
             cursor.execute("UPDATE fixed_assets SET cost = COALESCE(cost, purchase_cost, 0)")
         if "dep_rate" in fixed_asset_columns and "depreciation_rate" in (fixed_asset_columns | set(fixed_asset_column_defs)):
