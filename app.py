@@ -17,6 +17,7 @@ from modules import (
     initialize_paystack_payment,
     log_audit_action,
     show_aging,
+    show_ai_assistant,
     show_audit_trail,
     show_banking,
     show_chart_of_accounts,
@@ -39,7 +40,11 @@ GATEKEEPER_SYSTEM_PROMPT = (
     "You are the Gatekeeper Accounting Expert. Explain accounting terms like Accounts "
     "Payable and Chart of Accounts simply for Ghanaian businesses."
 )
-client = Groq(api_key=st.secrets["GROQ_API_KEY"])
+try:
+    groq_api_key = st.secrets.get("GROQ_API_KEY")
+except Exception:
+    groq_api_key = None
+client = Groq(api_key=groq_api_key) if groq_api_key else None
 
 # 1. Boot System
 def init_db():
@@ -234,6 +239,9 @@ def ask_gatekeeper_ai(menu_selection, chat_history):
         }
     )
     messages.extend(chat_history[-8:])
+
+    if not client:
+        return "Gatekeeper AI is unavailable because the `GROQ_API_KEY` secret is not configured."
 
     try:
         completion = client.chat.completions.create(
@@ -1152,7 +1160,7 @@ else:
         </div>
         """, unsafe_allow_html=True)
         
-        menu = ["Dashboard", "Inventory", "Payroll", "Sales/Purchase", "Reports", "Banking", "Taxation", "Audit Trail"]
+        menu = ["Dashboard", "Inventory", "Payroll", "Sales/Purchase", "Reports", "Banking", "Taxation", "AI Data Assessment", "Audit Trail"]
         choice = st.sidebar.selectbox("Navigation", menu)
         render_gatekeeper_ai_chat(choice)
         
@@ -1170,6 +1178,8 @@ else:
             show_banking("DEMO", "Demo")
         elif choice == "Taxation":
             show_taxation("DEMO")
+        elif choice == "AI Data Assessment":
+            show_ai_assistant("DEMO")
         elif choice == "Audit Trail":
             show_audit_trail("DEMO")
                     
@@ -1205,7 +1215,7 @@ else:
             "Inventory & Stock", "Sales Invoicing", "Purchase Orders", 
             "Banking & Cash", "Accounts Receivable", "Accounts Payable", 
             "Taxation (VAT/NHIL)", "Ghana Payroll (SSNIT)", "Fixed Asset Register", 
-            "Financial Intelligence", "System Audit Trail"
+            "Financial Intelligence", "AI Data Assessment", "System Audit Trail"
         ]
         
         if u['role'] == "Master Admin":
@@ -1233,6 +1243,7 @@ else:
         elif choice == "Ghana Payroll (SSNIT)": show_payroll(u['key'], u['role'])
         elif choice == "Fixed Asset Register": show_fixed_assets(u['key'], u['role'])
         elif choice == "Financial Intelligence": show_reports(u['key'])
+        elif choice == "AI Data Assessment": show_ai_assistant(u['key'])
         elif choice == "System Audit Trail": show_audit_trail(u['key'])
 
     st.sidebar.markdown("---")

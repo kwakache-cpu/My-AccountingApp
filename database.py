@@ -154,6 +154,31 @@ def init_db():
                 FOREIGN KEY (company_key) REFERENCES companies (key) ON DELETE CASCADE
             )
         """)
+        cursor.execute("PRAGMA table_info(vouchers)")
+        voucher_columns = {row[1] for row in cursor.fetchall()}
+        voucher_column_defs = {
+            "company_key": "TEXT",
+            "date": "TEXT",
+            "v_type": "TEXT",
+            "ledger": "TEXT",
+            "debit": "REAL DEFAULT 0",
+            "credit": "REAL DEFAULT 0",
+            "balance_after": "REAL DEFAULT 0",
+            "payment_method": "TEXT",
+            "reference_no": "TEXT",
+            "narration": "TEXT",
+            "is_cleared": "INTEGER DEFAULT 1",
+            "created_by": "TEXT",
+            "created_at": "TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
+        }
+        for column_name, column_def in voucher_column_defs.items():
+            if column_name not in voucher_columns:
+                cursor.execute(f"ALTER TABLE vouchers ADD COLUMN {column_name} {column_def}")
+        if "ref_no" in voucher_columns and "reference_no" in (voucher_columns | set(voucher_column_defs)):
+            cursor.execute(
+                "UPDATE vouchers SET reference_no = COALESCE(reference_no, ref_no) "
+                "WHERE reference_no IS NULL OR reference_no = ''"
+            )
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_vouch_date ON vouchers(date);")
 
         # --- TABLE 4: GHANA STATUTORY PAYROLL ENGINE ---
@@ -180,6 +205,20 @@ def init_db():
                 FOREIGN KEY (company_key) REFERENCES companies (key) ON DELETE CASCADE
             )
         """)
+        cursor.execute("PRAGMA table_info(payroll)")
+        payroll_columns = {row[1] for row in cursor.fetchall()}
+        payroll_column_defs = {
+            "company_key": "TEXT",
+            "emp_id": "TEXT",
+            "bank_name": "TEXT",
+            "account_number": "TEXT",
+            "allowances": "REAL DEFAULT 0",
+            "payment_status": "TEXT DEFAULT 'Unpaid'",
+            "created_at": "TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
+        }
+        for column_name, column_def in payroll_column_defs.items():
+            if column_name not in payroll_columns:
+                cursor.execute(f"ALTER TABLE payroll ADD COLUMN {column_name} {column_def}")
 
         # --- TABLE 5: FIXED ASSET REGISTER ---
         # Tracking long-term assets and depreciation
@@ -199,6 +238,32 @@ def init_db():
                 FOREIGN KEY (company_key) REFERENCES companies (key) ON DELETE CASCADE
             )
         """)
+        cursor.execute("PRAGMA table_info(fixed_assets)")
+        fixed_asset_columns = {row[1] for row in cursor.fetchall()}
+        fixed_asset_column_defs = {
+            "company_key": "TEXT",
+            "asset_category": "TEXT",
+            "purchase_date": "TEXT",
+            "cost": "REAL DEFAULT 0",
+            "depreciation_rate": "REAL DEFAULT 0",
+            "accumulated_depreciation": "REAL DEFAULT 0",
+            "book_value": "REAL DEFAULT 0",
+            "location": "TEXT",
+            "status": "TEXT DEFAULT 'Active'",
+        }
+        for column_name, column_def in fixed_asset_column_defs.items():
+            if column_name not in fixed_asset_columns:
+                cursor.execute(f"ALTER TABLE fixed_assets ADD COLUMN {column_name} {column_def}")
+        if "purchase_cost" in fixed_asset_columns and "cost" in (fixed_asset_columns | set(fixed_asset_column_defs)):
+            cursor.execute("UPDATE fixed_assets SET cost = COALESCE(cost, purchase_cost, 0)")
+        if "dep_rate" in fixed_asset_columns and "depreciation_rate" in (fixed_asset_columns | set(fixed_asset_column_defs)):
+            cursor.execute(
+                "UPDATE fixed_assets SET depreciation_rate = COALESCE(depreciation_rate, dep_rate, 0)"
+            )
+        if "accum_dep" in fixed_asset_columns and "accumulated_depreciation" in (fixed_asset_columns | set(fixed_asset_column_defs)):
+            cursor.execute(
+                "UPDATE fixed_assets SET accumulated_depreciation = COALESCE(accumulated_depreciation, accum_dep, 0)"
+            )
 
         # --- TABLE 6: FORENSIC AUDIT TRAIL ---
         # Security table for tracking all user actions

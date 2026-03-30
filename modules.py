@@ -1,7 +1,7 @@
 import logging
 import os
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timedelta
 from io import BytesIO
 
 import pandas as pd
@@ -52,6 +52,98 @@ def initialize_paystack_payment(email, amount, reference):
 # ==========================================
 DB_NAME = "eka_vault.db"
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), DB_NAME)
+
+
+def _get_groq_client():
+    """Create a Groq client only when the API key is available."""
+    try:
+        api_key = st.secrets.get("GROQ_API_KEY")
+    except Exception:
+        api_key = None
+    if not api_key:
+        return None
+    try:
+        return Groq(api_key=api_key)
+    except Exception as exc:
+        logger.warning(f"Failed to initialize Groq client: {exc}")
+        return None
+
+
+def _table_exists(conn, table_name):
+    row = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
+        (table_name,),
+    ).fetchone()
+    return bool(row)
+
+
+def _fetch_ai_assistant_records(conn, client_id):
+    """Collect the last 30 days of invoice, expense, and payroll activity for a client."""
+    since_date = (datetime.now() - timedelta(days=30)).date().isoformat()
+    records = {"invoices": [], "expenses": [], "payroll": []}
+
+    if _table_exists(conn, "vouchers"):
+        invoice_rows = conn.execute(
+            """
+            SELECT date, narration, reference_no, credit
+            FROM vouchers
+            WHERE company_key = ? AND v_type = 'Sales' AND date >= ?
+            ORDER BY date DESC
+            LIMIT 50
+            """,
+            (client_id, since_date),
+        ).fetchall()
+        expense_rows = conn.execute(
+            """
+            SELECT date, narration, reference_no, debit, credit
+            FROM vouchers
+            WHERE company_key = ? AND v_type = 'Expense' AND date >= ?
+            ORDER BY date DESC
+            LIMIT 50
+            """,
+            (client_id, since_date),
+        ).fetchall()
+        records["invoices"] = [dict(row) for row in invoice_rows]
+        records["expenses"] = [dict(row) for row in expense_rows]
+
+    if _table_exists(conn, "payroll"):
+        payroll_rows = conn.execute(
+            """
+            SELECT created_at, emp_name, basic_salary, allowances, paye, net_salary, month, year, payment_status
+            FROM payroll
+            WHERE company_key = ? AND date(COALESCE(created_at, CURRENT_TIMESTAMP)) >= date(?)
+            ORDER BY created_at DESC
+            LIMIT 50
+            """,
+            (client_id, since_date),
+        ).fetchall()
+        records["payroll"] = [dict(row) for row in payroll_rows]
+
+    return records
+
+
+def _summarize_ai_assistant_data(records):
+    invoice_total = sum(float(row.get("credit") or 0) for row in records["invoices"])
+    expense_total = sum(
+        float(row.get("debit") or row.get("credit") or 0) for row in records["expenses"]
+    )
+    payroll_total = sum(float(row.get("net_salary") or 0) for row in records["payroll"])
+
+    lines = [
+        f"Invoices in last 30 days: {len(records['invoices'])}, total value GHs {invoice_total:,.2f}.",
+        f"Expenses in last 30 days: {len(records['expenses'])}, total value GHs {expense_total:,.2f}.",
+        f"Payroll entries in last 30 days: {len(records['payroll'])}, net payroll GHs {payroll_total:,.2f}.",
+    ]
+
+    for label, rows in (
+        ("Recent invoices", records["invoices"][:5]),
+        ("Recent expenses", records["expenses"][:5]),
+        ("Recent payroll", records["payroll"][:5]),
+    ):
+        if rows:
+            lines.append(f"{label}: {rows}")
+
+    return "\n".join(lines)
 
 
 def init_db():
@@ -1179,6 +1271,112 @@ def show_reports(company_key):
 
     except Exception as e:
         st.error(f"Reports module error: {e}")
+
+
+# ==========================================
+# AI DATA ASSESSMENT
+# ==========================================
+def show_ai_assistant(client_id):
+    st.header("AI Data Assessment")
+    st.caption("Ask questions about your last 30 days of invoices, expenses, and payroll activity.")
+
+    conn = None
+    try:
+        conn = get_connection()
+        records = _fetch_ai_assistant_records(conn, client_id)
+    except Exception as exc:
+        logger.error(f"AI assistant data fetch failed: {exc}")
+        st.error("The AI assistant could not load your accounting records.")
+        return
+    finally:
+        if conn:
+            conn.close()
+
+    data_summary = _summarize_ai_assistant_data(records)
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Invoices", str(len(records["invoices"])))
+    col2.metric("Expenses", str(len(records["expenses"])))
+    col3.metric("Payroll Entries", str(len(records["payroll"])))
+
+    with st.expander("30-Day Data Snapshot", expanded=False):
+        st.text(data_summary)
+
+    history_key = f"ai_assistant_messages_{client_id}"
+    if history_key not in st.session_state:
+        st.session_state[history_key] = [
+            {
+                "role": "assistant",
+                "content": (
+                    "I can review your recent invoices, expenses, and payroll activity. "
+                    "Ask about trends, missing records, unusual balances, or possible corrections."
+                ),
+            }
+        ]
+
+    for message in st.session_state[history_key]:
+        with st.chat_message(message["role"]):
+            st.markdown(message["content"])
+
+    user_question = st.chat_input(
+        "Ask about invoices, expenses, or payroll...",
+        key=f"ai_assistant_input_{client_id}",
+    )
+    if not user_question:
+        return
+
+    st.session_state[history_key].append({"role": "user", "content": user_question})
+    with st.chat_message("user"):
+        st.markdown(user_question)
+
+    groq_client = _get_groq_client()
+    if not groq_client:
+        fallback_response = (
+            "AI insights are unavailable because the `GROQ_API_KEY` secret is not configured. "
+            "Your 30-day data snapshot is still available above for manual review."
+        )
+        st.session_state[history_key].append({"role": "assistant", "content": fallback_response})
+        with st.chat_message("assistant"):
+            st.markdown(fallback_response)
+        return
+
+    prompt = (
+        "You are an accounting data assessment assistant for a Ghana-focused ERP. "
+        "Use the supplied 30-day accounting summary to answer clearly, highlight anomalies, "
+        "and suggest edits or follow-up checks when appropriate. "
+        "Do not invent records that are not present.\n\n"
+        f"Client ID: {client_id}\n"
+        f"30-day data summary:\n{data_summary}\n\n"
+        f"User question: {user_question}"
+    )
+
+    try:
+        with st.chat_message("assistant"):
+            with st.spinner("Reviewing your accounting records..."):
+                completion = groq_client.chat.completions.create(
+                    model="llama-3.1-8b-instant",
+                    messages=[
+                        {
+                            "role": "system",
+                            "content": (
+                                "You are a careful accounting assistant. Base your answer only on the "
+                                "provided summary, note uncertainty, and keep suggestions practical."
+                            ),
+                        },
+                        {"role": "user", "content": prompt},
+                    ],
+                    temperature=0.3,
+                )
+                assistant_reply = completion.choices[0].message.content.strip()
+                st.markdown(assistant_reply)
+        st.session_state[history_key].append({"role": "assistant", "content": assistant_reply})
+    except Exception as exc:
+        logger.error(f"AI assistant request failed: {exc}")
+        failure_message = (
+            "The AI assessment request failed just now. Please try again, or review the 30-day snapshot above."
+        )
+        st.session_state[history_key].append({"role": "assistant", "content": failure_message})
+        with st.chat_message("assistant"):
+            st.markdown(failure_message)
 
 
 # ==========================================
