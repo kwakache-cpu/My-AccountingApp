@@ -14,16 +14,8 @@ import streamlit.components.v1 as components
 from dateutil.relativedelta import relativedelta
 from groq import Groq
 from PIL import Image
-
-try:
-    from pyzbar import pyzbar
-except ImportError:
-    pyzbar = None
-
-try:
-    import cv2
-except ImportError:
-    cv2 = None
+import cv2
+from pyzbar import pyzbar
 
 # Setup Logger
 logger = logging.getLogger(__name__)
@@ -587,36 +579,12 @@ def _focus_text_input(input_label):
     )
 
 
-def _decode_camera_code(camera_file):
-    if camera_file is None:
-        return None, "Capture an image to scan."
-
-    image_bytes = camera_file.getvalue()
-    image = Image.open(BytesIO(image_bytes)).convert("RGB")
-
-    try:
-        if pyzbar is not None:
-            decoded = pyzbar.decode(image)
-            if decoded:
-                return decoded[0].data.decode("utf-8").strip(), None
-    except Exception:
-        pass
-
-    try:
-        import numpy as np
-
-        if cv2 is not None:
-            image_array = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
-            qr_detector = cv2.QRCodeDetector()
-            decoded_text, _, _ = qr_detector.detectAndDecode(image_array)
-            if decoded_text:
-                return decoded_text.strip(), None
-    except Exception:
-        pass
-
-    if pyzbar is None or cv2 is None:
-        return None, "Scanner module loading... Please ensure dependencies are installed."
-    return None, "Install `pyzbar` or `opencv-python-headless` on the host to decode camera scans."
+def process_scan(image):
+    """Decode a barcode/QR value from a camera image and return the scanned text."""
+    decoded = pyzbar.decode(image)
+    if not decoded:
+        return None
+    return decoded[0].data.decode("utf-8").strip()
 
 
 def _render_camera_scanner(module_key, pending_key):
@@ -626,9 +594,6 @@ def _render_camera_scanner(module_key, pending_key):
     button_label = "Close Camera" if st.session_state.get(toggle_key) else "Tap to Scan"
 
     if st.button(button_label, key=f"{module_key}_camera_toggle_btn"):
-        if pyzbar is None or cv2 is None:
-            st.info("Scanner module loading... Please ensure dependencies are installed.")
-            return
         st.session_state[toggle_key] = not st.session_state.get(toggle_key, False)
         if not st.session_state[toggle_key]:
             st.session_state.pop(image_sig_key, None)
@@ -638,7 +603,7 @@ def _render_camera_scanner(module_key, pending_key):
         return
 
     nonce = st.session_state.get(nonce_key, 0)
-    camera_file = st.camera_input("Scan with Camera", key=f"{module_key}_camera_input_{nonce}")
+    camera_file = st.camera_input("Scanner", key=f"{module_key}_camera_input_{nonce}")
     if camera_file is None:
         return
 
@@ -646,15 +611,15 @@ def _render_camera_scanner(module_key, pending_key):
     if image_signature == st.session_state.get(image_sig_key):
         return
 
-    decoded_value, error_message = _decode_camera_code(camera_file)
+    image = Image.open(BytesIO(camera_file.getvalue())).convert("RGB")
+    decoded_value = process_scan(image)
     st.session_state[image_sig_key] = image_signature
     if decoded_value:
         st.session_state[pending_key] = decoded_value
         st.session_state[toggle_key] = False
         st.session_state[nonce_key] = nonce + 1
         st.rerun()
-    if error_message:
-        st.info(error_message)
+    st.info("No barcode or QR code was detected in that image yet.")
 
 
 def _lookup_inventory_by_barcode(conn, company_key, barcode_value):
