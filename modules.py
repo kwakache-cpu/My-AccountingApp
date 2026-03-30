@@ -14,7 +14,12 @@ from groq import Groq
 logger = logging.getLogger(__name__)
 
 # Import shared utilities from database
-from database import get_connection, log_audit_action
+from database import get_connection, log_audit_action as database_log_audit_action
+
+
+def log_audit_action(conn, company_key, user_role, action, module_name, details=None):
+    """Proxy audit logging so app.py can import the shared action from this module."""
+    return database_log_audit_action(conn, company_key, user_role, action, module_name, details)
 
 
 # ==========================================

@@ -1,9 +1,8 @@
 import streamlit as st
 import pandas as pd
 from database import get_connection
-from database import init_db as base_init_db, log_audit_action
+from database import init_db as base_init_db
 from groq import Groq
-from modules import *
 import logging
 from datetime import date, datetime, timedelta
 import hashlib
@@ -14,6 +13,23 @@ import smtplib
 import sqlite3
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
+from modules import (
+    initialize_paystack_payment,
+    log_audit_action,
+    show_aging,
+    show_audit_trail,
+    show_banking,
+    show_chart_of_accounts,
+    show_company_setup,
+    show_fixed_assets,
+    show_inventory,
+    show_payroll,
+    show_pos,
+    show_reports,
+    show_sales_purchase,
+    show_taxation,
+    show_vouchers,
+)
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -38,7 +54,7 @@ def init_db():
 
         cursor = conn.cursor()
         cursor.execute(
-            "CREATE TABLE IF NOT EXISTS companies (key TEXT PRIMARY KEY, name TEXT, tin TEXT, status TEXT DEFAULT 'Active', subscription_expiry TEXT, deployment_status TEXT DEFAULT 'Pending')"
+            "CREATE TABLE IF NOT EXISTS companies (key TEXT PRIMARY KEY, name TEXT, tin TEXT, status TEXT DEFAULT 'Active', subscription_expiry TEXT, deployment_status TEXT DEFAULT 'Pending', contact_email TEXT)"
         )
         cursor.execute(
             "CREATE TABLE IF NOT EXISTS pending_approvals (id INTEGER PRIMARY KEY, company_key TEXT, amount REAL, status TEXT, request_date TEXT)"
@@ -64,6 +80,10 @@ def init_db():
                 cursor.execute("ALTER TABLE companies ADD COLUMN status TEXT DEFAULT 'Active'")
             if "subscription_expiry" not in company_columns:
                 cursor.execute("ALTER TABLE companies ADD COLUMN subscription_expiry TEXT")
+            if "deployment_status" not in company_columns:
+                cursor.execute("ALTER TABLE companies ADD COLUMN deployment_status TEXT DEFAULT 'Pending'")
+            if "contact_email" not in company_columns:
+                cursor.execute("ALTER TABLE companies ADD COLUMN contact_email TEXT")
         chart_count = cursor.execute("SELECT COUNT(*) FROM chart_of_accounts").fetchone()[0]
         if chart_count == 0:
             cursor.executemany(
@@ -786,6 +806,10 @@ def run_startup_db_patch():
                 cursor.execute("ALTER TABLE companies ADD COLUMN status TEXT DEFAULT 'Active'")
             if "subscription_expiry" not in company_columns:
                 cursor.execute("ALTER TABLE companies ADD COLUMN subscription_expiry TEXT")
+            if "deployment_status" not in company_columns:
+                cursor.execute("ALTER TABLE companies ADD COLUMN deployment_status TEXT DEFAULT 'Pending'")
+            if "contact_email" not in company_columns:
+                cursor.execute("ALTER TABLE companies ADD COLUMN contact_email TEXT")
             cursor.execute(
                 "UPDATE companies SET status = 'Active' WHERE status IS NULL OR TRIM(status) = ''"
             )

@@ -78,6 +78,10 @@ def init_db():
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
+        cursor.execute("PRAGMA table_info(companies)")
+        company_columns = {row[1] for row in cursor.fetchall()}
+        if "contact_email" not in company_columns:
+            cursor.execute("ALTER TABLE companies ADD COLUMN contact_email TEXT")
 
         # --- TABLE 2: INVENTORY & STOCK MASTER ---
         # Manages product levels, costs, and warehouse locations
@@ -102,6 +106,29 @@ def init_db():
                 FOREIGN KEY (company_key) REFERENCES companies (key) ON DELETE CASCADE
             )
         """)
+        cursor.execute("PRAGMA table_info(inventory)")
+        inventory_columns = {row[1] for row in cursor.fetchall()}
+        inventory_column_defs = {
+            "company_key": "TEXT",
+            "item_code": "TEXT",
+            "category": "TEXT",
+            "description": "TEXT",
+            "qty": "REAL DEFAULT 0",
+            "min_stock_level": "REAL DEFAULT 10",
+            "unit": "TEXT DEFAULT 'pcs'",
+            "cost_price": "REAL DEFAULT 0",
+            "price": "REAL DEFAULT 0",
+            "tax_rate": "REAL DEFAULT 0",
+            "warehouse_location": "TEXT",
+            "is_active": "INTEGER DEFAULT 1",
+            "created_at": "TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
+            "updated_at": "TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
+        }
+        for column_name, column_def in inventory_column_defs.items():
+            if column_name not in inventory_columns:
+                cursor.execute(f"ALTER TABLE inventory ADD COLUMN {column_name} {column_def}")
+        if "quantity" in inventory_columns and "qty" in (inventory_columns | set(inventory_column_defs)):
+            cursor.execute("UPDATE inventory SET qty = COALESCE(qty, quantity, 0)")
         # Indexes for fast product searching
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_inv_comp ON inventory(company_key);")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_inv_name ON inventory(item_name);")
@@ -200,6 +227,19 @@ def init_db():
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
+        cursor.execute("PRAGMA table_info(maintenance_settings)")
+        maintenance_columns = {row[1] for row in cursor.fetchall()}
+        maintenance_column_defs = {
+            "maintenance_date": "TEXT",
+            "start_time": "TEXT",
+            "end_time": "TEXT",
+            "is_active": "INTEGER DEFAULT 0",
+            "message": "TEXT",
+            "updated_at": "TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
+        }
+        for column_name, column_def in maintenance_column_defs.items():
+            if column_name not in maintenance_columns:
+                cursor.execute(f"ALTER TABLE maintenance_settings ADD COLUMN {column_name} {column_def}")
         cursor.execute("INSERT OR IGNORE INTO maintenance_settings (id, is_active) VALUES (1, 0)")
 
         # --- TABLE 8: PENDING APPROVALS QUEUE ---
@@ -217,6 +257,18 @@ def init_db():
                 FOREIGN KEY (company_key) REFERENCES companies (key)
             )
         """)
+        cursor.execute("PRAGMA table_info(pending_approvals)")
+        pending_columns = {row[1] for row in cursor.fetchall()}
+        pending_column_defs = {
+            "payment_reference": "TEXT",
+            "payment_method": "TEXT",
+            "plan_requested": "TEXT",
+            "admin_notes": "TEXT",
+            "timestamp": "TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
+        }
+        for column_name, column_def in pending_column_defs.items():
+            if column_name not in pending_columns:
+                cursor.execute(f"ALTER TABLE pending_approvals ADD COLUMN {column_name} {column_def}")
 
         conn.commit()
         logger.info("E.K.A CLOUD DATABASE: Full Architectural Sync Complete.")
