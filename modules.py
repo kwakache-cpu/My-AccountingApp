@@ -2442,41 +2442,322 @@ def show_fixed_assets(company_key, role):
 # ==========================================
 # FINANCIAL INTELLIGENCE / REPORTS
 # ==========================================
+def _pdf_escape(value):
+    return str(value).replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
+
+
+def _build_simple_pdf(title, lines):
+    safe_lines = [title] + [str(line) for line in lines]
+    content_lines = ["BT", "/F1 12 Tf", "50 780 Td"]
+    first_line = True
+    for line in safe_lines:
+        if first_line:
+            content_lines.append(f"({_pdf_escape(line)}) Tj")
+            first_line = False
+        else:
+            content_lines.append("0 -16 Td")
+            content_lines.append(f"({_pdf_escape(line)}) Tj")
+    content_lines.append("ET")
+    stream = "\n".join(content_lines).encode("latin-1", errors="replace")
+
+    objects = []
+    objects.append(b"1 0 obj<< /Type /Catalog /Pages 2 0 R >>endobj\n")
+    objects.append(b"2 0 obj<< /Type /Pages /Kids [3 0 R] /Count 1 >>endobj\n")
+    objects.append(b"3 0 obj<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>endobj\n")
+    objects.append(f"4 0 obj<< /Length {len(stream)} >>stream\n".encode("latin-1") + stream + b"\nendstream endobj\n")
+    objects.append(b"5 0 obj<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>endobj\n")
+
+    pdf = bytearray(b"%PDF-1.4\n")
+    offsets = [0]
+    for obj in objects:
+        offsets.append(len(pdf))
+        pdf.extend(obj)
+    xref_offset = len(pdf)
+    pdf.extend(f"xref\n0 {len(offsets)}\n".encode("latin-1"))
+    pdf.extend(b"0000000000 65535 f \n")
+    for offset in offsets[1:]:
+        pdf.extend(f"{offset:010d} 00000 n \n".encode("latin-1"))
+    pdf.extend(
+        f"trailer<< /Size {len(offsets)} /Root 1 0 R >>\nstartxref\n{xref_offset}\n%%EOF".encode("latin-1")
+    )
+    return bytes(pdf)
+
+
+def _statement_export_buttons(statement_key, title, dataframe, summary_lines):
+    excel_bin = get_excel_bin(dataframe)
+    pdf_bin = _build_simple_pdf(title, summary_lines)
+    col1, col2 = st.columns(2)
+    with col1:
+        if excel_bin:
+            st.download_button(
+                "📥 Export to Excel",
+                data=excel_bin,
+                file_name=f"{statement_key}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key=f"{statement_key}_excel_export",
+            )
+    with col2:
+        st.download_button(
+            "📄 Export to PDF",
+            data=pdf_bin,
+            file_name=f"{statement_key}.pdf",
+            mime="application/pdf",
+            key=f"{statement_key}_pdf_export",
+        )
+
+
+def _get_reports_data(conn, company_key):
+    inventory_value = conn.execute(
+        "SELECT COALESCE(SUM(qty * cost_price), 0) FROM inventory WHERE company_key = ?",
+        (company_key,),
+    ).fetchone()[0] or 0.0
+    asset_value = conn.execute(
+        """
+        SELECT COALESCE(SUM(COALESCE(book_value, opening_book_value, cost, 0)), 0)
+        FROM fixed_assets
+        WHERE company_key = ? AND COALESCE(status, 'Active') != 'Disposed'
+        """,
+        (company_key,),
+    ).fetchone()[0] or 0.0
+    cash_on_hand = conn.execute(
+        """
+        SELECT COALESCE(SUM(credit - debit), 0)
+        FROM vouchers
+        WHERE company_key = ?
+          AND COALESCE(status, 'Active') != 'Void'
+          AND (
+                COALESCE(payment_method, '') = 'Cash'
+                OR lower(COALESCE(ledger, '')) LIKE '%cash%'
+              )
+        """,
+        (company_key,),
+    ).fetchone()[0] or 0.0
+    accounts_payable = conn.execute(
+        """
+        SELECT COALESCE(SUM(credit - debit), 0)
+        FROM vouchers
+        WHERE company_key = ?
+          AND COALESCE(status, 'Active') != 'Void'
+          AND (
+                lower(COALESCE(ledger, '')) LIKE '%accounts payable%'
+                OR v_type = 'Purchase'
+              )
+        """,
+        (company_key,),
+    ).fetchone()[0] or 0.0
+    outstanding_loans = conn.execute(
+        """
+        SELECT COALESCE(SUM(credit - debit), 0)
+        FROM vouchers
+        WHERE company_key = ?
+          AND COALESCE(status, 'Active') != 'Void'
+          AND (
+                lower(COALESCE(ledger, '')) LIKE '%loan%'
+                OR lower(COALESCE(narration, '')) LIKE '%loan%'
+              )
+        """,
+        (company_key,),
+    ).fetchone()[0] or 0.0
+    total_revenue = conn.execute(
+        """
+        SELECT COALESCE(SUM(credit), 0)
+        FROM vouchers
+        WHERE company_key = ? AND v_type = 'Sales' AND COALESCE(status, 'Active') != 'Void'
+        """,
+        (company_key,),
+    ).fetchone()[0] or 0.0
+    total_expenses = conn.execute(
+        """
+        SELECT COALESCE(SUM(CASE WHEN debit > 0 THEN debit ELSE credit END), 0)
+        FROM vouchers
+        WHERE company_key = ? AND v_type = 'Expense' AND COALESCE(status, 'Active') != 'Void'
+        """,
+        (company_key,),
+    ).fetchone()[0] or 0.0
+    payroll_total = conn.execute(
+        """
+        SELECT COALESCE(SUM(net_salary), 0)
+        FROM payroll
+        WHERE company_key = ? AND COALESCE(status, 'Active') != 'Void'
+        """,
+        (company_key,),
+    ).fetchone()[0] or 0.0
+    asset_purchases = conn.execute(
+        """
+        SELECT COALESCE(SUM(cost), 0)
+        FROM fixed_assets
+        WHERE company_key = ? AND COALESCE(status, 'Active') != 'Void'
+        """,
+        (company_key,),
+    ).fetchone()[0] or 0.0
+    asset_sales = conn.execute(
+        """
+        SELECT COALESCE(SUM(credit), 0)
+        FROM vouchers
+        WHERE company_key = ?
+          AND COALESCE(status, 'Active') != 'Void'
+          AND (
+                lower(COALESCE(ledger, '')) LIKE '%asset%'
+                OR lower(COALESCE(narration, '')) LIKE '%asset sale%'
+              )
+        """,
+        (company_key,),
+    ).fetchone()[0] or 0.0
+    sales_rows = conn.execute(
+        """
+        SELECT date, 'Sales' AS source, narration, ledger, debit, credit
+        FROM vouchers
+        WHERE company_key = ? AND v_type = 'Sales' AND COALESCE(status, 'Active') != 'Void'
+        """,
+        (company_key,),
+    ).fetchall()
+    expense_rows = conn.execute(
+        """
+        SELECT date, 'Expense' AS source, narration, ledger, debit, credit
+        FROM vouchers
+        WHERE company_key = ? AND v_type = 'Expense' AND COALESCE(status, 'Active') != 'Void'
+        """,
+        (company_key,),
+    ).fetchall()
+    payroll_rows = conn.execute(
+        """
+        SELECT printf('%04d-%02d-01', CAST(year AS INTEGER), CAST(month AS INTEGER)) AS date,
+               'Payroll' AS source,
+               emp_name || ' payroll' AS narration,
+               'Payroll' AS ledger,
+               net_salary AS debit,
+               0 AS credit
+        FROM payroll
+        WHERE company_key = ? AND COALESCE(status, 'Active') != 'Void'
+        """,
+        (company_key,),
+    ).fetchall()
+    return {
+        "inventory_value": float(inventory_value),
+        "asset_value": float(asset_value),
+        "cash_on_hand": float(cash_on_hand),
+        "accounts_payable": float(accounts_payable),
+        "outstanding_loans": float(outstanding_loans),
+        "total_revenue": float(total_revenue),
+        "total_expenses": float(total_expenses),
+        "payroll_total": float(payroll_total),
+        "asset_purchases": float(asset_purchases),
+        "asset_sales": float(asset_sales),
+        "ledger_rows": [dict(row) for row in (sales_rows + expense_rows + payroll_rows)],
+    }
+
 def show_reports(company_key):
     st.header("📊 Data Analytics")
     try:
         conn = get_connection()
-
-        # Revenue vs Expenses
-        total_revenue = conn.execute(
-            "SELECT COALESCE(SUM(credit), 0) FROM vouchers WHERE company_key = ? AND v_type = 'Sales' AND COALESCE(status, 'Active') != 'Void'",
-            (company_key,),
-        ).fetchone()[0] or 0.0
-        total_expenses = conn.execute(
-            "SELECT COALESCE(SUM(debit), 0) FROM vouchers WHERE company_key = ? AND v_type = 'Expense' AND COALESCE(status, 'Active') != 'Void'",
-            (company_key,),
-        ).fetchone()[0] or 0.0
-        net_profit = total_revenue - total_expenses
-
+        report_data = _get_reports_data(conn, company_key)
         conn.close()
 
-        col1, col2, col3 = st.columns(3)
-        col1.metric("Total Revenue", f"GH₵ {total_revenue:,.2f}")
-        col2.metric("Total Expenses", f"GH₵ {total_expenses:,.2f}")
-        col3.metric("Net Profit / (Loss)", f"GH₵ {net_profit:,.2f}",
-                    delta="Profit" if net_profit >= 0 else "Loss",
-                    delta_color="normal" if net_profit >= 0 else "inverse")
+        operating_cash_flow = report_data["total_revenue"] - report_data["total_expenses"] - report_data["payroll_total"]
+        investing_cash_flow = report_data["asset_sales"] - report_data["asset_purchases"]
+        total_assets = report_data["inventory_value"] + report_data["asset_value"] + report_data["cash_on_hand"]
+        total_liabilities = report_data["accounts_payable"] + report_data["outstanding_loans"]
+        equity = total_assets - total_liabilities
 
-        # P&L Chart
-        chart_df = pd.DataFrame(
-            {"Amount (GH₵)": [total_revenue, total_expenses]},
-            index=["Revenue", "Expenses"],
+        col1, col2, col3 = st.columns(3)
+        col1.metric("Revenue", f"GHS {report_data['total_revenue']:,.2f}")
+        col2.metric("Expenses", f"GHS {report_data['total_expenses']:,.2f}")
+        col3.metric("Operating Cash Flow", f"GHS {operating_cash_flow:,.2f}")
+
+        overview_df = pd.DataFrame(
+            {"Amount (GHS)": [report_data["total_revenue"], report_data["total_expenses"], report_data["payroll_total"]]},
+            index=["Revenue", "Expenses", "Payroll"],
         )
-        st.bar_chart(chart_df)
+        st.bar_chart(overview_df)
+
+        tabs = st.tabs(["Balance Sheet", "Cash Flow Statement", "General Ledger"])
+
+        with tabs[0]:
+            balance_sheet_df = pd.DataFrame(
+                [
+                    {"Section": "Assets", "Line Item": "Stock Value", "Amount (GHS)": report_data["inventory_value"]},
+                    {"Section": "Assets", "Line Item": "Asset Register Value", "Amount (GHS)": report_data["asset_value"]},
+                    {"Section": "Assets", "Line Item": "Cash on Hand", "Amount (GHS)": report_data["cash_on_hand"]},
+                    {"Section": "Liabilities", "Line Item": "Accounts Payable", "Amount (GHS)": report_data["accounts_payable"]},
+                    {"Section": "Liabilities", "Line Item": "Outstanding Loans", "Amount (GHS)": report_data["outstanding_loans"]},
+                    {"Section": "Equity", "Line Item": "Owner Equity", "Amount (GHS)": equity},
+                ]
+            )
+            metric_col1, metric_col2, metric_col3 = st.columns(3)
+            metric_col1.metric("Total Assets", f"GHS {total_assets:,.2f}")
+            metric_col2.metric("Total Liabilities", f"GHS {total_liabilities:,.2f}")
+            metric_col3.metric("Equity", f"GHS {equity:,.2f}")
+            st.dataframe(balance_sheet_df, use_container_width=True)
+            _statement_export_buttons(
+                "balance_sheet",
+                "Balance Sheet",
+                balance_sheet_df,
+                [
+                    f"Total Assets: GHS {total_assets:,.2f}",
+                    f"Total Liabilities: GHS {total_liabilities:,.2f}",
+                    f"Equity: GHS {equity:,.2f}",
+                ],
+            )
+
+        with tabs[1]:
+            cash_flow_df = pd.DataFrame(
+                [
+                    {"Activity": "Sales", "Amount (GHS)": report_data["total_revenue"]},
+                    {"Activity": "Expenses", "Amount (GHS)": -report_data["total_expenses"]},
+                    {"Activity": "Payroll", "Amount (GHS)": -report_data["payroll_total"]},
+                    {"Activity": "Operating Cash Flow", "Amount (GHS)": operating_cash_flow},
+                    {"Activity": "Asset Purchases", "Amount (GHS)": -report_data["asset_purchases"]},
+                    {"Activity": "Asset Sales", "Amount (GHS)": report_data["asset_sales"]},
+                    {"Activity": "Investing Cash Flow", "Amount (GHS)": investing_cash_flow},
+                    {"Activity": "Net Cash Movement", "Amount (GHS)": operating_cash_flow + investing_cash_flow},
+                ]
+            )
+            metric_col1, metric_col2 = st.columns(2)
+            metric_col1.metric("Operating Cash Flow", f"GHS {operating_cash_flow:,.2f}")
+            metric_col2.metric("Investing Cash Flow", f"GHS {investing_cash_flow:,.2f}")
+            st.dataframe(cash_flow_df, use_container_width=True)
+            _statement_export_buttons(
+                "cash_flow_statement",
+                "Cash Flow Statement",
+                cash_flow_df,
+                [
+                    f"Operating Cash Flow: GHS {operating_cash_flow:,.2f}",
+                    f"Investing Cash Flow: GHS {investing_cash_flow:,.2f}",
+                    f"Net Cash Movement: GHS {operating_cash_flow + investing_cash_flow:,.2f}",
+                ],
+            )
+
+        with tabs[2]:
+            general_ledger_df = pd.DataFrame(report_data["ledger_rows"])
+            if general_ledger_df.empty:
+                general_ledger_df = pd.DataFrame(columns=["Date", "Source", "Narration", "Ledger", "Debit (GHS)", "Credit (GHS)"])
+            else:
+                general_ledger_df["date"] = pd.to_datetime(general_ledger_df["date"], errors="coerce")
+                general_ledger_df = general_ledger_df.sort_values(by=["date", "source"], ascending=[False, True])
+                general_ledger_df["date"] = general_ledger_df["date"].dt.strftime("%Y-%m-%d")
+                general_ledger_df = general_ledger_df.rename(
+                    columns={
+                        "date": "Date",
+                        "source": "Source",
+                        "narration": "Narration",
+                        "ledger": "Ledger",
+                        "debit": "Debit (GHS)",
+                        "credit": "Credit (GHS)",
+                    }
+                )
+            st.dataframe(general_ledger_df, use_container_width=True)
+            _statement_export_buttons(
+                "general_ledger",
+                "General Ledger",
+                general_ledger_df,
+                [
+                    f"Ledger Entries: {len(general_ledger_df)}",
+                    "Sources included: Sales, Expenses, Payroll",
+                ],
+            )
 
     except Exception as e:
         st.error(f"Reports module error: {e}")
-
 
 # ==========================================
 # AI DATA ASSESSMENT

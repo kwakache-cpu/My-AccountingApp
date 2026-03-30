@@ -127,7 +127,7 @@ if 'auth' not in st.session_state:
     st.session_state.login_attempts = 0
     st.session_state.last_activity = datetime.now()
 if 'page' not in st.session_state:
-    st.session_state.page = None
+    st.session_state.page = "Dashboard"
 
 PAGE_LABELS = {
     "pos": "🛒 Point of Sale",
@@ -881,23 +881,23 @@ def show_dashboard(company_key, company_name, role):
             col1, col2, col3, col4 = st.columns(4)
 
             with col1:
-                if st.button("🛒 New Sale", width='stretch'):
-                    st.session_state.page = PAGE_LABELS["pos"]
+                if st.button("🛒 New Sale", key="dash_pos", width='stretch'):
+                    st.session_state.page = "POS (Point of Sale)"
                     st.rerun()
 
             with col2:
-                if st.button("📦 Add Inventory", width='stretch'):
-                    st.session_state.page = PAGE_LABELS["inventory"]
+                if st.button("📦 Add Inventory", key="dash_inventory", width='stretch'):
+                    st.session_state.page = "Inventory & Stock"
                     st.rerun()
 
             with col3:
-                if st.button("💳 Process Payroll", width='stretch'):
-                    st.session_state.page = PAGE_LABELS["payroll"]
+                if st.button("💳 Process Payroll", key="dash_payroll", width='stretch'):
+                    st.session_state.page = "Payroll"
                     st.rerun()
 
             with col4:
-                if st.button("📊 View Reports", width='stretch'):
-                    st.session_state.page = PAGE_LABELS["reports"]
+                if st.button("📊 View Reports", key="dash_reports", width='stretch'):
+                    st.session_state.page = "Reports"
                     st.rerun()
 
         finally:
