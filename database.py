@@ -44,6 +44,23 @@ def ensure_schema_integrity(conn):
             if column_name not in existing_columns:
                 cursor.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_def}")
 
+
+def check_and_repair_db():
+    """Open the persistent database and repair critical schema drift."""
+    conn = get_connection()
+    if not conn:
+        return False
+    try:
+        ensure_schema_integrity(conn)
+        conn.commit()
+        return True
+    except sqlite3.Error as exc:
+        logger.error("Schema repair failed: %s", exc)
+        conn.rollback()
+        return False
+    finally:
+        conn.close()
+
 # =================================================================
 # 2. CORE CONNECTION ENGINE
 # =================================================================

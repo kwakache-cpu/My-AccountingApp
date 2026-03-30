@@ -1,6 +1,6 @@
 import streamlit as st
 import pandas as pd
-from database import ensure_schema_integrity, get_connection
+from database import check_and_repair_db, ensure_schema_integrity, get_connection
 from database import init_db as base_init_db
 from groq import Groq
 import logging
@@ -50,6 +50,7 @@ client = Groq(api_key=groq_api_key) if groq_api_key else None
 # 1. Boot System
 def init_db():
     """Force the requested tables in app.py before the app starts."""
+    check_and_repair_db()
     base_init_db()
 
     conn = None
@@ -879,6 +880,7 @@ def show_dashboard(company_key, company_name, role):
 # Startup self-healing database patch
 def run_startup_db_patch():
     """Repair older local databases automatically on app startup."""
+    check_and_repair_db()
     conn = None
     try:
         conn = get_connection()

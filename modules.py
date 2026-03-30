@@ -381,6 +381,111 @@ def get_excel_bin(df):
         return b""
 
 
+def _build_receipt(company_name, items, total_amount, sale_date):
+    lines = [
+        company_name,
+        "STANDARD POS RECEIPT",
+        f"Date: {sale_date}",
+        "-" * 36,
+        "Item                     Qty    Price",
+        "-" * 36,
+    ]
+    for item in items:
+        lines.append(
+            f"{item['name'][:20]:<20} {int(item['qty']):>3} {float(item['price']):>8.2f}"
+        )
+    lines.extend(
+        [
+            "-" * 36,
+            f"TOTAL: GHs {float(total_amount):,.2f}",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _import_inventory_from_excel(conn, company_key, file_obj):
+    imported_df = pd.read_excel(file_obj)
+    if imported_df.empty:
+        return 0
+
+    column_map = {column.lower().strip(): column for column in imported_df.columns}
+    required = ["item_name", "category", "quantity"]
+    missing = [column for column in required if column not in column_map]
+    if missing:
+        raise ValueError(f"Missing required columns: {', '.join(missing)}")
+
+    added_rows = 0
+    for _, row in imported_df.iterrows():
+        item_name = str(row[column_map["item_name"]]).strip()
+        if not item_name:
+            continue
+        category = str(row[column_map["category"]]).strip()
+        qty = float(row[column_map["quantity"]] or 0)
+        price_column = column_map.get("selling_price") or column_map.get("unit_price") or column_map.get("price")
+        cost_column = column_map.get("cost_price")
+        price = float(row[price_column] or 0) if price_column else 0.0
+        cost_price = float(row[cost_column] or 0) if cost_column else 0.0
+        existing = conn.execute(
+            """
+            SELECT 1 FROM inventory
+            WHERE company_key = ? AND item_name = ? AND COALESCE(category, '') = ?
+              AND COALESCE(price, 0) = ? AND COALESCE(cost_price, 0) = ?
+            """,
+            (company_key, item_name, category, price, cost_price),
+        ).fetchone()
+        if existing:
+            continue
+        conn.execute(
+            """
+            INSERT INTO inventory (company_key, item_name, category, qty, price, cost_price)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (company_key, item_name, category, qty, price, cost_price),
+        )
+        added_rows += 1
+    return added_rows
+
+
+def _import_sales_from_excel(conn, company_key, doc_type, file_obj, created_by):
+    imported_df = pd.read_excel(file_obj)
+    if imported_df.empty:
+        return 0
+
+    column_map = {column.lower().strip(): column for column in imported_df.columns}
+    required = ["date", "description", "amount"]
+    missing = [column for column in required if column not in column_map]
+    if missing:
+        raise ValueError(f"Missing required columns: {', '.join(missing)}")
+
+    added_rows = 0
+    ledger = "Sales Revenue" if doc_type == "Sales" else "Accounts Payable"
+    for _, row in imported_df.iterrows():
+        tx_date = pd.to_datetime(row[column_map["date"]], errors="coerce")
+        narration = str(row[column_map["description"]]).strip()
+        amount = float(row[column_map["amount"]] or 0)
+        if pd.isna(tx_date) or not narration or amount <= 0:
+            continue
+        tx_date_str = tx_date.date().isoformat()
+        existing = conn.execute(
+            """
+            SELECT 1 FROM vouchers
+            WHERE company_key = ? AND v_type = ? AND date = ? AND narration = ? AND COALESCE(credit, 0) = ?
+            """,
+            (company_key, doc_type, tx_date_str, narration, amount),
+        ).fetchone()
+        if existing:
+            continue
+        conn.execute(
+            """
+            INSERT INTO vouchers (company_key, date, v_type, ledger, credit, narration, created_by)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (company_key, tx_date_str, doc_type, ledger, amount, narration, created_by),
+        )
+        added_rows += 1
+    return added_rows
+
+
 def get_financial_metrics():
     conn = get_connection()
     try:
@@ -788,6 +893,10 @@ def show_onboarding_payment():
 # ==========================================
 def show_inventory(company_key, role):
     st.header("📦 Inventory Management")
+    success_key = f"inventory_add_success_{company_key}"
+    if st.session_state.get(success_key):
+        st.success("Item added successfully!")
+        st.session_state.pop(success_key, None)
 
     tabs = st.tabs(["Stock Overview", "Stock In/Out", "Items Management"])
 
@@ -815,6 +924,15 @@ def show_inventory(company_key, role):
 
             if not df.empty:
                 st.dataframe(df, use_container_width=True)
+                excel_bin = get_excel_bin(df)
+                if excel_bin:
+                    st.download_button(
+                        "Export to Excel",
+                        data=excel_bin,
+                        file_name=f"inventory_{company_key}.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        key=f"inventory_export_{company_key}",
+                    )
                 col1, col2, col3 = st.columns(3)
                 col1.metric("Total Items", len(df))
                 col2.metric("Total Value", f"GH₵ {df['total_value'].sum():,.2f}")
@@ -833,7 +951,7 @@ def show_inventory(company_key, role):
         if role == "Demo":
             st.info("Items management is disabled in Demo mode.")
             return
-        with st.form("add_inventory_form"):
+        with st.form("add_inventory_form", clear_on_submit=True):
             item_name = st.text_input("Item Name")
             category = st.text_input("Category")
             qty = st.number_input("Quantity", min_value=0.0, value=0.0)
@@ -849,10 +967,26 @@ def show_inventory(company_key, role):
                     )
                     conn.commit()
                     conn.close()
-                    st.success(f"Item '{item_name}' added successfully.")
+                    st.session_state[success_key] = True
                     st.rerun()
                 except Exception as e:
                     st.error(f"Error adding item: {e}")
+
+        import_file = st.file_uploader(
+            "Import from Excel",
+            type=["xlsx"],
+            key=f"inventory_import_{company_key}",
+        )
+        if import_file and st.button("Import Inventory File", key=f"inventory_import_btn_{company_key}"):
+            try:
+                conn = get_connection()
+                added_rows = _import_inventory_from_excel(conn, company_key, import_file)
+                conn.commit()
+                conn.close()
+                st.success(f"Imported {added_rows} new inventory row(s).")
+                st.rerun()
+            except Exception as exc:
+                st.error(f"Inventory import failed: {exc}")
 
 
 # ==========================================
@@ -1053,6 +1187,7 @@ def show_company_setup(company_key, company_name, role):
 # ==========================================
 def show_pos(company_key, company_name, role):
     st.header("🛒 Point of Sale")
+    receipt_key = f"pos_receipt_{company_key}"
     if role == "Demo":
         _demo_notice()
         st.info("Demo POS: Select items and process a mock sale.")
@@ -1064,46 +1199,100 @@ def show_pos(company_key, company_name, role):
 
     try:
         conn = get_connection()
+        company_row = conn.execute("SELECT name FROM companies WHERE key = ?", (company_key,)).fetchone()
         items = conn.execute(
             "SELECT id, item_name, price, qty FROM inventory WHERE company_key = ? AND qty > 0",
             (company_key,),
         ).fetchall()
         conn.close()
 
-        if not items:
-            st.info("No stock available for sale. Please add inventory items first.")
-            return
+        company_label = company_row[0] if company_row else company_name
+        item_mode = st.radio(
+            "Item Entry Mode",
+            ["From Stock", "Manual Entry"],
+            horizontal=True,
+            key=f"pos_item_mode_{company_key}",
+        )
 
-        items_df = pd.DataFrame(items, columns=["ID", "Item Name", "Price", "Qty"])
-        selected_item = st.selectbox("Select Item", items_df["Item Name"].tolist())
-        qty_to_sell = st.number_input("Quantity", min_value=1, value=1)
-        payment_method = st.selectbox("Payment Method", ["Cash", "Mobile Money", "Bank Transfer", "Cheque"])
-
-        if st.button("Process Sale"):
+        items_df = pd.DataFrame(items, columns=["ID", "Item Name", "Price", "Qty"]) if items else pd.DataFrame()
+        if item_mode == "From Stock":
+            if items_df.empty:
+                st.info("No stock available for sale. Switch to Manual Entry to continue.")
+                return
+            selected_item = st.selectbox("Select Item", items_df["Item Name"].tolist(), key=f"pos_item_{company_key}")
+            qty_to_sell = st.number_input("Quantity", min_value=1, value=1, key=f"pos_qty_{company_key}")
             item_row = items_df.loc[items_df["Item Name"] == selected_item].iloc[0]
-            total = float(item_row["Price"]) * qty_to_sell
-            if qty_to_sell > item_row["Qty"]:
+            line_items = [{"name": selected_item, "qty": qty_to_sell, "price": float(item_row["Price"])}]
+            inventory_item_id = int(item_row["ID"])
+            available_qty = float(item_row["Qty"])
+        else:
+            selected_item = st.text_input("New Item Name", key=f"manual_pos_item_{company_key}")
+            manual_price = st.number_input("Manual Price (GH₵)", min_value=0.0, value=0.0, key=f"manual_pos_price_{company_key}")
+            qty_to_sell = st.number_input("Quantity", min_value=1, value=1, key=f"manual_pos_qty_{company_key}")
+            line_items = [{"name": selected_item, "qty": qty_to_sell, "price": float(manual_price)}]
+            inventory_item_id = None
+            available_qty = None
+
+        payment_method = st.selectbox("Payment Method", ["Cash", "Mobile Money", "Bank Transfer", "Cheque"])
+        total = sum(item["qty"] * item["price"] for item in line_items)
+
+        def process_pos_sale(print_receipt=False):
+            if not selected_item or total <= 0:
+                st.warning("Enter a valid item and price before processing the sale.")
+                return
+            if inventory_item_id is not None and qty_to_sell > available_qty:
                 st.error("Insufficient stock.")
-            else:
-                try:
-                    conn = get_connection()
+                return
+
+            try:
+                conn = get_connection()
+                if inventory_item_id is not None:
                     conn.execute(
                         "UPDATE inventory SET qty = qty - ? WHERE id = ? AND company_key = ?",
-                        (qty_to_sell, int(item_row["ID"]), company_key),
+                        (qty_to_sell, inventory_item_id, company_key),
                     )
-                    conn.execute(
-                        """INSERT INTO vouchers (company_key, date, v_type, ledger, credit, payment_method, narration, created_by)
-                           VALUES (?, ?, 'Sales', 'Sales Revenue', ?, ?, ?, ?)""",
-                        (company_key, datetime.now().date().isoformat(), total, payment_method,
-                         f"POS Sale: {selected_item} x{qty_to_sell}", role),
+                conn.execute(
+                    """INSERT INTO vouchers (company_key, date, v_type, ledger, credit, payment_method, narration, created_by)
+                       VALUES (?, ?, 'Sales', 'Sales Revenue', ?, ?, ?, ?)""",
+                    (
+                        company_key,
+                        datetime.now().date().isoformat(),
+                        total,
+                        payment_method,
+                        f"POS Sale: {selected_item} x{qty_to_sell}",
+                        role,
+                    ),
+                )
+                conn.commit()
+                log_audit_action(conn, company_key, role, "POS Sale", "POS", f"Sold {selected_item} x{qty_to_sell} for GH₵{total:.2f}")
+                conn.close()
+                st.success(f"Sale processed! Total: GH₵ {total:,.2f}")
+                if print_receipt:
+                    st.session_state[receipt_key] = _build_receipt(
+                        company_label,
+                        line_items,
+                        total,
+                        datetime.now().strftime("%Y-%m-%d %H:%M"),
                     )
-                    conn.commit()
-                    log_audit_action(conn, company_key, role, "POS Sale", "POS", f"Sold {selected_item} x{qty_to_sell} for GH₵{total:.2f}")
-                    conn.close()
-                    st.success(f"Sale processed! Total: GH₵ {total:,.2f}")
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"Error processing sale: {e}")
+            except Exception as e:
+                st.error(f"Error processing sale: {e}")
+
+        btn_col1, btn_col2 = st.columns(2)
+        if btn_col1.button("Process Sale", key=f"process_sale_{company_key}"):
+            process_pos_sale(print_receipt=False)
+        if btn_col2.button("Save and Print", key=f"save_print_sale_{company_key}"):
+            process_pos_sale(print_receipt=True)
+
+        if st.session_state.get(receipt_key):
+            st.subheader("Receipt Preview")
+            st.code(st.session_state[receipt_key], language="text")
+            st.download_button(
+                "Download Receipt",
+                data=st.session_state[receipt_key],
+                file_name=f"receipt_{company_key}.txt",
+                mime="text/plain",
+                key=f"receipt_download_{company_key}",
+            )
     except Exception as e:
         st.error(f"POS Error: {e}")
 
@@ -1174,10 +1363,35 @@ def show_sales_purchase(company_key, role, doc_type="Sales"):
         if data:
             df = pd.DataFrame(data, columns=["Date", "Description", "Amount (GH₵)"])
             st.dataframe(df, use_container_width=True)
+            excel_bin = get_excel_bin(df)
+            if excel_bin:
+                st.download_button(
+                    "Export to Excel",
+                    data=excel_bin,
+                    file_name=f"{doc_type.lower()}_{company_key}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    key=f"{doc_type.lower()}_export_{company_key}",
+                )
         else:
             st.info(f"No {doc_type} records found.")
     except Exception as e:
         st.error(f"Error loading {doc_type} records: {e}")
+
+    import_file = st.file_uploader(
+        f"Import {doc_type} from Excel",
+        type=["xlsx"],
+        key=f"{doc_type.lower()}_import_{company_key}",
+    )
+    if import_file and st.button(f"Import {doc_type} File", key=f"{doc_type.lower()}_import_btn_{company_key}"):
+        try:
+            conn = get_connection()
+            added_rows = _import_sales_from_excel(conn, company_key, doc_type, import_file, role)
+            conn.commit()
+            conn.close()
+            st.success(f"Imported {added_rows} new {doc_type.lower()} row(s).")
+            st.rerun()
+        except Exception as exc:
+            st.error(f"{doc_type} import failed: {exc}")
 
 
 # ==========================================
