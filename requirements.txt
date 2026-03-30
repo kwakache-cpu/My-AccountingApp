@@ -4,3 +4,5 @@ streamlit
 groq
 pandas
 python-dateutil
+pyzbar
+opencv-python-headless

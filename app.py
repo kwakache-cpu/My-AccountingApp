@@ -52,6 +52,7 @@ def init_db():
     """Force the requested tables in app.py before the app starts."""
     check_and_repair_db()
     base_init_db()
+    check_and_repair_db()
 
     conn = None
     try:

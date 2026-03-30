@@ -37,7 +37,7 @@ def ensure_schema_integrity(conn):
         "audit_logs": {"details": "TEXT"},
         "vouchers": {"status": "TEXT DEFAULT 'Active'"},
         "payroll": {"status": "TEXT DEFAULT 'Active'"},
-        "inventory": {"opening_balance": "REAL DEFAULT 0"},
+        "inventory": {"opening_balance": "REAL DEFAULT 0", "barcode": "TEXT"},
         "fixed_assets": {"opening_book_value": "REAL DEFAULT 0"},
     }
 
@@ -47,6 +47,11 @@ def ensure_schema_integrity(conn):
         for column_name, column_def in columns.items():
             if column_name not in existing_columns:
                 cursor.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_def}")
+
+    cursor.execute("PRAGMA table_info(stock)")
+    stock_columns = {row[1] for row in cursor.fetchall()}
+    if stock_columns and "barcode" not in stock_columns:
+        cursor.execute("ALTER TABLE stock ADD COLUMN barcode TEXT")
 
 
 def check_and_repair_db():
@@ -161,6 +166,7 @@ def init_db():
         inventory_column_defs = {
             "company_key": "TEXT",
             "item_code": "TEXT",
+            "barcode": "TEXT",
             "category": "TEXT",
             "description": "TEXT",
             "opening_balance": "REAL DEFAULT 0",
@@ -183,6 +189,7 @@ def init_db():
         # Indexes for fast product searching
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_inv_comp ON inventory(company_key);")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_inv_name ON inventory(item_name);")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_inv_barcode ON inventory(barcode);")
 
         # --- TABLE 3: FINANCIAL VOUCHERS & GENERAL LEDGER ---
         # Central ledger for POS sales, expenses, and journals

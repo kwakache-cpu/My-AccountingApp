@@ -3,14 +3,27 @@ import os
 import random
 import hashlib
 import sqlite3
+import base64
 from datetime import datetime, timedelta
 from io import BytesIO
 
 import pandas as pd
 import requests
 import streamlit as st
+import streamlit.components.v1 as components
 from dateutil.relativedelta import relativedelta
 from groq import Groq
+from PIL import Image
+
+try:
+    from pyzbar import pyzbar
+except ImportError:
+    pyzbar = None
+
+try:
+    import cv2
+except ImportError:
+    cv2 = None
 
 # Setup Logger
 logger = logging.getLogger(__name__)
@@ -465,10 +478,12 @@ def _import_inventory_from_excel(conn, company_key, file_obj):
             continue
         category = str(row[column_map["category"]]).strip()
         opening_column = column_map.get("opening_stock") or column_map.get("opening_balance")
+        barcode_column = column_map.get("barcode")
         qty = float(row[column_map["quantity"]] or 0)
         opening_balance = float(row[opening_column] or qty) if opening_column else qty
         price_column = column_map.get("selling_price") or column_map.get("unit_price") or column_map.get("price")
         cost_column = column_map.get("cost_price")
+        barcode = str(row[barcode_column]).strip() if barcode_column and not pd.isna(row[barcode_column]) else ""
         price = float(row[price_column] or 0) if price_column else 0.0
         cost_price = float(row[cost_column] or 0) if cost_column else 0.0
         if row_id is not None:
@@ -480,10 +495,10 @@ def _import_inventory_from_excel(conn, company_key, file_obj):
                 conn.execute(
                     """
                     UPDATE inventory
-                    SET item_name = ?, category = ?, opening_balance = ?, qty = ?, price = ?, cost_price = ?
+                    SET item_name = ?, barcode = ?, category = ?, opening_balance = ?, qty = ?, price = ?, cost_price = ?
                     WHERE company_key = ? AND id = ?
                     """,
-                    (item_name, category, opening_balance, qty, price, cost_price, company_key, int(row_id)),
+                    (item_name, barcode, category, opening_balance, qty, price, cost_price, company_key, int(row_id)),
                 )
                 changed_rows += 1
                 continue
@@ -498,22 +513,182 @@ def _import_inventory_from_excel(conn, company_key, file_obj):
             conn.execute(
                 """
                 UPDATE inventory
-                SET opening_balance = ?, qty = ?, price = ?, cost_price = ?
+                SET barcode = COALESCE(NULLIF(?, ''), barcode), opening_balance = ?, qty = ?, price = ?, cost_price = ?
                 WHERE company_key = ? AND id = ?
                 """,
-                (opening_balance, qty, price, cost_price, company_key, existing["id"]),
+                (barcode, opening_balance, qty, price, cost_price, company_key, existing["id"]),
             )
             changed_rows += 1
             continue
         conn.execute(
             """
-            INSERT INTO inventory (company_key, item_name, category, opening_balance, qty, price, cost_price)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO inventory (company_key, item_name, barcode, category, opening_balance, qty, price, cost_price)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (company_key, item_name, category, opening_balance, qty, price, cost_price),
+            (company_key, item_name, barcode, category, opening_balance, qty, price, cost_price),
         )
         changed_rows += 1
     return changed_rows
+
+
+SCANNER_BEEP_BASE64 = (
+    "UklGRlQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YTAAAAAAAP//AAD//wAA//8AAP//"
+    "AAD//wAA//8AAP//AAD//wAA"
+)
+
+
+def _set_input_pending(source_key, pending_key):
+    pending_value = str(st.session_state.get(source_key, "") or "").strip()
+    if pending_value:
+        st.session_state[pending_key] = pending_value
+
+
+def _trigger_scan_feedback(message_key, message, level="success", beep_key=None):
+    st.session_state[message_key] = {"level": level, "text": message}
+    if beep_key:
+        st.session_state[beep_key] = True
+
+
+def _render_flash_message(message_key, beep_key=None):
+    payload = st.session_state.pop(message_key, None)
+    if not payload:
+        return
+    level = payload.get("level", "info")
+    text = payload.get("text", "")
+    getattr(st, level, st.info)(text)
+    if beep_key and st.session_state.pop(beep_key, False):
+        components.html(
+            f"""
+            <audio autoplay>
+                <source src="data:audio/wav;base64,{SCANNER_BEEP_BASE64}" type="audio/wav">
+            </audio>
+            """,
+            height=0,
+        )
+
+
+def _focus_text_input(input_label):
+    components.html(
+        f"""
+        <script>
+        const focusTarget = () => {{
+            const parentDoc = window.parent.document;
+            const input = parentDoc.querySelector('input[aria-label="{input_label}"]');
+            if (input) {{
+                input.focus();
+                input.select();
+            }}
+        }};
+        focusTarget();
+        setTimeout(focusTarget, 150);
+        </script>
+        """,
+        height=0,
+    )
+
+
+def _decode_camera_code(camera_file):
+    if camera_file is None:
+        return None, "Capture an image to scan."
+
+    image_bytes = camera_file.getvalue()
+    image = Image.open(BytesIO(image_bytes)).convert("RGB")
+
+    try:
+        if pyzbar is not None:
+            decoded = pyzbar.decode(image)
+            if decoded:
+                return decoded[0].data.decode("utf-8").strip(), None
+    except Exception:
+        pass
+
+    try:
+        import numpy as np
+
+        if cv2 is not None:
+            image_array = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
+            qr_detector = cv2.QRCodeDetector()
+            decoded_text, _, _ = qr_detector.detectAndDecode(image_array)
+            if decoded_text:
+                return decoded_text.strip(), None
+    except Exception:
+        pass
+
+    if pyzbar is None or cv2 is None:
+        return None, "Scanner module loading... Please ensure dependencies are installed."
+    return None, "Install `pyzbar` or `opencv-python-headless` on the host to decode camera scans."
+
+
+def _render_camera_scanner(module_key, pending_key):
+    toggle_key = f"{module_key}_camera_open"
+    nonce_key = f"{module_key}_camera_nonce"
+    image_sig_key = f"{module_key}_camera_image_sig"
+    button_label = "Close Camera" if st.session_state.get(toggle_key) else "Tap to Scan"
+
+    if st.button(button_label, key=f"{module_key}_camera_toggle_btn"):
+        if pyzbar is None or cv2 is None:
+            st.info("Scanner module loading... Please ensure dependencies are installed.")
+            return
+        st.session_state[toggle_key] = not st.session_state.get(toggle_key, False)
+        if not st.session_state[toggle_key]:
+            st.session_state.pop(image_sig_key, None)
+        st.rerun()
+
+    if not st.session_state.get(toggle_key):
+        return
+
+    nonce = st.session_state.get(nonce_key, 0)
+    camera_file = st.camera_input("Scan with Camera", key=f"{module_key}_camera_input_{nonce}")
+    if camera_file is None:
+        return
+
+    image_signature = f"{camera_file.name}:{len(camera_file.getvalue())}"
+    if image_signature == st.session_state.get(image_sig_key):
+        return
+
+    decoded_value, error_message = _decode_camera_code(camera_file)
+    st.session_state[image_sig_key] = image_signature
+    if decoded_value:
+        st.session_state[pending_key] = decoded_value
+        st.session_state[toggle_key] = False
+        st.session_state[nonce_key] = nonce + 1
+        st.rerun()
+    if error_message:
+        st.info(error_message)
+
+
+def _lookup_inventory_by_barcode(conn, company_key, barcode_value):
+    return conn.execute(
+        """
+        SELECT id, item_name, category, qty, price, cost_price, barcode
+        FROM inventory
+        WHERE company_key = ? AND barcode = ?
+        """,
+        (company_key, barcode_value),
+    ).fetchone()
+
+
+def _add_item_to_pos_cart(company_key, item_row):
+    cart_key = f"pos_cart_{company_key}"
+    cart = st.session_state.setdefault(cart_key, [])
+    item_id = int(item_row["id"])
+    for existing_line in cart:
+        if int(existing_line["inventory_item_id"]) == item_id:
+            existing_line["qty"] += 1
+            existing_line["line_total"] = existing_line["qty"] * existing_line["price"]
+            return
+
+    cart.append(
+        {
+            "inventory_item_id": item_id,
+            "name": item_row["item_name"],
+            "barcode": item_row["barcode"] or "",
+            "price": float(item_row["price"] or 0.0),
+            "available_qty": float(item_row["qty"] or 0.0),
+            "qty": 1,
+            "line_total": float(item_row["price"] or 0.0),
+        }
+    )
 
 
 def _import_sales_from_excel(conn, company_key, doc_type, file_obj, created_by):
@@ -991,12 +1166,74 @@ def show_inventory(company_key, role):
     st.header("📦 Inventory Management")
     success_key = f"inventory_add_success_{company_key}"
     delete_success_key = f"inventory_delete_success_{company_key}"
+    inventory_message_key = f"inventory_message_{company_key}"
+    inventory_scan_beep_key = f"inventory_scan_beep_{company_key}"
+    inventory_scan_input_key = f"inventory_scan_input_{company_key}"
+    inventory_pending_scan_key = f"inventory_pending_scan_{company_key}"
+    inventory_new_barcode_key = f"inventory_new_barcode_{company_key}"
     if st.session_state.get(success_key):
-        st.success("Item added successfully!")
+        _trigger_scan_feedback(inventory_message_key, "Item added successfully!")
         st.session_state.pop(success_key, None)
     if st.session_state.get(delete_success_key):
-        st.success("Item deleted")
+        _trigger_scan_feedback(inventory_message_key, "Item deleted")
         st.session_state.pop(delete_success_key, None)
+
+    _render_flash_message(inventory_message_key, inventory_scan_beep_key)
+    st.text_input(
+        "Scan Barcode",
+        key=inventory_scan_input_key,
+        placeholder="Scan or type a barcode and press Enter",
+        on_change=_set_input_pending,
+        args=(inventory_scan_input_key, inventory_pending_scan_key),
+    )
+    _render_camera_scanner(f"inventory_{company_key}", inventory_pending_scan_key)
+
+    pending_inventory_barcode = str(st.session_state.get(inventory_pending_scan_key, "") or "").strip()
+    if pending_inventory_barcode and role != "Demo":
+        conn = None
+        try:
+            conn = get_connection()
+            matched_item = _lookup_inventory_by_barcode(conn, company_key, pending_inventory_barcode)
+            if matched_item:
+                updated_qty = float(matched_item["qty"] or 0) + 1
+                conn.execute(
+                    """
+                    UPDATE inventory
+                    SET qty = COALESCE(qty, 0) + 1, updated_at = CURRENT_TIMESTAMP
+                    WHERE id = ? AND company_key = ?
+                    """,
+                    (int(matched_item["id"]), company_key),
+                )
+                conn.commit()
+                log_audit_action(
+                    conn,
+                    company_key,
+                    role,
+                    "Inventory Barcode Scan",
+                    "Inventory",
+                    f"Incremented {matched_item['item_name']} via barcode {pending_inventory_barcode}",
+                )
+                _trigger_scan_feedback(
+                    inventory_message_key,
+                    f"{matched_item['item_name']} quantity increased to {updated_qty:,.2f}.",
+                    "success",
+                    inventory_scan_beep_key,
+                )
+            else:
+                st.session_state[inventory_new_barcode_key] = pending_inventory_barcode
+                _trigger_scan_feedback(
+                    inventory_message_key,
+                    f"Barcode {pending_inventory_barcode} is new. Enter the item name and prices below to save it.",
+                    "info",
+                )
+        except Exception as exc:
+            st.error(f"Inventory barcode scan failed: {exc}")
+        finally:
+            if conn:
+                conn.close()
+            st.session_state.pop(inventory_pending_scan_key, None)
+            st.session_state[inventory_scan_input_key] = ""
+            st.rerun()
 
     tabs = st.tabs(["Stock Overview", "Stock In/Out", "Items Management"])
 
@@ -1007,6 +1244,7 @@ def show_inventory(company_key, role):
             if role == "Demo":
                 df = pd.DataFrame({
                     "item_code": ["INV-001", "INV-002"],
+                    "barcode": ["1234567890123", "0987654321098"],
                     "item_name": ["Product A", "Product B"],
                     "category": ["General", "General"],
                     "quantity": [50, 8],
@@ -1015,7 +1253,7 @@ def show_inventory(company_key, role):
                 })
             else:
                 query = """
-                    SELECT id, item_code, item_name, category, opening_balance, qty as quantity,
+                    SELECT id, item_code, barcode, item_name, category, opening_balance, qty as quantity,
                            price as unit_price, cost_price, (qty * cost_price) as total_value
                     FROM inventory WHERE company_key = ?
                 """
@@ -1044,7 +1282,7 @@ def show_inventory(company_key, role):
                     for _, stock_row in df.iterrows():
                         name_col, edit_col, delete_col = st.columns([4, 1, 1])
                         name_col.caption(
-                            f"{stock_row['item_name']} | Qty {float(stock_row['quantity']):,.2f} | "
+                            f"{stock_row['item_name']} | Barcode {stock_row.get('barcode') or 'N/A'} | Qty {float(stock_row['quantity']):,.2f} | "
                             f"Sell GH₵ {float(stock_row['unit_price']):,.2f}"
                         )
                         if edit_col.button("Edit", key=f"inventory_edit_btn_{company_key}_{int(stock_row['id'])}"):
@@ -1073,6 +1311,7 @@ def show_inventory(company_key, role):
                     edit_item_id = st.session_state.get(selected_edit_key, int(df["id"].iloc[0]))
                     edit_row = df.loc[df["id"] == edit_item_id].iloc[0]
                     with st.form(f"inventory_edit_form_{company_key}_{edit_item_id}", clear_on_submit=True):
+                        edit_barcode = st.text_input("Barcode", value=str(edit_row.get("barcode") or ""))
                         edit_category = st.text_input("Category", value=str(edit_row["category"] or ""))
                         edit_qty = st.number_input("Quantity", min_value=0.0, value=float(edit_row["quantity"] or 0.0))
                         edit_price = st.number_input("Selling Price (GH₵)", min_value=0.0, value=float(edit_row["unit_price"] or 0.0))
@@ -1083,10 +1322,10 @@ def show_inventory(company_key, role):
                                 conn.execute(
                                     """
                                     UPDATE inventory
-                                    SET category = ?, qty = ?, price = ?, cost_price = ?
+                                    SET barcode = ?, category = ?, qty = ?, price = ?, cost_price = ?, updated_at = CURRENT_TIMESTAMP
                                     WHERE id = ? AND company_key = ?
                                     """,
-                                    (edit_category, edit_qty, edit_price, edit_cost_price, int(edit_item_id), company_key),
+                                    (edit_barcode.strip(), edit_category, edit_qty, edit_price, edit_cost_price, int(edit_item_id), company_key),
                                 )
                                 conn.commit()
                                 log_audit_action(conn, company_key, role, "Inventory Item Updated", "Inventory", f"Updated item ID {int(edit_item_id)}")
@@ -1111,6 +1350,7 @@ def show_inventory(company_key, role):
             st.info("Items management is disabled in Demo mode.")
             return
         with st.form("add_inventory_form", clear_on_submit=True):
+            barcode = st.text_input("New Barcode", value=str(st.session_state.get(inventory_new_barcode_key, "") or ""))
             item_name = st.text_input("Item Name")
             category = st.text_input("Category")
             opening_stock = st.number_input("Opening Stock Quantity", min_value=0.0, value=0.0)
@@ -1120,15 +1360,23 @@ def show_inventory(company_key, role):
             if submitted and item_name:
                 try:
                     conn = get_connection()
+                    normalized_barcode = barcode.strip()
+                    if normalized_barcode:
+                        existing_barcode = _lookup_inventory_by_barcode(conn, company_key, normalized_barcode)
+                        if existing_barcode:
+                            st.error(f"Barcode {normalized_barcode} is already assigned to {existing_barcode['item_name']}.")
+                            conn.close()
+                            return
                     conn.execute(
                         """
-                        INSERT INTO inventory (company_key, item_name, category, opening_balance, qty, price, cost_price)
-                        VALUES (?, ?, ?, ?, ?, ?, ?)
+                        INSERT INTO inventory (company_key, item_name, barcode, category, opening_balance, qty, price, cost_price)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                         """,
-                        (company_key, item_name, category, opening_stock, opening_stock, price, cost_price),
+                        (company_key, item_name, normalized_barcode, category, opening_stock, opening_stock, price, cost_price),
                     )
                     conn.commit()
                     conn.close()
+                    st.session_state.pop(inventory_new_barcode_key, None)
                     st.session_state[success_key] = True
                     st.rerun()
                 except Exception as e:
@@ -1420,102 +1668,212 @@ def show_company_setup(company_key, company_name, role):
 # POINT OF SALE (POS)
 # ==========================================
 def show_pos(company_key, company_name, role):
-    st.header("🛒 Point of Sale")
+    st.header("???? Point of Sale")
     receipt_key = f"pos_receipt_{company_key}"
-    draft_key = f"pos_draft_{company_key}"
     pos_success_key = f"pos_sale_success_{company_key}"
     void_success_key = f"pos_void_success_{company_key}"
+    pos_message_key = f"pos_message_{company_key}"
+    pos_scan_beep_key = f"pos_scan_beep_{company_key}"
+    pos_scan_input_key = f"pos_scan_input_{company_key}"
+    pos_pending_scan_key = f"pos_pending_scan_{company_key}"
+    cart_key = f"pos_cart_{company_key}"
     if role == "Demo":
         _demo_notice()
         st.info("Demo POS: Select items and process a mock sale.")
-        demo_items = ["Product A - GH₵ 120.00", "Product B - GH₵ 75.00", "Product C - GH₵ 200.00"]
+        demo_items = ["Product A - GH??? 120.00", "Product B - GH??? 75.00", "Product C - GH??? 200.00"]
         selected = st.multiselect("Select Items", demo_items)
         if selected:
-            st.success(f"Demo sale: {len(selected)} item(s) selected. Total: GH₵ {len(selected) * 120:.2f}")
+            st.success(f"Demo sale: {len(selected)} item(s) selected. Total: GH??? {len(selected) * 120:.2f}")
         return
 
     if st.session_state.get(pos_success_key):
-        st.success("Sale processed successfully.")
+        _trigger_scan_feedback(pos_message_key, "Sale processed successfully.")
         st.session_state.pop(pos_success_key, None)
     if st.session_state.get(void_success_key):
-        st.success("Transaction voided")
+        _trigger_scan_feedback(pos_message_key, "Transaction voided")
         st.session_state.pop(void_success_key, None)
+
+    _render_flash_message(pos_message_key, pos_scan_beep_key)
 
     try:
         conn = get_connection()
         company_row = conn.execute("SELECT name FROM companies WHERE key = ?", (company_key,)).fetchone()
         items = conn.execute(
-            "SELECT id, item_name, price, qty FROM inventory WHERE company_key = ? AND qty > 0",
+            "SELECT id, item_name, barcode, price, qty FROM inventory WHERE company_key = ? AND qty > 0",
             (company_key,),
         ).fetchall()
         conn.close()
 
         company_label = company_row[0] if company_row else company_name
+        items_df = pd.DataFrame(items, columns=["ID", "Item Name", "Barcode", "Price", "Qty"]) if items else pd.DataFrame()
+
+        st.caption("Scanner-ready checkout")
+        st.text_input(
+            "Barcode Search",
+            key=pos_scan_input_key,
+            placeholder="Scan barcode and the item will be added to the cart",
+            label_visibility="collapsed",
+            on_change=_set_input_pending,
+            args=(pos_scan_input_key, pos_pending_scan_key),
+        )
+        _focus_text_input("Barcode Search")
+        _render_camera_scanner(f"pos_{company_key}", pos_pending_scan_key)
+
+        pending_pos_barcode = str(st.session_state.get(pos_pending_scan_key, "") or "").strip()
+        if pending_pos_barcode:
+            conn = None
+            try:
+                conn = get_connection()
+                matched_item = _lookup_inventory_by_barcode(conn, company_key, pending_pos_barcode)
+                if matched_item and float(matched_item["qty"] or 0) > 0:
+                    _add_item_to_pos_cart(company_key, matched_item)
+                    _trigger_scan_feedback(
+                        pos_message_key,
+                        f"Added {matched_item['item_name']} to the active sale.",
+                        "success",
+                        pos_scan_beep_key,
+                    )
+                else:
+                    _trigger_scan_feedback(
+                        pos_message_key,
+                        f"No in-stock item found for barcode {pending_pos_barcode}.",
+                        "warning",
+                    )
+            except Exception as exc:
+                st.error(f"POS barcode scan failed: {exc}")
+            finally:
+                if conn:
+                    conn.close()
+                st.session_state.pop(pos_pending_scan_key, None)
+                st.session_state[pos_scan_input_key] = ""
+                st.rerun()
+
         item_mode = st.radio(
             "Item Entry Mode",
             ["From Stock", "Manual Entry"],
             horizontal=True,
             key=f"pos_item_mode_{company_key}",
         )
-
-        items_df = pd.DataFrame(items, columns=["ID", "Item Name", "Price", "Qty"]) if items else pd.DataFrame()
         if item_mode == "From Stock":
             if items_df.empty:
                 st.info("No stock available for sale. Switch to Manual Entry to continue.")
-                return
-            selected_item = st.selectbox("Select Item", items_df["Item Name"].tolist(), key=f"pos_item_{company_key}")
-            qty_to_sell = st.number_input("Quantity", min_value=1, value=1, key=f"pos_qty_{company_key}")
-            item_row = items_df.loc[items_df["Item Name"] == selected_item].iloc[0]
-            line_items = [{"name": selected_item, "qty": qty_to_sell, "price": float(item_row["Price"])}]
-            inventory_item_id = int(item_row["ID"])
-            available_qty = float(item_row["Qty"])
+            else:
+                selected_item = st.selectbox("Select Item", items_df["Item Name"].tolist(), key=f"pos_item_{company_key}")
+                qty_to_sell = st.number_input("Quantity", min_value=1, value=1, key=f"pos_qty_{company_key}")
+                if st.button("Add Selected Item", key=f"pos_add_selected_{company_key}"):
+                    item_row = items_df.loc[items_df["Item Name"] == selected_item].iloc[0]
+                    for _ in range(int(qty_to_sell)):
+                        _add_item_to_pos_cart(
+                            company_key,
+                            {
+                                "id": int(item_row["ID"]),
+                                "item_name": item_row["Item Name"],
+                                "barcode": item_row["Barcode"],
+                                "price": float(item_row["Price"] or 0.0),
+                                "qty": float(item_row["Qty"] or 0.0),
+                            },
+                        )
+                    _trigger_scan_feedback(pos_message_key, f"Added {selected_item} x{int(qty_to_sell)} to the cart.")
+                    st.rerun()
         else:
             selected_item = st.text_input("New Item Name", key=f"manual_pos_item_{company_key}")
-            manual_price = st.number_input("Manual Price (GH₵)", min_value=0.0, value=0.0, key=f"manual_pos_price_{company_key}")
+            manual_price = st.number_input("Manual Price (GH???)", min_value=0.0, value=0.0, key=f"manual_pos_price_{company_key}")
             qty_to_sell = st.number_input("Quantity", min_value=1, value=1, key=f"manual_pos_qty_{company_key}")
-            line_items = [{"name": selected_item, "qty": qty_to_sell, "price": float(manual_price)}]
-            inventory_item_id = None
-            available_qty = None
+            if st.button("Add Manual Item", key=f"pos_add_manual_{company_key}"):
+                if selected_item and float(manual_price) > 0:
+                    cart = st.session_state.setdefault(cart_key, [])
+                    cart.append(
+                        {
+                            "inventory_item_id": None,
+                            "name": selected_item.strip(),
+                            "barcode": "",
+                            "price": float(manual_price),
+                            "available_qty": None,
+                            "qty": int(qty_to_sell),
+                            "line_total": int(qty_to_sell) * float(manual_price),
+                        }
+                    )
+                    _trigger_scan_feedback(pos_message_key, f"Added manual item {selected_item.strip()} to the cart.")
+                    st.rerun()
+                st.warning("Enter a valid manual item and price before adding it.")
 
         payment_method = st.selectbox("Payment Method", ["Cash", "Mobile Money", "Bank Transfer", "Cheque"])
-        total = sum(item["qty"] * item["price"] for item in line_items)
+        cart = st.session_state.setdefault(cart_key, [])
+        if cart:
+            cart_df = pd.DataFrame(
+                [
+                    {
+                        "Item": row["name"],
+                        "Barcode": row.get("barcode") or "",
+                        "Qty": row["qty"],
+                        "Unit Price": row["price"],
+                        "Line Total": row["qty"] * row["price"],
+                    }
+                    for row in cart
+                ]
+            )
+            st.subheader("Active Sale Cart")
+            st.dataframe(cart_df, use_container_width=True)
+            st.metric("Cart Total", f"GH??? {cart_df['Line Total'].sum():,.2f}")
+            remove_choice = st.selectbox(
+                "Remove Cart Line",
+                ["Keep all items"] + [f"{index + 1}. {line['name']} x{line['qty']}" for index, line in enumerate(cart)],
+                key=f"pos_remove_line_{company_key}",
+            )
+            remove_col, clear_col = st.columns(2)
+            if remove_col.button("Remove Selected Line", key=f"pos_remove_selected_{company_key}") and remove_choice != "Keep all items":
+                remove_index = int(remove_choice.split(".", 1)[0]) - 1
+                cart.pop(remove_index)
+                st.rerun()
+            if clear_col.button("Clear Cart", key=f"pos_clear_cart_{company_key}"):
+                st.session_state[cart_key] = []
+                st.rerun()
+        else:
+            st.info("Scan a barcode or add an item manually to start the sale.")
 
         def process_pos_sale(print_receipt=False):
-            sale_payload = st.session_state.get(
-                draft_key,
-                {
-                    "selected_item": selected_item,
-                    "qty": qty_to_sell,
-                    "total": total,
-                    "line_items": line_items,
-                    "inventory_item_id": inventory_item_id,
-                    "available_qty": available_qty,
-                    "payment_method": payment_method,
-                },
-            )
-            if not sale_payload["selected_item"] or float(sale_payload["total"]) <= 0:
-                st.warning("Enter a valid item and price before processing the sale.")
-                return
-            if sale_payload["inventory_item_id"] is not None and float(sale_payload["qty"]) > float(sale_payload["available_qty"]):
-                st.error("Insufficient stock.")
+            sale_cart = st.session_state.get(cart_key, [])
+            if not sale_cart:
+                st.warning("Add at least one item to the cart before processing the sale.")
                 return
 
             try:
                 conn = get_connection()
-                if sale_payload["inventory_item_id"] is not None:
-                    conn.execute(
-                        "UPDATE inventory SET qty = qty - ? WHERE id = ? AND company_key = ?",
-                        (sale_payload["qty"], sale_payload["inventory_item_id"], company_key),
+                line_items = []
+                total = 0.0
+                for sale_line in sale_cart:
+                    line_items.append(
+                        {
+                            "name": sale_line["name"],
+                            "qty": sale_line["qty"],
+                            "price": sale_line["price"],
+                        }
                     )
+                    total += float(sale_line["qty"]) * float(sale_line["price"])
+                    if sale_line["inventory_item_id"] is not None:
+                        current_item = conn.execute(
+                            "SELECT qty FROM inventory WHERE id = ? AND company_key = ?",
+                            (int(sale_line["inventory_item_id"]), company_key),
+                        ).fetchone()
+                        current_qty = float(current_item["qty"] or 0) if current_item else 0.0
+                        if float(sale_line["qty"]) > current_qty:
+                            st.error(f"Insufficient stock for {sale_line['name']}.")
+                            conn.close()
+                            return
+                        conn.execute(
+                            "UPDATE inventory SET qty = qty - ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND company_key = ?",
+                            (sale_line["qty"], int(sale_line["inventory_item_id"]), company_key),
+                        )
+                narration = ", ".join(f"{item['name']} x{item['qty']}" for item in line_items)
                 conn.execute(
                     """INSERT INTO vouchers (company_key, date, v_type, ledger, credit, payment_method, narration, status, created_by)
                        VALUES (?, ?, 'Sales', 'Sales Revenue', ?, ?, ?, 'Active', ?)""",
                     (
                         company_key,
                         datetime.now().date().isoformat(),
-                        sale_payload["total"],
-                        sale_payload["payment_method"],
-                        f"POS Sale: {sale_payload['selected_item']} x{sale_payload['qty']}",
+                        total,
+                        payment_method,
+                        f"POS Sale: {narration}",
                         role,
                     ),
                 )
@@ -1526,90 +1884,35 @@ def show_pos(company_key, company_name, role):
                     role,
                     "POS Sale",
                     "POS",
-                    f"Sold {sale_payload['selected_item']} x{sale_payload['qty']} for GH₵{float(sale_payload['total']):.2f}",
+                    f"Sold {narration} for GH???{float(total):.2f}",
                 )
                 conn.close()
-                st.success(f"Sale processed! Total: GH₵ {float(sale_payload['total']):,.2f}")
                 if print_receipt:
                     st.session_state[receipt_key] = _build_receipt(
                         company_label,
-                        sale_payload["line_items"],
-                        sale_payload["total"],
+                        line_items,
+                        total,
                         datetime.now().strftime("%Y-%m-%d %H:%M"),
                     )
+                st.session_state[cart_key] = []
+                st.session_state[pos_success_key] = True
                 _clear_streamlit_state(
-                    draft_key,
-                    f"pos_item_mode_{company_key}",
                     f"pos_item_{company_key}",
                     f"pos_qty_{company_key}",
                     f"manual_pos_item_{company_key}",
                     f"manual_pos_price_{company_key}",
                     f"manual_pos_qty_{company_key}",
+                    pos_scan_input_key,
                 )
                 st.rerun()
             except Exception as e:
                 st.error(f"Error processing sale: {e}")
 
-        if st.button("Review Transaction", key=f"review_sale_{company_key}"):
-            st.session_state[draft_key] = {
-                "selected_item": selected_item,
-                "qty": qty_to_sell,
-                "total": total,
-                "line_items": line_items,
-                "inventory_item_id": inventory_item_id,
-                "available_qty": available_qty,
-                "payment_method": payment_method,
-            }
-
-        draft_sale = st.session_state.get(draft_key)
-        if draft_sale:
-            st.subheader("Pending Transaction Review")
-            with st.form(f"pos_review_form_{company_key}"):
-                review_item = st.text_input("Item", value=str(draft_sale["selected_item"]))
-                review_qty = st.number_input("Quantity", min_value=1, value=int(draft_sale["qty"]))
-                review_price = st.number_input(
-                    "Unit Price (GH₵)",
-                    min_value=0.0,
-                    value=float(draft_sale["line_items"][0]["price"]),
-                )
-                review_payment_method = st.selectbox(
-                    "Payment Method",
-                    ["Cash", "Mobile Money", "Bank Transfer", "Cheque"],
-                    index=["Cash", "Mobile Money", "Bank Transfer", "Cheque"].index(draft_sale["payment_method"]),
-                )
-                review_total = float(review_qty) * float(review_price)
-                st.caption(f"Review Total: GH₵ {review_total:,.2f}")
-                save_review = st.form_submit_button("Update Draft")
-                if save_review:
-                    draft_sale.update(
-                        {
-                            "selected_item": review_item,
-                            "qty": review_qty,
-                            "payment_method": review_payment_method,
-                            "total": review_total,
-                            "line_items": [{"name": review_item, "qty": review_qty, "price": review_price}],
-                        }
-                    )
-                    st.session_state[draft_key] = draft_sale
-                    st.success("Draft transaction updated.")
-
-            action_col1, action_col2, action_col3 = st.columns(3)
-            if action_col1.button("Void Transaction", key=f"void_sale_{company_key}"):
-                _clear_streamlit_state(
-                    draft_key,
-                    f"pos_item_mode_{company_key}",
-                    f"pos_item_{company_key}",
-                    f"pos_qty_{company_key}",
-                    f"manual_pos_item_{company_key}",
-                    f"manual_pos_price_{company_key}",
-                    f"manual_pos_qty_{company_key}",
-                )
-                st.warning("Pending transaction voided.")
-                st.rerun()
-            if action_col2.button("Process Sale", key=f"process_sale_{company_key}"):
-                process_pos_sale(print_receipt=False)
-            if action_col3.button("Save and Print", key=f"save_print_sale_{company_key}"):
-                process_pos_sale(print_receipt=True)
+        action_col1, action_col2 = st.columns(2)
+        if action_col1.button("Process Sale", key=f"process_sale_{company_key}"):
+            process_pos_sale(print_receipt=False)
+        if action_col2.button("Save and Print", key=f"save_print_sale_{company_key}"):
+            process_pos_sale(print_receipt=True)
 
         st.subheader("Recent POS Transactions")
         conn = get_connection()
@@ -1632,7 +1935,7 @@ def show_pos(company_key, company_name, role):
                 for _, sale_row in sales_df.iterrows():
                     info_col, action_col = st.columns([4, 1])
                     info_col.caption(
-                        f"{sale_row['Date']} | {sale_row['Narration']} | GHâ‚µ {float(sale_row['Amount']):,.2f} | {sale_row['Status']}"
+                        f"{sale_row['Date']} | {sale_row['Narration']} | GH??????? {float(sale_row['Amount']):,.2f} | {sale_row['Status']}"
                     )
                     if sale_row["Status"] != "Void" and action_col.button("Void", key=f"pos_void_btn_{company_key}_{int(sale_row['ID'])}"):
                         st.session_state[pos_void_confirm_key] = int(sale_row["ID"])
@@ -1668,8 +1971,6 @@ def show_pos(company_key, company_name, role):
             )
     except Exception as e:
         st.error(f"POS Error: {e}")
-
-
 # ==========================================
 # SALES & PURCHASE
 # ==========================================
