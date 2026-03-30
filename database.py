@@ -13,6 +13,16 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+DEFAULT_CHART_OF_ACCOUNTS = [
+    ("Cash", "Asset"),
+    ("Sales", "Revenue"),
+    ("Sales Revenue", "Revenue"),
+    ("Inventory", "Asset"),
+    ("Cost of Goods Sold", "Expense"),
+    ("Salary Expense", "Expense"),
+    ("Opening Balance Equity", "Equity"),
+]
+
 # Primary Database Path
 DB_NAME = "eka_enterprise_v3.db"
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -52,6 +62,87 @@ def ensure_schema_integrity(conn):
     stock_columns = {row[1] for row in cursor.fetchall()}
     if stock_columns and "barcode" not in stock_columns:
         cursor.execute("ALTER TABLE stock ADD COLUMN barcode TEXT")
+
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS chart_of_accounts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            category TEXT NOT NULL,
+            account_code TEXT,
+            account_name TEXT,
+            account_type TEXT
+        )
+        """
+    )
+    cursor.execute("PRAGMA table_info(chart_of_accounts)")
+    coa_columns = {row[1] for row in cursor.fetchall()}
+    for column_name, column_def in {
+        "name": "TEXT",
+        "category": "TEXT",
+        "account_code": "TEXT",
+        "account_name": "TEXT",
+        "account_type": "TEXT",
+    }.items():
+        if column_name not in coa_columns:
+            cursor.execute(f"ALTER TABLE chart_of_accounts ADD COLUMN {column_name} {column_def}")
+    cursor.execute(
+        """
+        UPDATE chart_of_accounts
+        SET name = COALESCE(NULLIF(name, ''), account_name),
+            category = COALESCE(NULLIF(category, ''), account_type)
+        """
+    )
+    existing_accounts = {
+        (str(row["name"]).strip().lower(), str(row["category"]).strip().lower())
+        for row in cursor.execute("SELECT name, category FROM chart_of_accounts").fetchall()
+        if row["name"] and row["category"]
+    }
+    for account_name, category_name in DEFAULT_CHART_OF_ACCOUNTS:
+        if (account_name.lower(), category_name.lower()) not in existing_accounts:
+            cursor.execute(
+                """
+                INSERT INTO chart_of_accounts (name, category, account_name, account_type)
+                VALUES (?, ?, ?, ?)
+                """,
+                (account_name, category_name, account_name, category_name),
+            )
+
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS journal_entries (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            company_key TEXT,
+            date TEXT NOT NULL,
+            description TEXT NOT NULL,
+            reference TEXT
+        )
+        """
+    )
+    cursor.execute("PRAGMA table_info(journal_entries)")
+    journal_entry_columns = {row[1] for row in cursor.fetchall()}
+    for column_name, column_def in {
+        "company_key": "TEXT",
+        "date": "TEXT",
+        "description": "TEXT",
+        "reference": "TEXT",
+    }.items():
+        if column_name not in journal_entry_columns:
+            cursor.execute(f"ALTER TABLE journal_entries ADD COLUMN {column_name} {column_def}")
+
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS journal_lines (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            entry_id INTEGER NOT NULL,
+            account_id INTEGER NOT NULL,
+            debit REAL DEFAULT 0,
+            credit REAL DEFAULT 0,
+            FOREIGN KEY (entry_id) REFERENCES journal_entries(id) ON DELETE CASCADE,
+            FOREIGN KEY (account_id) REFERENCES chart_of_accounts(id)
+        )
+        """
+    )
 
 
 def check_and_repair_db():

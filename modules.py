@@ -211,6 +211,116 @@ def _clear_streamlit_state(*keys):
         st.session_state.pop(key, None)
 
 
+def _normalize_account_category(category):
+    normalized = str(category or "").strip().title()
+    return "Revenue" if normalized == "Income" else normalized
+
+
+def _get_or_create_account(conn, account_name, category):
+    normalized_name = str(account_name or "").strip()
+    normalized_category = _normalize_account_category(category)
+    if not normalized_name or not normalized_category:
+        raise ValueError("Account name and category are required.")
+
+    row = conn.execute(
+        """
+        SELECT id
+        FROM chart_of_accounts
+        WHERE lower(COALESCE(name, account_name)) = lower(?)
+          AND lower(COALESCE(category, account_type)) = lower(?)
+        LIMIT 1
+        """,
+        (normalized_name, normalized_category),
+    ).fetchone()
+    if row:
+        return int(row["id"])
+
+    cursor = conn.execute(
+        """
+        INSERT INTO chart_of_accounts (name, category, account_name, account_type)
+        VALUES (?, ?, ?, ?)
+        """,
+        (normalized_name, normalized_category, normalized_name, normalized_category),
+    )
+    return int(cursor.lastrowid)
+
+
+def create_journal_entry(description, lines, company_key=None, reference=None, entry_date=None, conn=None):
+    if not lines:
+        raise ValueError("Journal lines are required.")
+
+    normalized_lines = []
+    total_debits = 0.0
+    total_credits = 0.0
+    for line in lines:
+        account_name = str(line.get("account_name") or line.get("name") or "").strip()
+        category = _normalize_account_category(line.get("category"))
+        debit = round(float(line.get("debit") or 0), 2)
+        credit = round(float(line.get("credit") or 0), 2)
+        if not account_name or not category:
+            raise ValueError("Each journal line must include an account name and category.")
+        if debit < 0 or credit < 0:
+            raise ValueError("Journal line values cannot be negative.")
+        if debit == 0 and credit == 0:
+            continue
+        normalized_lines.append(
+            {
+                "account_name": account_name,
+                "category": category,
+                "debit": debit,
+                "credit": credit,
+            }
+        )
+        total_debits += debit
+        total_credits += credit
+
+    total_debits = round(total_debits, 2)
+    total_credits = round(total_credits, 2)
+    if not normalized_lines:
+        raise ValueError("Journal entry must contain at least one non-zero line.")
+    if round(total_debits - total_credits, 2) != 0:
+        raise ValueError("Journal entry is unbalanced. Total debits must equal total credits.")
+
+    owns_connection = conn is None
+    conn = conn or get_connection()
+    if conn is None:
+        raise RuntimeError("Database connection unavailable for journal entry.")
+
+    try:
+        cursor = conn.execute(
+            """
+            INSERT INTO journal_entries (company_key, date, description, reference)
+            VALUES (?, ?, ?, ?)
+            """,
+            (
+                company_key,
+                (entry_date or datetime.now().date()).isoformat() if hasattr(entry_date or datetime.now().date(), "isoformat") else str(entry_date),
+                description,
+                reference,
+            ),
+        )
+        entry_id = int(cursor.lastrowid)
+        for line in normalized_lines:
+            account_id = _get_or_create_account(conn, line["account_name"], line["category"])
+            conn.execute(
+                """
+                INSERT INTO journal_lines (entry_id, account_id, debit, credit)
+                VALUES (?, ?, ?, ?)
+                """,
+                (entry_id, account_id, line["debit"], line["credit"]),
+            )
+        if owns_connection:
+            conn.commit()
+        return entry_id
+    except Exception:
+        if owns_connection:
+            conn.rollback()
+        raise
+    finally:
+        if owns_connection and conn:
+            conn.close()
+
+
 def _ensure_counterparty(conn, company_key, party_name, party_type, city_region, tx_date, balance_delta):
     existing = conn.execute(
         """
@@ -1339,6 +1449,18 @@ def show_inventory(company_key, role):
                         """,
                         (company_key, item_name, normalized_barcode, category, opening_stock, opening_stock, price, cost_price),
                     )
+                    opening_stock_value = round(float(opening_stock or 0) * float(cost_price or 0), 2)
+                    if opening_stock_value > 0:
+                        create_journal_entry(
+                            "Opening inventory balance",
+                            [
+                                {"account_name": "Inventory", "category": "Asset", "debit": opening_stock_value, "credit": 0},
+                                {"account_name": "Opening Balance Equity", "category": "Equity", "debit": 0, "credit": opening_stock_value},
+                            ],
+                            company_key=company_key,
+                            reference=f"INV-OPEN-{item_name}",
+                            conn=conn,
+                        )
                     conn.commit()
                     conn.close()
                     st.session_state.pop(inventory_new_barcode_key, None)
@@ -1461,11 +1583,18 @@ def show_vouchers(company_key, role):
 # CHART OF ACCOUNTS
 # ==========================================
 def show_chart_of_accounts(company_key, role):
-    st.header("📊 Chart of Accounts")
+    st.header("?? Chart of Accounts")
     try:
         conn = get_connection()
         rows = conn.execute(
-            "SELECT account_code, account_name, account_type FROM chart_of_accounts ORDER BY account_code"
+            """
+            SELECT
+                COALESCE(account_code, '') AS account_code,
+                COALESCE(name, account_name) AS account_name,
+                COALESCE(category, account_type) AS account_type
+            FROM chart_of_accounts
+            ORDER BY COALESCE(account_code, ''), COALESCE(name, account_name)
+            """
         ).fetchall()
         conn.close()
         if rows:
@@ -1486,8 +1615,11 @@ def show_chart_of_accounts(company_key, role):
                     try:
                         conn = get_connection()
                         conn.execute(
-                            "INSERT INTO chart_of_accounts (account_code, account_name, account_type) VALUES (?, ?, ?)",
-                            (acc_code, acc_name, acc_type),
+                            """
+                            INSERT INTO chart_of_accounts (account_code, account_name, account_type, name, category)
+                            VALUES (?, ?, ?, ?, ?)
+                            """,
+                            (acc_code, acc_name, acc_type, acc_name, _normalize_account_category(acc_type)),
                         )
                         conn.commit()
                         conn.close()
@@ -1841,6 +1973,16 @@ def show_pos(company_key, company_name, role):
                         f"POS Sale: {narration}",
                         role,
                     ),
+                )
+                create_journal_entry(
+                    "POS sale",
+                    [
+                        {"account_name": "Cash", "category": "Asset", "debit": total, "credit": 0},
+                        {"account_name": "Sales Revenue", "category": "Revenue", "debit": 0, "credit": total},
+                    ],
+                    company_key=company_key,
+                    reference=f"POS-{datetime.now().strftime('%Y%m%d%H%M%S')}",
+                    conn=conn,
                 )
                 conn.commit()
                 log_audit_action(
@@ -2647,117 +2789,184 @@ def _get_reports_data(conn, company_key):
     }
 
 def show_reports(company_key):
-    st.header("📊 Data Analytics")
+    st.header("?? Data Analytics")
+    conn = None
     try:
         conn = get_connection()
-        report_data = _get_reports_data(conn, company_key)
-        conn.close()
+        trial_rows = conn.execute(
+            """
+            SELECT
+                COALESCE(c.name, c.account_name) AS account_name,
+                CASE
+                    WHEN COALESCE(c.category, c.account_type) = 'Income' THEN 'Revenue'
+                    ELSE COALESCE(c.category, c.account_type)
+                END AS category,
+                ROUND(SUM(jl.debit), 2) AS debit_total,
+                ROUND(SUM(jl.credit), 2) AS credit_total,
+                ROUND(
+                    CASE
+                        WHEN CASE
+                            WHEN COALESCE(c.category, c.account_type) = 'Income' THEN 'Revenue'
+                            ELSE COALESCE(c.category, c.account_type)
+                        END IN ('Asset', 'Expense')
+                        THEN SUM(jl.debit - jl.credit)
+                        ELSE SUM(jl.credit - jl.debit)
+                    END,
+                    2
+                ) AS balance
+            FROM journal_entries je
+            JOIN journal_lines jl ON jl.entry_id = je.id
+            JOIN chart_of_accounts c ON c.id = jl.account_id
+            WHERE je.company_key = ?
+            GROUP BY c.id, account_name, category
+            HAVING ABS(SUM(jl.debit - jl.credit)) > 0.0001 OR ABS(SUM(jl.credit - jl.debit)) > 0.0001
+            ORDER BY category, account_name
+            """,
+            (company_key,),
+        ).fetchall()
 
-        operating_cash_flow = report_data["total_revenue"] - report_data["total_expenses"] - report_data["payroll_total"]
-        investing_cash_flow = report_data["asset_sales"] - report_data["asset_purchases"]
-        total_assets = report_data["inventory_value"] + report_data["asset_value"] + report_data["cash_on_hand"]
-        total_liabilities = report_data["accounts_payable"] + report_data["outstanding_loans"]
-        equity = total_assets - total_liabilities
+        balance_sheet_rows = conn.execute(
+            """
+            SELECT
+                CASE
+                    WHEN COALESCE(c.category, c.account_type) = 'Income' THEN 'Revenue'
+                    ELSE COALESCE(c.category, c.account_type)
+                END AS category,
+                COALESCE(c.name, c.account_name) AS account_name,
+                ROUND(
+                    CASE
+                        WHEN CASE
+                            WHEN COALESCE(c.category, c.account_type) = 'Income' THEN 'Revenue'
+                            ELSE COALESCE(c.category, c.account_type)
+                        END = 'Asset'
+                        THEN SUM(jl.debit - jl.credit)
+                        ELSE SUM(jl.credit - jl.debit)
+                    END,
+                    2
+                ) AS amount
+            FROM journal_entries je
+            JOIN journal_lines jl ON jl.entry_id = je.id
+            JOIN chart_of_accounts c ON c.id = jl.account_id
+            WHERE je.company_key = ?
+              AND CASE
+                    WHEN COALESCE(c.category, c.account_type) = 'Income' THEN 'Revenue'
+                    ELSE COALESCE(c.category, c.account_type)
+                  END IN ('Asset', 'Liability', 'Equity')
+            GROUP BY c.id, category, account_name
+            ORDER BY CASE category WHEN 'Asset' THEN 1 WHEN 'Liability' THEN 2 ELSE 3 END, account_name
+            """,
+            (company_key,),
+        ).fetchall()
 
-        col1, col2, col3 = st.columns(3)
-        col1.metric("Revenue", f"GHS {report_data['total_revenue']:,.2f}")
-        col2.metric("Expenses", f"GHS {report_data['total_expenses']:,.2f}")
-        col3.metric("Operating Cash Flow", f"GHS {operating_cash_flow:,.2f}")
-
-        overview_df = pd.DataFrame(
-            {"Amount (GHS)": [report_data["total_revenue"], report_data["total_expenses"], report_data["payroll_total"]]},
-            index=["Revenue", "Expenses", "Payroll"],
-        )
-        st.bar_chart(overview_df)
-
-        tabs = st.tabs(["Balance Sheet", "Cash Flow Statement", "General Ledger"])
-
-        with tabs[0]:
-            balance_sheet_df = pd.DataFrame(
-                [
-                    {"Section": "Assets", "Line Item": "Stock Value", "Amount (GHS)": report_data["inventory_value"]},
-                    {"Section": "Assets", "Line Item": "Asset Register Value", "Amount (GHS)": report_data["asset_value"]},
-                    {"Section": "Assets", "Line Item": "Cash on Hand", "Amount (GHS)": report_data["cash_on_hand"]},
-                    {"Section": "Liabilities", "Line Item": "Accounts Payable", "Amount (GHS)": report_data["accounts_payable"]},
-                    {"Section": "Liabilities", "Line Item": "Outstanding Loans", "Amount (GHS)": report_data["outstanding_loans"]},
-                    {"Section": "Equity", "Line Item": "Owner Equity", "Amount (GHS)": equity},
-                ]
-            )
-            metric_col1, metric_col2, metric_col3 = st.columns(3)
-            metric_col1.metric("Total Assets", f"GHS {total_assets:,.2f}")
-            metric_col2.metric("Total Liabilities", f"GHS {total_liabilities:,.2f}")
-            metric_col3.metric("Equity", f"GHS {equity:,.2f}")
-            st.dataframe(balance_sheet_df, use_container_width=True)
-            _statement_export_buttons(
-                "balance_sheet",
-                "Balance Sheet",
-                balance_sheet_df,
-                [
-                    f"Total Assets: GHS {total_assets:,.2f}",
-                    f"Total Liabilities: GHS {total_liabilities:,.2f}",
-                    f"Equity: GHS {equity:,.2f}",
-                ],
-            )
-
-        with tabs[1]:
-            cash_flow_df = pd.DataFrame(
-                [
-                    {"Activity": "Sales", "Amount (GHS)": report_data["total_revenue"]},
-                    {"Activity": "Expenses", "Amount (GHS)": -report_data["total_expenses"]},
-                    {"Activity": "Payroll", "Amount (GHS)": -report_data["payroll_total"]},
-                    {"Activity": "Operating Cash Flow", "Amount (GHS)": operating_cash_flow},
-                    {"Activity": "Asset Purchases", "Amount (GHS)": -report_data["asset_purchases"]},
-                    {"Activity": "Asset Sales", "Amount (GHS)": report_data["asset_sales"]},
-                    {"Activity": "Investing Cash Flow", "Amount (GHS)": investing_cash_flow},
-                    {"Activity": "Net Cash Movement", "Amount (GHS)": operating_cash_flow + investing_cash_flow},
-                ]
-            )
-            metric_col1, metric_col2 = st.columns(2)
-            metric_col1.metric("Operating Cash Flow", f"GHS {operating_cash_flow:,.2f}")
-            metric_col2.metric("Investing Cash Flow", f"GHS {investing_cash_flow:,.2f}")
-            st.dataframe(cash_flow_df, use_container_width=True)
-            _statement_export_buttons(
-                "cash_flow_statement",
-                "Cash Flow Statement",
-                cash_flow_df,
-                [
-                    f"Operating Cash Flow: GHS {operating_cash_flow:,.2f}",
-                    f"Investing Cash Flow: GHS {investing_cash_flow:,.2f}",
-                    f"Net Cash Movement: GHS {operating_cash_flow + investing_cash_flow:,.2f}",
-                ],
-            )
-
-        with tabs[2]:
-            general_ledger_df = pd.DataFrame(report_data["ledger_rows"])
-            if general_ledger_df.empty:
-                general_ledger_df = pd.DataFrame(columns=["Date", "Source", "Narration", "Ledger", "Debit (GHS)", "Credit (GHS)"])
-            else:
-                general_ledger_df["date"] = pd.to_datetime(general_ledger_df["date"], errors="coerce")
-                general_ledger_df = general_ledger_df.sort_values(by=["date", "source"], ascending=[False, True])
-                general_ledger_df["date"] = general_ledger_df["date"].dt.strftime("%Y-%m-%d")
-                general_ledger_df = general_ledger_df.rename(
-                    columns={
-                        "date": "Date",
-                        "source": "Source",
-                        "narration": "Narration",
-                        "ledger": "Ledger",
-                        "debit": "Debit (GHS)",
-                        "credit": "Credit (GHS)",
-                    }
-                )
-            st.dataframe(general_ledger_df, use_container_width=True)
-            _statement_export_buttons(
-                "general_ledger",
-                "General Ledger",
-                general_ledger_df,
-                [
-                    f"Ledger Entries: {len(general_ledger_df)}",
-                    "Sources included: Sales, Expenses, Payroll",
-                ],
-            )
-
+        pnl_rows = conn.execute(
+            """
+            SELECT
+                CASE
+                    WHEN COALESCE(c.category, c.account_type) = 'Income' THEN 'Revenue'
+                    ELSE COALESCE(c.category, c.account_type)
+                END AS category,
+                COALESCE(c.name, c.account_name) AS account_name,
+                ROUND(
+                    CASE
+                        WHEN CASE
+                            WHEN COALESCE(c.category, c.account_type) = 'Income' THEN 'Revenue'
+                            ELSE COALESCE(c.category, c.account_type)
+                        END = 'Revenue'
+                        THEN SUM(jl.credit - jl.debit)
+                        ELSE SUM(jl.debit - jl.credit)
+                    END,
+                    2
+                ) AS amount
+            FROM journal_entries je
+            JOIN journal_lines jl ON jl.entry_id = je.id
+            JOIN chart_of_accounts c ON c.id = jl.account_id
+            WHERE je.company_key = ?
+              AND CASE
+                    WHEN COALESCE(c.category, c.account_type) = 'Income' THEN 'Revenue'
+                    ELSE COALESCE(c.category, c.account_type)
+                  END IN ('Revenue', 'Expense')
+            GROUP BY c.id, category, account_name
+            ORDER BY CASE category WHEN 'Revenue' THEN 1 ELSE 2 END, account_name
+            """,
+            (company_key,),
+        ).fetchall()
     except Exception as e:
         st.error(f"Reports module error: {e}")
+        return
+    finally:
+        if conn:
+            conn.close()
+
+    trial_balance_df = pd.DataFrame(trial_rows, columns=["Account", "Category", "Debit (GHS)", "Credit (GHS)", "Balance (GHS)"])
+    balance_sheet_df = pd.DataFrame(balance_sheet_rows, columns=["Category", "Account", "Amount (GHS)"])
+    profit_loss_df = pd.DataFrame(pnl_rows, columns=["Category", "Account", "Amount (GHS)"])
+    if not balance_sheet_df.empty:
+        balance_sheet_df = balance_sheet_df[balance_sheet_df["Amount (GHS)"].abs() > 0.0001].reset_index(drop=True)
+    if not profit_loss_df.empty:
+        profit_loss_df = profit_loss_df[profit_loss_df["Amount (GHS)"].abs() > 0.0001].reset_index(drop=True)
+
+    total_assets = float(balance_sheet_df.loc[balance_sheet_df["Category"] == "Asset", "Amount (GHS)"].sum()) if not balance_sheet_df.empty else 0.0
+    total_liabilities = float(balance_sheet_df.loc[balance_sheet_df["Category"] == "Liability", "Amount (GHS)"].sum()) if not balance_sheet_df.empty else 0.0
+    total_equity = float(balance_sheet_df.loc[balance_sheet_df["Category"] == "Equity", "Amount (GHS)"].sum()) if not balance_sheet_df.empty else 0.0
+    total_revenue = float(profit_loss_df.loc[profit_loss_df["Category"] == "Revenue", "Amount (GHS)"].sum()) if not profit_loss_df.empty else 0.0
+    total_expenses = float(profit_loss_df.loc[profit_loss_df["Category"] == "Expense", "Amount (GHS)"].sum()) if not profit_loss_df.empty else 0.0
+    net_profit = total_revenue - total_expenses
+
+    metric_col1, metric_col2, metric_col3 = st.columns(3)
+    metric_col1.metric("Trial Balance Accounts", str(len(trial_balance_df)))
+    metric_col2.metric("Total Assets", f"GHS {total_assets:,.2f}")
+    metric_col3.metric("Net Profit", f"GHS {net_profit:,.2f}")
+
+    tabs = st.tabs(["Trial Balance", "Balance Sheet", "Profit & Loss"])
+
+    with tabs[0]:
+        if trial_balance_df.empty:
+            st.info("No posted journal balances were found for this company.")
+        else:
+            st.dataframe(trial_balance_df, use_container_width=True)
+        _statement_export_buttons(
+            "trial_balance",
+            "Trial Balance",
+            trial_balance_df if not trial_balance_df.empty else pd.DataFrame(columns=["Account", "Category", "Debit (GHS)", "Credit (GHS)", "Balance (GHS)"]),
+            [
+                f"Accounts with balances: {len(trial_balance_df)}",
+                f"Total debits: GHS {float(trial_balance_df['Debit (GHS)'].sum()) if not trial_balance_df.empty else 0.0:,.2f}",
+                f"Total credits: GHS {float(trial_balance_df['Credit (GHS)'].sum()) if not trial_balance_df.empty else 0.0:,.2f}",
+            ],
+        )
+
+    with tabs[1]:
+        if balance_sheet_df.empty:
+            st.info("No balance sheet activity has been posted yet.")
+        else:
+            st.dataframe(balance_sheet_df, use_container_width=True)
+        _statement_export_buttons(
+            "balance_sheet",
+            "Balance Sheet",
+            balance_sheet_df if not balance_sheet_df.empty else pd.DataFrame(columns=["Category", "Account", "Amount (GHS)"]),
+            [
+                f"Total Assets: GHS {total_assets:,.2f}",
+                f"Total Liabilities: GHS {total_liabilities:,.2f}",
+                f"Total Equity: GHS {total_equity:,.2f}",
+            ],
+        )
+
+    with tabs[2]:
+        if profit_loss_df.empty:
+            st.info("No profit and loss activity has been posted yet.")
+        else:
+            st.dataframe(profit_loss_df, use_container_width=True)
+        _statement_export_buttons(
+            "profit_and_loss",
+            "Profit and Loss",
+            profit_loss_df if not profit_loss_df.empty else pd.DataFrame(columns=["Category", "Account", "Amount (GHS)"]),
+            [
+                f"Revenue: GHS {total_revenue:,.2f}",
+                f"Expenses: GHS {total_expenses:,.2f}",
+                f"Net Profit: GHS {net_profit:,.2f}",
+            ],
+        )
+
 
 # ==========================================
 # AI DATA ASSESSMENT
