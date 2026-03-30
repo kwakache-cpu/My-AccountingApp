@@ -707,7 +707,6 @@ def show_company_registration_module():
                 st.rerun()
             finally:
                 conn.close()
-                st.session_state[pos_success_key] = True
 
     conn = get_connection()
     try:
@@ -1295,7 +1294,7 @@ def show_company_setup(company_key, company_name, role):
     try:
         conn = get_connection()
         company = conn.execute("SELECT * FROM companies WHERE key = ?", (company_key,)).fetchone()
-        company_data = _row_to_dict(company)
+        company_data = dict(company) if company is not None else {}
         if company:
             col1, col2 = st.columns(2)
             with col1:
