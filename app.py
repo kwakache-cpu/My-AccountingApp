@@ -1,6 +1,6 @@
 import streamlit as st
 import pandas as pd
-from database import get_connection
+from database import ensure_schema_integrity, get_connection
 from database import init_db as base_init_db
 from groq import Groq
 import logging
@@ -59,6 +59,7 @@ def init_db():
             return
 
         cursor = conn.cursor()
+        ensure_schema_integrity(conn)
         cursor.execute(
             "CREATE TABLE IF NOT EXISTS companies (key TEXT PRIMARY KEY, name TEXT, tin TEXT, status TEXT DEFAULT 'Active', subscription_expiry TEXT, deployment_status TEXT DEFAULT 'Pending', contact_email TEXT)"
         )
@@ -120,6 +121,7 @@ st.set_page_config(
 if 'auth' not in st.session_state:
     st.session_state.auth = False
     st.session_state.user = None
+    st.session_state.company_id = None
     st.session_state.login_attempts = 0
     st.session_state.last_activity = datetime.now()
 
@@ -133,6 +135,7 @@ def check_session_timeout():
         if datetime.now() - last_activity > timedelta(minutes=SESSION_TIMEOUT):
             st.session_state.auth = False
             st.session_state.user = None
+            st.session_state.company_id = None
             st.warning("Session expired due to inactivity. Please login again.")
             return False
     return True
@@ -428,6 +431,7 @@ def enter_demo():
     """Enter demo mode."""
     st.session_state.auth = True
     st.session_state.user = {"key": "DEMO", "name": "Demo Corporation Ltd", "role": "Demo"}
+    st.session_state.company_id = "DEMO"
     st.session_state.demo_mode = True
     st.session_state.start_time = datetime.now()
     st.session_state.login_attempts = 0
@@ -495,6 +499,7 @@ def login_ui():
                     if license_key == "JUANMANUEL2":
                         st.session_state.auth = True
                         st.session_state.user = {"name": "Gatekeeper", "role": "Dev", "key": "ADMIN"}
+                        st.session_state.company_id = "ADMIN"
                         log_audit_action(conn, "SYSTEM", "Dev", "Developer login", "Authentication")
                         conn.close()
                         st.session_state.login_attempts = 0
@@ -510,6 +515,7 @@ def login_ui():
                         if license_status['status'] != 'expired':
                             st.session_state.auth = True
                             st.session_state.user = {"key": admin[0], "name": admin[1], "role": "Master Admin"}
+                            st.session_state.company_id = admin[0]
                             log_audit_action(conn, admin[0], "Master Admin", "Successful login", "Authentication")
                             conn.close()
                             st.session_state.login_attempts = 0
@@ -527,6 +533,7 @@ def login_ui():
                         if license_status['status'] != 'expired':
                             st.session_state.auth = True
                             st.session_state.user = {"key": sub[0], "name": sub[1], "role": "Sub-Admin"}
+                            st.session_state.company_id = sub[0]
                             log_audit_action(conn, sub[0], "Sub-Admin", "Successful login", "Authentication")
                             conn.close()
                             st.session_state.login_attempts = 0
@@ -545,6 +552,7 @@ def login_ui():
                             if license_status['status'] != 'expired':
                                 st.session_state.auth = True
                                 st.session_state.user = {"key": staff[0], "name": staff[1], "role": "Staff"}
+                                st.session_state.company_id = staff[0]
                                 log_audit_action(conn, staff[0], "Staff", "Successful login", "Authentication")
                                 conn.close()
                                 st.session_state.login_attempts = 0
@@ -571,6 +579,7 @@ def login_ui():
                                 "role": user_login[2],
                                 "staff_name": user_login[3],
                             }
+                            st.session_state.company_id = user_login[0]
                             log_audit_action(conn, user_login[0], user_login[2], "Successful login", "Authentication")
                             conn.close()
                             st.session_state.login_attempts = 0
@@ -831,6 +840,7 @@ def run_startup_db_patch():
             return
 
         cursor = conn.cursor()
+        ensure_schema_integrity(conn)
 
         cursor.execute("PRAGMA table_info(companies)")
         company_columns = {row[1] for row in cursor.fetchall()}
@@ -967,6 +977,39 @@ else:
                         "Welcome to the admin dashboard. Seed sample data or deploy your first "
                         "license to bring these system metrics to life."
                     )
+
+                st.markdown("---")
+                st.subheader("Master Price Setting")
+                try:
+                    current_price_row = conn.execute(
+                        "SELECT master_price_per_month FROM system_settings WHERE id = 1"
+                    ).fetchone()
+                    current_price = float(current_price_row[0]) if current_price_row and current_price_row[0] is not None else 500.0
+                except Exception:
+                    current_price = 500.0
+                with st.form("master_price_setting_form"):
+                    master_price = st.number_input(
+                        "Master Price Per Month (GHS)",
+                        min_value=0.0,
+                        value=current_price,
+                        step=50.0,
+                    )
+                    if st.form_submit_button("Save Master Price"):
+                        try:
+                            conn.execute(
+                                """
+                                INSERT INTO system_settings (id, master_price_per_month, updated_at)
+                                VALUES (1, ?, CURRENT_TIMESTAMP)
+                                ON CONFLICT(id) DO UPDATE SET
+                                    master_price_per_month = excluded.master_price_per_month,
+                                    updated_at = CURRENT_TIMESTAMP
+                                """,
+                                (master_price,),
+                            )
+                            conn.commit()
+                            st.success(f"Master monthly price updated to GHS {master_price:,.2f}.")
+                        except Exception as price_error:
+                            st.error(f"Could not update master price: {price_error}")
                 
                 # Global Forensic Trail (Dev only) - Enhanced with error handling
                 st.markdown("---")
@@ -1284,5 +1327,6 @@ else:
         
         st.session_state.auth = False
         st.session_state.user = None
+        st.session_state.company_id = None
         st.session_state.login_attempts = 0
         st.rerun()

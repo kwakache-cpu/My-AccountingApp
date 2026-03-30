@@ -28,9 +28,20 @@ def log_audit_action(conn, company_key, user_role, action, module_name, details=
 # ==========================================
 def initialize_paystack_payment(email, amount, reference):
     """Initialize a payment with Paystack."""
+    try:
+        paystack_secret_key = st.secrets.get("paystack_secret_key")
+    except Exception:
+        paystack_secret_key = None
+    if not paystack_secret_key:
+        st.info(
+            "System Configuration Required: the Paystack payment key has not been configured yet. "
+            "Please contact the system administrator to complete payment setup."
+        )
+        return None
+
     url = "https://api.paystack.co/transaction/initialize"
     headers = {
-        "Authorization": f"Bearer {st.secrets['paystack_secret_key']}",
+        "Authorization": f"Bearer {paystack_secret_key}",
         "Content-Type": "application/json"
     }
     data = {
@@ -53,6 +64,35 @@ def initialize_paystack_payment(email, amount, reference):
 # ==========================================
 DB_NAME = "eka_vault.db"
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), DB_NAME)
+
+
+def get_master_price_per_month():
+    conn = None
+    try:
+        conn = get_connection()
+        row = conn.execute(
+            "SELECT master_price_per_month FROM system_settings WHERE id = 1"
+        ).fetchone()
+        return float(row[0]) if row and row[0] is not None else 500.0
+    except Exception as exc:
+        logger.warning(f"Falling back to default master price: {exc}")
+        return 500.0
+    finally:
+        if conn:
+            conn.close()
+
+
+def _get_active_company_id(expected_company_id=None):
+    active_company_id = st.session_state.get("company_id")
+    if not active_company_id:
+        active_company_id = st.session_state.get("user", {}).get("key")
+    if expected_company_id and active_company_id and expected_company_id != active_company_id:
+        logger.warning(
+            "Blocked cross-tenant access attempt: requested=%s active=%s",
+            expected_company_id,
+            active_company_id,
+        )
+    return active_company_id
 
 
 def _get_groq_client():
@@ -697,6 +737,7 @@ def show_onboarding_payment():
     """Handle the onboarding payment process for new companies."""
     st.header("🏢 New Company Registration")
     st.info("Complete the registration and onboarding payment to activate your EKA ERP instance.")
+    master_price_per_month = get_master_price_per_month()
 
     with st.form("onboarding_form"):
         col1, col2 = st.columns(2)
@@ -705,11 +746,11 @@ def show_onboarding_payment():
             admin_email = st.text_input("Admin Email Address")
         with col2:
             sector = st.selectbox("Business Sector", ["Retail", "Manufacturing", "Services", "Construction", "Other"])
-            package = st.selectbox("ERP Package", ["Standard", "Professional", "Enterprise"])
+            subscription_months = st.selectbox("Subscription Duration (Months)", [1, 3, 6, 12, 24], index=3)
 
-        amount_map = {"Standard": 500, "Professional": 1200, "Enterprise": 2500}
-        amount = amount_map[package]
+        amount = float(master_price_per_month) * int(subscription_months)
 
+        st.caption(f"Master Price Per Month: GH₵ {master_price_per_month:,.2f}")
         st.write(f"### Total Due: GH₵ {amount:,.2f}")
         submit = st.form_submit_button("Proceed to Payment")
 
@@ -726,11 +767,12 @@ def show_onboarding_payment():
                             'company_name': company_name,
                             'email': admin_email,
                             'amount': amount,
+                            'months': int(subscription_months),
                             'reference': reference
                         }
                         st.link_button("Proceed to Paystack", url)
                     else:
-                        st.error("Failed to initialize payment.")
+                        st.warning("Payment could not be initialized yet. Please review the system configuration and try again.")
                 except Exception as e:
                     st.error(f"Onboarding payment error: {e}")
                     logger.error(f"Onboarding payment error: {e}")
@@ -1439,13 +1481,18 @@ def show_reports(company_key):
 # AI DATA ASSESSMENT
 # ==========================================
 def show_ai_assistant(client_id):
+    active_company_id = _get_active_company_id(client_id)
+    if not active_company_id:
+        st.warning("No active company context is available for the AI assistant.")
+        return
+
     st.header("AI Data Assessment")
     st.caption("Ask questions about your last 30 days of invoices, expenses, and payroll activity.")
 
     conn = None
     try:
         conn = get_connection()
-        records = _fetch_ai_assistant_records(conn, client_id)
+        records = _fetch_ai_assistant_records(conn, active_company_id)
     except Exception as exc:
         logger.error(f"AI assistant data fetch failed: {exc}")
         st.error("The AI assistant could not load your accounting records.")
@@ -1463,7 +1510,7 @@ def show_ai_assistant(client_id):
     with st.expander("30-Day Data Snapshot", expanded=False):
         st.text(data_summary)
 
-    history_key = f"ai_assistant_messages_{client_id}"
+    history_key = f"ai_assistant_messages_{active_company_id}"
     if history_key not in st.session_state:
         st.session_state[history_key] = [
             {
@@ -1481,7 +1528,7 @@ def show_ai_assistant(client_id):
 
     user_question = st.chat_input(
         "Ask about invoices, expenses, or payroll...",
-        key=f"ai_assistant_input_{client_id}",
+        key=f"ai_assistant_input_{active_company_id}",
     )
     if not user_question:
         return
@@ -1506,7 +1553,7 @@ def show_ai_assistant(client_id):
         "Use the supplied 30-day accounting summary to answer clearly, highlight anomalies, "
         "and suggest edits or follow-up checks when appropriate. "
         "Do not invent records that are not present.\n\n"
-        f"Client ID: {client_id}\n"
+        f"Client ID: {active_company_id}\n"
         f"30-day data summary:\n{data_summary}\n\n"
         f"User question: {user_question}"
     )

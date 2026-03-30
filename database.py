@@ -2,6 +2,7 @@ import sqlite3
 import logging
 from datetime import datetime
 import os
+import shutil
 
 # =================================================================
 # 1. SYSTEM LOGGING & CONFIGURATION
@@ -14,6 +15,34 @@ logger = logging.getLogger(__name__)
 
 # Primary Database Path
 DB_NAME = "eka_enterprise_v3.db"
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DEFAULT_DATA_DIR = os.path.join(BASE_DIR, "data")
+DB_DIR = os.path.abspath(os.getenv("EKA_DATA_DIR", DEFAULT_DATA_DIR))
+DB_PATH = os.path.join(DB_DIR, DB_NAME)
+LEGACY_DB_PATH = os.path.abspath(DB_NAME)
+
+
+def _ensure_db_directory():
+    os.makedirs(DB_DIR, exist_ok=True)
+    if LEGACY_DB_PATH != DB_PATH and os.path.exists(LEGACY_DB_PATH) and not os.path.exists(DB_PATH):
+        shutil.copy2(LEGACY_DB_PATH, DB_PATH)
+        logger.info("Migrated legacy database to persistent path: %s", DB_PATH)
+
+
+def ensure_schema_integrity(conn):
+    """Protect critical columns during upgrades to avoid missing-column crashes."""
+    cursor = conn.cursor()
+    critical_columns = {
+        "companies": {"contact_email": "TEXT"},
+        "audit_logs": {"details": "TEXT"},
+    }
+
+    for table_name, columns in critical_columns.items():
+        cursor.execute(f"PRAGMA table_info({table_name})")
+        existing_columns = {row[1] for row in cursor.fetchall()}
+        for column_name, column_def in columns.items():
+            if column_name not in existing_columns:
+                cursor.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_def}")
 
 # =================================================================
 # 2. CORE CONNECTION ENGINE
@@ -25,8 +54,9 @@ def get_connection():
     settings for data integrity.
     """
     try:
+        _ensure_db_directory()
         # check_same_thread=False is essential for Streamlit's architecture
-        conn = sqlite3.connect('eka_enterprise_v3.db', check_same_thread=False)
+        conn = sqlite3.connect(DB_PATH, check_same_thread=False)
         conn.row_factory = sqlite3.Row
         
         # Enable Foreign Key Constraints for referential integrity
@@ -78,10 +108,9 @@ def init_db():
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
+        ensure_schema_integrity(conn)
         cursor.execute("PRAGMA table_info(companies)")
         company_columns = {row[1] for row in cursor.fetchall()}
-        if "contact_email" not in company_columns:
-            cursor.execute("ALTER TABLE companies ADD COLUMN contact_email TEXT")
 
         # --- TABLE 2: INVENTORY & STOCK MASTER ---
         # Manages product levels, costs, and warehouse locations
@@ -405,6 +434,18 @@ def init_db():
                 cursor.execute(f"ALTER TABLE counterparties ADD COLUMN {column_name} {column_def}")
         cursor.execute(
             "CREATE INDEX IF NOT EXISTS idx_counterparties_company_type ON counterparties(company_key, party_type)"
+        )
+
+        # --- TABLE 11: SYSTEM SETTINGS ---
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS system_settings (
+                id INTEGER PRIMARY KEY,
+                master_price_per_month REAL DEFAULT 500,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        cursor.execute(
+            "INSERT OR IGNORE INTO system_settings (id, master_price_per_month) VALUES (1, 500)"
         )
 
         conn.commit()
