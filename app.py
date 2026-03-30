@@ -144,6 +144,29 @@ def update_activity():
     """Update last activity timestamp."""
     st.session_state.last_activity = datetime.now()
 
+
+def hash_login_password(password):
+    return hashlib.sha256(password.encode("utf-8")).hexdigest()
+
+
+def wipe_company_records(conn, company_key):
+    company_scoped_tables = [
+        "users",
+        "counterparties",
+        "inventory",
+        "vouchers",
+        "payroll",
+        "fixed_assets",
+        "audit_logs",
+        "pending_approvals",
+    ]
+    for table_name in company_scoped_tables:
+        try:
+            conn.execute(f"DELETE FROM {table_name} WHERE company_key = ?", (company_key,))
+        except sqlite3.Error:
+            continue
+    conn.execute("DELETE FROM companies WHERE key = ?", (company_key,))
+
 def check_maintenance_status():
     """NATIVE SQLITE FIX: No  wrapper"""
     conn = None
@@ -490,6 +513,11 @@ def login_ui():
                 type="password", 
                 key="v3_final_login_input_field"
             )
+            staff_password = st.text_input(
+                "Password (for staff logins)",
+                type="password",
+                key="v3_final_staff_password_field",
+            )
             
             if st.button("Access Cloud Modules", key="v3_final_auth_submit_btn"):
                 try:
@@ -506,8 +534,12 @@ def login_ui():
                         st.rerun()
                     
                     # Master Admin Check
-                    admin = conn.execute("SELECT key, name FROM companies WHERE key = ?", (license_key,)).fetchone()
+                    admin = conn.execute("SELECT key, name, COALESCE(status, 'Active') FROM companies WHERE key = ?", (license_key,)).fetchone()
                     if admin:
+                        if admin[2] != "Active":
+                            st.error("This company is currently archived or inactive. Contact Gatekeeper to reactivate access.")
+                            conn.close()
+                            return
                         # Check license expiry with grace period
                         license_status = check_license_expiry_with_grace(admin[0])
                         
@@ -524,8 +556,12 @@ def login_ui():
                             st.error(f"Your license expired {license_status['days_left']} days ago. Please renew to access the system.")
                     
                     # Sub-Admin/Staff Check
-                    sub = conn.execute("SELECT key, name FROM companies WHERE sub_admin_key = ?", (license_key,)).fetchone()
+                    sub = conn.execute("SELECT key, name, COALESCE(status, 'Active') FROM companies WHERE sub_admin_key = ?", (license_key,)).fetchone()
                     if sub:
+                        if sub[2] != "Active":
+                            st.error("This company is currently archived or inactive. Contact Gatekeeper to reactivate access.")
+                            conn.close()
+                            return
                         # Check license expiry with grace period
                         license_status = check_license_expiry_with_grace(sub[0])
                         
@@ -543,8 +579,12 @@ def login_ui():
                         
                     if license_key.endswith("-staff"):
                         pure_k = license_key.replace("-staff", "")
-                        staff = conn.execute("SELECT key, name FROM companies WHERE key = ?", (pure_k,)).fetchone()
+                        staff = conn.execute("SELECT key, name, COALESCE(status, 'Active') FROM companies WHERE key = ?", (pure_k,)).fetchone()
                         if staff:
+                            if staff[2] != "Active":
+                                st.error("This company is currently archived or inactive. Contact Gatekeeper to reactivate access.")
+                                conn.close()
+                                return
                             # Check license expiry with grace period
                             license_status = check_license_expiry_with_grace(staff[0])
                             
@@ -562,14 +602,20 @@ def login_ui():
 
                     user_login = conn.execute(
                         """
-                        SELECT u.company_key, c.name, u.role, u.full_name
+                        SELECT u.company_key, c.name, u.role, u.full_name, u.password_hash
                         FROM users u
                         JOIN companies c ON c.key = u.company_key
-                        WHERE u.login_key = ? AND COALESCE(u.status, 'Active') = 'Active'
+                        WHERE u.login_key = ?
+                          AND COALESCE(u.status, 'Active') = 'Active'
+                          AND COALESCE(c.status, 'Active') = 'Active'
                         """,
                         (license_key,),
                     ).fetchone()
                     if user_login:
+                        if not staff_password or hash_login_password(staff_password) != (user_login[4] or ""):
+                            st.error("Invalid staff password. Please try again.")
+                            conn.close()
+                            return
                         license_status = check_license_expiry_with_grace(user_login[0])
                         if license_status['status'] != 'expired':
                             st.session_state.auth = True
@@ -1123,6 +1169,93 @@ else:
                             f"Status: {selected_portfolio['status']} | "
                             f"Deployment: {selected_portfolio['deployment_status']}"
                         )
+                        action_company_key = selected_portfolio["key"]
+                        action_company_name = selected_portfolio["name"]
+                        st.warning(
+                            "Company lifecycle actions are destructive. Archive will disable login but keep data. "
+                            "Wipe will permanently delete the company and all linked records."
+                        )
+                        action_choice = st.radio(
+                            "Remove Company Action",
+                            ["Archive (Keep Data)", "Wipe (Delete Entirely)"],
+                            key="company_lifecycle_action",
+                            horizontal=True,
+                        )
+                        confirm_action = st.checkbox(
+                            f"I confirm the {action_choice.lower()} action for {action_company_name}.",
+                            key="company_lifecycle_confirm",
+                        )
+                        action_col1, action_col2 = st.columns(2)
+                        with action_col1:
+                            if st.button("Apply Company Action", key="apply_company_action_btn"):
+                                if not confirm_action:
+                                    st.warning("Confirm the company action before applying it.")
+                                else:
+                                    try:
+                                        if action_choice == "Archive (Keep Data)":
+                                            conn.execute(
+                                                """
+                                                UPDATE companies
+                                                SET status = 'Inactive', deployment_status = 'Archived'
+                                                WHERE key = ?
+                                                """,
+                                                (action_company_key,),
+                                            )
+                                            conn.commit()
+                                            log_audit_action(
+                                                conn,
+                                                action_company_key,
+                                                "Dev",
+                                                "Company Archived",
+                                                "Gatekeeper Dashboard",
+                                                f"{action_company_name} archived with data retained.",
+                                            )
+                                            st.success(f"{action_company_name} archived. Data retained and login disabled.")
+                                        else:
+                                            wipe_company_records(conn, action_company_key)
+                                            conn.commit()
+                                            log_audit_action(
+                                                conn,
+                                                "SYSTEM",
+                                                "Dev",
+                                                "Company Wiped",
+                                                "Gatekeeper Dashboard",
+                                                f"{action_company_name} permanently deleted.",
+                                            )
+                                            st.success(f"{action_company_name} and all linked records were deleted.")
+                                        st.rerun()
+                                    except Exception as action_error:
+                                        conn.rollback()
+                                        st.error(f"Company action failed: {action_error}")
+                        with action_col2:
+                            if st.button("Reactivate Archived Company", key="reactivate_archived_company_btn"):
+                                try:
+                                    conn.execute(
+                                        """
+                                        UPDATE companies
+                                        SET status = 'Active',
+                                            deployment_status = CASE
+                                                WHEN COALESCE(deployment_status, '') = 'Archived' THEN 'Live'
+                                                ELSE deployment_status
+                                            END
+                                        WHERE key = ?
+                                        """,
+                                        (action_company_key,),
+                                    )
+                                    conn.commit()
+                                    log_audit_action(
+                                        conn,
+                                        action_company_key,
+                                        "Dev",
+                                        "Company Reactivated",
+                                        "Gatekeeper Dashboard",
+                                        f"{action_company_name} reactivated from the portfolio manager.",
+                                    )
+                                    st.success(f"{action_company_name} reactivated.")
+                                    st.rerun()
+                                except Exception as reactivate_error:
+                                    conn.rollback()
+                                    st.error(f"Could not reactivate company: {reactivate_error}")
                 except Exception as portfolio_click_error:
                     logger.error(f"Portfolio interaction error: {portfolio_click_error}")
                     st.warning("Company selection is temporarily unavailable, but the portfolio table is still visible.")

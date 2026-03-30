@@ -1,6 +1,7 @@
 import logging
 import os
 import random
+import hashlib
 import sqlite3
 from datetime import datetime, timedelta
 from io import BytesIO
@@ -194,6 +195,10 @@ def _row_to_dict(row):
 def _generate_staff_login_key(company_key, role_name):
     suffix = "BK" if role_name == "Bookkeeper" else "STF"
     return f"{company_key}-{suffix}-{random.randint(1000, 9999)}"
+
+
+def _hash_staff_password(password):
+    return hashlib.sha256(password.encode("utf-8")).hexdigest()
 
 
 def _ensure_counterparty(conn, company_key, party_name, party_type, city_region, tx_date, balance_delta):
@@ -980,20 +985,29 @@ def show_company_setup(company_key, company_name, role):
                 with st.form("company_setup_staff_form"):
                     staff_name = st.text_input("Full Name")
                     staff_role = st.selectbox("Role", ["Bookkeeper", "Staff"])
+                    staff_password = st.text_input("Assign Password", type="password")
                     submitted = st.form_submit_button("Create Staff Login")
 
                     if submitted:
                         if not staff_name.strip():
                             st.warning("Enter a staff name before creating a login.")
+                        elif not staff_password:
+                            st.warning("Assign a password before creating the staff login.")
                         else:
                             login_key = _generate_staff_login_key(company_key, staff_role)
                             try:
                                 conn.execute(
                                     """
-                                    INSERT INTO users (company_key, full_name, login_key, role, status)
-                                    VALUES (?, ?, ?, ?, 'Active')
+                                    INSERT INTO users (company_key, full_name, login_key, password_hash, role, status)
+                                    VALUES (?, ?, ?, ?, ?, 'Active')
                                     """,
-                                    (company_key, staff_name.strip(), login_key, staff_role),
+                                    (
+                                        company_key,
+                                        staff_name.strip(),
+                                        login_key,
+                                        _hash_staff_password(staff_password),
+                                        staff_role,
+                                    ),
                                 )
                                 conn.commit()
                                 log_audit_action(
