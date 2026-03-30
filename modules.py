@@ -1,5 +1,6 @@
 import logging
 import os
+import random
 import sqlite3
 from datetime import datetime, timedelta
 from io import BytesIO
@@ -144,6 +145,97 @@ def _summarize_ai_assistant_data(records):
             lines.append(f"{label}: {rows}")
 
     return "\n".join(lines)
+
+
+def _row_to_dict(row):
+    return dict(row) if row is not None else {}
+
+
+def _generate_staff_login_key(company_key, role_name):
+    suffix = "BK" if role_name == "Bookkeeper" else "STF"
+    return f"{company_key}-{suffix}-{random.randint(1000, 9999)}"
+
+
+def _ensure_counterparty(conn, company_key, party_name, party_type, city_region, tx_date, balance_delta):
+    existing = conn.execute(
+        """
+        SELECT id, balance
+        FROM counterparties
+        WHERE company_key = ? AND party_name = ? AND party_type = ?
+        """,
+        (company_key, party_name, party_type),
+    ).fetchone()
+    if existing:
+        conn.execute(
+            """
+            UPDATE counterparties
+            SET city_region = COALESCE(NULLIF(?, ''), city_region),
+                last_transaction = ?,
+                balance = COALESCE(balance, 0) + ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (city_region, tx_date, balance_delta, existing["id"]),
+        )
+    else:
+        conn.execute(
+            """
+            INSERT INTO counterparties
+                (company_key, party_name, party_type, city_region, last_transaction, balance)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (company_key, party_name, party_type, city_region, tx_date, balance_delta),
+        )
+
+
+def show_debtors_by_city_report(company_key):
+    st.subheader("Debtors by City")
+    conn = None
+    try:
+        conn = get_connection()
+        city_rows = conn.execute(
+            """
+            SELECT DISTINCT COALESCE(NULLIF(city_region, ''), 'Unassigned') AS city_region
+            FROM counterparties
+            WHERE company_key = ? AND party_type = 'Customer'
+            ORDER BY city_region
+            """,
+            (company_key,),
+        ).fetchall()
+        city_options = ["All Cities"] + [row[0] for row in city_rows]
+        selected_city = st.selectbox("Filter by City / Region", city_options, key=f"debtor_city_{company_key}")
+
+        query = """
+            SELECT party_name, last_transaction, balance, COALESCE(NULLIF(city_region, ''), 'Unassigned') AS city_region
+            FROM counterparties
+            WHERE company_key = ? AND party_type = 'Customer' AND balance > 0
+        """
+        params = [company_key]
+        if selected_city != "All Cities":
+            query += " AND COALESCE(NULLIF(city_region, ''), 'Unassigned') = ?"
+            params.append(selected_city)
+        query += " ORDER BY city_region, party_name"
+
+        debtors = conn.execute(query, tuple(params)).fetchall()
+        if not debtors:
+            st.info("No debtor balances are available for the selected city.")
+            return
+
+        report_df = pd.DataFrame(
+            debtors,
+            columns=["Customer Name", "Last Transaction", "Balance", "City / Region"],
+        )
+        road_df = report_df[["Customer Name", "Last Transaction", "Balance"]].copy()
+        road_df["Balance"] = road_df["Balance"].map(lambda value: f"GHs {float(value):,.2f}")
+
+        st.dataframe(report_df, use_container_width=True)
+        st.markdown("Road Summary")
+        st.dataframe(road_df, use_container_width=True, hide_index=True)
+    except Exception as exc:
+        st.error(f"Debtor city report error: {exc}")
+    finally:
+        if conn:
+            conn.close()
 
 
 def init_db():
@@ -823,24 +915,81 @@ def show_chart_of_accounts(company_key, role):
 def show_company_setup(company_key, company_name, role):
     st.header("🏢 Company Setup")
     st.subheader("Company Profile")
+    conn = None
     try:
         conn = get_connection()
         company = conn.execute("SELECT * FROM companies WHERE key = ?", (company_key,)).fetchone()
-        conn.close()
+        company_data = _row_to_dict(company)
         if company:
             col1, col2 = st.columns(2)
             with col1:
-                st.text_input("Company Name", value=company["name"], disabled=True)
-                st.text_input("License Key", value=company["key"], disabled=True)
-                st.text_input("Plan Type", value=company.get("plan_type", "Basic"), disabled=True)
+                st.text_input("Company Name", value=company_data["name"], disabled=True)
+                st.text_input("License Key", value=company_data["key"], disabled=True)
+                st.text_input("Plan Type", value=company_data.get("plan_type", "Basic"), disabled=True)
             with col2:
-                st.text_input("Subscription Expiry", value=str(company.get("subscription_expiry", "N/A")), disabled=True)
-                st.text_input("Status", value=company.get("status", "Active"), disabled=True)
-                st.text_input("Contact Email", value=str(company.get("contact_email", "")), disabled=True)
+                expiry_value = company_data.get("subscription_expiry") or company_data.get("subscription_end_date") or "N/A"
+                st.text_input("Subscription Expiry", value=str(expiry_value), disabled=True)
+                st.text_input("Status", value=company_data.get("status", "Active"), disabled=True)
+                st.text_input("Contact Email", value=str(company_data.get("contact_email") or company_data.get("admin_email") or ""), disabled=True)
+
+            if role == "Master Admin":
+                st.markdown("---")
+                st.subheader("Staff Management")
+                with st.form("company_setup_staff_form"):
+                    staff_name = st.text_input("Full Name")
+                    staff_role = st.selectbox("Role", ["Bookkeeper", "Staff"])
+                    submitted = st.form_submit_button("Create Staff Login")
+
+                    if submitted:
+                        if not staff_name.strip():
+                            st.warning("Enter a staff name before creating a login.")
+                        else:
+                            login_key = _generate_staff_login_key(company_key, staff_role)
+                            try:
+                                conn.execute(
+                                    """
+                                    INSERT INTO users (company_key, full_name, login_key, role, status)
+                                    VALUES (?, ?, ?, ?, 'Active')
+                                    """,
+                                    (company_key, staff_name.strip(), login_key, staff_role),
+                                )
+                                conn.commit()
+                                log_audit_action(
+                                    conn,
+                                    company_key,
+                                    role,
+                                    "Staff Login Created",
+                                    "Company Setup",
+                                    f"{staff_name.strip()} created as {staff_role} with key {login_key}",
+                                )
+                                st.success(f"Staff login created. Login key: {login_key}")
+                            except Exception as exc:
+                                st.error(f"Could not create staff login: {exc}")
+
+                users = conn.execute(
+                    """
+                    SELECT full_name, role, login_key, status, created_at
+                    FROM users
+                    WHERE company_key = ?
+                    ORDER BY created_at DESC
+                    """,
+                    (company_key,),
+                ).fetchall()
+                if users:
+                    users_df = pd.DataFrame(
+                        users,
+                        columns=["Full Name", "Role", "Login Key", "Status", "Created At"],
+                    )
+                    st.dataframe(users_df, use_container_width=True)
+                else:
+                    st.caption("No staff logins created yet.")
         else:
             st.info("Company profile not found.")
     except Exception as e:
         st.error(f"Error loading company setup: {e}")
+    finally:
+        if conn:
+            conn.close()
 
 
 # ==========================================
@@ -927,6 +1076,7 @@ def show_sales_purchase(company_key, role, doc_type="Sales"):
         with col2:
             status = st.selectbox("Status", ["Paid", "Pending", "Draft"] if doc_type == "Sales" else ["Received", "Pending", "Cancelled"])
             doc_date = st.date_input("Date", datetime.now().date())
+        city_region = st.text_input("City / Region")
         narration = st.text_input("Description / Reference")
         submitted = st.form_submit_button(f"Save {doc_type}")
 
@@ -939,6 +1089,16 @@ def show_sales_purchase(company_key, role, doc_type="Sales"):
                        VALUES (?, ?, ?, ?, ?, ?, ?)""",
                     (company_key, doc_date.isoformat(), doc_type, ledger, amount,
                      f"{party_name}: {narration}", role),
+                )
+                balance_delta = amount if status == "Pending" else 0.0
+                _ensure_counterparty(
+                    conn,
+                    company_key,
+                    party_name,
+                    "Customer" if doc_type == "Sales" else "Vendor",
+                    city_region,
+                    doc_date.isoformat(),
+                    balance_delta,
                 )
                 conn.commit()
                 log_audit_action(conn, company_key, role, f"{doc_type} Recorded", doc_type, f"{party_name} - GH₵{amount:.2f}")
@@ -1020,6 +1180,8 @@ def show_aging(company_key, aging_type="Receivable"):
             df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
             df["Days Outstanding"] = (datetime.now() - df["Date"]).dt.days
             st.dataframe(df, use_container_width=True)
+            if aging_type == "Receivable":
+                show_debtors_by_city_report(company_key)
         else:
             st.info(f"No {aging_type} records found.")
     except Exception as e:

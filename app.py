@@ -24,6 +24,7 @@ from modules import (
     show_company_setup,
     show_fixed_assets,
     show_inventory,
+    show_onboarding_payment,
     show_payroll,
     show_pos,
     show_reports,
@@ -550,7 +551,33 @@ def login_ui():
                                 st.rerun()
                             else:
                                 st.error(f"Your license expired {license_status['days_left']} days ago. Please renew to access the system.")
-                    
+
+                    user_login = conn.execute(
+                        """
+                        SELECT u.company_key, c.name, u.role, u.full_name
+                        FROM users u
+                        JOIN companies c ON c.key = u.company_key
+                        WHERE u.login_key = ? AND COALESCE(u.status, 'Active') = 'Active'
+                        """,
+                        (license_key,),
+                    ).fetchone()
+                    if user_login:
+                        license_status = check_license_expiry_with_grace(user_login[0])
+                        if license_status['status'] != 'expired':
+                            st.session_state.auth = True
+                            st.session_state.user = {
+                                "key": user_login[0],
+                                "name": user_login[1],
+                                "role": user_login[2],
+                                "staff_name": user_login[3],
+                            }
+                            log_audit_action(conn, user_login[0], user_login[2], "Successful login", "Authentication")
+                            conn.close()
+                            st.session_state.login_attempts = 0
+                            st.rerun()
+                        else:
+                            st.error(f"Your license expired {license_status['days_left']} days ago. Please renew to access the system.")
+
                     # Failed login attempt
                     st.session_state.login_attempts += 1
                     log_audit_action(conn, "SYSTEM", "Unknown", f"Failed login attempt {st.session_state.login_attempts}", "Authentication")

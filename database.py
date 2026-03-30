@@ -279,6 +279,15 @@ def init_db():
                 ip_address TEXT
             )
         """)
+        cursor.execute("PRAGMA table_info(audit_logs)")
+        audit_columns = {row[1] for row in cursor.fetchall()}
+        audit_column_defs = {
+            "details": "TEXT",
+            "ip_address": "TEXT",
+        }
+        for column_name, column_def in audit_column_defs.items():
+            if column_name not in audit_columns:
+                cursor.execute(f"ALTER TABLE audit_logs ADD COLUMN {column_name} {column_def}")
 
         # --- TABLE 7: MAINTENANCE & SYSTEM SETTINGS ---
         cursor.execute("""
@@ -334,6 +343,69 @@ def init_db():
         for column_name, column_def in pending_column_defs.items():
             if column_name not in pending_columns:
                 cursor.execute(f"ALTER TABLE pending_approvals ADD COLUMN {column_name} {column_def}")
+
+        # --- TABLE 9: COMPANY USERS ---
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                company_key TEXT NOT NULL,
+                full_name TEXT NOT NULL,
+                login_key TEXT NOT NULL UNIQUE,
+                role TEXT NOT NULL,
+                status TEXT DEFAULT 'Active',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (company_key) REFERENCES companies (key) ON DELETE CASCADE
+            )
+        """)
+        cursor.execute("PRAGMA table_info(users)")
+        user_columns = {row[1] for row in cursor.fetchall()}
+        user_column_defs = {
+            "company_key": "TEXT",
+            "full_name": "TEXT",
+            "login_key": "TEXT",
+            "role": "TEXT",
+            "status": "TEXT DEFAULT 'Active'",
+            "created_at": "TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
+        }
+        for column_name, column_def in user_column_defs.items():
+            if column_name not in user_columns:
+                cursor.execute(f"ALTER TABLE users ADD COLUMN {column_name} {column_def}")
+        cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_login_key ON users(login_key)")
+
+        # --- TABLE 10: CUSTOMER / VENDOR PROFILES ---
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS counterparties (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                company_key TEXT NOT NULL,
+                party_name TEXT NOT NULL,
+                party_type TEXT NOT NULL,
+                city_region TEXT,
+                last_transaction TEXT,
+                balance REAL DEFAULT 0,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(company_key, party_name, party_type),
+                FOREIGN KEY (company_key) REFERENCES companies (key) ON DELETE CASCADE
+            )
+        """)
+        cursor.execute("PRAGMA table_info(counterparties)")
+        counterparty_columns = {row[1] for row in cursor.fetchall()}
+        counterparty_column_defs = {
+            "company_key": "TEXT",
+            "party_name": "TEXT",
+            "party_type": "TEXT",
+            "city_region": "TEXT",
+            "last_transaction": "TEXT",
+            "balance": "REAL DEFAULT 0",
+            "created_at": "TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
+            "updated_at": "TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
+        }
+        for column_name, column_def in counterparty_column_defs.items():
+            if column_name not in counterparty_columns:
+                cursor.execute(f"ALTER TABLE counterparties ADD COLUMN {column_name} {column_def}")
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_counterparties_company_type ON counterparties(company_key, party_type)"
+        )
 
         conn.commit()
         logger.info("E.K.A CLOUD DATABASE: Full Architectural Sync Complete.")
