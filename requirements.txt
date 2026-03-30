@@ -6,3 +6,5 @@ pandas
 python-dateutil
 pyzbar
 opencv-python-headless
+pyzbar
+opencv-python-headless
