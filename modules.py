@@ -591,7 +591,7 @@ def _render_camera_scanner(module_key, pending_key):
     toggle_key = f"{module_key}_camera_open"
     nonce_key = f"{module_key}_camera_nonce"
     image_sig_key = f"{module_key}_camera_image_sig"
-    button_label = "Close Camera" if st.session_state.get(toggle_key) else "Tap to Scan"
+    button_label = "❌ Close Camera" if st.session_state.get(toggle_key) else "🔍 Tap to Scan"
 
     if st.button(button_label, key=f"{module_key}_camera_toggle_btn"):
         st.session_state[toggle_key] = not st.session_state.get(toggle_key, False)
@@ -1230,7 +1230,7 @@ def show_inventory(company_key, role):
                 excel_bin = get_excel_bin(df)
                 if excel_bin:
                     st.download_button(
-                        "Export to Excel",
+                        "📥 Export to Excel",
                         data=excel_bin,
                         file_name=f"inventory_{company_key}.xlsx",
                         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -1252,13 +1252,13 @@ def show_inventory(company_key, role):
                         )
                         if edit_col.button("Edit", key=f"inventory_edit_btn_{company_key}_{int(stock_row['id'])}"):
                             st.session_state[selected_edit_key] = int(stock_row["id"])
-                        if delete_col.button("Delete", key=f"inventory_delete_btn_{company_key}_{int(stock_row['id'])}"):
+                        if delete_col.button("🗑️ Delete Record", key=f"inventory_delete_btn_{company_key}_{int(stock_row['id'])}"):
                             st.session_state[delete_confirm_key] = int(stock_row["id"])
                     delete_item_id = st.session_state.get(delete_confirm_key)
                     if delete_item_id is not None:
                         st.warning("Are you sure you want to permanently delete this item?")
                         confirm_col, cancel_col = st.columns(2)
-                        if confirm_col.button("Confirm Delete", key=f"inventory_delete_confirm_btn_{company_key}_{delete_item_id}"):
+                        if confirm_col.button("🗑️ Delete Record", key=f"inventory_delete_confirm_btn_{company_key}_{delete_item_id}"):
                             conn = get_connection()
                             conn.execute(
                                 "DELETE FROM inventory WHERE id = ? AND company_key = ?",
@@ -1321,7 +1321,7 @@ def show_inventory(company_key, role):
             opening_stock = st.number_input("Opening Stock Quantity", min_value=0.0, value=0.0)
             price = st.number_input("Selling Price (GH₵)", min_value=0.0, value=0.0)
             cost_price = st.number_input("Cost Price (GH₵)", min_value=0.0, value=0.0)
-            submitted = st.form_submit_button("Add Item")
+            submitted = st.form_submit_button("➕ Add New Item")
             if submitted and item_name:
                 try:
                     conn = get_connection()
@@ -1501,7 +1501,7 @@ def show_chart_of_accounts(company_key, role):
 # COMPANY SETUP
 # ==========================================
 def show_company_setup(company_key, company_name, role):
-    st.header("🏢 Company Setup")
+    st.header("⚙️ System Configuration")
     st.subheader("Company Profile")
     conn = None
     try:
@@ -1633,7 +1633,7 @@ def show_company_setup(company_key, company_name, role):
 # POINT OF SALE (POS)
 # ==========================================
 def show_pos(company_key, company_name, role):
-    st.header("???? Point of Sale")
+    st.header("🛒 Point of Sale")
     receipt_key = f"pos_receipt_{company_key}"
     pos_success_key = f"pos_sale_success_{company_key}"
     void_success_key = f"pos_void_success_{company_key}"
@@ -1645,10 +1645,10 @@ def show_pos(company_key, company_name, role):
     if role == "Demo":
         _demo_notice()
         st.info("Demo POS: Select items and process a mock sale.")
-        demo_items = ["Product A - GH??? 120.00", "Product B - GH??? 75.00", "Product C - GH??? 200.00"]
+        demo_items = ["Product A - GH₵ 120.00", "Product B - GH₵ 75.00", "Product C - GH₵ 200.00"]
         selected = st.multiselect("Select Items", demo_items)
         if selected:
-            st.success(f"Demo sale: {len(selected)} item(s) selected. Total: GH??? {len(selected) * 120:.2f}")
+            st.success(f"Demo sale: {len(selected)} item(s) selected. Total: GH₵ {len(selected) * 120:.2f}")
         return
 
     if st.session_state.get(pos_success_key):
@@ -1779,14 +1779,14 @@ def show_pos(company_key, company_name, role):
             )
             st.subheader("Active Sale Cart")
             st.dataframe(cart_df, use_container_width=True)
-            st.metric("Cart Total", f"GH??? {cart_df['Line Total'].sum():,.2f}")
+            st.metric("Cart Total", f"GH₵ {cart_df['Line Total'].sum():,.2f}")
             remove_choice = st.selectbox(
                 "Remove Cart Line",
                 ["Keep all items"] + [f"{index + 1}. {line['name']} x{line['qty']}" for index, line in enumerate(cart)],
                 key=f"pos_remove_line_{company_key}",
             )
             remove_col, clear_col = st.columns(2)
-            if remove_col.button("Remove Selected Line", key=f"pos_remove_selected_{company_key}") and remove_choice != "Keep all items":
+            if remove_col.button("🗑️ Delete Record", key=f"pos_remove_selected_{company_key}") and remove_choice != "Keep all items":
                 remove_index = int(remove_choice.split(".", 1)[0]) - 1
                 cart.pop(remove_index)
                 st.rerun()
@@ -1849,7 +1849,7 @@ def show_pos(company_key, company_name, role):
                     role,
                     "POS Sale",
                     "POS",
-                    f"Sold {narration} for GH???{float(total):.2f}",
+                    f"Sold {narration} for GH₵{float(total):.2f}",
                 )
                 conn.close()
                 if print_receipt:
@@ -1876,7 +1876,7 @@ def show_pos(company_key, company_name, role):
         action_col1, action_col2 = st.columns(2)
         if action_col1.button("Process Sale", key=f"process_sale_{company_key}"):
             process_pos_sale(print_receipt=False)
-        if action_col2.button("Save and Print", key=f"save_print_sale_{company_key}"):
+        if action_col2.button("🖨️ Save & Print Receipt", key=f"save_print_sale_{company_key}"):
             process_pos_sale(print_receipt=True)
 
         st.subheader("Recent POS Transactions")
@@ -1900,7 +1900,7 @@ def show_pos(company_key, company_name, role):
                 for _, sale_row in sales_df.iterrows():
                     info_col, action_col = st.columns([4, 1])
                     info_col.caption(
-                        f"{sale_row['Date']} | {sale_row['Narration']} | GH??????? {float(sale_row['Amount']):,.2f} | {sale_row['Status']}"
+                        f"{sale_row['Date']} | {sale_row['Narration']} | GH₵ {float(sale_row['Amount']):,.2f} | {sale_row['Status']}"
                     )
                     if sale_row["Status"] != "Void" and action_col.button("Void", key=f"pos_void_btn_{company_key}_{int(sale_row['ID'])}"):
                         st.session_state[pos_void_confirm_key] = int(sale_row["ID"])
@@ -2005,7 +2005,7 @@ def show_sales_purchase(company_key, role, doc_type="Sales"):
             excel_bin = get_excel_bin(df)
             if excel_bin:
                 st.download_button(
-                    "Export to Excel",
+                    "📥 Export to Excel",
                     data=excel_bin,
                     file_name=f"{doc_type.lower()}_{company_key}.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -2132,7 +2132,7 @@ def show_taxation(company_key):
 # GHANA PAYROLL (SSNIT)
 # ==========================================
 def show_payroll(company_key, role):
-    st.header("👷 Ghana Payroll (SSNIT)")
+    st.header("💳 Payroll & Salaries")
 
     if role == "Demo":
         _demo_notice()
@@ -2293,7 +2293,7 @@ def show_payroll(company_key, role):
 # FIXED ASSET REGISTER
 # ==========================================
 def show_fixed_assets(company_key, role):
-    st.header("🏗️ Fixed Asset Register")
+    st.header("🏛️ Asset Register")
     delete_success_key = f"asset_delete_success_{company_key}"
     if st.session_state.get(delete_success_key):
         st.success("Item deleted")
@@ -2346,7 +2346,7 @@ def show_fixed_assets(company_key, role):
                 except Exception as e:
                     st.error(f"Error adding asset: {e}")
 
-    st.subheader("Asset Register")
+    st.subheader("🏛️ Asset Register")
     try:
         conn = get_connection()
         data = conn.execute(
@@ -2377,13 +2377,13 @@ def show_fixed_assets(company_key, role):
                     )
                     if edit_col.button("Edit", key=f"asset_edit_btn_{company_key}_{int(asset_row['ID'])}"):
                         st.session_state[selected_asset_key] = int(asset_row["ID"])
-                    if delete_col.button("Delete", key=f"asset_delete_btn_{company_key}_{int(asset_row['ID'])}"):
+                    if delete_col.button("🗑️ Delete Record", key=f"asset_delete_btn_{company_key}_{int(asset_row['ID'])}"):
                         st.session_state[delete_asset_key] = int(asset_row["ID"])
                 delete_asset_id = st.session_state.get(delete_asset_key)
                 if delete_asset_id is not None:
                     st.warning("Are you sure you want to permanently delete this item?")
                     confirm_col, cancel_col = st.columns(2)
-                    if confirm_col.button("Confirm Delete", key=f"asset_delete_confirm_btn_{company_key}_{delete_asset_id}"):
+                    if confirm_col.button("🗑️ Delete Record", key=f"asset_delete_confirm_btn_{company_key}_{delete_asset_id}"):
                         conn.execute(
                             "DELETE FROM fixed_assets WHERE id = ? AND company_key = ?",
                             (int(delete_asset_id), company_key),
@@ -2443,7 +2443,7 @@ def show_fixed_assets(company_key, role):
 # FINANCIAL INTELLIGENCE / REPORTS
 # ==========================================
 def show_reports(company_key):
-    st.header("📈 Financial Intelligence")
+    st.header("📊 Data Analytics")
     try:
         conn = get_connection()
 
@@ -2487,7 +2487,7 @@ def show_ai_assistant(client_id):
         st.warning("No active company context is available for the AI assistant.")
         return
 
-    st.header("AI Data Assessment")
+    st.header("🤖 Gatekeeper Admin")
     st.caption("Ask questions about your last 30 days of invoices, expenses, and payroll activity.")
 
     conn = None

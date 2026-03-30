@@ -294,17 +294,17 @@ def render_gatekeeper_ai_chat(menu_selection):
             }
         ]
 
-    with st.sidebar.expander("Gatekeeper AI", expanded=False):
+    with st.sidebar.expander("🤖 Gatekeeper Admin", expanded=False):
         st.caption(f"Active module: {menu_selection}")
 
         for message in st.session_state.messages[-6:]:
             with st.chat_message(message["role"]):
                 st.markdown(message["content"])
 
-        user_question = st.chat_input("Ask Gatekeeper AI...", key=f"ai_guide_{menu_selection}")
+        user_question = st.chat_input("Ask Gatekeeper Admin...", key=f"ai_guide_{menu_selection}")
         if user_question:
             st.session_state.messages.append({"role": "user", "content": user_question})
-            with st.spinner("Gatekeeper AI is thinking..."):
+            with st.spinner("Gatekeeper Admin is thinking..."):
                 ai_response = ask_gatekeeper_ai(menu_selection, st.session_state.messages)
             st.session_state.messages.append({"role": "assistant", "content": ai_response})
             st.rerun()
@@ -355,7 +355,7 @@ def render_gatekeeper_ai_guide(menu_selection):
         "This AI guide follows the module you are currently viewing and explains the most important fields before you save an entry. Ask a short question below if you want entry help tailored to this screen."
     )
 
-    with st.sidebar.expander("🤖 Gatekeeper AI Guide", expanded=False):
+    with st.sidebar.expander("🤖 Gatekeeper Admin", expanded=False):
         st.markdown(
             """
             <div style='background-color:#eef6ff; border-left:4px solid #0f766e; padding:12px; border-radius:10px; margin-bottom:10px;'>
@@ -367,7 +367,7 @@ def render_gatekeeper_ai_guide(menu_selection):
         )
         st.markdown(help_text)
 
-        user_question = st.chat_input("Ask Gatekeeper AI for help", key=f"ai_guide_{menu_selection}")
+        user_question = st.chat_input("Ask Gatekeeper Admin for help", key=f"ai_guide_{menu_selection}")
         if user_question:
             ai_response = module_responses.get(
                 menu_selection,
@@ -1366,25 +1366,25 @@ else:
         </div>
         """, unsafe_allow_html=True)
         
-        menu = ["Dashboard", "Inventory", "Payroll", "Sales/Purchase", "Reports", "Banking", "Taxation", "AI Data Assessment", "Audit Trail"]
+        menu = ["Dashboard", "📦 Inventory Management", "💳 Payroll & Salaries", "Sales/Purchase", "📊 Data Analytics", "Banking", "Taxation", "🤖 Gatekeeper Admin", "Audit Trail"]
         choice = st.sidebar.selectbox("Navigation", menu)
         render_gatekeeper_ai_chat(choice)
         
         if choice == "Dashboard":
             show_dashboard("DEMO", "Demo Corporation Ltd", "Demo")
-        elif choice == "Inventory":
+        elif choice == "📦 Inventory Management":
             show_inventory("DEMO", "Demo")
-        elif choice == "Payroll":
+        elif choice == "💳 Payroll & Salaries":
             show_payroll("DEMO", "Demo")
         elif choice == "Sales/Purchase":
             show_sales_purchase("DEMO", "Demo", "Sales")
-        elif choice == "Reports":
+        elif choice == "📊 Data Analytics":
             show_reports("DEMO")
         elif choice == "Banking":
             show_banking("DEMO", "Demo")
         elif choice == "Taxation":
             show_taxation("DEMO")
-        elif choice == "AI Data Assessment":
+        elif choice == "🤖 Gatekeeper Admin":
             show_ai_assistant("DEMO")
         elif choice == "Audit Trail":
             show_audit_trail("DEMO")
@@ -1417,15 +1417,15 @@ else:
                         st.error("Failed to initialize renewal payment.")
         
         menu = [
-            "🏠 Dashboard", "POS (Point of Sale)", "Vouchers & Journals", "Chart of Accounts", 
-            "Inventory & Stock", "Sales Invoicing", "Purchase Orders", 
+            "🏠 Dashboard", "🛒 Point of Sale", "Vouchers & Journals", "Chart of Accounts", 
+            "📦 Inventory Management", "Sales Invoicing", "Purchase Orders", 
             "Banking & Cash", "Accounts Receivable", "Accounts Payable", 
-            "Taxation (VAT/NHIL)", "Ghana Payroll (SSNIT)", "Fixed Asset Register", 
-            "Financial Intelligence", "AI Data Assessment", "System Audit Trail"
+            "Taxation (VAT/NHIL)", "💳 Payroll & Salaries", "🏛️ Asset Register", 
+            "📊 Data Analytics", "🤖 Gatekeeper Admin", "System Audit Trail"
         ]
         
         if u['role'] == "Master Admin":
-            menu.insert(1, "Company Setup")
+            menu.insert(1, "⚙️ System Configuration")
         
         choice = st.sidebar.selectbox("Go to Module:", menu, key="v3_main_nav_dropdown")
         render_gatekeeper_ai_chat(choice)
@@ -1435,21 +1435,21 @@ else:
             show_dashboard(u['key'], u['name'], u['role'])  # FIXED: Correct parameter passing
         
         # Comprehensive Mapping Logic
-        elif choice == "Company Setup": show_company_setup(u['key'], u['name'], u['role'])
-        elif choice == "POS (Point of Sale)": show_pos(u['key'], u['name'], u['role'])
+        elif choice == "⚙️ System Configuration": show_company_setup(u['key'], u['name'], u['role'])
+        elif choice == "🛒 Point of Sale": show_pos(u['key'], u['name'], u['role'])
         elif choice == "Vouchers & Journals": show_vouchers(u['key'], u['role'])
         elif choice == "Chart of Accounts": show_chart_of_accounts(u['key'], u['role'])
-        elif choice == "Inventory & Stock": show_inventory(u['key'], u['role'])
+        elif choice == "📦 Inventory Management": show_inventory(u['key'], u['role'])
         elif choice == "Sales Invoicing": show_sales_purchase(u['key'], u['role'], "Sales")
         elif choice == "Purchase Orders": show_sales_purchase(u['key'], u['role'], "Purchase")
         elif choice == "Banking & Cash": show_banking(u['key'], u['role'])
         elif choice == "Accounts Receivable": show_aging(u['key'], "Receivable")
         elif choice == "Accounts Payable": show_aging(u['key'], "Payable")
         elif choice == "Taxation (VAT/NHIL)": show_taxation(u['key'])
-        elif choice == "Ghana Payroll (SSNIT)": show_payroll(u['key'], u['role'])
-        elif choice == "Fixed Asset Register": show_fixed_assets(u['key'], u['role'])
-        elif choice == "Financial Intelligence": show_reports(u['key'])
-        elif choice == "AI Data Assessment": show_ai_assistant(u['key'])
+        elif choice == "💳 Payroll & Salaries": show_payroll(u['key'], u['role'])
+        elif choice == "🏛️ Asset Register": show_fixed_assets(u['key'], u['role'])
+        elif choice == "📊 Data Analytics": show_reports(u['key'])
+        elif choice == "🤖 Gatekeeper Admin": show_ai_assistant(u['key'])
         elif choice == "System Audit Trail": show_audit_trail(u['key'])
 
     st.sidebar.markdown("---")
