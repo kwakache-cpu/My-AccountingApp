@@ -129,7 +129,7 @@ def _fetch_ai_assistant_records(conn, client_id):
             """
             SELECT date, narration, reference_no, credit
             FROM vouchers
-            WHERE company_key = ? AND v_type = 'Sales' AND date >= ?
+            WHERE company_key = ? AND v_type = 'Sales' AND date >= ? AND COALESCE(status, 'Active') != 'Void'
             ORDER BY date DESC
             LIMIT 50
             """,
@@ -139,7 +139,7 @@ def _fetch_ai_assistant_records(conn, client_id):
             """
             SELECT date, narration, reference_no, debit, credit
             FROM vouchers
-            WHERE company_key = ? AND v_type = 'Expense' AND date >= ?
+            WHERE company_key = ? AND v_type = 'Expense' AND date >= ? AND COALESCE(status, 'Active') != 'Void'
             ORDER BY date DESC
             LIMIT 50
             """,
@@ -153,7 +153,7 @@ def _fetch_ai_assistant_records(conn, client_id):
             """
             SELECT created_at, emp_name, basic_salary, allowances, paye, net_salary, month, year, payment_status
             FROM payroll
-            WHERE company_key = ? AND date(COALESCE(created_at, CURRENT_TIMESTAMP)) >= date(?)
+            WHERE company_key = ? AND date(COALESCE(created_at, CURRENT_TIMESTAMP)) >= date(?) AND COALESCE(status, 'Active') != 'Void'
             ORDER BY created_at DESC
             LIMIT 50
             """,
@@ -199,6 +199,11 @@ def _generate_staff_login_key(company_key, role_name):
 
 def _hash_staff_password(password):
     return hashlib.sha256(password.encode("utf-8")).hexdigest()
+
+
+def _clear_streamlit_state(*keys):
+    for key in keys:
+        st.session_state.pop(key, None)
 
 
 def _ensure_counterparty(conn, company_key, party_name, party_type, city_region, tx_date, balance_delta):
@@ -702,6 +707,7 @@ def show_company_registration_module():
                 st.rerun()
             finally:
                 conn.close()
+                st.session_state[pos_success_key] = True
 
     conn = get_connection()
     try:
@@ -985,9 +991,13 @@ def show_onboarding_payment():
 def show_inventory(company_key, role):
     st.header("📦 Inventory Management")
     success_key = f"inventory_add_success_{company_key}"
+    delete_success_key = f"inventory_delete_success_{company_key}"
     if st.session_state.get(success_key):
         st.success("Item added successfully!")
         st.session_state.pop(success_key, None)
+    if st.session_state.get(delete_success_key):
+        st.success("Item deleted")
+        st.session_state.pop(delete_success_key, None)
 
     tabs = st.tabs(["Stock Overview", "Stock In/Out", "Items Management"])
 
@@ -1006,8 +1016,8 @@ def show_inventory(company_key, role):
                 })
             else:
                 query = """
-                    SELECT id, item_code, item_name, category, qty as quantity,
-                           price as unit_price, cost_price, (qty * price) as total_value
+                    SELECT id, item_code, item_name, category, opening_balance, qty as quantity,
+                           price as unit_price, cost_price, (qty * cost_price) as total_value
                     FROM inventory WHERE company_key = ?
                 """
                 df = pd.read_sql_query(query, conn, params=(company_key,))
@@ -1031,17 +1041,39 @@ def show_inventory(company_key, role):
                 if role in ("Master Admin", "Bookkeeper", "Sub-Admin") and "id" in df.columns:
                     st.markdown("Edit Stock Item")
                     selected_edit_key = f"inventory_edit_selected_{company_key}"
+                    delete_confirm_key = f"inventory_delete_confirm_{company_key}"
                     for _, stock_row in df.iterrows():
-                        name_col, button_col = st.columns([4, 1])
+                        name_col, edit_col, delete_col = st.columns([4, 1, 1])
                         name_col.caption(
                             f"{stock_row['item_name']} | Qty {float(stock_row['quantity']):,.2f} | "
                             f"Sell GH₵ {float(stock_row['unit_price']):,.2f}"
                         )
-                        if button_col.button("Edit", key=f"inventory_edit_btn_{company_key}_{int(stock_row['id'])}"):
+                        if edit_col.button("Edit", key=f"inventory_edit_btn_{company_key}_{int(stock_row['id'])}"):
                             st.session_state[selected_edit_key] = int(stock_row["id"])
+                        if delete_col.button("Delete", key=f"inventory_delete_btn_{company_key}_{int(stock_row['id'])}"):
+                            st.session_state[delete_confirm_key] = int(stock_row["id"])
+                    delete_item_id = st.session_state.get(delete_confirm_key)
+                    if delete_item_id is not None:
+                        st.warning("Are you sure you want to permanently delete this item?")
+                        confirm_col, cancel_col = st.columns(2)
+                        if confirm_col.button("Confirm Delete", key=f"inventory_delete_confirm_btn_{company_key}_{delete_item_id}"):
+                            conn = get_connection()
+                            conn.execute(
+                                "DELETE FROM inventory WHERE id = ? AND company_key = ?",
+                                (int(delete_item_id), company_key),
+                            )
+                            conn.commit()
+                            log_audit_action(conn, company_key, role, "Inventory Item Deleted", "Inventory", f"Deleted item ID {int(delete_item_id)}")
+                            conn.close()
+                            _clear_streamlit_state(delete_confirm_key, selected_edit_key)
+                            st.session_state[delete_success_key] = True
+                            st.rerun()
+                        if cancel_col.button("Cancel", key=f"inventory_delete_cancel_btn_{company_key}_{delete_item_id}"):
+                            _clear_streamlit_state(delete_confirm_key)
+                            st.rerun()
                     edit_item_id = st.session_state.get(selected_edit_key, int(df["id"].iloc[0]))
                     edit_row = df.loc[df["id"] == edit_item_id].iloc[0]
-                    with st.form(f"inventory_edit_form_{company_key}_{edit_item_id}"):
+                    with st.form(f"inventory_edit_form_{company_key}_{edit_item_id}", clear_on_submit=True):
                         edit_category = st.text_input("Category", value=str(edit_row["category"] or ""))
                         edit_qty = st.number_input("Quantity", min_value=0.0, value=float(edit_row["quantity"] or 0.0))
                         edit_price = st.number_input("Selling Price (GH₵)", min_value=0.0, value=float(edit_row["unit_price"] or 0.0))
@@ -1060,7 +1092,7 @@ def show_inventory(company_key, role):
                                 conn.commit()
                                 log_audit_action(conn, company_key, role, "Inventory Item Updated", "Inventory", f"Updated item ID {int(edit_item_id)}")
                                 conn.close()
-                                st.session_state.pop(selected_edit_key, None)
+                                _clear_streamlit_state(selected_edit_key, delete_confirm_key)
                                 st.success("Entry Updated")
                                 st.rerun()
                             except Exception as exc:
@@ -1082,7 +1114,7 @@ def show_inventory(company_key, role):
         with st.form("add_inventory_form", clear_on_submit=True):
             item_name = st.text_input("Item Name")
             category = st.text_input("Category")
-            opening_stock = st.number_input("Opening Stock", min_value=0.0, value=0.0)
+            opening_stock = st.number_input("Opening Stock Quantity", min_value=0.0, value=0.0)
             price = st.number_input("Selling Price (GH₵)", min_value=0.0, value=0.0)
             cost_price = st.number_input("Cost Price (GH₵)", min_value=0.0, value=0.0)
             submitted = st.form_submit_button("Add Item")
@@ -1392,6 +1424,8 @@ def show_pos(company_key, company_name, role):
     st.header("🛒 Point of Sale")
     receipt_key = f"pos_receipt_{company_key}"
     draft_key = f"pos_draft_{company_key}"
+    pos_success_key = f"pos_sale_success_{company_key}"
+    void_success_key = f"pos_void_success_{company_key}"
     if role == "Demo":
         _demo_notice()
         st.info("Demo POS: Select items and process a mock sale.")
@@ -1400,6 +1434,13 @@ def show_pos(company_key, company_name, role):
         if selected:
             st.success(f"Demo sale: {len(selected)} item(s) selected. Total: GH₵ {len(selected) * 120:.2f}")
         return
+
+    if st.session_state.get(pos_success_key):
+        st.success("Sale processed successfully.")
+        st.session_state.pop(pos_success_key, None)
+    if st.session_state.get(void_success_key):
+        st.success("Transaction voided")
+        st.session_state.pop(void_success_key, None)
 
     try:
         conn = get_connection()
@@ -1468,8 +1509,8 @@ def show_pos(company_key, company_name, role):
                         (sale_payload["qty"], sale_payload["inventory_item_id"], company_key),
                     )
                 conn.execute(
-                    """INSERT INTO vouchers (company_key, date, v_type, ledger, credit, payment_method, narration, created_by)
-                       VALUES (?, ?, 'Sales', 'Sales Revenue', ?, ?, ?, ?)""",
+                    """INSERT INTO vouchers (company_key, date, v_type, ledger, credit, payment_method, narration, status, created_by)
+                       VALUES (?, ?, 'Sales', 'Sales Revenue', ?, ?, ?, 'Active', ?)""",
                     (
                         company_key,
                         datetime.now().date().isoformat(),
@@ -1497,16 +1538,16 @@ def show_pos(company_key, company_name, role):
                         sale_payload["total"],
                         datetime.now().strftime("%Y-%m-%d %H:%M"),
                     )
-                st.session_state.pop(draft_key, None)
-                for state_key in (
+                _clear_streamlit_state(
+                    draft_key,
                     f"pos_item_mode_{company_key}",
                     f"pos_item_{company_key}",
                     f"pos_qty_{company_key}",
                     f"manual_pos_item_{company_key}",
                     f"manual_pos_price_{company_key}",
                     f"manual_pos_qty_{company_key}",
-                ):
-                    st.session_state.pop(state_key, None)
+                )
+                st.rerun()
             except Exception as e:
                 st.error(f"Error processing sale: {e}")
 
@@ -1555,22 +1596,66 @@ def show_pos(company_key, company_name, role):
 
             action_col1, action_col2, action_col3 = st.columns(3)
             if action_col1.button("Void Transaction", key=f"void_sale_{company_key}"):
-                st.session_state.pop(draft_key, None)
-                for state_key in (
+                _clear_streamlit_state(
+                    draft_key,
                     f"pos_item_mode_{company_key}",
                     f"pos_item_{company_key}",
                     f"pos_qty_{company_key}",
                     f"manual_pos_item_{company_key}",
                     f"manual_pos_price_{company_key}",
                     f"manual_pos_qty_{company_key}",
-                ):
-                    st.session_state.pop(state_key, None)
+                )
                 st.warning("Pending transaction voided.")
                 st.rerun()
             if action_col2.button("Process Sale", key=f"process_sale_{company_key}"):
                 process_pos_sale(print_receipt=False)
             if action_col3.button("Save and Print", key=f"save_print_sale_{company_key}"):
                 process_pos_sale(print_receipt=True)
+
+        st.subheader("Recent POS Transactions")
+        conn = get_connection()
+        sales_rows = conn.execute(
+            """
+            SELECT id, date, narration, credit, COALESCE(status, 'Active') AS status
+            FROM vouchers
+            WHERE company_key = ? AND v_type = 'Sales'
+            ORDER BY date DESC, id DESC
+            LIMIT 20
+            """,
+            (company_key,),
+        ).fetchall()
+        conn.close()
+        if sales_rows:
+            sales_df = pd.DataFrame(sales_rows, columns=["ID", "Date", "Narration", "Amount", "Status"])
+            st.dataframe(sales_df, use_container_width=True)
+            if role in ("Master Admin", "Bookkeeper", "Sub-Admin"):
+                pos_void_confirm_key = f"pos_void_confirm_{company_key}"
+                for _, sale_row in sales_df.iterrows():
+                    info_col, action_col = st.columns([4, 1])
+                    info_col.caption(
+                        f"{sale_row['Date']} | {sale_row['Narration']} | GHâ‚µ {float(sale_row['Amount']):,.2f} | {sale_row['Status']}"
+                    )
+                    if sale_row["Status"] != "Void" and action_col.button("Void", key=f"pos_void_btn_{company_key}_{int(sale_row['ID'])}"):
+                        st.session_state[pos_void_confirm_key] = int(sale_row["ID"])
+                void_sale_id = st.session_state.get(pos_void_confirm_key)
+                if void_sale_id is not None:
+                    st.warning("Are you sure you want to void this transaction?")
+                    confirm_col, cancel_col = st.columns(2)
+                    if confirm_col.button("Confirm Void", key=f"pos_void_confirm_btn_{company_key}_{void_sale_id}"):
+                        conn = get_connection()
+                        conn.execute(
+                            "UPDATE vouchers SET status = 'Void' WHERE id = ? AND company_key = ?",
+                            (int(void_sale_id), company_key),
+                        )
+                        conn.commit()
+                        log_audit_action(conn, company_key, role, "POS Transaction Voided", "POS", f"Voided voucher ID {int(void_sale_id)}")
+                        conn.close()
+                        _clear_streamlit_state(pos_void_confirm_key)
+                        st.session_state[void_success_key] = True
+                        st.rerun()
+                    if cancel_col.button("Cancel", key=f"pos_void_cancel_btn_{company_key}_{void_sale_id}"):
+                        _clear_streamlit_state(pos_void_confirm_key)
+                        st.rerun()
 
         if st.session_state.get(receipt_key):
             st.subheader("Receipt Preview")
@@ -1698,12 +1783,12 @@ def show_banking(company_key, role):
         conn = get_connection()
         cash_total = conn.execute(
             """SELECT COALESCE(SUM(credit) - SUM(debit), 0) FROM vouchers
-               WHERE company_key = ? AND payment_method = 'Cash'""",
+               WHERE company_key = ? AND payment_method = 'Cash' AND COALESCE(status, 'Active') != 'Void'""",
             (company_key,),
         ).fetchone()[0] or 0.0
         bank_total = conn.execute(
             """SELECT COALESCE(SUM(credit) - SUM(debit), 0) FROM vouchers
-               WHERE company_key = ? AND payment_method = 'Bank Transfer'""",
+               WHERE company_key = ? AND payment_method = 'Bank Transfer' AND COALESCE(status, 'Active') != 'Void'""",
             (company_key,),
         ).fetchone()[0] or 0.0
         conn.close()
@@ -1730,7 +1815,7 @@ def show_aging(company_key, aging_type="Receivable"):
     try:
         conn = get_connection()
         data = conn.execute(
-            "SELECT date, narration, credit FROM vouchers WHERE company_key = ? AND v_type = ? ORDER BY date ASC",
+            "SELECT date, narration, credit FROM vouchers WHERE company_key = ? AND v_type = ? AND COALESCE(status, 'Active') != 'Void' ORDER BY date ASC",
             (company_key, v_type),
         ).fetchall()
         conn.close()
@@ -1759,7 +1844,7 @@ def show_taxation(company_key):
     try:
         conn = get_connection()
         total_sales = conn.execute(
-            "SELECT COALESCE(SUM(credit), 0) FROM vouchers WHERE company_key = ? AND v_type = 'Sales'",
+            "SELECT COALESCE(SUM(credit), 0) FROM vouchers WHERE company_key = ? AND v_type = 'Sales' AND COALESCE(status, 'Active') != 'Void'",
             (company_key,),
         ).fetchone()[0] or 0.0
         conn.close()
@@ -1798,7 +1883,7 @@ def show_payroll(company_key, role):
         return
 
     with st.expander("➕ Add Payroll Entry", expanded=True):
-        with st.form("payroll_form"):
+        with st.form("payroll_form", clear_on_submit=True):
             col1, col2 = st.columns(2)
             with col1:
                 emp_name = st.text_input("Employee Name")
@@ -1820,8 +1905,8 @@ def show_payroll(company_key, role):
                     conn.execute(
                         """INSERT INTO payroll
                            (company_key, emp_name, basic_salary, allowances, ssnit_t1, ssnit_t2,
-                            taxable_income, paye, net_salary, deductions, month, year, payment_status)
-                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                            taxable_income, paye, net_salary, deductions, month, year, payment_status, status)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Active')""",
                         (
                             company_key,
                             emp_name,
@@ -1841,7 +1926,7 @@ def show_payroll(company_key, role):
                     conn.commit()
                     log_audit_action(conn, company_key, role, "Payroll Entry Added", "Payroll", f"{emp_name} - {month} {year}")
                     conn.close()
-                    st.success(f"Payroll saved. Net Salary: GH₵ {payroll_values['net_salary']:,.2f}")
+                    st.success("Entry Updated")
                     st.rerun()
                 except Exception as e:
                     st.error(f"Error saving payroll: {e}")
@@ -1851,31 +1936,52 @@ def show_payroll(company_key, role):
     try:
         conn = get_connection()
         data = conn.execute(
-            """SELECT id, emp_name, basic_salary, allowances, deductions, ssnit_t1, paye, net_salary, month, year, payment_status
+            """SELECT id, emp_name, basic_salary, allowances, deductions, ssnit_t1, paye, net_salary, month, year,
+                      payment_status, COALESCE(status, 'Active')
                FROM payroll WHERE company_key = ? ORDER BY year DESC, month DESC""",
             (company_key,),
         ).fetchall()
         if data:
             df = pd.DataFrame(data, columns=["ID", "Employee", "Basic Salary", "Allowances", "Deductions",
-                                              "SSNIT T1", "PAYE", "Net Salary", "Month", "Year", "Status"])
+                                              "SSNIT T1", "PAYE", "Net Salary", "Month", "Year", "Payment Status", "Status"])
             st.dataframe(df, use_container_width=True)
             if role == "Master Admin":
                 selected_payroll_key = f"payroll_edit_selected_{company_key}"
+                void_payroll_key = f"payroll_void_selected_{company_key}"
                 for _, payroll_list_row in df.iterrows():
-                    name_col, button_col = st.columns([4, 1])
+                    name_col, edit_col, void_col = st.columns([4, 1, 1])
                     name_col.caption(
                         f"{payroll_list_row['Employee']} | Salary GH₵ {float(payroll_list_row['Basic Salary']):,.2f} | "
-                        f"Net GH₵ {float(payroll_list_row['Net Salary']):,.2f}"
+                        f"Net GH₵ {float(payroll_list_row['Net Salary']):,.2f} | {payroll_list_row['Status']}"
                     )
-                    if button_col.button("Edit", key=f"payroll_edit_btn_{company_key}_{int(payroll_list_row['ID'])}"):
+                    if edit_col.button("Edit", key=f"payroll_edit_btn_{company_key}_{int(payroll_list_row['ID'])}"):
                         st.session_state[selected_payroll_key] = int(payroll_list_row["ID"])
+                    if payroll_list_row["Status"] != "Void" and void_col.button("Void", key=f"payroll_void_btn_{company_key}_{int(payroll_list_row['ID'])}"):
+                        st.session_state[void_payroll_key] = int(payroll_list_row["ID"])
+                void_payroll_id = st.session_state.get(void_payroll_key)
+                if void_payroll_id is not None:
+                    st.warning("Are you sure you want to void this payroll entry?")
+                    confirm_col, cancel_col = st.columns(2)
+                    if confirm_col.button("Confirm Void", key=f"payroll_void_confirm_btn_{company_key}_{void_payroll_id}"):
+                        conn.execute(
+                            "UPDATE payroll SET status = 'Void' WHERE id = ? AND company_key = ?",
+                            (int(void_payroll_id), company_key),
+                        )
+                        conn.commit()
+                        log_audit_action(conn, company_key, role, "Payroll Voided", "Payroll", f"Voided payroll ID {int(void_payroll_id)}")
+                        _clear_streamlit_state(void_payroll_key, selected_payroll_key)
+                        st.success("Entry Updated")
+                        st.rerun()
+                    if cancel_col.button("Cancel", key=f"payroll_void_cancel_btn_{company_key}_{void_payroll_id}"):
+                        _clear_streamlit_state(void_payroll_key)
+                        st.rerun()
                 payroll_record_id = st.session_state.get(selected_payroll_key, int(df["ID"].iloc[0]))
                 edit_row = df.loc[df["ID"] == payroll_record_id].iloc[0]
-                with st.form(f"payroll_edit_form_{company_key}_{payroll_record_id}"):
+                with st.form(f"payroll_edit_form_{company_key}_{payroll_record_id}", clear_on_submit=True):
                     edit_salary = st.number_input("Salary", min_value=0.0, value=float(edit_row["Basic Salary"] or 0.0))
                     edit_bonus = st.number_input("Bonus", min_value=0.0, value=float(edit_row["Allowances"] or 0.0))
                     edit_deductions = st.number_input("Deductions", min_value=0.0, value=float(edit_row["Deductions"] or 0.0))
-                    edit_status = st.selectbox("Payment Status", ["Paid", "Unpaid"], index=0 if edit_row["Status"] == "Paid" else 1)
+                    edit_status = st.selectbox("Payment Status", ["Paid", "Unpaid"], index=0 if edit_row["Payment Status"] == "Paid" else 1)
                     if st.form_submit_button("Update Payroll"):
                         updated_values = _calculate_payroll_values(edit_salary, edit_bonus, edit_deductions)
                         details = (
@@ -1906,7 +2012,7 @@ def show_payroll(company_key, role):
                         )
                         conn.commit()
                         log_audit_action(conn, company_key, role, "Payroll Updated", "Payroll", details)
-                        st.session_state.pop(selected_payroll_key, None)
+                        _clear_streamlit_state(selected_payroll_key, void_payroll_key)
                         st.success("Entry Updated")
                         st.rerun()
         else:
@@ -1923,6 +2029,10 @@ def show_payroll(company_key, role):
 # ==========================================
 def show_fixed_assets(company_key, role):
     st.header("🏗️ Fixed Asset Register")
+    delete_success_key = f"asset_delete_success_{company_key}"
+    if st.session_state.get(delete_success_key):
+        st.success("Item deleted")
+        st.session_state.pop(delete_success_key, None)
 
     if role == "Demo":
         _demo_notice()
@@ -1993,14 +2103,34 @@ def show_fixed_assets(company_key, role):
             col3.metric("Total Book Value", f"GH₵ {total_book:,.2f}")
             if role in ("Master Admin", "Bookkeeper", "Sub-Admin"):
                 selected_asset_key = f"asset_edit_selected_{company_key}"
+                delete_asset_key = f"asset_delete_selected_{company_key}"
                 for _, asset_row in df.iterrows():
-                    name_col, button_col = st.columns([4, 1])
+                    name_col, edit_col, delete_col = st.columns([4, 1, 1])
                     name_col.caption(
                         f"{asset_row['Asset Name']} | Current GH₵ {float(asset_row['Current Value']):,.2f} | "
                         f"Purchase Date {asset_row['Purchase Date']}"
                     )
-                    if button_col.button("Edit", key=f"asset_edit_btn_{company_key}_{int(asset_row['ID'])}"):
+                    if edit_col.button("Edit", key=f"asset_edit_btn_{company_key}_{int(asset_row['ID'])}"):
                         st.session_state[selected_asset_key] = int(asset_row["ID"])
+                    if delete_col.button("Delete", key=f"asset_delete_btn_{company_key}_{int(asset_row['ID'])}"):
+                        st.session_state[delete_asset_key] = int(asset_row["ID"])
+                delete_asset_id = st.session_state.get(delete_asset_key)
+                if delete_asset_id is not None:
+                    st.warning("Are you sure you want to permanently delete this item?")
+                    confirm_col, cancel_col = st.columns(2)
+                    if confirm_col.button("Confirm Delete", key=f"asset_delete_confirm_btn_{company_key}_{delete_asset_id}"):
+                        conn.execute(
+                            "DELETE FROM fixed_assets WHERE id = ? AND company_key = ?",
+                            (int(delete_asset_id), company_key),
+                        )
+                        conn.commit()
+                        log_audit_action(conn, company_key, role, "Fixed Asset Deleted", "Fixed Assets", f"Deleted asset ID {int(delete_asset_id)}")
+                        _clear_streamlit_state(delete_asset_key, selected_asset_key)
+                        st.session_state[delete_success_key] = True
+                        st.rerun()
+                    if cancel_col.button("Cancel", key=f"asset_delete_cancel_btn_{company_key}_{delete_asset_id}"):
+                        _clear_streamlit_state(delete_asset_key)
+                        st.rerun()
                 edit_asset_id = st.session_state.get(selected_asset_key, int(df["ID"].iloc[0]))
                 edit_asset_row = df.loc[df["ID"] == edit_asset_id].iloc[0]
                 with st.form(f"asset_edit_form_{company_key}_{edit_asset_id}", clear_on_submit=True):
@@ -2032,7 +2162,7 @@ def show_fixed_assets(company_key, role):
                         )
                         conn.commit()
                         log_audit_action(conn, company_key, role, "Fixed Asset Updated", "Fixed Assets", f"Updated asset ID {int(edit_asset_id)}")
-                        st.session_state.pop(selected_asset_key, None)
+                        _clear_streamlit_state(selected_asset_key, delete_asset_key)
                         st.success("Entry Updated")
                         st.rerun()
         else:
@@ -2054,11 +2184,11 @@ def show_reports(company_key):
 
         # Revenue vs Expenses
         total_revenue = conn.execute(
-            "SELECT COALESCE(SUM(credit), 0) FROM vouchers WHERE company_key = ? AND v_type = 'Sales'",
+            "SELECT COALESCE(SUM(credit), 0) FROM vouchers WHERE company_key = ? AND v_type = 'Sales' AND COALESCE(status, 'Active') != 'Void'",
             (company_key,),
         ).fetchone()[0] or 0.0
         total_expenses = conn.execute(
-            "SELECT COALESCE(SUM(debit), 0) FROM vouchers WHERE company_key = ? AND v_type = 'Expense'",
+            "SELECT COALESCE(SUM(debit), 0) FROM vouchers WHERE company_key = ? AND v_type = 'Expense' AND COALESCE(status, 'Active') != 'Void'",
             (company_key,),
         ).fetchone()[0] or 0.0
         net_profit = total_revenue - total_expenses

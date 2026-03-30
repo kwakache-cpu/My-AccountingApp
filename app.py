@@ -765,14 +765,14 @@ def show_dashboard(company_key, company_name, role):
                 current_month = datetime.now().strftime('%Y-%m')
                 month_sales = conn.execute(
                     """SELECT COALESCE(SUM(credit), 0) FROM vouchers
-                       WHERE company_key = ? AND v_type = 'Sales'
+                       WHERE company_key = ? AND v_type = 'Sales' AND COALESCE(status, 'Active') != 'Void'
                        AND date LIKE ?""",
                     (company_key, f"{current_month}%"),
                 ).fetchone()[0]
                 col2.metric("Month Sales", f"GHS {month_sales:.2f}")
 
                 emp_count = conn.execute(
-                    "SELECT COUNT(DISTINCT emp_name) FROM payroll WHERE company_key = ?",
+                    "SELECT COUNT(DISTINCT emp_name) FROM payroll WHERE company_key = ? AND COALESCE(status, 'Active') != 'Void'",
                     (company_key,),
                 ).fetchone()[0] or 0
                 col3.metric("Employees", str(emp_count))
@@ -807,7 +807,7 @@ def show_dashboard(company_key, company_name, role):
                     recent_data = conn.execute(
                         """SELECT date, v_type, narration,
                            CASE WHEN credit > 0 THEN credit ELSE debit END AS amount
-                           FROM vouchers WHERE company_key = ?
+                           FROM vouchers WHERE company_key = ? AND COALESCE(status, 'Active') != 'Void'
                            ORDER BY date DESC LIMIT 10""",
                         (company_key,),
                     ).fetchall()

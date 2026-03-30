@@ -35,6 +35,10 @@ def ensure_schema_integrity(conn):
     critical_columns = {
         "companies": {"contact_email": "TEXT"},
         "audit_logs": {"details": "TEXT"},
+        "vouchers": {"status": "TEXT DEFAULT 'Active'"},
+        "payroll": {"status": "TEXT DEFAULT 'Active'"},
+        "inventory": {"opening_balance": "REAL DEFAULT 0"},
+        "fixed_assets": {"opening_book_value": "REAL DEFAULT 0"},
     }
 
     for table_name, columns in critical_columns.items():
@@ -215,6 +219,7 @@ def init_db():
             "reference_no": "TEXT",
             "narration": "TEXT",
             "is_cleared": "INTEGER DEFAULT 1",
+            "status": "TEXT DEFAULT 'Active'",
             "created_by": "TEXT",
             "created_at": "TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
         }
@@ -261,6 +266,7 @@ def init_db():
             "account_number": "TEXT",
             "allowances": "REAL DEFAULT 0",
             "deductions": "REAL DEFAULT 0",
+            "status": "TEXT DEFAULT 'Active'",
             "payment_status": "TEXT DEFAULT 'Unpaid'",
             "created_at": "TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
         }
