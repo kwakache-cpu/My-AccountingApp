@@ -32,6 +32,12 @@ from modules import (
     show_taxation,
     show_vouchers,
 )
+from financials import (
+    show_financial_reports,
+    show_invoice_manager,
+    show_ledger_viewer,
+    show_record_transaction,
+)
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -1463,6 +1469,28 @@ else:
         selected_index = menu.index(current_page) if current_page in menu else 0
         choice = st.sidebar.selectbox("Go to Module:", menu, index=selected_index, key="v3_main_nav_dropdown")
         st.session_state.page = choice
+        with st.sidebar.expander("Currency", expanded=False):
+            settings_conn = get_connection()
+            settings_row = settings_conn.execute(
+                "SELECT COALESCE(base_currency, 'GHS') AS base_currency, COALESCE(display_currency, 'GHS') AS display_currency FROM system_settings WHERE id = 1"
+            ).fetchone()
+            base_currency = str(settings_row["base_currency"]) if settings_row else "GHS"
+            display_currency = str(settings_row["display_currency"]) if settings_row else "GHS"
+            currency_options = ["GHS", "USD", "EUR", "GBP"]
+            selected_currency = st.selectbox(
+                "Display Currency",
+                currency_options,
+                index=currency_options.index(display_currency) if display_currency in currency_options else 0,
+                key="display_currency_toggle",
+            )
+            st.caption(f"Base Currency: {base_currency}")
+            if selected_currency != display_currency:
+                settings_conn.execute(
+                    "UPDATE system_settings SET display_currency = ?, updated_at = CURRENT_TIMESTAMP WHERE id = 1",
+                    (selected_currency,),
+                )
+                settings_conn.commit()
+            settings_conn.close()
         render_gatekeeper_ai_chat(choice)
         
         # Dashboard Module (NEW)

@@ -211,97 +211,190 @@ def _clear_streamlit_state(*keys):
         st.session_state.pop(key, None)
 
 
+BASE_CURRENCY = "GHS"
+
+
 def _normalize_account_category(category):
     normalized = str(category or "").strip().title()
-    return "Revenue" if normalized == "Income" else normalized
+    if normalized == "Revenue":
+        return "Income"
+    return normalized
 
 
-def _get_or_create_account(conn, account_name, category):
+def _resolve_entry_date(entry_date=None):
+    value = entry_date or datetime.now().date()
+    return value.isoformat() if hasattr(value, "isoformat") else str(value)
+
+
+def get_display_currency():
+    conn = None
+    try:
+        conn = get_connection()
+        row = conn.execute(
+            "SELECT COALESCE(display_currency, base_currency, 'GHS') AS currency FROM system_settings WHERE id = 1"
+        ).fetchone()
+        return str(row["currency"] or BASE_CURRENCY) if row else BASE_CURRENCY
+    except Exception:
+        return BASE_CURRENCY
+    finally:
+        if conn:
+            conn.close()
+
+
+def is_period_locked(company_key, entry_date, conn=None):
+    if not company_key:
+        return False
+    entry_date_iso = _resolve_entry_date(entry_date)
+    owns_connection = conn is None
+    conn = conn or get_connection()
+    if conn is None:
+        return False
+    try:
+        row = conn.execute(
+            """
+            SELECT 1
+            FROM accounting_periods
+            WHERE company_key = ?
+              AND is_locked = 1
+              AND date(?) BETWEEN date(start_date) AND date(end_date)
+            LIMIT 1
+            """,
+            (company_key, entry_date_iso),
+        ).fetchone()
+        return bool(row)
+    finally:
+        if owns_connection and conn:
+            conn.close()
+
+
+def set_period_lock(company_key, period_date, locked, locked_by=None):
+    period_dt = pd.to_datetime(period_date).date()
+    start_date = period_dt.replace(day=1)
+    next_month = (pd.Timestamp(start_date) + pd.offsets.MonthBegin(1)).date()
+    end_date = (pd.Timestamp(next_month) - pd.Timedelta(days=1)).date()
+    period_label = start_date.strftime("%Y-%m")
+    conn = get_connection()
+    try:
+        conn.execute(
+            """
+            INSERT INTO accounting_periods (company_key, period_label, start_date, end_date, is_locked, locked_at, locked_by)
+            VALUES (?, ?, ?, ?, ?, CASE WHEN ? = 1 THEN CURRENT_TIMESTAMP ELSE NULL END, ?)
+            ON CONFLICT(company_key, period_label) DO UPDATE SET
+                start_date = excluded.start_date,
+                end_date = excluded.end_date,
+                is_locked = excluded.is_locked,
+                locked_at = CASE WHEN excluded.is_locked = 1 THEN CURRENT_TIMESTAMP ELSE NULL END,
+                locked_by = excluded.locked_by
+            """,
+            (company_key, period_label, start_date.isoformat(), end_date.isoformat(), int(bool(locked)), int(bool(locked)), locked_by),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _get_or_create_account(conn, account_name, category, parent_name=None):
     normalized_name = str(account_name or "").strip()
     normalized_category = _normalize_account_category(category)
     if not normalized_name or not normalized_category:
-        raise ValueError("Account name and category are required.")
+        raise ValueError("Account name and type are required.")
 
     row = conn.execute(
         """
         SELECT id
         FROM chart_of_accounts
         WHERE lower(COALESCE(name, account_name)) = lower(?)
-          AND lower(COALESCE(category, account_type)) = lower(?)
         LIMIT 1
         """,
-        (normalized_name, normalized_category),
+        (normalized_name,),
     ).fetchone()
     if row:
+        conn.execute(
+            """
+            UPDATE chart_of_accounts
+            SET type = COALESCE(NULLIF(type, ''), ?),
+                category = COALESCE(NULLIF(category, ''), ?),
+                account_name = COALESCE(NULLIF(account_name, ''), ?),
+                account_type = COALESCE(NULLIF(account_type, ''), ?)
+            WHERE id = ?
+            """,
+            (normalized_category, normalized_category, normalized_name, normalized_category, int(row["id"])),
+        )
         return int(row["id"])
+
+    parent_id = None
+    if parent_name:
+        parent_row = conn.execute(
+            "SELECT id FROM chart_of_accounts WHERE lower(COALESCE(name, account_name)) = lower(?) LIMIT 1",
+            (str(parent_name).strip(),),
+        ).fetchone()
+        parent_id = int(parent_row["id"]) if parent_row else None
 
     cursor = conn.execute(
         """
-        INSERT INTO chart_of_accounts (name, category, account_name, account_type)
-        VALUES (?, ?, ?, ?)
+        INSERT INTO chart_of_accounts (name, type, parent_id, category, account_name, account_type)
+        VALUES (?, ?, ?, ?, ?, ?)
         """,
-        (normalized_name, normalized_category, normalized_name, normalized_category),
+        (normalized_name, normalized_category, parent_id, normalized_category, normalized_name, normalized_category),
     )
     return int(cursor.lastrowid)
 
 
-def create_journal_entry(description, lines, company_key=None, reference=None, entry_date=None, conn=None):
+def post_transaction(description, lines, company_key=None, reference=None, created_by=None, entry_date=None, conn=None):
     if not lines:
-        raise ValueError("Journal lines are required.")
+        raise ValueError("Transaction lines are required.")
+
+    entry_date_iso = _resolve_entry_date(entry_date)
+    owns_connection = conn is None
+    conn = conn or get_connection()
+    if conn is None:
+        raise RuntimeError("Database connection unavailable for transaction posting.")
+    if is_period_locked(company_key, entry_date_iso, conn=conn):
+        raise ValueError(f"The accounting period for {entry_date_iso[:7]} is locked.")
 
     normalized_lines = []
     total_debits = 0.0
     total_credits = 0.0
     for line in lines:
         account_name = str(line.get("account_name") or line.get("name") or "").strip()
-        category = _normalize_account_category(line.get("category"))
+        category = _normalize_account_category(line.get("category") or line.get("type"))
+        parent_name = line.get("parent_name")
         debit = round(float(line.get("debit") or 0), 2)
         credit = round(float(line.get("credit") or 0), 2)
         if not account_name or not category:
-            raise ValueError("Each journal line must include an account name and category.")
+            raise ValueError("Each line requires an account name and type.")
         if debit < 0 or credit < 0:
-            raise ValueError("Journal line values cannot be negative.")
+            raise ValueError("Debit and credit values cannot be negative.")
         if debit == 0 and credit == 0:
             continue
-        normalized_lines.append(
-            {
-                "account_name": account_name,
-                "category": category,
-                "debit": debit,
-                "credit": credit,
-            }
-        )
+        normalized_lines.append({
+            "account_name": account_name,
+            "category": category,
+            "parent_name": parent_name,
+            "debit": debit,
+            "credit": credit,
+        })
         total_debits += debit
         total_credits += credit
 
     total_debits = round(total_debits, 2)
     total_credits = round(total_credits, 2)
     if not normalized_lines:
-        raise ValueError("Journal entry must contain at least one non-zero line.")
+        raise ValueError("Transaction must include at least one non-zero line.")
     if round(total_debits - total_credits, 2) != 0:
-        raise ValueError("Journal entry is unbalanced. Total debits must equal total credits.")
-
-    owns_connection = conn is None
-    conn = conn or get_connection()
-    if conn is None:
-        raise RuntimeError("Database connection unavailable for journal entry.")
+        raise ValueError("Unbalanced transaction: total debits must equal total credits.")
 
     try:
         cursor = conn.execute(
             """
-            INSERT INTO journal_entries (company_key, date, description, reference)
-            VALUES (?, ?, ?, ?)
+            INSERT INTO journal_entries (company_key, date, description, reference, created_by)
+            VALUES (?, ?, ?, ?, ?)
             """,
-            (
-                company_key,
-                (entry_date or datetime.now().date()).isoformat() if hasattr(entry_date or datetime.now().date(), "isoformat") else str(entry_date),
-                description,
-                reference,
-            ),
+            (company_key, entry_date_iso, description, reference, created_by),
         )
         entry_id = int(cursor.lastrowid)
         for line in normalized_lines:
-            account_id = _get_or_create_account(conn, line["account_name"], line["category"])
+            account_id = _get_or_create_account(conn, line["account_name"], line["category"], line.get("parent_name"))
             conn.execute(
                 """
                 INSERT INTO journal_lines (entry_id, account_id, debit, credit)
@@ -319,6 +412,18 @@ def create_journal_entry(description, lines, company_key=None, reference=None, e
     finally:
         if owns_connection and conn:
             conn.close()
+
+
+def create_journal_entry(description, lines, company_key=None, reference=None, entry_date=None, conn=None):
+    return post_transaction(
+        description,
+        lines,
+        company_key=company_key,
+        reference=reference,
+        created_by=st.session_state.get("user", {}).get("role", "System"),
+        entry_date=entry_date,
+        conn=conn,
+    )
 
 
 def _ensure_counterparty(conn, company_key, party_name, party_type, city_region, tx_date, balance_delta):
@@ -351,6 +456,20 @@ def _ensure_counterparty(conn, company_key, party_name, party_type, city_region,
             """,
             (company_key, party_name, party_type, city_region, tx_date, balance_delta),
         )
+
+
+def _get_or_create_party(conn, table_name, company_key, party_name):
+    existing = conn.execute(
+        f"SELECT id FROM {table_name} WHERE company_key = ? AND name = ?",
+        (company_key, party_name),
+    ).fetchone()
+    if existing:
+        return int(existing["id"])
+    cursor = conn.execute(
+        f"INSERT INTO {table_name} (company_key, name, currency) VALUES (?, ?, 'GHS')",
+        (company_key, party_name),
+    )
+    return int(cursor.lastrowid)
 
 
 def show_debtors_by_city_report(company_key):
@@ -759,6 +878,7 @@ def _add_item_to_pos_cart(company_key, item_row):
             "name": item_row["item_name"],
             "barcode": item_row["barcode"] or "",
             "price": float(item_row["price"] or 0.0),
+            "cost_price": float(item_row["cost_price"] or 0.0),
             "available_qty": float(item_row["qty"] or 0.0),
             "qty": 1,
             "line_total": float(item_row["price"] or 0.0),
@@ -1938,6 +2058,7 @@ def show_pos(company_key, company_name, role):
                 conn = get_connection()
                 line_items = []
                 total = 0.0
+                cost_of_goods_sold = 0.0
                 for sale_line in sale_cart:
                     line_items.append(
                         {
@@ -1947,6 +2068,7 @@ def show_pos(company_key, company_name, role):
                         }
                     )
                     total += float(sale_line["qty"]) * float(sale_line["price"])
+                    cost_of_goods_sold += float(sale_line["qty"]) * float(sale_line.get("cost_price") or 0.0)
                     if sale_line["inventory_item_id"] is not None:
                         current_item = conn.execute(
                             "SELECT qty FROM inventory WHERE id = ? AND company_key = ?",
@@ -1978,12 +2100,23 @@ def show_pos(company_key, company_name, role):
                     "POS sale",
                     [
                         {"account_name": "Cash", "category": "Asset", "debit": total, "credit": 0},
-                        {"account_name": "Sales Revenue", "category": "Revenue", "debit": 0, "credit": total},
+                        {"account_name": "Sales Revenue", "category": "Income", "debit": 0, "credit": total},
                     ],
                     company_key=company_key,
                     reference=f"POS-{datetime.now().strftime('%Y%m%d%H%M%S')}",
                     conn=conn,
                 )
+                if cost_of_goods_sold > 0:
+                    create_journal_entry(
+                        "Inventory issued to cost of goods sold",
+                        [
+                            {"account_name": "Cost of Goods Sold", "category": "Expense", "debit": cost_of_goods_sold, "credit": 0},
+                            {"account_name": "Inventory", "category": "Asset", "debit": 0, "credit": cost_of_goods_sold},
+                        ],
+                        company_key=company_key,
+                        reference=f"COGS-{datetime.now().strftime('%Y%m%d%H%M%S')}",
+                        conn=conn,
+                    )
                 conn.commit()
                 log_audit_action(
                     conn,
@@ -2110,12 +2243,60 @@ def show_sales_purchase(company_key, role, doc_type="Sales"):
             try:
                 conn = get_connection()
                 ledger = "Sales Revenue" if doc_type == "Sales" else "Accounts Payable"
+                tx_reference = f"{doc_type[:3].upper()}-{datetime.now().strftime('%Y%m%d%H%M%S')}"
                 conn.execute(
                     """INSERT INTO vouchers (company_key, date, v_type, ledger, credit, narration, created_by)
                        VALUES (?, ?, ?, ?, ?, ?, ?)""",
                     (company_key, doc_date.isoformat(), doc_type, ledger, amount,
                      f"{party_name}: {narration}", role),
                 )
+                if doc_type == "Sales":
+                    customer_id = _get_or_create_party(conn, "customers", company_key, party_name)
+                    conn.execute(
+                        """
+                        INSERT INTO invoices (company_key, customer_id, invoice_number, invoice_date, due_date, status, amount, currency, description, created_by)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, 'GHS', ?, ?)
+                        """,
+                        (company_key, customer_id, tx_reference, doc_date.isoformat(), doc_date.isoformat(), status, amount, narration, role),
+                    )
+                    debit_account = "Cash" if status == "Paid" else "Accounts Receivable"
+                    if status != "Draft":
+                        post_transaction(
+                            "Sales transaction",
+                            [
+                                {"account_name": debit_account, "category": "Asset", "debit": amount, "credit": 0},
+                                {"account_name": "Sales Revenue", "category": "Income", "debit": 0, "credit": amount},
+                            ],
+                            company_key=company_key,
+                            reference=tx_reference,
+                            created_by=role,
+                            entry_date=doc_date,
+                            conn=conn,
+                        )
+                else:
+                    supplier_id = _get_or_create_party(conn, "suppliers", company_key, party_name)
+                    conn.execute(
+                        """
+                        INSERT INTO bills (company_key, supplier_id, bill_number, bill_date, due_date, status, amount, currency, description, created_by)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, 'GHS', ?, ?)
+                        """,
+                        (company_key, supplier_id, tx_reference, doc_date.isoformat(), doc_date.isoformat(), status, amount, narration, role),
+                    )
+                    credit_account = "Cash" if status == "Received" else "Accounts Payable"
+                    credit_category = "Asset" if credit_account == "Cash" else "Liability"
+                    if status != "Cancelled":
+                        post_transaction(
+                            "Purchase transaction",
+                            [
+                                {"account_name": "Inventory", "category": "Asset", "debit": amount, "credit": 0},
+                                {"account_name": credit_account, "category": credit_category, "debit": 0, "credit": amount},
+                            ],
+                            company_key=company_key,
+                            reference=tx_reference,
+                            created_by=role,
+                            entry_date=doc_date,
+                            conn=conn,
+                        )
                 balance_delta = amount if status == "Pending" else 0.0
                 _ensure_counterparty(
                     conn,
@@ -2329,6 +2510,37 @@ def show_payroll(company_key, role):
                             year,
                             payment_status,
                         ),
+                    )
+                    conn.execute(
+                        """
+                        INSERT INTO payroll_records
+                            (company_key, period_start, period_end, employee_name, gross_pay, deductions, net_pay, status)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            company_key,
+                            f"{year}-{str(['January','February','March','April','May','June','July','August','September','October','November','December'].index(month)+1).zfill(2)}-01",
+                            f"{year}-{str(['January','February','March','April','May','June','July','August','September','October','November','December'].index(month)+1).zfill(2)}-28",
+                            emp_name,
+                            basic_salary + allowances,
+                            deductions,
+                            payroll_values["net_salary"],
+                            payment_status,
+                        ),
+                    )
+                    salary_credit_account = "Cash" if payment_status == "Paid" else "Payroll Payable"
+                    salary_credit_type = "Asset" if salary_credit_account == "Cash" else "Liability"
+                    post_transaction(
+                        "Payroll accrual",
+                        [
+                            {"account_name": "Salary Expense", "category": "Expense", "debit": payroll_values["net_salary"], "credit": 0},
+                            {"account_name": salary_credit_account, "category": salary_credit_type, "debit": 0, "credit": payroll_values["net_salary"]},
+                        ],
+                        company_key=company_key,
+                        reference=f"PAY-{emp_name}-{month}-{year}",
+                        created_by=role,
+                        entry_date=datetime(int(year), ['January','February','March','April','May','June','July','August','September','October','November','December'].index(month)+1, 1).date(),
+                        conn=conn,
                     )
                     conn.commit()
                     log_audit_action(conn, company_key, role, "Payroll Entry Added", "Payroll", f"{emp_name} - {month} {year}")

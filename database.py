@@ -13,14 +13,40 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-DEFAULT_CHART_OF_ACCOUNTS = [
-    ("Cash", "Asset"),
-    ("Sales", "Revenue"),
-    ("Sales Revenue", "Revenue"),
-    ("Inventory", "Asset"),
-    ("Cost of Goods Sold", "Expense"),
-    ("Salary Expense", "Expense"),
-    ("Opening Balance Equity", "Equity"),
+IFRS_CHART_OF_ACCOUNTS = [
+    ("Assets", "Asset", None),
+    ("Current Assets", "Asset", "Assets"),
+    ("Cash", "Asset", "Current Assets"),
+    ("Bank", "Asset", "Current Assets"),
+    ("Mobile Money", "Asset", "Current Assets"),
+    ("Accounts Receivable", "Asset", "Current Assets"),
+    ("Inventory", "Asset", "Current Assets"),
+    ("VAT Receivable", "Asset", "Current Assets"),
+    ("Non-Current Assets", "Asset", "Assets"),
+    ("Fixed Assets", "Asset", "Non-Current Assets"),
+    ("Accumulated Depreciation", "Asset", "Non-Current Assets"),
+    ("Liabilities", "Liability", None),
+    ("Current Liabilities", "Liability", "Liabilities"),
+    ("Accounts Payable", "Liability", "Current Liabilities"),
+    ("Payroll Payable", "Liability", "Current Liabilities"),
+    ("VAT Payable", "Liability", "Current Liabilities"),
+    ("Loans Payable", "Liability", "Current Liabilities"),
+    ("Equity", "Equity", None),
+    ("Owner Capital", "Equity", "Equity"),
+    ("Retained Earnings", "Equity", "Equity"),
+    ("Opening Balance Equity", "Equity", "Equity"),
+    ("Income", "Income", None),
+    ("Sales", "Income", "Income"),
+    ("Sales Revenue", "Income", "Income"),
+    ("Other Income", "Income", "Income"),
+    ("Expenses", "Expense", None),
+    ("Cost of Goods Sold", "Expense", "Expenses"),
+    ("Purchases", "Expense", "Expenses"),
+    ("Salary Expense", "Expense", "Expenses"),
+    ("Rent Expense", "Expense", "Expenses"),
+    ("Utilities Expense", "Expense", "Expenses"),
+    ("Repairs and Maintenance", "Expense", "Expenses"),
+    ("Depreciation Expense", "Expense", "Expenses"),
 ]
 
 # Primary Database Path
@@ -68,10 +94,13 @@ def ensure_schema_integrity(conn):
         CREATE TABLE IF NOT EXISTS chart_of_accounts (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT NOT NULL,
-            category TEXT NOT NULL,
+            type TEXT NOT NULL,
+            parent_id INTEGER,
+            category TEXT,
             account_code TEXT,
             account_name TEXT,
-            account_type TEXT
+            account_type TEXT,
+            FOREIGN KEY (parent_id) REFERENCES chart_of_accounts(id)
         )
         """
     )
@@ -79,6 +108,8 @@ def ensure_schema_integrity(conn):
     coa_columns = {row[1] for row in cursor.fetchall()}
     for column_name, column_def in {
         "name": "TEXT",
+        "type": "TEXT",
+        "parent_id": "INTEGER",
         "category": "TEXT",
         "account_code": "TEXT",
         "account_name": "TEXT",
@@ -90,23 +121,45 @@ def ensure_schema_integrity(conn):
         """
         UPDATE chart_of_accounts
         SET name = COALESCE(NULLIF(name, ''), account_name),
-            category = COALESCE(NULLIF(category, ''), account_type)
+            type = COALESCE(NULLIF(type, ''), NULLIF(account_type, ''), NULLIF(category, ''), 'Asset'),
+            category = COALESCE(NULLIF(category, ''), NULLIF(type, ''), account_type),
+            account_name = COALESCE(NULLIF(account_name, ''), name),
+            account_type = COALESCE(NULLIF(account_type, ''), NULLIF(type, ''), category)
         """
     )
     existing_accounts = {
-        (str(row["name"]).strip().lower(), str(row["category"]).strip().lower())
-        for row in cursor.execute("SELECT name, category FROM chart_of_accounts").fetchall()
-        if row["name"] and row["category"]
+        str(row["name"]).strip().lower(): dict(row)
+        for row in cursor.execute("SELECT id, name, type FROM chart_of_accounts").fetchall()
+        if row["name"]
     }
-    for account_name, category_name in DEFAULT_CHART_OF_ACCOUNTS:
-        if (account_name.lower(), category_name.lower()) not in existing_accounts:
+    for account_name, account_type, parent_name in IFRS_CHART_OF_ACCOUNTS:
+        existing = existing_accounts.get(account_name.lower())
+        if existing:
             cursor.execute(
                 """
-                INSERT INTO chart_of_accounts (name, category, account_name, account_type)
-                VALUES (?, ?, ?, ?)
+                UPDATE chart_of_accounts
+                SET type = ?, category = ?, account_name = COALESCE(NULLIF(account_name, ''), ?),
+                    account_type = COALESCE(NULLIF(account_type, ''), ?)
+                WHERE id = ?
                 """,
-                (account_name, category_name, account_name, category_name),
+                (account_type, account_type, account_name, account_type, existing["id"]),
             )
+        else:
+            cursor.execute(
+                """
+                INSERT INTO chart_of_accounts (name, type, category, account_name, account_type)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (account_name, account_type, account_type, account_name, account_type),
+            )
+    chart_rows = cursor.execute("SELECT id, name FROM chart_of_accounts").fetchall()
+    chart_ids = {str(row['name']).strip().lower(): row['id'] for row in chart_rows if row['name']}
+    for account_name, _account_type, parent_name in IFRS_CHART_OF_ACCOUNTS:
+        parent_id = chart_ids.get(str(parent_name).strip().lower()) if parent_name else None
+        cursor.execute(
+            "UPDATE chart_of_accounts SET parent_id = ? WHERE lower(name) = lower(?)",
+            (parent_id, account_name),
+        )
 
     cursor.execute(
         """
@@ -115,7 +168,8 @@ def ensure_schema_integrity(conn):
             company_key TEXT,
             date TEXT NOT NULL,
             description TEXT NOT NULL,
-            reference TEXT
+            reference TEXT,
+            created_by TEXT
         )
         """
     )
@@ -126,6 +180,7 @@ def ensure_schema_integrity(conn):
         "date": "TEXT",
         "description": "TEXT",
         "reference": "TEXT",
+        "created_by": "TEXT",
     }.items():
         if column_name not in journal_entry_columns:
             cursor.execute(f"ALTER TABLE journal_entries ADD COLUMN {column_name} {column_def}")
@@ -142,6 +197,148 @@ def ensure_schema_integrity(conn):
             FOREIGN KEY (account_id) REFERENCES chart_of_accounts(id)
         )
         """
+    )
+
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS customers (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            company_key TEXT NOT NULL,
+            name TEXT NOT NULL,
+            email TEXT,
+            phone TEXT,
+            address TEXT,
+            currency TEXT DEFAULT 'GHS',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(company_key, name)
+        )
+        """
+    )
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS suppliers (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            company_key TEXT NOT NULL,
+            name TEXT NOT NULL,
+            email TEXT,
+            phone TEXT,
+            address TEXT,
+            currency TEXT DEFAULT 'GHS',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(company_key, name)
+        )
+        """
+    )
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS invoices (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            company_key TEXT NOT NULL,
+            customer_id INTEGER,
+            invoice_number TEXT,
+            invoice_date TEXT NOT NULL,
+            due_date TEXT,
+            status TEXT DEFAULT 'Draft',
+            amount REAL DEFAULT 0,
+            currency TEXT DEFAULT 'GHS',
+            description TEXT,
+            created_by TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (customer_id) REFERENCES customers(id)
+        )
+        """
+    )
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS bills (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            company_key TEXT NOT NULL,
+            supplier_id INTEGER,
+            bill_number TEXT,
+            bill_date TEXT NOT NULL,
+            due_date TEXT,
+            status TEXT DEFAULT 'Draft',
+            amount REAL DEFAULT 0,
+            currency TEXT DEFAULT 'GHS',
+            description TEXT,
+            created_by TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (supplier_id) REFERENCES suppliers(id)
+        )
+        """
+    )
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS payments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            company_key TEXT NOT NULL,
+            payment_date TEXT NOT NULL,
+            payment_type TEXT NOT NULL,
+            customer_id INTEGER,
+            supplier_id INTEGER,
+            invoice_id INTEGER,
+            bill_id INTEGER,
+            amount REAL DEFAULT 0,
+            currency TEXT DEFAULT 'GHS',
+            method TEXT,
+            reference TEXT,
+            created_by TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS payroll_records (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            company_key TEXT NOT NULL,
+            payroll_id INTEGER,
+            period_start TEXT,
+            period_end TEXT,
+            employee_name TEXT NOT NULL,
+            gross_pay REAL DEFAULT 0,
+            deductions REAL DEFAULT 0,
+            net_pay REAL DEFAULT 0,
+            status TEXT DEFAULT 'Draft',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS accounting_periods (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            company_key TEXT NOT NULL,
+            period_label TEXT NOT NULL,
+            start_date TEXT NOT NULL,
+            end_date TEXT NOT NULL,
+            is_locked INTEGER DEFAULT 0,
+            locked_at TIMESTAMP,
+            locked_by TEXT,
+            UNIQUE(company_key, period_label)
+        )
+        """
+    )
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS system_settings (
+            id INTEGER PRIMARY KEY,
+            master_price_per_month REAL DEFAULT 500,
+            base_currency TEXT DEFAULT 'GHS',
+            display_currency TEXT DEFAULT 'GHS',
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+    cursor.execute("PRAGMA table_info(system_settings)")
+    existing_system_columns = {row[1] for row in cursor.fetchall()}
+    if existing_system_columns:
+        if "base_currency" not in existing_system_columns:
+            cursor.execute("ALTER TABLE system_settings ADD COLUMN base_currency TEXT DEFAULT 'GHS'")
+        if "display_currency" not in existing_system_columns:
+            cursor.execute("ALTER TABLE system_settings ADD COLUMN display_currency TEXT DEFAULT 'GHS'")
+    cursor.execute(
+        "INSERT OR IGNORE INTO system_settings (id, master_price_per_month, base_currency, display_currency) VALUES (1, 500, 'GHS', 'GHS')"
     )
 
 
