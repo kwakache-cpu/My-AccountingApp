@@ -1994,7 +1994,7 @@ def show_pos(company_key, company_name, role):
                     st.rerun()
         else:
             selected_item = st.text_input("New Item Name", key=f"manual_pos_item_{company_key}")
-            manual_price = st.number_input("Manual Price (GH???)", min_value=0.0, value=0.0, key=f"manual_pos_price_{company_key}")
+            manual_price = st.number_input("Manual Price (GH₵)", min_value=0.0, value=0.0, key=f"manual_pos_price_{company_key}")
             qty_to_sell = st.number_input("Quantity", min_value=1, value=1, key=f"manual_pos_qty_{company_key}")
             if st.button("Add Manual Item", key=f"pos_add_manual_{company_key}"):
                 if selected_item and float(manual_price) > 0:

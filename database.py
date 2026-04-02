@@ -161,18 +161,30 @@ def ensure_schema_integrity(conn):
             (parent_id, account_name),
         )
 
-    cursor.execute(
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS system_settings (
+                id INTEGER PRIMARY KEY,
+                master_price_per_month REAL DEFAULT 500,
+                base_currency TEXT DEFAULT 'GHS',
+                display_currency TEXT DEFAULT 'GHS',
+                exchange_rate REAL DEFAULT 1.0,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
         """
-        CREATE TABLE IF NOT EXISTS journal_entries (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            company_key TEXT,
-            date TEXT NOT NULL,
-            description TEXT NOT NULL,
-            reference TEXT,
-            created_by TEXT
         )
-        """
-    )
+        cursor.execute("PRAGMA table_info(system_settings)")
+        existing_system_columns = {row[1] for row in cursor.fetchall()}
+        if existing_system_columns:
+            if "base_currency" not in existing_system_columns:
+                cursor.execute("ALTER TABLE system_settings ADD COLUMN base_currency TEXT DEFAULT 'GHS'")
+            if "display_currency" not in existing_system_columns:
+                cursor.execute("ALTER TABLE system_settings ADD COLUMN display_currency TEXT DEFAULT 'GHS'")
+            if "exchange_rate" not in existing_system_columns:
+                cursor.execute("ALTER TABLE system_settings ADD COLUMN exchange_rate REAL DEFAULT 1.0")
+        cursor.execute(
+            "INSERT OR IGNORE INTO system_settings (id, master_price_per_month, base_currency, display_currency, exchange_rate) VALUES (1, 500, 'GHS', 'GHS', 1.0)"
+        )
     cursor.execute("PRAGMA table_info(journal_entries)")
     journal_entry_columns = {row[1] for row in cursor.fetchall()}
     for column_name, column_def in {
