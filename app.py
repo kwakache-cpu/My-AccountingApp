@@ -228,6 +228,25 @@ def normalize_page_label(page_name):
     }
     return legacy_labels.get(canonical, canonical)
 
+
+def repair_ui_label(label):
+    value = str(label or "")
+    keyword_map = [
+        ("Dashboard", "📊 Dashboard"),
+        ("Point of Sale", "🛒 Point of Sale"),
+        ("Inventory Management", "📦 Inventory Management"),
+        ("Payroll & Salaries", "💳 Payroll & Salaries"),
+        ("Data Analytics", "📊 Data Analytics"),
+        ("System Configuration", "⚙️ System Configuration"),
+        ("Sales Invoicing", "🧾 Sales Invoicing"),
+        ("Gatekeeper Admin", "🤖 Gatekeeper Admin"),
+        ("Asset Register", "📦 Asset Register"),
+    ]
+    for keyword, repaired in keyword_map:
+        if keyword in value:
+            return repaired
+    return value
+
 # Session timeout (30 minutes)
 SESSION_TIMEOUT = 30  # minutes
 
@@ -1344,19 +1363,25 @@ else:
                             st.error("Company Name and System License Key are required.")
 
                 st.markdown("---")
-                st.subheader("Global Maintenance Management")
+                st.subheader("Maintenance Over")
+                st.success("Thank you for your patience. Our systems are upgraded to better serve your business.")
                 col_m1, col_m2, col_m3 = st.columns(3)
                 m_date = col_m1.date_input('Maintenance Date')
                 m_start = col_m2.time_input('Start Time')
                 m_end = col_m3.time_input('End Time')
-                m_msg = st.text_area('Notice Message', f'System maintenance on {m_date} from {m_start} to {m_end}.')
+                m_msg = st.text_area(
+                    'Client Appreciation Message',
+                    "Maintenance Over. Thank you for your patience. Our systems are upgraded to better serve your business.",
+                )
 
-                if st.button('Update & Notify All'):
+                if st.button('Update Client Message'):
                     conn = get_connection()
-                    time_window = f"{m_start.strftime('%H:%M')} - {m_end.strftime('%H:%M')}"
-                    conn.execute('UPDATE maintenance_settings SET maintenance_date=?, is_active=1 WHERE id=1', (f"{m_date} ({time_window})",))
+                    conn.execute(
+                        "UPDATE maintenance_settings SET maintenance_date=?, is_active=0, message=?, updated_at=CURRENT_TIMESTAMP WHERE id=1",
+                        ("Maintenance Over", m_msg),
+                    )
                     conn.commit()
-                    st.success(f'Maintenance scheduled for {m_date} during {time_window}')
+                    st.success('Maintenance appreciation message updated for clients.')
                     conn.close()
 
                 conn.close()
@@ -1590,10 +1615,23 @@ else:
         
         menu = ["Dashboard", "📦 Inventory Management", "💳 Payroll & Salaries", "Sales/Purchase", "📊 Data Analytics", "Banking", "Taxation", "🤖 Gatekeeper Admin", "Audit Trail"]
         current_page = normalize_page_label(st.session_state.get("page")) or "Dashboard"
+        current_page = repair_ui_label(current_page)
         selected_index = menu.index(current_page) if current_page in menu else 0
         choice = st.sidebar.selectbox("Navigation", menu, index=selected_index)
         st.session_state.page = choice
         render_gatekeeper_ai_chat(choice)
+        display_choice_map = {
+            "📊 Dashboard": "ðŸ  Dashboard",
+            "🛒 Point of Sale": "ðŸ›’ Point of Sale",
+            "📦 Inventory Management": "ðŸ“¦ Inventory Management",
+            "💳 Payroll & Salaries": "ðŸ’³ Payroll & Salaries",
+            "📊 Data Analytics": "ðŸ“Š Data Analytics",
+            "⚙️ System Configuration": "âš™ï¸ System Configuration",
+            "🧾 Sales Invoicing": "Sales Invoicing",
+            "🤖 Gatekeeper Admin": "ðŸ¤– Gatekeeper Admin",
+            "📦 Asset Register": "ðŸ›ï¸ Asset Register",
+        }
+        choice = display_choice_map.get(choice, choice)
         
         if choice == "Dashboard":
             show_dashboard("DEMO", "Demo Corporation Ltd", "Demo")
@@ -1648,15 +1686,18 @@ else:
             "Taxation (VAT/NHIL)", "💳 Payroll & Salaries", "🏛️ Asset Register", 
             "📊 Data Analytics", "🤖 Gatekeeper Admin", "System Audit Trail"
         ]
-        
+        menu = [repair_ui_label(item) for item in menu]
+
         if u['role'] == "Master Admin":
             menu.insert(1, "⚙️ System Configuration")
         
+        menu = [repair_ui_label(item) for item in menu]
         current_page = normalize_page_label(st.session_state.get("page")) or "🏠 Dashboard"
+        current_page = repair_ui_label(current_page)
         selected_index = menu.index(current_page) if current_page in menu else 0
         choice = st.sidebar.selectbox("Go to Module:", menu, index=selected_index, key="v3_main_nav_dropdown")
         st.session_state.page = choice
-        choice = normalize_page_label(choice)
+        choice = repair_ui_label(normalize_page_label(choice))
         st.session_state.page = choice
         with st.sidebar.expander("Currency", expanded=False):
             settings_conn = get_connection()
@@ -1674,7 +1715,7 @@ else:
                 key="display_currency_toggle",
             )
             selected_rate = 1.0 if selected_currency == "GHS" else st.number_input(
-                f"Exchange Rate: 1 {selected_currency} = ? GHS",
+                f"Display Multiplier for {selected_currency}",
                 min_value=0.000001,
                 value=exchange_rate if display_currency == selected_currency and exchange_rate > 0 else 1.0,
                 step=0.01,

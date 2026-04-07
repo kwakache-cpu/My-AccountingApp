@@ -273,7 +273,7 @@ def convert_amount_from_base(amount):
     rate = get_exchange_rate()
     if currency == BASE_CURRENCY or rate <= 0:
         return value
-    return value / rate
+    return value * rate
 
 
 def format_currency(amount, currency=None):
@@ -904,6 +904,18 @@ def _import_inventory_from_excel(conn, company_key, file_obj):
             """,
             (company_key, item_name, barcode, category, opening_balance, qty, price, cost_price),
         )
+        opening_stock_value = round(float(opening_balance or 0) * float(cost_price or 0), 2)
+        if opening_stock_value > 0:
+            create_journal_entry(
+                "Opening inventory balance",
+                [
+                    {"account_name": "Inventory", "category": "Asset", "debit": opening_stock_value, "credit": 0},
+                    {"account_name": "Opening Balance Equity", "category": "Equity", "debit": 0, "credit": opening_stock_value},
+                ],
+                company_key=company_key,
+                reference=f"INV-IMPORT-{item_name}-{changed_rows + 1}",
+                conn=conn,
+            )
         changed_rows += 1
     return changed_rows
 

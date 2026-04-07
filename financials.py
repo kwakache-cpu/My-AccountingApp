@@ -283,6 +283,36 @@ def get_changes_in_equity(company_key, start_date=None, end_date=None, account_n
     )
 
 
+def get_depreciation_schedule(company_key):
+    conn = get_connection()
+    try:
+        df = pd.read_sql_query(
+            """
+            SELECT
+                asset_name AS "Asset Name",
+                asset_category AS "Category",
+                purchase_date AS "Purchase Date",
+                cost AS "Cost (GHS)",
+                useful_life_years AS "Useful Life (Years)",
+                residual_value AS "Residual Value (GHS)",
+                depreciation_method AS "Method",
+                depreciation_rate AS "Rate (%)",
+                accumulated_depreciation AS "Accumulated Depreciation (GHS)",
+                book_value AS "Book Value (GHS)",
+                last_depreciation_date AS "Last Depreciation Date",
+                status AS "Status"
+            FROM fixed_assets
+            WHERE company_key = ?
+            ORDER BY asset_name
+            """,
+            conn,
+            params=(company_key,),
+        )
+        return df
+    finally:
+        conn.close()
+
+
 def show_record_transaction(company_key, role):
     st.header("🧾 Record Transaction")
     accounts = _chart_lookup()
@@ -583,3 +613,52 @@ def show_financial_reports(company_key, role=None):
         with tab:
             st.dataframe(df, use_container_width=True)
             _csv_button(label, df, f"{label}_{company_key}")
+
+
+def show_financial_reports(company_key, role=None):
+    st.header("📊 Financial Reports")
+    start_date, end_date, account_name = _filter_controls(f"financial_final_{company_key}")
+    trial_balance_df = get_trial_balance(company_key, start_date, end_date, account_name)
+    income_statement_df = get_income_statement(company_key, start_date, end_date, account_name)
+    balance_sheet_df = get_balance_sheet(company_key, start_date, end_date, account_name)
+    cash_flow_df = get_cash_flow_statement(company_key, start_date, end_date, account_name)
+    equity_df = get_changes_in_equity(company_key, start_date, end_date, account_name)
+    depreciation_df = get_depreciation_schedule(company_key)
+
+    total_debits = float(trial_balance_df["Debit (GHS)"].sum()) if not trial_balance_df.empty else 0.0
+    total_credits = float(trial_balance_df["Credit (GHS)"].sum()) if not trial_balance_df.empty else 0.0
+    total_assets = float(balance_sheet_df.loc[balance_sheet_df["Category"] == "Asset", "Amount (GHS)"].sum()) if not balance_sheet_df.empty else 0.0
+    total_liabilities = float(balance_sheet_df.loc[balance_sheet_df["Category"] == "Liability", "Amount (GHS)"].sum()) if not balance_sheet_df.empty else 0.0
+    total_equity = float(balance_sheet_df.loc[balance_sheet_df["Category"] == "Equity", "Amount (GHS)"].sum()) if not balance_sheet_df.empty else 0.0
+    net_profit = float(income_statement_df.loc[income_statement_df["Account"] == "Net Profit", "Amount (GHS)"].sum()) if not income_statement_df.empty else 0.0
+    balanced = abs(total_debits - total_credits) < 0.01
+
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Trial Balance", "Balanced" if balanced else "Out of Balance")
+    col2.metric("Net Profit", format_currency(net_profit))
+    col3.metric("Balance Sheet", "Balanced" if abs(total_assets - (total_liabilities + total_equity)) < 0.01 else "Needs Review")
+    st.caption(f"Debit/Credit Validation: {'Balanced' if balanced else 'Needs review'}")
+
+    tabs = st.tabs(
+        [
+            "Trial Balance",
+            "Income Statement",
+            "Balance Sheet",
+            "Cash Flow Statement",
+            "Changes in Equity",
+            "Depreciation Schedule",
+        ]
+    )
+    report_defs = [
+        ("Trial Balance", trial_balance_df),
+        ("Income Statement", income_statement_df),
+        ("Balance Sheet", balance_sheet_df),
+        ("Cash Flow Statement", cash_flow_df),
+        ("Statement of Changes in Equity", equity_df),
+        ("Depreciation Schedule", depreciation_df),
+    ]
+    for tab, (label, df) in zip(tabs, report_defs):
+        with tab:
+            display_df = _convert_money_frame(df)
+            st.dataframe(display_df, use_container_width=True)
+            _csv_button(label, display_df, f"{label}_final_{company_key}")
