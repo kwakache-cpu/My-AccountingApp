@@ -161,30 +161,43 @@ def ensure_schema_integrity(conn):
             (parent_id, account_name),
         )
 
-        cursor.execute(
-            """
-            CREATE TABLE IF NOT EXISTS system_settings (
-                id INTEGER PRIMARY KEY,
-                master_price_per_month REAL DEFAULT 500,
-                base_currency TEXT DEFAULT 'GHS',
-                display_currency TEXT DEFAULT 'GHS',
-                exchange_rate REAL DEFAULT 1.0,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
+    cursor.execute(
         """
+        CREATE TABLE IF NOT EXISTS system_settings (
+            id INTEGER PRIMARY KEY,
+            master_price_per_month REAL DEFAULT 500,
+            base_currency TEXT DEFAULT 'GHS',
+            display_currency TEXT DEFAULT 'GHS',
+            exchange_rate REAL DEFAULT 1.0,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
-        cursor.execute("PRAGMA table_info(system_settings)")
-        existing_system_columns = {row[1] for row in cursor.fetchall()}
-        if existing_system_columns:
-            if "base_currency" not in existing_system_columns:
-                cursor.execute("ALTER TABLE system_settings ADD COLUMN base_currency TEXT DEFAULT 'GHS'")
-            if "display_currency" not in existing_system_columns:
-                cursor.execute("ALTER TABLE system_settings ADD COLUMN display_currency TEXT DEFAULT 'GHS'")
-            if "exchange_rate" not in existing_system_columns:
-                cursor.execute("ALTER TABLE system_settings ADD COLUMN exchange_rate REAL DEFAULT 1.0")
-        cursor.execute(
-            "INSERT OR IGNORE INTO system_settings (id, master_price_per_month, base_currency, display_currency, exchange_rate) VALUES (1, 500, 'GHS', 'GHS', 1.0)"
+    """
+    )
+    cursor.execute("PRAGMA table_info(system_settings)")
+    existing_system_columns = {row[1] for row in cursor.fetchall()}
+    if existing_system_columns:
+        if "base_currency" not in existing_system_columns:
+            cursor.execute("ALTER TABLE system_settings ADD COLUMN base_currency TEXT DEFAULT 'GHS'")
+        if "display_currency" not in existing_system_columns:
+            cursor.execute("ALTER TABLE system_settings ADD COLUMN display_currency TEXT DEFAULT 'GHS'")
+        if "exchange_rate" not in existing_system_columns:
+            cursor.execute("ALTER TABLE system_settings ADD COLUMN exchange_rate REAL DEFAULT 1.0")
+    cursor.execute(
+        "INSERT OR IGNORE INTO system_settings (id, master_price_per_month, base_currency, display_currency, exchange_rate) VALUES (1, 500, 'GHS', 'GHS', 1.0)"
+    )
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS journal_entries (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            company_key TEXT,
+            date TEXT NOT NULL,
+            description TEXT NOT NULL,
+            reference TEXT,
+            created_by TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
+        """
+    )
     cursor.execute("PRAGMA table_info(journal_entries)")
     journal_entry_columns = {row[1] for row in cursor.fetchall()}
     for column_name, column_def in {
@@ -193,6 +206,7 @@ def ensure_schema_integrity(conn):
         "description": "TEXT",
         "reference": "TEXT",
         "created_by": "TEXT",
+        "created_at": "TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
     }.items():
         if column_name not in journal_entry_columns:
             cursor.execute(f"ALTER TABLE journal_entries ADD COLUMN {column_name} {column_def}")
@@ -210,6 +224,8 @@ def ensure_schema_integrity(conn):
         )
         """
     )
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_journal_entries_company_date ON journal_entries(company_key, date)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_journal_lines_entry ON journal_lines(entry_id)")
 
     cursor.execute(
         """
@@ -338,6 +354,7 @@ def ensure_schema_integrity(conn):
             master_price_per_month REAL DEFAULT 500,
             base_currency TEXT DEFAULT 'GHS',
             display_currency TEXT DEFAULT 'GHS',
+            exchange_rate REAL DEFAULT 1.0,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
         """
@@ -349,8 +366,10 @@ def ensure_schema_integrity(conn):
             cursor.execute("ALTER TABLE system_settings ADD COLUMN base_currency TEXT DEFAULT 'GHS'")
         if "display_currency" not in existing_system_columns:
             cursor.execute("ALTER TABLE system_settings ADD COLUMN display_currency TEXT DEFAULT 'GHS'")
+        if "exchange_rate" not in existing_system_columns:
+            cursor.execute("ALTER TABLE system_settings ADD COLUMN exchange_rate REAL DEFAULT 1.0")
     cursor.execute(
-        "INSERT OR IGNORE INTO system_settings (id, master_price_per_month, base_currency, display_currency) VALUES (1, 500, 'GHS', 'GHS')"
+        "INSERT OR IGNORE INTO system_settings (id, master_price_per_month, base_currency, display_currency, exchange_rate) VALUES (1, 500, 'GHS', 'GHS', 1.0)"
     )
 
 
@@ -591,9 +610,13 @@ def init_db():
                 asset_category TEXT,
                 purchase_date TEXT,
                 cost REAL NOT NULL,
+                useful_life_years REAL DEFAULT 0,
+                residual_value REAL DEFAULT 0,
+                depreciation_method TEXT DEFAULT 'Straight-line',
                 depreciation_rate REAL DEFAULT 0,
                 accumulated_depreciation REAL DEFAULT 0,
                 book_value REAL NOT NULL,
+                last_depreciation_date TEXT,
                 location TEXT,
                 status TEXT DEFAULT 'Active',
                 FOREIGN KEY (company_key) REFERENCES companies (key) ON DELETE CASCADE
@@ -607,9 +630,13 @@ def init_db():
             "purchase_date": "TEXT",
             "cost": "REAL DEFAULT 0",
             "opening_book_value": "REAL DEFAULT 0",
+            "useful_life_years": "REAL DEFAULT 0",
+            "residual_value": "REAL DEFAULT 0",
+            "depreciation_method": "TEXT DEFAULT 'Straight-line'",
             "depreciation_rate": "REAL DEFAULT 0",
             "accumulated_depreciation": "REAL DEFAULT 0",
             "book_value": "REAL DEFAULT 0",
+            "last_depreciation_date": "TEXT",
             "location": "TEXT",
             "status": "TEXT DEFAULT 'Active'",
         }
@@ -628,6 +655,20 @@ def init_db():
             cursor.execute(
                 "UPDATE fixed_assets SET accumulated_depreciation = COALESCE(accumulated_depreciation, accum_dep, 0)"
             )
+        cursor.execute(
+            """
+            UPDATE fixed_assets
+            SET depreciation_method = COALESCE(NULLIF(depreciation_method, ''), 'Straight-line'),
+                residual_value = COALESCE(residual_value, 0),
+                useful_life_years = CASE
+                    WHEN COALESCE(useful_life_years, 0) > 0 THEN useful_life_years
+                    WHEN COALESCE(depreciation_rate, 0) > 0 THEN ROUND(100.0 / depreciation_rate, 4)
+                    ELSE 0
+                END,
+                book_value = COALESCE(book_value, opening_book_value, cost, 0),
+                opening_book_value = COALESCE(opening_book_value, book_value, cost, 0)
+            """
+        )
 
         # --- TABLE 6: FORENSIC AUDIT TRAIL ---
         # Security table for tracking all user actions

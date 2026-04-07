@@ -4,7 +4,7 @@ import pandas as pd
 import streamlit as st
 
 from database import get_connection
-from modules import get_display_currency, post_transaction, set_period_lock
+from modules import convert_amount_from_base, format_currency, get_display_currency, post_transaction, set_period_lock
 
 
 def _resolve_date(value):
@@ -91,6 +91,28 @@ def _csv_button(label, dataframe, key):
         mime="text/csv",
         key=key,
     )
+
+
+def _money_label():
+    return f"({get_display_currency()})"
+
+
+def _convert_money_frame(dataframe):
+    if dataframe.empty:
+        return dataframe
+    df = dataframe.copy()
+    money_columns = [
+        column_name
+        for column_name in df.columns
+        if any(token in str(column_name) for token in ("(GHS)", "Amount", "Debit", "Credit", "Balance", "Movement"))
+    ]
+    for column_name in money_columns:
+        df[column_name] = pd.to_numeric(df[column_name], errors="coerce").fillna(0.0).map(convert_amount_from_base)
+    renamed_columns = {}
+    for column_name in df.columns:
+        if "(GHS)" in str(column_name):
+            renamed_columns[column_name] = str(column_name).replace("(GHS)", _money_label())
+    return df.rename(columns=renamed_columns)
 
 
 def _filter_controls(prefix):
@@ -470,6 +492,62 @@ def show_ledger_viewer(company_key, role):
         with tab:
             st.dataframe(df, use_container_width=True)
             _csv_button(label, df, f"{label}_{company_key}")
+
+
+def show_ledger_viewer(company_key, role):
+    st.header("📚 Ledger Viewer")
+    start_date, end_date, account_name = _filter_controls(f"ledger_override_{company_key}")
+    tabs = st.tabs(["General Journal", "Sales Journal", "Purchases Journal", "Cash Book", "General Ledger"])
+    report_defs = [
+        ("General Journal", get_general_journal(company_key, start_date, end_date, account_name)),
+        ("Sales Journal", get_sales_journal(company_key, start_date, end_date, account_name)),
+        ("Purchases Journal", get_purchases_journal(company_key, start_date, end_date, account_name)),
+        ("Cash Book", get_cash_book(company_key, start_date, end_date, account_name)),
+        ("General Ledger", get_general_ledger(company_key, start_date, end_date, account_name)),
+    ]
+    for tab, (label, df) in zip(tabs, report_defs):
+        with tab:
+            display_df = _convert_money_frame(df)
+            st.dataframe(display_df, use_container_width=True)
+            _csv_button(label, display_df, f"{label}_override_{company_key}")
+
+
+def show_financial_reports(company_key, role=None):
+    st.header("📊 Financial Reports")
+    start_date, end_date, account_name = _filter_controls(f"financial_override_{company_key}")
+    trial_balance_df = get_trial_balance(company_key, start_date, end_date, account_name)
+    income_statement_df = get_income_statement(company_key, start_date, end_date, account_name)
+    balance_sheet_df = get_balance_sheet(company_key, start_date, end_date, account_name)
+    cash_flow_df = get_cash_flow_statement(company_key, start_date, end_date, account_name)
+    equity_df = get_changes_in_equity(company_key, start_date, end_date, account_name)
+
+    total_debits = float(trial_balance_df["Debit (GHS)"].sum()) if not trial_balance_df.empty else 0.0
+    total_credits = float(trial_balance_df["Credit (GHS)"].sum()) if not trial_balance_df.empty else 0.0
+    total_assets = float(balance_sheet_df.loc[balance_sheet_df["Category"] == "Asset", "Amount (GHS)"].sum()) if not balance_sheet_df.empty else 0.0
+    total_liabilities = float(balance_sheet_df.loc[balance_sheet_df["Category"] == "Liability", "Amount (GHS)"].sum()) if not balance_sheet_df.empty else 0.0
+    total_equity = float(balance_sheet_df.loc[balance_sheet_df["Category"] == "Equity", "Amount (GHS)"].sum()) if not balance_sheet_df.empty else 0.0
+    net_profit = float(income_statement_df.loc[income_statement_df["Account"] == "Net Profit", "Amount (GHS)"].sum()) if not income_statement_df.empty else 0.0
+    balanced = abs(total_debits - total_credits) < 0.01
+
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Trial Balance", "Balanced" if balanced else "Out of Balance")
+    col2.metric("Net Profit", format_currency(net_profit))
+    col3.metric("Balance Sheet", "Balanced" if abs(total_assets - (total_liabilities + total_equity)) < 0.01 else "Needs Review")
+    st.caption(f"Debit/Credit Validation: {'Balanced' if balanced else 'Needs review'}")
+
+    tabs = st.tabs(["Trial Balance", "Income Statement", "Balance Sheet", "Cash Flow Statement", "Changes in Equity"])
+    report_defs = [
+        ("Trial Balance", trial_balance_df),
+        ("Income Statement", income_statement_df),
+        ("Balance Sheet", balance_sheet_df),
+        ("Cash Flow Statement", cash_flow_df),
+        ("Statement of Changes in Equity", equity_df),
+    ]
+    for tab, (label, df) in zip(tabs, report_defs):
+        with tab:
+            display_df = _convert_money_frame(df)
+            st.dataframe(display_df, use_container_width=True)
+            _csv_button(label, display_df, f"{label}_override_{company_key}")
 
 
 def show_financial_reports(company_key, role=None):

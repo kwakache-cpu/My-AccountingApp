@@ -14,6 +14,8 @@ import sqlite3
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from modules import (
+    format_currency,
+    get_exchange_rate,
     initialize_paystack_payment,
     log_audit_action,
     show_aging,
@@ -160,7 +162,71 @@ PAGE_ALIASES = {
 
 
 def normalize_page_label(page_name):
-    return PAGE_ALIASES.get(page_name, page_name)
+    canonical = PAGE_ALIASES.get(page_name, page_name)
+    legacy_labels = {
+        PAGE_LABELS["dashboard"]: "ðŸ  Dashboard",
+        PAGE_LABELS["pos"]: "ðŸ›’ Point of Sale",
+        PAGE_LABELS["inventory"]: "ðŸ“¦ Inventory Management",
+        PAGE_LABELS["payroll"]: "ðŸ’³ Payroll & Salaries",
+        PAGE_LABELS["reports"]: "ðŸ“Š Data Analytics",
+        PAGE_LABELS["settings"]: "âš™ï¸ System Configuration",
+        PAGE_LABELS["invoices"]: "Sales Invoicing",
+    }
+    return legacy_labels.get(canonical, canonical)
+
+
+if 'exchange_rate' not in st.session_state:
+    st.session_state.exchange_rate = 1.0
+
+PAGE_LABELS = {
+    "dashboard": "📊 Dashboard",
+    "pos": "🛒 Point of Sale",
+    "inventory": "📦 Inventory Management",
+    "payroll": "💳 Payroll & Salaries",
+    "reports": "📊 Data Analytics",
+    "settings": "⚙️ System Configuration",
+    "invoices": "🧾 Sales Invoicing",
+}
+
+PAGE_ALIASES.update(
+    {
+        "POS (Point of Sale)": PAGE_LABELS["pos"],
+        "ðŸ›’ Point of Sale": PAGE_LABELS["pos"],
+        "🛒 Point of Sale": PAGE_LABELS["pos"],
+        "Inventory & Stock": PAGE_LABELS["inventory"],
+        "ðŸ“¦ Inventory Management": PAGE_LABELS["inventory"],
+        "📦 Inventory Management": PAGE_LABELS["inventory"],
+        "Payroll": PAGE_LABELS["payroll"],
+        "Ghana Payroll (SSNIT)": PAGE_LABELS["payroll"],
+        "ðŸ’³ Payroll & Salaries": PAGE_LABELS["payroll"],
+        "💳 Payroll & Salaries": PAGE_LABELS["payroll"],
+        "Reports": PAGE_LABELS["reports"],
+        "Financial Intelligence": PAGE_LABELS["reports"],
+        "ðŸ“Š Data Analytics": PAGE_LABELS["reports"],
+        "📊 Data Analytics": PAGE_LABELS["reports"],
+        "Company Setup": PAGE_LABELS["settings"],
+        "âš™ï¸ System Configuration": PAGE_LABELS["settings"],
+        "⚙️ System Configuration": PAGE_LABELS["settings"],
+        "ðŸ  Dashboard": PAGE_LABELS["dashboard"],
+        "📊 Dashboard": PAGE_LABELS["dashboard"],
+        "Sales Invoicing": PAGE_LABELS["invoices"],
+        "🧾 Sales Invoicing": PAGE_LABELS["invoices"],
+    }
+)
+
+
+def normalize_page_label(page_name):
+    canonical = PAGE_ALIASES.get(page_name, page_name)
+    legacy_labels = {
+        PAGE_LABELS["dashboard"]: "ðŸ  Dashboard",
+        PAGE_LABELS["pos"]: "ðŸ›’ Point of Sale",
+        PAGE_LABELS["inventory"]: "ðŸ“¦ Inventory Management",
+        PAGE_LABELS["payroll"]: "ðŸ’³ Payroll & Salaries",
+        PAGE_LABELS["reports"]: "ðŸ“Š Data Analytics",
+        PAGE_LABELS["settings"]: "âš™ï¸ System Configuration",
+        PAGE_LABELS["invoices"]: "Sales Invoicing",
+    }
+    return legacy_labels.get(canonical, canonical)
 
 # Session timeout (30 minutes)
 SESSION_TIMEOUT = 30  # minutes
@@ -913,6 +979,127 @@ def show_dashboard(company_key, company_name, role):
     except Exception as e:
         st.error(f"Dashboard Error: {e}")
 
+def show_dashboard(company_key, company_name, role):
+    """Currency-aware dashboard with maintenance-complete banner."""
+    try:
+        st.header(f"Business Dashboard: {company_name}")
+        st.success(
+            "Maintenance Complete\n\nThank you for your patience. Our systems are upgraded to better serve your business."
+        )
+
+        license_status = check_license_expiry_with_grace(company_key)
+        if license_status['status'] == 'warning':
+            st.info(
+                f"Your subscription ends in {license_status['days_left']} days. "
+                "Please renew to avoid interruption."
+            )
+        elif license_status['status'] == 'expired':
+            st.error(
+                f"Your subscription expired {license_status['days_left']} days ago. "
+                "Please renew to restore access."
+            )
+
+        if st.session_state.get('demo_mode', False):
+            col1, col2, col3, col4 = st.columns(4)
+            col1.metric("Inventory Value", format_currency(25000.0))
+            col2.metric("Month Sales", format_currency(15000.0))
+            col3.metric("Employees", "5")
+            col4.metric("Asset Value", format_currency(50000.0))
+            return
+
+        conn = None
+        try:
+            conn = get_connection()
+            col1, col2, col3, col4 = st.columns(4)
+
+            inv_val = conn.execute(
+                "SELECT COALESCE(SUM(qty * cost_price), 0) FROM inventory WHERE company_key = ?",
+                (company_key,),
+            ).fetchone()[0]
+            month_sales = conn.execute(
+                """SELECT COALESCE(SUM(credit), 0) FROM vouchers
+                   WHERE company_key = ? AND v_type = 'Sales' AND COALESCE(status, 'Active') != 'Void'
+                   AND date LIKE ?""",
+                (company_key, f"{datetime.now().strftime('%Y-%m')}%"),
+            ).fetchone()[0]
+            emp_count = conn.execute(
+                "SELECT COUNT(DISTINCT emp_name) FROM payroll WHERE company_key = ? AND COALESCE(status, 'Active') != 'Void'",
+                (company_key,),
+            ).fetchone()[0] or 0
+            fa_val = conn.execute(
+                "SELECT COALESCE(SUM(book_value), 0) FROM fixed_assets WHERE company_key = ?",
+                (company_key,),
+            ).fetchone()[0]
+
+            col1.metric("Inventory Value", format_currency(inv_val))
+            col2.metric("Month Sales", format_currency(month_sales))
+            col3.metric("Employees", str(emp_count))
+            col4.metric("Asset Value", format_currency(fa_val))
+
+            st.markdown("---")
+            left_col, right_col = st.columns(2)
+            with left_col:
+                st.subheader("Recent Transactions")
+                recent_txns = pd.read_sql_query(
+                    """
+                    SELECT date, v_type, narration,
+                           CASE WHEN credit > 0 THEN credit ELSE debit END AS amount
+                    FROM vouchers
+                    WHERE company_key = ? AND COALESCE(status, 'Active') != 'Void'
+                    ORDER BY date DESC
+                    LIMIT 10
+                    """,
+                    conn,
+                    params=(company_key,),
+                )
+                if recent_txns.empty:
+                    st.info("No recent transactions found.")
+                else:
+                    recent_txns["Amount"] = recent_txns["amount"].map(format_currency)
+                    recent_txns = recent_txns.drop(columns=["amount"]).rename(
+                        columns={"date": "Date", "v_type": "Type", "narration": "Description"}
+                    )
+                    st.dataframe(recent_txns, width='stretch')
+
+            with right_col:
+                st.subheader("Low Stock Items")
+                low_stock = pd.read_sql_query(
+                    """
+                    SELECT item_name AS Item, qty AS Quantity, unit AS Unit
+                    FROM inventory
+                    WHERE company_key = ? AND qty <= 10
+                    ORDER BY qty ASC
+                    LIMIT 10
+                    """,
+                    conn,
+                    params=(company_key,),
+                )
+                if low_stock.empty:
+                    st.success("All stock levels are adequate!")
+                else:
+                    st.dataframe(low_stock, width='stretch')
+
+            st.subheader("Quick Actions")
+            quick_col1, quick_col2, quick_col3, quick_col4 = st.columns(4)
+            if quick_col1.button("🛒 New Sale", key="dash_pos", width='stretch'):
+                st.session_state.page = PAGE_LABELS["pos"]
+                st.rerun()
+            if quick_col2.button("📦 Add Inventory", key="dash_inventory", width='stretch'):
+                st.session_state.page = PAGE_LABELS["inventory"]
+                st.rerun()
+            if quick_col3.button("💳 Process Payroll", key="dash_payroll", width='stretch'):
+                st.session_state.page = PAGE_LABELS["payroll"]
+                st.rerun()
+            if quick_col4.button("📊 View Reports", key="dash_reports", width='stretch'):
+                st.session_state.page = PAGE_LABELS["reports"]
+                st.rerun()
+        finally:
+            if conn:
+                conn.close()
+    except Exception as e:
+        st.error(f"Dashboard Error: {e}")
+
+
 # Startup self-healing database patch
 def run_startup_db_patch():
     """Repair older local databases automatically on app startup."""
@@ -1469,13 +1656,16 @@ else:
         selected_index = menu.index(current_page) if current_page in menu else 0
         choice = st.sidebar.selectbox("Go to Module:", menu, index=selected_index, key="v3_main_nav_dropdown")
         st.session_state.page = choice
+        choice = normalize_page_label(choice)
+        st.session_state.page = choice
         with st.sidebar.expander("Currency", expanded=False):
             settings_conn = get_connection()
             settings_row = settings_conn.execute(
-                "SELECT COALESCE(base_currency, 'GHS') AS base_currency, COALESCE(display_currency, 'GHS') AS display_currency FROM system_settings WHERE id = 1"
+                "SELECT COALESCE(base_currency, 'GHS') AS base_currency, COALESCE(display_currency, 'GHS') AS display_currency, COALESCE(exchange_rate, 1.0) AS exchange_rate FROM system_settings WHERE id = 1"
             ).fetchone()
             base_currency = str(settings_row["base_currency"]) if settings_row else "GHS"
             display_currency = str(settings_row["display_currency"]) if settings_row else "GHS"
+            exchange_rate = float(settings_row["exchange_rate"]) if settings_row and settings_row["exchange_rate"] not in (None, "") else 1.0
             currency_options = ["GHS", "USD", "EUR", "GBP"]
             selected_currency = st.selectbox(
                 "Display Currency",
@@ -1483,13 +1673,23 @@ else:
                 index=currency_options.index(display_currency) if display_currency in currency_options else 0,
                 key="display_currency_toggle",
             )
+            selected_rate = 1.0 if selected_currency == "GHS" else st.number_input(
+                f"Exchange Rate: 1 {selected_currency} = ? GHS",
+                min_value=0.000001,
+                value=exchange_rate if display_currency == selected_currency and exchange_rate > 0 else 1.0,
+                step=0.01,
+                key="display_exchange_rate_toggle",
+            )
             st.caption(f"Base Currency: {base_currency}")
-            if selected_currency != display_currency:
+            st.session_state.exchange_rate = selected_rate
+            if selected_currency != display_currency or abs(float(exchange_rate) - float(selected_rate)) > 0.000001:
                 settings_conn.execute(
-                    "UPDATE system_settings SET display_currency = ?, updated_at = CURRENT_TIMESTAMP WHERE id = 1",
-                    (selected_currency,),
+                    "UPDATE system_settings SET display_currency = ?, exchange_rate = ?, updated_at = CURRENT_TIMESTAMP WHERE id = 1",
+                    (selected_currency, selected_rate),
                 )
                 settings_conn.commit()
+                settings_conn.close()
+                st.rerun()
             settings_conn.close()
         render_gatekeeper_ai_chat(choice)
         
