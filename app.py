@@ -18,6 +18,7 @@ from modules import (
     get_exchange_rate,
     initialize_paystack_payment,
     log_audit_action,
+    show_dashboard as show_dashboard_module,
     show_aging,
     show_ai_assistant,
     show_audit_trail,
@@ -1228,6 +1229,7 @@ PRIMARY_NAV_ITEMS = [
     ("📦 Inventory Management", "Inventory Management"),
     ("📊 Data Analytics", "Data Analytics"),
     ("🧾 Financial Reports", "Financial Reports"),
+    ("📦 Asset Register", "Asset Register"),
     ("⚙️ System Configuration", "System Configuration"),
 ]
 
@@ -1302,7 +1304,7 @@ def _render_primary_sidebar(user, include_settings=True):
 
 def _render_primary_page(user):
     if st.session_state.page == "Dashboard":
-        show_dashboard(user["key"], user["name"], user["role"])
+        show_dashboard_module(user["key"], user["name"], user["role"])
     elif st.session_state.page == "Point of Sale":
         show_pos(user["key"], user["name"], user["role"])
     elif st.session_state.page == "Inventory Management":
@@ -1311,6 +1313,8 @@ def _render_primary_page(user):
         show_reports(user["key"])
     elif st.session_state.page == "Financial Reports":
         show_financial_reports(user["key"], user["role"])
+    elif st.session_state.page == "Asset Register":
+        show_fixed_assets(user["key"], user["role"])
     elif st.session_state.page == "System Configuration":
         show_company_setup(user["key"], user["name"], user["role"])
     else:

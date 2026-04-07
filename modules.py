@@ -3617,6 +3617,117 @@ def show_reports(company_key):
         show_record_transaction(company_key, st.session_state.get("user", {}).get("role", "System"))
 
 
+def show_dashboard(company_key, company_name, role):
+    """Primary business dashboard restored in modules.py for safe routing."""
+    st.header(f"📊 Dashboard: {company_name}")
+
+    if role == "Demo":
+        col1, col2, col3, col4 = st.columns(4)
+        col1.metric("Inventory Value", format_currency(25000.0))
+        col2.metric("Month Sales", format_currency(15000.0))
+        col3.metric("Employees", "5")
+        col4.metric("Asset Value", format_currency(50000.0))
+        return
+
+    conn = None
+    try:
+        conn = get_connection()
+        col1, col2, col3, col4 = st.columns(4)
+
+        inv_val = conn.execute(
+            "SELECT COALESCE(SUM(qty * cost_price), 0) FROM inventory WHERE company_key = ?",
+            (company_key,),
+        ).fetchone()[0]
+        month_sales = conn.execute(
+            """
+            SELECT COALESCE(SUM(credit), 0)
+            FROM vouchers
+            WHERE company_key = ?
+              AND v_type = 'Sales'
+              AND COALESCE(status, 'Active') != 'Void'
+              AND date LIKE ?
+            """,
+            (company_key, f"{datetime.now().strftime('%Y-%m')}%"),
+        ).fetchone()[0]
+        emp_count = conn.execute(
+            "SELECT COUNT(DISTINCT emp_name) FROM payroll WHERE company_key = ? AND COALESCE(status, 'Active') != 'Void'",
+            (company_key,),
+        ).fetchone()[0] or 0
+        fa_val = conn.execute(
+            "SELECT COALESCE(SUM(book_value), 0) FROM fixed_assets WHERE company_key = ?",
+            (company_key,),
+        ).fetchone()[0]
+
+        col1.metric("Inventory Value", format_currency(inv_val))
+        col2.metric("Month Sales", format_currency(month_sales))
+        col3.metric("Employees", str(emp_count))
+        col4.metric("Asset Value", format_currency(fa_val))
+
+        st.markdown("---")
+        left_col, right_col = st.columns(2)
+
+        with left_col:
+            st.subheader("Recent Transactions")
+            recent_txns = pd.read_sql_query(
+                """
+                SELECT date, v_type, narration,
+                       CASE WHEN credit > 0 THEN credit ELSE debit END AS amount
+                FROM vouchers
+                WHERE company_key = ? AND COALESCE(status, 'Active') != 'Void'
+                ORDER BY date DESC
+                LIMIT 10
+                """,
+                conn,
+                params=(company_key,),
+            )
+            if recent_txns.empty:
+                st.info("No recent transactions found.")
+            else:
+                recent_txns["Amount"] = recent_txns["amount"].map(format_currency)
+                recent_txns = recent_txns.drop(columns=["amount"]).rename(
+                    columns={"date": "Date", "v_type": "Type", "narration": "Description"}
+                )
+                st.dataframe(recent_txns, use_container_width=True)
+
+        with right_col:
+            st.subheader("Low Stock Items")
+            low_stock = pd.read_sql_query(
+                """
+                SELECT item_name AS Item, qty AS Quantity, unit AS Unit
+                FROM inventory
+                WHERE company_key = ? AND qty <= 10
+                ORDER BY qty ASC
+                LIMIT 10
+                """,
+                conn,
+                params=(company_key,),
+            )
+            if low_stock.empty:
+                st.success("All stock levels are adequate!")
+            else:
+                st.dataframe(low_stock, use_container_width=True)
+
+        st.subheader("Quick Actions")
+        action_col1, action_col2, action_col3, action_col4 = st.columns(4)
+        if action_col1.button("🛒 New Sale", key=f"dashboard_pos_{company_key}", use_container_width=True):
+            st.session_state.page = "Point of Sale"
+            st.rerun()
+        if action_col2.button("📦 Add Inventory", key=f"dashboard_inventory_{company_key}", use_container_width=True):
+            st.session_state.page = "Inventory Management"
+            st.rerun()
+        if action_col3.button("🧾 Financial Reports", key=f"dashboard_financial_reports_{company_key}", use_container_width=True):
+            st.session_state.page = "Financial Reports"
+            st.rerun()
+        if action_col4.button("📊 Data Analytics", key=f"dashboard_reports_{company_key}", use_container_width=True):
+            st.session_state.page = "Data Analytics"
+            st.rerun()
+    except Exception as exc:
+        st.error(f"Dashboard Error: {exc}")
+    finally:
+        if conn:
+            conn.close()
+
+
 # ==========================================
 # AI DATA ASSESSMENT
 # ==========================================
