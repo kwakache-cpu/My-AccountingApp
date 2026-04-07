@@ -18,6 +18,8 @@ from modules import (
     get_exchange_rate,
     initialize_paystack_payment,
     log_audit_action,
+    show_accounts_payable,
+    show_accounts_receivable,
     show_dashboard as show_dashboard_module,
     show_aging,
     show_ai_assistant,
@@ -1234,6 +1236,24 @@ PRIMARY_NAV_ITEMS = [
 ]
 
 
+PRIMARY_NAV_ITEMS = [
+    ("📊 Dashboard", "Dashboard"),
+    ("🛒 Point of Sale", "Point of Sale"),
+    ("📦 Inventory Management", "Inventory Management"),
+    ("📅 Accounts Receivable", "Accounts Receivable"),
+    ("📅 Accounts Payable", "Accounts Payable"),
+    ("💰 Banking & Cash", "Banking & Cash"),
+    ("📅 Taxation (VAT/NHIL)", "Taxation (VAT/NHIL)"),
+    ("📅 Payroll & Salaries", "Payroll & Salaries"),
+    ("🏛️ Asset Register", "Asset Register"),
+    ("📊 Data Analytics", "Data Analytics"),
+    ("🧾 Financial Reports", "Financial Reports"),
+    ("🤖 Gatekeeper Admin", "Gatekeeper Admin"),
+    ("📅 System Audit Trail", "System Audit Trail"),
+    ("⚙️ System Configuration", "System Configuration"),
+]
+
+
 def _ensure_valid_page(default_page="Dashboard"):
     valid_pages = {page_key for _label, page_key in PRIMARY_NAV_ITEMS}
     current_page = st.session_state.get("page", default_page)
@@ -1309,12 +1329,26 @@ def _render_primary_page(user):
         show_pos(user["key"], user["name"], user["role"])
     elif st.session_state.page == "Inventory Management":
         show_inventory(user["key"], user["role"])
+    elif st.session_state.page == "Accounts Receivable":
+        show_accounts_receivable(user["key"])
+    elif st.session_state.page == "Accounts Payable":
+        show_accounts_payable(user["key"])
+    elif st.session_state.page == "Banking & Cash":
+        show_banking(user["key"], user["role"])
+    elif st.session_state.page == "Taxation (VAT/NHIL)":
+        show_taxation(user["key"])
+    elif st.session_state.page == "Payroll & Salaries":
+        show_payroll(user["key"], user["role"])
+    elif st.session_state.page == "Asset Register":
+        show_fixed_assets(user["key"], user["role"])
     elif st.session_state.page == "Data Analytics":
         show_reports(user["key"])
     elif st.session_state.page == "Financial Reports":
         show_financial_reports(user["key"], user["role"])
-    elif st.session_state.page == "Asset Register":
-        show_fixed_assets(user["key"], user["role"])
+    elif st.session_state.page == "Gatekeeper Admin":
+        show_ai_assistant(user["key"])
+    elif st.session_state.page == "System Audit Trail":
+        show_audit_trail(user["key"])
     elif st.session_state.page == "System Configuration":
         show_company_setup(user["key"], user["name"], user["role"])
     else:

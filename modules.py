@@ -3728,6 +3728,16 @@ def show_dashboard(company_key, company_name, role):
             conn.close()
 
 
+def show_accounts_receivable(company_key):
+    """Dedicated Accounts Receivable page wrapper."""
+    show_aging(company_key, "Receivable")
+
+
+def show_accounts_payable(company_key):
+    """Dedicated Accounts Payable page wrapper."""
+    show_aging(company_key, "Payable")
+
+
 # ==========================================
 # AI DATA ASSESSMENT
 # ==========================================
