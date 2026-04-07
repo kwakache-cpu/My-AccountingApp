@@ -1003,7 +1003,7 @@ def show_dashboard(company_key, company_name, role):
     try:
         st.header(f"Business Dashboard: {company_name}")
         st.success(
-            "Maintenance Complete\n\nThank you for your patience. Our systems are upgraded to better serve your business."
+            "System Upgraded\n\nThank you for your patience. Our systems are upgraded to better serve your business."
         )
 
         license_status = check_license_expiry_with_grace(company_key)
@@ -1380,8 +1380,22 @@ else:
                         "UPDATE maintenance_settings SET maintenance_date=?, is_active=0, message=?, updated_at=CURRENT_TIMESTAMP WHERE id=1",
                         ("Maintenance Over", m_msg),
                     )
+                    recipients = conn.execute(
+                        """
+                        SELECT name, contact_email
+                        FROM companies
+                        WHERE contact_email IS NOT NULL AND TRIM(contact_email) != ''
+                        """
+                    ).fetchall()
                     conn.commit()
-                    st.success('Maintenance appreciation message updated for clients.')
+                    delivered = 0
+                    for recipient in recipients:
+                        try:
+                            if send_maintenance_email(recipient["contact_email"], recipient["name"], m_msg):
+                                delivered += 1
+                        except Exception:
+                            continue
+                    st.success(f'Maintenance appreciation message updated for clients. Emails sent: {delivered}.')
                     conn.close()
 
                 conn.close()
@@ -1733,6 +1747,18 @@ else:
                 st.rerun()
             settings_conn.close()
         render_gatekeeper_ai_chat(choice)
+        regular_choice_map = {
+            "📊 Dashboard": "ðŸ  Dashboard",
+            "🛒 Point of Sale": "ðŸ›’ Point of Sale",
+            "📦 Inventory Management": "ðŸ“¦ Inventory Management",
+            "💳 Payroll & Salaries": "ðŸ’³ Payroll & Salaries",
+            "📊 Data Analytics": "ðŸ“Š Data Analytics",
+            "⚙️ System Configuration": "âš™ï¸ System Configuration",
+            "🧾 Sales Invoicing": "Sales Invoicing",
+            "🤖 Gatekeeper Admin": "ðŸ¤– Gatekeeper Admin",
+            "📦 Asset Register": "ðŸ›ï¸ Asset Register",
+        }
+        choice = regular_choice_map.get(choice, choice)
         
         # Dashboard Module (NEW)
         if choice == "🏠 Dashboard":

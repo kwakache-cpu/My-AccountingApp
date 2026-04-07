@@ -18,6 +18,7 @@ import cv2
 from pyzbar import pyzbar
 
 pos_success_key = "pos_transaction_success"
+scanner_active = True
 
 # Setup Logger
 logger = logging.getLogger(__name__)
@@ -282,6 +283,12 @@ def format_currency(amount, currency=None):
     return f"{active_currency} {converted:,.2f}"
 
 
+def get_reporting_multiplier():
+    currency = get_display_currency()
+    rate = get_exchange_rate()
+    return 1.0 if currency == BASE_CURRENCY or rate <= 0 else rate
+
+
 def is_period_locked(company_key, entry_date, conn=None):
     if not company_key:
         return False
@@ -465,6 +472,14 @@ def create_journal_entry(description, lines, company_key=None, reference=None, e
         entry_date=entry_date,
         conn=conn,
     )
+
+
+def _inventory_offset_account(funding_source):
+    normalized = str(funding_source or "").strip().lower()
+    if normalized in {"cash", "bank", "mobile money"}:
+        account_name = "Cash" if normalized == "cash" else ("Bank" if normalized == "bank" else "Mobile Money")
+        return account_name, "Asset"
+    return "Accounts Payable", "Liability"
 
 
 def _journal_reference_exists(conn, company_key, reference):
@@ -906,11 +921,12 @@ def _import_inventory_from_excel(conn, company_key, file_obj):
         )
         opening_stock_value = round(float(opening_balance or 0) * float(cost_price or 0), 2)
         if opening_stock_value > 0:
+            offset_account, offset_type = _inventory_offset_account("Accounts Payable")
             create_journal_entry(
                 "Opening inventory balance",
                 [
                     {"account_name": "Inventory", "category": "Asset", "debit": opening_stock_value, "credit": 0},
-                    {"account_name": "Opening Balance Equity", "category": "Equity", "debit": 0, "credit": opening_stock_value},
+                    {"account_name": offset_account, "category": offset_type, "debit": 0, "credit": opening_stock_value},
                 ],
                 company_key=company_key,
                 reference=f"INV-IMPORT-{item_name}-{changed_rows + 1}",
@@ -998,6 +1014,8 @@ def _render_camera_scanner(module_key, pending_key):
 
     if not st.session_state.get(toggle_key):
         return
+
+    st.session_state["scanner_active"] = scanner_active
 
     nonce = st.session_state.get(nonce_key, 0)
     camera_file = st.camera_input("Scanner", key=f"{module_key}_camera_input_{nonce}")
@@ -1717,6 +1735,7 @@ def show_inventory(company_key, role):
             item_name = st.text_input("Item Name")
             category = st.text_input("Category")
             opening_stock = st.number_input("Opening Stock Quantity", min_value=0.0, value=0.0)
+            funding_source = st.selectbox("Inventory Funding Source", ["Cash", "Bank", "Mobile Money", "Accounts Payable"])
             price = st.number_input("Selling Price (GH₵)", min_value=0.0, value=0.0)
             cost_price = st.number_input("Cost Price (GH₵)", min_value=0.0, value=0.0)
             submitted = st.form_submit_button("➕ Add New Item")
@@ -1739,11 +1758,12 @@ def show_inventory(company_key, role):
                     )
                     opening_stock_value = round(float(opening_stock or 0) * float(cost_price or 0), 2)
                     if opening_stock_value > 0:
+                        offset_account, offset_type = _inventory_offset_account(funding_source)
                         create_journal_entry(
                             "Opening inventory balance",
                             [
                                 {"account_name": "Inventory", "category": "Asset", "debit": opening_stock_value, "credit": 0},
-                                {"account_name": "Opening Balance Equity", "category": "Equity", "debit": 0, "credit": opening_stock_value},
+                                {"account_name": offset_account, "category": offset_type, "debit": 0, "credit": opening_stock_value},
                             ],
                             company_key=company_key,
                             reference=f"INV-OPEN-{item_name}",
@@ -2251,8 +2271,15 @@ def show_pos(company_key, company_name, role):
                             "UPDATE inventory SET qty = qty - ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND company_key = ?",
                             (sale_line["qty"], int(sale_line["inventory_item_id"]), company_key),
                         )
+                payment_account_map = {
+                    "Cash": ("Cash", "Asset"),
+                    "Mobile Money": ("Mobile Money", "Asset"),
+                    "Bank Transfer": ("Bank", "Asset"),
+                    "Cheque": ("Bank", "Asset"),
+                }
+                receipt_account, receipt_category = payment_account_map.get(payment_method, ("Cash", "Asset"))
                 narration = ", ".join(f"{item['name']} x{item['qty']}" for item in line_items)
-                conn.execute(
+                sale_cursor = conn.execute(
                     """INSERT INTO vouchers (company_key, date, v_type, ledger, credit, payment_method, narration, status, created_by)
                        VALUES (?, ?, 'Sales', 'Sales Revenue', ?, ?, ?, 'Active', ?)""",
                     (
@@ -2267,11 +2294,11 @@ def show_pos(company_key, company_name, role):
                 create_journal_entry(
                     "POS sale",
                     [
-                        {"account_name": "Cash", "category": "Asset", "debit": total, "credit": 0},
+                        {"account_name": receipt_account, "category": receipt_category, "debit": total, "credit": 0},
                         {"account_name": "Sales Revenue", "category": "Income", "debit": 0, "credit": total},
                     ],
                     company_key=company_key,
-                    reference=f"POS-{datetime.now().strftime('%Y%m%d%H%M%S')}",
+                    reference=f"POS-{int(sale_cursor.lastrowid)}",
                     conn=conn,
                 )
                 if cost_of_goods_sold > 0:
@@ -3563,6 +3590,20 @@ def show_reports(company_key):
         )
 
 
+def show_reports(company_key):
+    """Route report navigation to the IFRS financial reporting suite."""
+    from financials import show_financial_reports, show_ledger_viewer, show_record_transaction
+
+    tabs = st.tabs(["📊 Financial Statements", "📚 Ledger", "🧾 Record Transaction"])
+    with tabs[0]:
+        show_financial_reports(company_key)
+    with tabs[1]:
+        show_ledger_viewer(company_key, st.session_state.get("user", {}).get("role"))
+    with tabs[2]:
+        show_record_transaction(company_key, st.session_state.get("user", {}).get("role", "System"))
+
+
+# Final UI-safe reports override.
 def show_reports(company_key):
     """Route report navigation to the IFRS financial reporting suite."""
     from financials import show_financial_reports, show_ledger_viewer, show_record_transaction
