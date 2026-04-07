@@ -1222,6 +1222,102 @@ def main():
     run_startup_db_patch()
 
 
+PRIMARY_NAV_ITEMS = [
+    ("📊 Dashboard", "Dashboard"),
+    ("🛒 Point of Sale", "Point of Sale"),
+    ("📦 Inventory Management", "Inventory Management"),
+    ("📊 Data Analytics", "Data Analytics"),
+    ("🧾 Financial Reports", "Financial Reports"),
+    ("⚙️ System Configuration", "System Configuration"),
+]
+
+
+def _ensure_valid_page(default_page="Dashboard"):
+    valid_pages = {page_key for _label, page_key in PRIMARY_NAV_ITEMS}
+    current_page = st.session_state.get("page", default_page)
+    if current_page not in valid_pages:
+        label_to_key = {label: key for label, key in PRIMARY_NAV_ITEMS}
+        current_page = label_to_key.get(str(current_page), default_page)
+    st.session_state.page = current_page
+    return current_page
+
+
+def _render_primary_sidebar(user, include_settings=True):
+    st.sidebar.markdown(
+        f"""
+        <div style='background-color:#f0f2f6; padding:20px; border-radius:15px; border: 1px solid #d1d5db;'>
+            <h2 style='margin-bottom:0;'>📦 {user['name']}</h2>
+            <p style='color:#6b7280;'>Role: <b>{user['role']}</b></p>
+            <p style='color:#6b7280; font-size:12px;'>Session: Active</p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    nav_items = PRIMARY_NAV_ITEMS if include_settings else [item for item in PRIMARY_NAV_ITEMS if item[1] != "System Configuration"]
+    current_page = _ensure_valid_page()
+    labels = [label for label, _key in nav_items]
+    selected_label = next((label for label, key in nav_items if key == current_page), labels[0])
+    selected_index = labels.index(selected_label) if selected_label in labels else 0
+    chosen_label = st.sidebar.selectbox("Navigation", labels, index=selected_index, key="primary_navigation")
+    chosen_page = dict(nav_items)[chosen_label]
+    if chosen_page != st.session_state.page:
+        st.session_state.page = chosen_page
+        st.rerun()
+
+    with st.sidebar.expander("Currency", expanded=False):
+        settings_conn = get_connection()
+        settings_row = settings_conn.execute(
+            "SELECT COALESCE(base_currency, 'GHS') AS base_currency, COALESCE(display_currency, 'GHS') AS display_currency, COALESCE(exchange_rate, 1.0) AS exchange_rate FROM system_settings WHERE id = 1"
+        ).fetchone()
+        base_currency = str(settings_row["base_currency"]) if settings_row else "GHS"
+        display_currency = str(settings_row["display_currency"]) if settings_row else "GHS"
+        exchange_rate = float(settings_row["exchange_rate"]) if settings_row and settings_row["exchange_rate"] not in (None, "") else 1.0
+        currency_options = ["GHS", "USD", "EUR", "GBP"]
+        selected_currency = st.selectbox(
+            "Display Currency",
+            currency_options,
+            index=currency_options.index(display_currency) if display_currency in currency_options else 0,
+            key="display_currency_primary",
+        )
+        selected_rate = 1.0 if selected_currency == "GHS" else st.number_input(
+            f"Display Multiplier for {selected_currency}",
+            min_value=0.000001,
+            value=exchange_rate if display_currency == selected_currency and exchange_rate > 0 else 1.0,
+            step=0.01,
+            key="display_exchange_rate_primary",
+        )
+        st.caption(f"Base Currency: {base_currency}")
+        st.session_state.exchange_rate = selected_rate
+        if selected_currency != display_currency or abs(float(exchange_rate) - float(selected_rate)) > 0.000001:
+            settings_conn.execute(
+                "UPDATE system_settings SET display_currency = ?, exchange_rate = ?, updated_at = CURRENT_TIMESTAMP WHERE id = 1",
+                (selected_currency, selected_rate),
+            )
+            settings_conn.commit()
+            settings_conn.close()
+            st.rerun()
+        settings_conn.close()
+
+
+def _render_primary_page(user):
+    if st.session_state.page == "Dashboard":
+        show_dashboard(user["key"], user["name"], user["role"])
+    elif st.session_state.page == "Point of Sale":
+        show_pos(user["key"], user["name"], user["role"])
+    elif st.session_state.page == "Inventory Management":
+        show_inventory(user["key"], user["role"])
+    elif st.session_state.page == "Data Analytics":
+        show_reports(user["key"])
+    elif st.session_state.page == "Financial Reports":
+        show_financial_reports(user["key"], user["role"])
+    elif st.session_state.page == "System Configuration":
+        show_company_setup(user["key"], user["name"], user["role"])
+    else:
+        st.session_state.page = "Dashboard"
+        st.rerun()
+
+
 # Main application flow
 main()
 if not st.session_state.auth or not check_session_timeout():
@@ -1608,6 +1704,15 @@ else:
                 st.error(f'License Table Error: {e}')
                     
     elif u['role'] == "Demo":
+        demo_user = {"key": "DEMO", "name": "Demo Corporation Ltd", "role": "Demo"}
+        _render_primary_sidebar(demo_user, include_settings=False)
+        _render_primary_page(demo_user)
+        st.sidebar.markdown("---")
+        if st.sidebar.button("🔴 Secure Logout", width='stretch', key="v3_demo_logout_primary"):
+            st.session_state.clear()
+            st.rerun()
+        st.stop()
+
         # Demo User Interface
         # Check demo timeout
         if 'start_time' in st.session_state:
@@ -1667,6 +1772,23 @@ else:
             show_audit_trail("DEMO")
                     
     else:
+        _render_primary_sidebar(u, include_settings=True)
+        _render_primary_page(u)
+        st.sidebar.markdown("---")
+        if st.sidebar.button("🔴 Secure Logout", width='stretch', key="v3_primary_logout"):
+            try:
+                conn = get_connection()
+                log_audit_action(conn, u.get('key', 'SYSTEM'), u['role'], "User logout", "Authentication")
+                conn.close()
+            except Exception:
+                pass
+            st.session_state.auth = False
+            st.session_state.user = None
+            st.session_state.company_id = None
+            st.session_state.login_attempts = 0
+            st.rerun()
+        st.stop()
+
         # Regular User Interface
         st.sidebar.markdown(f"""
         <div style='background-color:#f0f2f6; padding:20px; border-radius:15px; border: 1px solid #d1d5db;'>

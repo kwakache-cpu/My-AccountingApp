@@ -662,3 +662,8 @@ def show_financial_reports(company_key, role=None):
             display_df = _convert_money_frame(df)
             st.dataframe(display_df, use_container_width=True)
             _csv_button(label, display_df, f"{label}_final_{company_key}")
+
+
+def show_reports(company_key, role=None):
+    """Financial reports sidebar entry point."""
+    show_financial_reports(company_key, role)
