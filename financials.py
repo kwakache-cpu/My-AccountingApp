@@ -4,7 +4,7 @@ import sqlite3
 import pandas as pd
 import streamlit as st
 
-from database import get_connection
+from database import get_connection, init_db
 from modules import convert_amount_from_base, format_currency, format_currency_dataframe, get_currency_symbol, get_display_currency, get_exchange_rate, post_transaction, set_period_lock
 
 
@@ -62,17 +62,21 @@ def _normal_balance(account_type):
 
 
 def _chart_lookup():
+    init_db()
     conn = get_connection()
     try:
-        rows = conn.execute(
-            """
-            SELECT COALESCE(code, account_code, '') AS account_code,
-                   COALESCE(name, account_name) AS account_name,
-                   COALESCE(type, category, account_type) AS account_type
-            FROM chart_of_accounts
-            ORDER BY COALESCE(name, account_name)
-            """
-        ).fetchall()
+        try:
+            rows = conn.execute(
+                """
+                SELECT COALESCE(code, account_code, '') AS account_code,
+                       COALESCE(name, account_name) AS account_name,
+                       COALESCE(type, category, account_type) AS account_type
+                FROM chart_of_accounts
+                ORDER BY COALESCE(name, account_name)
+                """
+            ).fetchall()
+        except sqlite3.Error:
+            return []
         return {
             str(row["account_name"]): {
                 "account_type": str(row["account_type"]),
@@ -362,6 +366,7 @@ def get_depreciation_schedule(company_key):
 def show_record_transaction(company_key, role):
     st.header("🧾 Record Transaction")
     accounts = _chart_lookup()
+    account_map = accounts if isinstance(accounts, dict) else {}
     with st.expander("Period Lock Controls", expanded=False):
         period_date = st.date_input("Accounting Period", value=datetime.now().date().replace(day=1), key=f"period_date_{company_key}")
         col1, col2 = st.columns(2)
@@ -377,14 +382,14 @@ def show_record_transaction(company_key, role):
         description = st.text_input("Description", key=f"manual_tx_desc_{company_key}")
         reference = st.text_input("Reference", key=f"manual_tx_ref_{company_key}")
         lines = []
-        account_names = [""] + list(accounts.keys())
+        account_names = [""] + list(account_map.keys())
         for idx in range(4):
             c1, c2, c3 = st.columns([3, 1, 1])
             account = c1.selectbox(f"Account {idx + 1}", account_names, key=f"manual_account_{company_key}_{idx}")
             debit = c2.number_input(f"Debit {idx + 1}", min_value=0.0, step=0.01, key=f"manual_debit_{company_key}_{idx}")
             credit = c3.number_input(f"Credit {idx + 1}", min_value=0.0, step=0.01, key=f"manual_credit_{company_key}_{idx}")
             if account and (debit > 0 or credit > 0):
-                account_meta = accounts.get(account, {"account_type": "Expense", "account_code": ""})
+                account_meta = account_map.get(account, {"account_type": "Expense", "account_code": ""})
                 lines.append({"account_name": account, "category": account_meta.get("account_type", "Expense"), "debit": debit, "credit": credit})
         if st.form_submit_button("Post Transaction"):
             try:
