@@ -1,6 +1,6 @@
 import streamlit as st
 import pandas as pd
-from database import DB_PATH, check_and_repair_db, ensure_schema_integrity, get_connection
+from database import DB_PATH, check_and_repair_db, ensure_schema_integrity, get_connection, get_firebase_runtime_config
 from database import init_db as base_init_db
 from groq import Groq
 import json
@@ -87,7 +87,8 @@ def _init_firebase_storage_client():
     if FIREBASE_APP is not None:
         return FIREBASE_APP
     try:
-        firebase_key_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "firebase_key.json")
+        firebase_config = get_firebase_runtime_config()
+        firebase_key_path = firebase_config["key_path"]
         if not os.path.exists(firebase_key_path):
             return None
         with open(firebase_key_path, "r", encoding="utf-8") as firebase_file:
@@ -99,7 +100,10 @@ def _init_firebase_storage_client():
         firebase_cred = credentials.Certificate(firebase_key_path)
         FIREBASE_APP = initialize_app(
             firebase_cred,
-            {"storageBucket": FIREBASE_BUCKET_NAME},
+            {
+                "storageBucket": FIREBASE_BUCKET_NAME,
+                "databaseURL": firebase_config["databaseURL"],
+            },
             name="eka-silent-sync",
         )
         return FIREBASE_APP
@@ -121,6 +125,20 @@ def _get_firebase_bucket():
         return storage.bucket(app=app)
     except Exception:
         return None
+
+
+def _get_cloud_vault_status():
+    try:
+        bucket = _get_firebase_bucket()
+        if bucket is None:
+            return "🔴 Cloud Vault: Local Mode"
+        try:
+            list(bucket.list_blobs(max_results=1))
+            return "🟢 Cloud Vault: Connected"
+        except Exception:
+            return "🔴 Cloud Vault: Local Mode"
+    except Exception:
+        return "🔴 Cloud Vault: Local Mode"
 
 
 def _sync_cloud_db_down_if_newer():
@@ -1480,6 +1498,7 @@ def _render_primary_sidebar(user, include_settings=True):
         st.rerun()
     st.sidebar.divider()
     _render_currency_sidebar_controls("display_currency_primary")
+    st.sidebar.caption(_get_cloud_vault_status())
     render_accounting_assistant_sidebar(st.session_state.page)
     st.sidebar.divider()
     currency = st.sidebar.selectbox(

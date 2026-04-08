@@ -56,6 +56,15 @@ DEFAULT_DATA_DIR = os.path.join(BASE_DIR, "data")
 DB_DIR = os.path.abspath(os.getenv("EKA_DATA_DIR", DEFAULT_DATA_DIR))
 DB_PATH = os.path.join(DB_DIR, DB_NAME)
 LEGACY_DB_PATH = os.path.abspath(DB_NAME)
+FIREBASE_KEY_PATH = os.path.join(os.path.dirname(__file__), "firebase_key.json")
+FIREBASE_DATABASE_URL = "https://eka-erp-cloud-vault-default-rtdb.firebaseio.com/"
+
+
+def get_firebase_runtime_config():
+    return {
+        "databaseURL": FIREBASE_DATABASE_URL,
+        "key_path": FIREBASE_KEY_PATH,
+    }
 
 
 def _ensure_db_directory():
