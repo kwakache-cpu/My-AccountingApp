@@ -572,30 +572,27 @@ E.K.A Support Team
     logger.info(f"Renewal email preview generated for {company_name} <{recipient}>")
     return True
 
-def ask_gatekeeper_ai(menu_selection, chat_history):
-    """Call Groq for a real Gatekeeper AI answer."""
-    messages = [{"role": "system", "content": GATEKEEPER_SYSTEM_PROMPT}]
-    messages.append(
-        {
-            "role": "system",
-            "content": f"The user is currently viewing the {menu_selection} module.",
-        }
-    )
-    messages.extend(chat_history[-8:])
-
-    if st.session_state.get("ai_active") is False:
-        return "Gatekeeper AI is unavailable because the `GROQ_API_KEY` secret is not configured."
+def ask_gatekeeper_ai(user_input):
+    """Send the raw user prompt directly to Groq and return the response text."""
+    if st.session_state.get("ai_active") is False or client is None:
+        return "The app cannot see GROQ_API_KEY in Streamlit Secrets."
 
     try:
-        completion = client.chat.completions.create(
+        response = client.chat.completions.create(
             model="llama3-8b-8192",
-            messages=messages,
-            temperature=0.4,
+            messages=[
+                {
+                    "role": "system",
+                    "content": "You are a professional Chartered Accountant. Provide direct, helpful answers to user queries based on their ERP data.",
+                },
+                {"role": "user", "content": user_input},
+            ],
+            temperature=0.5,
         )
-        return completion.choices[0].message.content.strip()
-    except Exception as ai_error:
-        logger.error(f"Gatekeeper AI call failed: {ai_error}")
-        return "Gatekeeper AI is currently unavailable. Please check the Groq API connection."
+        return response.choices[0].message.content
+    except Exception as e:
+        logger.error(f"Gatekeeper AI call failed: {e}")
+        return f"AI Error: {str(e)}"
 
 
 def render_gatekeeper_ai_chat(menu_selection):
@@ -619,7 +616,7 @@ def render_gatekeeper_ai_chat(menu_selection):
         if user_question:
             st.session_state.messages.append({"role": "user", "content": user_question})
             with st.spinner("Gatekeeper Admin is thinking..."):
-                ai_response = ask_gatekeeper_ai(menu_selection, st.session_state.messages)
+                ai_response = ask_gatekeeper_ai(user_question)
             st.session_state.messages.append({"role": "assistant", "content": ai_response})
             st.rerun()
 
