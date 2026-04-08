@@ -194,33 +194,31 @@ def _render_currency_sidebar_controls(selectbox_key):
         settings_row = settings_conn.execute(
             "SELECT COALESCE(base_currency, 'GHS') AS base_currency, COALESCE(display_currency, 'GHS') AS display_currency, COALESCE(exchange_rate, 1.0) AS exchange_rate FROM system_settings WHERE id = 1"
         ).fetchone()
-        base_currency = str(settings_row["base_currency"]) if settings_row else "GHS"
-        display_currency = str(settings_row["display_currency"]) if settings_row else "GHS"
+        current_currency = str(settings_row["display_currency"]) if settings_row else "GHS"
         current_rate = (
             float(settings_row["exchange_rate"])
             if settings_row and settings_row["exchange_rate"] not in (None, "")
-            else _get_bog_display_rate(display_currency)
+            else _get_bog_display_rate(current_currency)
         )
-        currency_options = ["GHS", "USD", "EUR", "GBP"]
-        selected_currency = st.selectbox(
-            "Display Currency",
-            currency_options,
-            index=currency_options.index(display_currency) if display_currency in currency_options else 0,
+        selected_currency = st.sidebar.selectbox(
+            "Base Currency",
+            ["GHS", "USD", "EUR", "GBP"],
+            index=["GHS", "USD", "EUR", "GBP"].index(current_currency) if current_currency in ["GHS", "USD", "EUR", "GBP"] else 0,
             key=selectbox_key,
         )
         selected_rate = _get_bog_display_rate(selected_currency)
-        st.caption(f"Base Currency: {base_currency}")
-        if selected_currency == "GHS":
-            st.caption("BoG April 2026 sync: 1 GHS = 1.00 GHS")
-        else:
-            st.caption(f"BoG April 2026 sync: 1 {selected_currency} = {selected_rate:,.2f} GHS")
-            st.caption(f"Display multiplier applied to base values: 1 / {selected_rate:,.2f}")
-        st.session_state.exchange_rate = selected_rate
+        st.session_state.base_currency = selected_currency
         st.session_state.display_currency = selected_currency
-        if selected_currency != display_currency or abs(current_rate - selected_rate) > 0.000001:
+        st.session_state.exchange_rate = selected_rate
+        if selected_currency == "GHS":
+            st.sidebar.caption("BoG April 2026 sync: 1 GHS = 1.00 GHS")
+        else:
+            st.sidebar.caption(f"BoG April 2026 sync: 1 {selected_currency} = {selected_rate:,.2f} GHS")
+            st.sidebar.caption(f"Global display multiplier: 1 / {selected_rate:,.2f}")
+        if selected_currency != current_currency or abs(current_rate - selected_rate) > 0.000001:
             settings_conn.execute(
-                "UPDATE system_settings SET display_currency = ?, exchange_rate = ?, updated_at = CURRENT_TIMESTAMP WHERE id = 1",
-                (selected_currency, selected_rate),
+                "UPDATE system_settings SET base_currency = ?, display_currency = ?, exchange_rate = ?, updated_at = CURRENT_TIMESTAMP WHERE id = 1",
+                ("GHS", selected_currency, selected_rate),
             )
             settings_conn.commit()
             st.rerun()
@@ -1332,9 +1330,8 @@ def _render_primary_sidebar(user, include_settings=True):
     if chosen_page != st.session_state.page:
         st.session_state.page = chosen_page
         st.rerun()
-
-    with st.sidebar.expander("Currency", expanded=False):
-        _render_currency_sidebar_controls("display_currency_primary")
+    st.sidebar.divider()
+    _render_currency_sidebar_controls("display_currency_primary")
 
 
 def _render_primary_page(user):

@@ -105,6 +105,12 @@ def _money_label():
     return f"({get_display_currency()})"
 
 
+def _account_label(account_code, account_name):
+    code = str(account_code or "").strip()
+    name = str(account_name or "").strip()
+    return f"{code} - {name}" if code else name
+
+
 def _convert_money_frame(dataframe):
     if dataframe.empty:
         return dataframe
@@ -121,6 +127,20 @@ def _convert_money_frame(dataframe):
         if "(GHS)" in str(column_name):
             renamed_columns[column_name] = str(column_name).replace("(GHS)", _money_label())
     return df.rename(columns=renamed_columns)
+
+
+def _format_account_headers(dataframe):
+    if dataframe.empty:
+        return dataframe
+    df = dataframe.copy()
+    if "Account" in df.columns:
+        code_column = "Account Code" if "Account Code" in df.columns else None
+        if code_column:
+            df["Account"] = df.apply(
+                lambda row: _account_label(row.get(code_column), row.get("Account")),
+                axis=1,
+            )
+    return df
 
 
 def _filter_controls(prefix):
@@ -679,7 +699,7 @@ def show_financial_reports(company_key, role=None):
     ]
     for tab, (label, df) in zip(tabs, report_defs):
         with tab:
-            display_df = _convert_money_frame(df)
+            display_df = _format_account_headers(_convert_money_frame(df))
             st.dataframe(display_df, use_container_width=True)
             _csv_button(label, display_df, f"{label}_final_{company_key}")
 

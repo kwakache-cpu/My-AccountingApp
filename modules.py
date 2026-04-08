@@ -321,7 +321,7 @@ def _selected_currency_context():
     )
 
 
-def ask_accounting_assistant(module_selection, chat_history):
+def accounting_ai_response(module_selection, chat_history):
     groq_client = _get_groq_client()
     if not groq_client:
         return (
@@ -355,7 +355,7 @@ def ask_accounting_assistant(module_selection, chat_history):
 
 
 def render_accounting_assistant_sidebar(module_selection):
-    history_key = f"accounting_sidebar_messages_{module_selection}"
+    history_key = "accounting_ai_sidebar_history"
     if history_key not in st.session_state:
         st.session_state[history_key] = [
             {
@@ -366,25 +366,24 @@ def render_accounting_assistant_sidebar(module_selection):
                 ),
             }
         ]
+    st.sidebar.caption(module_selection)
+    st.sidebar.caption(_selected_currency_context())
+    history_container = st.sidebar.container(height=220)
+    with history_container:
+        for message in st.session_state[history_key][-8:]:
+            speaker = "AI" if message["role"] == "assistant" else "You"
+            st.markdown(f"**{speaker}:** {message['content']}")
 
-    with st.sidebar.expander("Accounting Assistant", expanded=False):
-        st.caption(module_selection)
-        st.caption(_selected_currency_context())
-
-        for message in st.session_state[history_key][-6:]:
-            with st.chat_message(message["role"]):
-                st.markdown(message["content"])
-
-        user_question = st.chat_input(
-            "Ask the Accounting Assistant...",
-            key=f"accounting_sidebar_input_{module_selection}",
-        )
-        if user_question:
-            st.session_state[history_key].append({"role": "user", "content": user_question})
-            with st.spinner("Accounting Assistant is reviewing your question..."):
-                answer = ask_accounting_assistant(module_selection, st.session_state[history_key])
-            st.session_state[history_key].append({"role": "assistant", "content": answer})
-            st.rerun()
+    user_question = st.sidebar.chat_input(
+        "Ask Accounting AI...",
+        key=f"accounting_sidebar_input_{module_selection}",
+    )
+    if user_question:
+        st.session_state[history_key].append({"role": "user", "content": user_question})
+        with st.spinner("Accounting AI is reviewing your question..."):
+            answer = accounting_ai_response(module_selection, st.session_state[history_key])
+        st.session_state[history_key].append({"role": "assistant", "content": answer})
+        st.rerun()
 
 
 def is_period_locked(company_key, entry_date, conn=None):
