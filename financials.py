@@ -366,7 +366,7 @@ def show_record_transaction(company_key, role):
             st.success(f"Unlocked {period_date.strftime('%Y-%m')}")
 
     with st.form(f"manual_tx_form_{company_key}"):
-        tx_date = st.date_input("Date", value=datetime.now().date(), key=f"manual_tx_date_{company_key}")
+        tx_date = st.date_input("Transaction Date", value=datetime.now().date(), key=f"manual_tx_date_{company_key}")
         description = st.text_input("Description", key=f"manual_tx_desc_{company_key}")
         reference = st.text_input("Reference", key=f"manual_tx_ref_{company_key}")
         lines = []

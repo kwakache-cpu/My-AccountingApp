@@ -1,4 +1,6 @@
 ﻿import logging
+import json
+import logging
 import os
 import random
 import hashlib
@@ -17,6 +19,14 @@ from PIL import Image
 import cv2
 from pyzbar import pyzbar
 
+try:
+    import firebase_admin
+    from firebase_admin import credentials, db
+except Exception:
+    firebase_admin = None
+    credentials = None
+    db = None
+
 pos_success_key = "pos_transaction_success"
 scanner_active = True
 
@@ -24,7 +34,11 @@ scanner_active = True
 logger = logging.getLogger(__name__)
 
 # Import shared utilities from database
-from database import get_connection, log_audit_action as database_log_audit_action
+from database import (
+    get_connection,
+    get_firebase_runtime_config,
+    log_audit_action as database_log_audit_action,
+)
 
 
 def log_audit_action(conn, company_key, user_role, action, module_name, details=None):
@@ -217,6 +231,61 @@ def _generate_user_id(company_key, staff_name, login_key):
 def _clear_streamlit_state(*keys):
     for key in keys:
         st.session_state.pop(key, None)
+
+
+FIREBASE_MODULE_APP = None
+
+
+def _init_modules_firebase_app():
+    global FIREBASE_MODULE_APP
+    if firebase_admin is None or credentials is None or db is None:
+        return None
+    if FIREBASE_MODULE_APP is not None:
+        return FIREBASE_MODULE_APP
+    try:
+        firebase_config = get_firebase_runtime_config()
+        firebase_key_path = firebase_config["key_path"]
+        if not os.path.exists(firebase_key_path):
+            return None
+        with open(firebase_key_path, "r", encoding="utf-8") as firebase_file:
+            firebase_info = json.load(firebase_file)
+        project_id = str(firebase_info.get("project_id") or "").strip()
+        if not project_id:
+            return None
+        FIREBASE_MODULE_APP = firebase_admin.initialize_app(
+            credentials.Certificate(firebase_key_path),
+            {
+                "databaseURL": firebase_config["databaseURL"],
+                "storageBucket": f"{project_id}.appspot.com",
+            },
+            name="eka-modules-sync",
+        )
+        return FIREBASE_MODULE_APP
+    except ValueError:
+        try:
+            FIREBASE_MODULE_APP = firebase_admin.get_app("eka-modules-sync")
+            return FIREBASE_MODULE_APP
+        except Exception:
+            return None
+    except Exception:
+        return None
+
+
+def _push_transaction_to_cloud(entry_id, payload):
+    firebase_app = _init_modules_firebase_app()
+    if firebase_app is None or db is None:
+        return False
+    try:
+        company_key = str(payload.get("company_key") or "SYSTEM")
+        payload = dict(payload)
+        payload["local_entry_id"] = entry_id
+        pushed_ref = db.reference(
+            f"journal_entries/{company_key}",
+            app=firebase_app,
+        ).push(payload)
+        return bool(getattr(pushed_ref, "key", None))
+    except Exception:
+        return False
 
 
 BASE_CURRENCY = "GHS"
@@ -597,6 +666,21 @@ def post_transaction(description, lines, company_key=None, reference=None, creat
             )
         if owns_connection:
             conn.commit()
+        _push_transaction_to_cloud(
+            entry_id,
+            {
+                "entry_id": entry_id,
+                "company_key": company_key,
+                "date": entry_date_iso,
+                "description": description,
+                "reference": reference,
+                "created_by": created_by,
+                "total_debits": total_debits,
+                "total_credits": total_credits,
+                "lines": normalized_lines,
+                "synced_at": datetime.now().isoformat(),
+            },
+        )
         return entry_id
     except Exception:
         if owns_connection:
@@ -614,6 +698,18 @@ def create_journal_entry(description, lines, company_key=None, reference=None, e
         company_key=company_key,
         reference=reference,
         created_by=st.session_state.get("user", {}).get("role", "System"),
+        entry_date=entry_date,
+        conn=conn,
+    )
+
+
+def save_transaction(description, lines, company_key=None, reference=None, created_by=None, entry_date=None, conn=None):
+    return post_transaction(
+        description,
+        lines,
+        company_key=company_key,
+        reference=reference,
+        created_by=created_by or st.session_state.get("user", {}).get("role", "System"),
         entry_date=entry_date,
         conn=conn,
     )
@@ -1879,6 +1975,7 @@ def show_inventory(company_key, role):
             barcode = st.text_input("New Barcode", value=str(st.session_state.get(inventory_new_barcode_key, "") or ""))
             item_name = st.text_input("Item Name")
             category = st.text_input("Category")
+            transaction_date = st.date_input("Transaction Date", value=datetime.now().date(), key=f"inventory_transaction_date_{company_key}")
             opening_stock = st.number_input("Opening Stock Quantity", min_value=0.0, value=0.0)
             funding_source = st.selectbox("Inventory Funding Source", ["Cash", "Bank", "Mobile Money", "Accounts Payable"])
             price = st.number_input(f"Selling Price ({st.session_state.currency_symbol})", min_value=0.0, value=0.0)
@@ -1912,6 +2009,7 @@ def show_inventory(company_key, role):
                             ],
                             company_key=company_key,
                             reference=f"INV-OPEN-{item_name}",
+                            entry_date=transaction_date,
                             conn=conn,
                         )
                     conn.commit()
@@ -2374,6 +2472,7 @@ def show_pos(company_key, company_name, role):
                 st.warning("Enter a valid manual item and price before adding it.")
 
         payment_method = st.selectbox("Payment Method", ["Cash", "Mobile Money", "Bank Transfer", "Cheque"])
+        sale_date = st.date_input("Transaction Date", value=datetime.now().date(), key=f"pos_sale_date_{company_key}")
         cart = st.session_state.setdefault(cart_key, [])
         if cart:
             cart_df = pd.DataFrame(
@@ -2455,7 +2554,7 @@ def show_pos(company_key, company_name, role):
                        VALUES (?, ?, 'Sales', 'Sales Revenue', ?, ?, ?, 'Active', ?)""",
                     (
                         company_key,
-                        datetime.now().date().isoformat(),
+                        sale_date.isoformat(),
                         total,
                         payment_method,
                         f"POS Sale: {narration}",
@@ -2470,6 +2569,7 @@ def show_pos(company_key, company_name, role):
                     ],
                     company_key=company_key,
                     reference=f"POS-{int(sale_cursor.lastrowid)}",
+                    entry_date=sale_date,
                     conn=conn,
                 )
                 if cost_of_goods_sold > 0:
@@ -2481,6 +2581,7 @@ def show_pos(company_key, company_name, role):
                         ],
                         company_key=company_key,
                         reference=f"COGS-{datetime.now().strftime('%Y%m%d%H%M%S')}",
+                        entry_date=sale_date,
                         conn=conn,
                     )
                 conn.commit()
@@ -2498,7 +2599,7 @@ def show_pos(company_key, company_name, role):
                         company_label,
                         line_items,
                         total,
-                        datetime.now().strftime("%Y-%m-%d %H:%M"),
+                        f"{sale_date.isoformat()} {datetime.now().strftime('%H:%M')}",
                     )
                 st.session_state[cart_key] = []
                 st.session_state[pos_success_key] = True

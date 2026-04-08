@@ -141,6 +141,13 @@ def _get_cloud_vault_status():
         return "🔴 Cloud Vault: Local Mode"
 
 
+def _verify_cloud_vault_handshake():
+    try:
+        st.session_state.cloud_vault_status = _get_cloud_vault_status()
+    except Exception:
+        st.session_state.cloud_vault_status = "🔴 Cloud Vault: Local Mode"
+
+
 def _sync_cloud_db_down_if_newer():
     bucket = _get_firebase_bucket()
     if bucket is None:
@@ -1406,6 +1413,7 @@ def main():
     _sync_cloud_db_down_if_newer()
     run_startup_db_patch()
     _start_firebase_ghost_sync()
+    _verify_cloud_vault_handshake()
     if "base_currency" not in st.session_state:
         st.session_state.base_currency = "GHS"
     if "exchange_rate" not in st.session_state:
@@ -1498,7 +1506,6 @@ def _render_primary_sidebar(user, include_settings=True):
         st.rerun()
     st.sidebar.divider()
     _render_currency_sidebar_controls("display_currency_primary")
-    st.sidebar.caption(_get_cloud_vault_status())
     render_accounting_assistant_sidebar(st.session_state.page)
     st.sidebar.divider()
     currency = st.sidebar.selectbox(
@@ -1611,6 +1618,10 @@ else:
                         "Welcome to the admin dashboard. Seed sample data or deploy your first "
                         "license to bring these system metrics to life."
                     )
+
+                st.markdown("---")
+                st.subheader("System Health")
+                st.caption(st.session_state.get("cloud_vault_status", "🔴 Cloud Vault: Local Mode"))
 
                 st.markdown("---")
                 st.subheader("Master Price Setting")
