@@ -893,10 +893,10 @@ def show_dashboard(company_key, company_name, role):
 
         if st.session_state.get('demo_mode', False):
             col1, col2, col3, col4 = st.columns(4)
-            col1.metric("Inventory Value", "GHS 25,000.00")
-            col2.metric("Month Sales", "GHS 15,000.00")
+            col1.metric(label=f"Inventory Value ({st.session_state.currency_symbol})", value=format_currency(25000.0))
+            col2.metric(label=f"Month Sales ({st.session_state.currency_symbol})", value=format_currency(15000.0))
             col3.metric("Employees", "5")
-            col4.metric("Asset Value", "GHS 50,000.00")
+            col4.metric(label=f"Asset Value ({st.session_state.currency_symbol})", value=format_currency(50000.0))
 
             st.markdown("---")
             col1, col2 = st.columns(2)
@@ -909,6 +909,7 @@ def show_dashboard(company_key, company_name, role):
                     'Description': ['Product Sale', 'Office Supplies', 'Service Revenue'],
                     'Amount': [5000.0, 2000.0, 3000.0],
                 })
+                demo_txns["Amount"] = demo_txns["Amount"].map(format_currency)
                 st.dataframe(demo_txns, width='stretch')
 
             with col2:
@@ -933,7 +934,7 @@ def show_dashboard(company_key, company_name, role):
                     "SELECT COALESCE(SUM(qty * cost_price), 0) FROM inventory WHERE company_key = ?",
                     (company_key,),
                 ).fetchone()[0]
-                col1.metric("Inventory Value", f"GHS {inv_val:.2f}")
+                col1.metric(label=f"Inventory Value ({st.session_state.currency_symbol})", value=format_currency(inv_val))
 
                 current_month = datetime.now().strftime('%Y-%m')
                 month_sales = conn.execute(
@@ -942,7 +943,7 @@ def show_dashboard(company_key, company_name, role):
                        AND date LIKE ?""",
                     (company_key, f"{current_month}%"),
                 ).fetchone()[0]
-                col2.metric("Month Sales", f"GHS {month_sales:.2f}")
+                col2.metric(label=f"Month Sales ({st.session_state.currency_symbol})", value=format_currency(month_sales))
 
                 emp_count = conn.execute(
                     "SELECT COUNT(DISTINCT emp_name) FROM payroll WHERE company_key = ? AND COALESCE(status, 'Active') != 'Void'",
@@ -954,7 +955,7 @@ def show_dashboard(company_key, company_name, role):
                     "SELECT COALESCE(SUM(book_value), 0) FROM fixed_assets WHERE company_key = ?",
                     (company_key,),
                 ).fetchone()[0]
-                col4.metric("Asset Value", f"GHS {fa_val:.2f}")
+                col4.metric(label=f"Asset Value ({st.session_state.currency_symbol})", value=format_currency(fa_val))
             except sqlite3.OperationalError as db_schema_error:
                 if "no such table" in str(db_schema_error).lower():
                     st.warning(
@@ -1468,7 +1469,7 @@ else:
                 m1, m2, m3, m4 = st.columns(4)
                 m1.metric("Total Licenses", str(total_companies))
                 m2.metric("Active Subscriptions", str(active_subscriptions))
-                m3.metric("Monthly Revenue", f"GHS {monthly_revenue:.2f}")
+                m3.metric(label=f"Monthly Revenue ({st.session_state.currency_symbol})", value=format_currency(monthly_revenue))
                 m4.metric("System Uptime", "100%")
 
                 if total_companies == 0 and active_subscriptions == 0 and monthly_revenue == 0:
@@ -1488,7 +1489,7 @@ else:
                     current_price = 500.0
                 with st.form("master_price_setting_form"):
                     master_price = st.number_input(
-                        "Master Price Per Month (GHS)",
+                        f"Master Price Per Month ({st.session_state.currency_symbol})",
                         min_value=0.0,
                         value=current_price,
                         step=50.0,
@@ -1506,7 +1507,7 @@ else:
                                 (master_price,),
                             )
                             conn.commit()
-                            st.success(f"Master monthly price updated to GHS {master_price:,.2f}.")
+                            st.success(f"Master monthly price updated to {format_currency(master_price)}.")
                         except Exception as price_error:
                             st.error(f"Could not update master price: {price_error}")
                 

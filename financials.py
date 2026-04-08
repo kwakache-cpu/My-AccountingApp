@@ -4,7 +4,7 @@ import pandas as pd
 import streamlit as st
 
 from database import get_connection
-from modules import convert_amount_from_base, format_currency, get_currency_symbol, get_display_currency, post_transaction, set_period_lock
+from modules import convert_amount_from_base, format_currency, format_currency_dataframe, get_currency_symbol, get_display_currency, get_exchange_rate, post_transaction, set_period_lock
 
 
 def _resolve_date(value):
@@ -126,7 +126,7 @@ def _convert_money_frame(dataframe):
     for column_name in df.columns:
         if "(GHS)" in str(column_name):
             renamed_columns[column_name] = str(column_name).replace("(GHS)", _money_label())
-    return df.rename(columns=renamed_columns)
+    return format_currency_dataframe(df.rename(columns=renamed_columns))
 
 
 def _format_account_headers(dataframe):
@@ -406,7 +406,7 @@ def show_invoice_manager(company_key, role):
         conn = get_connection()
         df = pd.read_sql_query("SELECT name, email, phone, currency, created_at FROM customers WHERE company_key = ? ORDER BY name", conn, params=(company_key,))
         conn.close()
-        st.dataframe(df, use_container_width=True)
+        st.dataframe(format_currency_dataframe(df), use_container_width=True)
         _csv_button("Customers", df, f"customers_csv_{company_key}")
 
     with tabs[1]:
@@ -423,7 +423,7 @@ def show_invoice_manager(company_key, role):
         conn = get_connection()
         df = pd.read_sql_query("SELECT name, email, phone, currency, created_at FROM suppliers WHERE company_key = ? ORDER BY name", conn, params=(company_key,))
         conn.close()
-        st.dataframe(df, use_container_width=True)
+        st.dataframe(format_currency_dataframe(df), use_container_width=True)
         _csv_button("Suppliers", df, f"suppliers_csv_{company_key}")
 
     with tabs[2]:
@@ -465,7 +465,7 @@ def show_invoice_manager(company_key, role):
         conn = get_connection()
         df = pd.read_sql_query("SELECT invoice_number, invoice_date, due_date, status, amount, currency, description FROM invoices WHERE company_key = ? ORDER BY invoice_date DESC", conn, params=(company_key,))
         conn.close()
-        st.dataframe(df, use_container_width=True)
+        st.dataframe(format_currency_dataframe(df), use_container_width=True)
         _csv_button("Invoices", df, f"invoices_csv_{company_key}")
 
     with tabs[3]:
@@ -509,7 +509,7 @@ def show_invoice_manager(company_key, role):
         conn = get_connection()
         df = pd.read_sql_query("SELECT bill_number, bill_date, due_date, status, amount, currency, description FROM bills WHERE company_key = ? ORDER BY bill_date DESC", conn, params=(company_key,))
         conn.close()
-        st.dataframe(df, use_container_width=True)
+        st.dataframe(format_currency_dataframe(df), use_container_width=True)
         _csv_button("Bills", df, f"bills_csv_{company_key}")
 
     with tabs[4]:
@@ -543,7 +543,7 @@ def show_invoice_manager(company_key, role):
         conn = get_connection()
         df = pd.read_sql_query("SELECT payment_date, payment_type, amount, currency, method, reference, created_by FROM payments WHERE company_key = ? ORDER BY payment_date DESC", conn, params=(company_key,))
         conn.close()
-        st.dataframe(df, use_container_width=True)
+        st.dataframe(format_currency_dataframe(df), use_container_width=True)
         _csv_button("Payments", df, f"payments_csv_{company_key}")
 
 
@@ -560,7 +560,7 @@ def show_ledger_viewer(company_key, role):
     ]
     for tab, (label, df) in zip(tabs, report_defs):
         with tab:
-            st.dataframe(df, use_container_width=True)
+            st.dataframe(format_currency_dataframe(df), use_container_width=True)
             _csv_button(label, df, f"{label}_{company_key}")
 
 
@@ -578,7 +578,7 @@ def show_ledger_viewer(company_key, role):
     for tab, (label, df) in zip(tabs, report_defs):
         with tab:
             display_df = _convert_money_frame(df)
-            st.dataframe(display_df, use_container_width=True)
+            st.dataframe(format_currency_dataframe(display_df), use_container_width=True)
             _csv_button(label, display_df, f"{label}_override_{company_key}")
 
 
@@ -616,7 +616,7 @@ def show_financial_reports(company_key, role=None):
     for tab, (label, df) in zip(tabs, report_defs):
         with tab:
             display_df = _convert_money_frame(df)
-            st.dataframe(display_df, use_container_width=True)
+            st.dataframe(format_currency_dataframe(display_df), use_container_width=True)
             _csv_button(label, display_df, f"{label}_override_{company_key}")
 
 
@@ -651,7 +651,7 @@ def show_financial_reports(company_key, role=None):
     ]
     for tab, (label, df) in zip(tabs, report_defs):
         with tab:
-            st.dataframe(df, use_container_width=True)
+            st.dataframe(format_currency_dataframe(df), use_container_width=True)
             _csv_button(label, df, f"{label}_{company_key}")
 
 
@@ -700,7 +700,7 @@ def show_financial_reports(company_key, role=None):
     for tab, (label, df) in zip(tabs, report_defs):
         with tab:
             display_df = _format_account_headers(_convert_money_frame(df))
-            st.dataframe(display_df, use_container_width=True)
+            st.dataframe(format_currency_dataframe(display_df), use_container_width=True)
             _csv_button(label, display_df, f"{label}_final_{company_key}")
 
 
@@ -781,10 +781,17 @@ def _display_table_with_rate(df_original):
     if df_display.empty:
         st.table(df_display)
         return df_display
+    active_rate = get_exchange_rate()
+    safe_rate = active_rate if active_rate and active_rate > 0 else 1.0
     if "Amount" in df_display.columns:
-        df_display["Amount"] = pd.to_numeric(df_display["Amount"], errors="coerce").fillna(0.0) / _safe_rate()
+        df_display["Amount"] = pd.to_numeric(df_display["Amount"], errors="coerce").fillna(0.0).map(
+            lambda x: f"{st.session_state.currency_symbol}{x / safe_rate:,.2f}"
+        )
     if "Amount (GHS)" in df_display.columns:
-        df_display["Amount (GHS)"] = pd.to_numeric(df_display["Amount (GHS)"], errors="coerce").fillna(0.0) / _safe_rate()
+        df_display["Amount (GHS)"] = pd.to_numeric(df_display["Amount (GHS)"], errors="coerce").fillna(0.0).map(
+            lambda x: f"{st.session_state.currency_symbol}{x / safe_rate:,.2f}"
+        )
+    df_display = format_currency_dataframe(df_display)
     st.table(df_display)
     return df_display
 

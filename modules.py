@@ -306,6 +306,19 @@ def format_currency(amount, currency=None):
     return f"{get_currency_symbol()} {converted:,.2f}"
 
 
+def format_currency_dataframe(dataframe):
+    if not isinstance(dataframe, pd.DataFrame) or dataframe.empty:
+        return dataframe
+    df = dataframe.copy()
+    keywords = ("price", "amount", "total", "balance", "cost", "value", "salary", "net")
+    for column_name in df.columns:
+        if any(token in str(column_name).lower() for token in keywords):
+            numeric_series = pd.to_numeric(df[column_name], errors="coerce")
+            if numeric_series.notna().any():
+                df[column_name] = numeric_series.fillna(0.0).map(format_currency)
+    return df
+
+
 def get_reporting_multiplier():
     currency = get_display_currency()
     rate = get_exchange_rate()
@@ -786,9 +799,9 @@ def show_debtors_by_city_report(company_key):
         road_df = report_df[["Customer Name", "Last Transaction", "Balance"]].copy()
         road_df["Balance"] = road_df["Balance"].map(lambda value: f"GHs {float(value):,.2f}")
 
-        st.dataframe(report_df, use_container_width=True)
+        st.dataframe(format_currency_dataframe(report_df), use_container_width=True)
         st.markdown("Road Summary")
-        st.dataframe(road_df, use_container_width=True, hide_index=True)
+        st.dataframe(format_currency_dataframe(road_df), use_container_width=True, hide_index=True)
     except Exception as exc:
         st.error(f"Debtor city report error: {exc}")
     finally:
@@ -1377,7 +1390,7 @@ def show_company_registration_module():
 
     if rows:
         st.dataframe(
-            pd.DataFrame(rows, columns=["Company Name", "Admin Contact", "Contact Email", "Status", "Subscription Expiry"]),
+            format_currency_dataframe(pd.DataFrame(rows, columns=["Company Name", "Admin Contact", "Contact Email", "Status", "Subscription Expiry"])),
             use_container_width=True,
         )
     else:
@@ -1404,7 +1417,7 @@ def show_system_health_module():
 
     if logs:
         logs_df = pd.DataFrame(logs, columns=["Timestamp", "Level", "Module", "Message"])
-        st.dataframe(logs_df, use_container_width=True)
+        st.dataframe(format_currency_dataframe(logs_df), use_container_width=True)
         excel_bin = get_excel_bin(logs_df)
         if excel_bin:
             st.download_button("Export Logs", data=excel_bin, file_name="eka_gatekeeper_logs.xlsx")
@@ -1427,7 +1440,7 @@ def show_license_renewal_module():
         return
 
     companies_df = pd.DataFrame(companies, columns=["ID", "Company Name", "Status", "Subscription Expiry"])
-    st.dataframe(companies_df, use_container_width=True)
+    st.dataframe(format_currency_dataframe(companies_df), use_container_width=True)
 
     selected_name = st.selectbox("Select Company", companies_df["Company Name"].tolist())
     duration_months = st.number_input("Extend By (Months)", min_value=1, value=12, key="renew_duration_months")
@@ -1464,7 +1477,7 @@ def show_sales_invoices_page(conn, demo_on):
         demo_df = pd.DataFrame(
             [{"Customer Name": "Accra Retail Ltd", "Amount": 12500.0, "Status": "Paid", "Date": datetime.now().date().isoformat()}]
         )
-        st.dataframe(demo_df, use_container_width=True)
+        st.dataframe(format_currency_dataframe(demo_df), use_container_width=True)
         return
 
     with st.form("sales_invoice_form"):
@@ -1486,7 +1499,7 @@ def show_sales_invoices_page(conn, demo_on):
     rows = conn.execute("SELECT customer_name, amount, status, date FROM sales_invoices ORDER BY date DESC, id DESC").fetchall()
     if rows:
         df = pd.DataFrame(rows, columns=["Customer Name", "Amount", "Status", "Date"])
-        st.dataframe(df, use_container_width=True)
+        st.dataframe(format_currency_dataframe(df), use_container_width=True)
     else:
         st.caption("No invoices yet.")
 
@@ -1498,7 +1511,7 @@ def show_accounts_payable_page(conn, demo_on):
         demo_df = pd.DataFrame(
             [{"Supplier Name": "Tema Supplier Co.", "Amount": 4200.0, "Status": "Unpaid", "Date": datetime.now().date().isoformat()}]
         )
-        st.dataframe(demo_df, use_container_width=True)
+        st.dataframe(format_currency_dataframe(demo_df), use_container_width=True)
         return
 
     with st.form("accounts_payable_form"):
@@ -1520,7 +1533,7 @@ def show_accounts_payable_page(conn, demo_on):
     rows = conn.execute("SELECT supplier_name, amount, status, date FROM accounts_payable ORDER BY date DESC, id DESC").fetchall()
     if rows:
         df = pd.DataFrame(rows, columns=["Supplier Name", "Amount", "Status", "Date"])
-        st.dataframe(df, use_container_width=True)
+        st.dataframe(format_currency_dataframe(df), use_container_width=True)
     else:
         st.caption("No payables yet.")
 
@@ -1535,7 +1548,7 @@ def show_chart_of_accounts_page(conn, demo_on):
                 {"Account Name": "Accounts Payable", "Account Type": "Liability", "Balance": 4200.0},
             ]
         )
-        st.dataframe(demo_df, use_container_width=True)
+        st.dataframe(format_currency_dataframe(demo_df), use_container_width=True)
         return
 
     with st.form("chart_of_accounts_form"):
@@ -1556,7 +1569,7 @@ def show_chart_of_accounts_page(conn, demo_on):
     rows = conn.execute("SELECT account_name, account_type, balance FROM chart_of_accounts ORDER BY account_name").fetchall()
     if rows:
         df = pd.DataFrame(rows, columns=["Account Name", "Account Type", "Balance"])
-        st.dataframe(df, use_container_width=True)
+        st.dataframe(format_currency_dataframe(df), use_container_width=True)
     else:
         st.caption("No chart of accounts records yet.")
 
@@ -1568,7 +1581,7 @@ def show_vouchers_page(conn, demo_on):
         demo_df = pd.DataFrame(
             [{"Narration": "Demo voucher", "Amount": 12500.0, "Reference": "DEMO-001", "Date": datetime.now().date().isoformat()}]
         )
-        st.dataframe(demo_df, use_container_width=True)
+        st.dataframe(format_currency_dataframe(demo_df), use_container_width=True)
         return
 
     with st.form("voucher_form"):
@@ -1590,7 +1603,7 @@ def show_vouchers_page(conn, demo_on):
     rows = conn.execute("SELECT narration, amount, ref_no, date FROM vouchers ORDER BY date DESC, id DESC").fetchall()
     if rows:
         df = pd.DataFrame(rows, columns=["Narration", "Amount", "Reference", "Date"])
-        st.dataframe(df, use_container_width=True)
+        st.dataframe(format_currency_dataframe(df), use_container_width=True)
     else:
         st.caption("No vouchers yet.")
 
@@ -1745,7 +1758,7 @@ def show_inventory(company_key, role):
             conn.close()
 
             if not df.empty:
-                st.dataframe(df, use_container_width=True)
+                st.dataframe(format_currency_dataframe(df), use_container_width=True)
                 excel_bin = get_excel_bin(df)
                 if excel_bin:
                     st.download_button(
@@ -1951,7 +1964,7 @@ def show_vouchers(company_key, role):
             df = pd.DataFrame(data, columns=["ID", "Date", "Type", "Narration", "Amount", "Ref"]) if data else pd.DataFrame()
         conn.close()
         if not df.empty:
-            st.dataframe(df, use_container_width=True)
+            st.dataframe(format_currency_dataframe(df), use_container_width=True)
             if role in ("Master Admin", "Bookkeeper", "Sub-Admin") and "ID" in df.columns:
                 expense_rows = df[df["Type"] == "Expense"]
                 if not expense_rows.empty:
@@ -2010,7 +2023,7 @@ def show_chart_of_accounts(company_key, role):
         conn.close()
         if rows:
             df = pd.DataFrame(rows, columns=["Account Code", "Account Name", "Account Type"])
-            st.dataframe(df, use_container_width=True)
+            st.dataframe(format_currency_dataframe(df), use_container_width=True)
         else:
             st.info("No chart of accounts entries found.")
     except Exception as e:
@@ -2160,7 +2173,7 @@ def show_company_setup(company_key, company_name, role):
                         users,
                         columns=["Full Name", "Role", "Login Key", "Status", "Created At"],
                     )
-                    st.dataframe(users_df, use_container_width=True)
+                    st.dataframe(format_currency_dataframe(users_df), use_container_width=True)
                 else:
                     st.caption("No staff logins created yet.")
         else:
@@ -2321,7 +2334,7 @@ def show_pos(company_key, company_name, role):
                 ]
             )
             st.subheader("Active Sale Cart")
-            st.dataframe(cart_df, use_container_width=True)
+            st.dataframe(format_currency_dataframe(cart_df), use_container_width=True)
             st.metric(f"Cart Total ({get_currency_symbol()})", format_currency(cart_df["Line Total"].sum()))
             remove_choice = st.selectbox(
                 "Remove Cart Line",
@@ -2467,7 +2480,7 @@ def show_pos(company_key, company_name, role):
         conn.close()
         if sales_rows:
             sales_df = pd.DataFrame(sales_rows, columns=["ID", "Date", "Narration", "Amount", "Status"])
-            st.dataframe(sales_df, use_container_width=True)
+            st.dataframe(format_currency_dataframe(sales_df), use_container_width=True)
             if role in ("Master Admin", "Bookkeeper", "Sub-Admin"):
                 pos_void_confirm_key = f"pos_void_confirm_{company_key}"
                 for _, sale_row in sales_df.iterrows():
@@ -2522,7 +2535,7 @@ def show_sales_purchase(company_key, role, doc_type="Sales"):
             "Status": ["Paid", "Pending"],
             "Date": [datetime.now().date().isoformat()] * 2,
         })
-        st.dataframe(demo_data, use_container_width=True)
+        st.dataframe(format_currency_dataframe(demo_data), use_container_width=True)
         return
 
     with st.form(f"{doc_type.lower()}_form"):
@@ -2622,7 +2635,7 @@ def show_sales_purchase(company_key, role, doc_type="Sales"):
         conn.close()
         if data:
             df = pd.DataFrame(data, columns=["Date", "Description", "Amount (GH₵)"])
-            st.dataframe(df, use_container_width=True)
+            st.dataframe(format_currency_dataframe(df), use_container_width=True)
             excel_bin = get_excel_bin(df)
             if excel_bin:
                 st.download_button(
@@ -2709,7 +2722,7 @@ def show_aging(company_key, aging_type="Receivable"):
             df = pd.DataFrame(data, columns=["Date", "Description", f"Amount ({get_currency_symbol()})"])
             df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
             df["Days Outstanding"] = (datetime.now() - df["Date"]).dt.days
-            st.dataframe(df, use_container_width=True)
+            st.dataframe(format_currency_dataframe(df), use_container_width=True)
             if aging_type == "Receivable":
                 show_debtors_by_city_report(company_key)
         else:
@@ -2765,7 +2778,7 @@ def show_payroll(company_key, role):
             "Net Salary": [2152.5, 2555.0],
             "Month": ["March 2026"] * 2,
         })
-        st.dataframe(demo_df, use_container_width=True)
+        st.dataframe(format_currency_dataframe(demo_df), use_container_width=True)
         return
 
     with st.expander("➕ Add Payroll Entry", expanded=True):
@@ -2861,7 +2874,7 @@ def show_payroll(company_key, role):
         if data:
             df = pd.DataFrame(data, columns=["ID", "Employee", "Basic Salary", "Allowances", "Deductions",
                                               "SSNIT T1", "PAYE", "Net Salary", "Month", "Year", "Payment Status", "Status"])
-            st.dataframe(df, use_container_width=True)
+            st.dataframe(format_currency_dataframe(df), use_container_width=True)
             if role == "Master Admin":
                 selected_payroll_key = f"payroll_edit_selected_{company_key}"
                 void_payroll_key = f"payroll_void_selected_{company_key}"
@@ -2961,7 +2974,7 @@ def show_fixed_assets(company_key, role):
             "Book Value (GH₵)": [68000.0, 3685.0],
             "Status": ["Active", "Active"],
         })
-        st.dataframe(demo_df, use_container_width=True)
+        st.dataframe(format_currency_dataframe(demo_df), use_container_width=True)
         return
 
     with st.expander("➕ Add Fixed Asset", expanded=True):
@@ -3010,7 +3023,7 @@ def show_fixed_assets(company_key, role):
         if data:
             df = pd.DataFrame(data, columns=["ID", "Asset Name", "Category", "Purchase Date", f"Cost ({get_currency_symbol()})",
                                               "Opening Book Value", "Dep. Rate (%)", "Accum. Dep.", "Current Value", "Location", "Status"])
-            st.dataframe(df, use_container_width=True)
+            st.dataframe(format_currency_dataframe(df), use_container_width=True)
 
             total_cost = df[f"Cost ({get_currency_symbol()})"].sum()
             total_book = df["Current Value"].sum()
@@ -3111,7 +3124,7 @@ def show_fixed_assets(company_key, role):
                 "Status": ["Active", "Active"],
             }
         )
-        st.dataframe(demo_df, use_container_width=True)
+        st.dataframe(format_currency_dataframe(demo_df), use_container_width=True)
         return
 
     action_col1, action_col2 = st.columns(2)
@@ -3221,7 +3234,7 @@ def show_fixed_assets(company_key, role):
                 "Status",
             ],
         )
-        st.dataframe(df, use_container_width=True)
+        st.dataframe(format_currency_dataframe(df), use_container_width=True)
 
         col1, col2, col3 = st.columns(3)
         col1.metric("Total Assets", len(df))
@@ -3648,7 +3661,7 @@ def show_reports(company_key):
         if trial_balance_df.empty:
             st.info("No posted journal balances were found for this company.")
         else:
-            st.dataframe(trial_balance_df, use_container_width=True)
+            st.dataframe(format_currency_dataframe(trial_balance_df), use_container_width=True)
         _statement_export_buttons(
             "trial_balance",
             "Trial Balance",
@@ -3664,7 +3677,7 @@ def show_reports(company_key):
         if balance_sheet_df.empty:
             st.info("No balance sheet activity has been posted yet.")
         else:
-            st.dataframe(balance_sheet_df, use_container_width=True)
+            st.dataframe(format_currency_dataframe(balance_sheet_df), use_container_width=True)
         _statement_export_buttons(
             "balance_sheet",
             "Balance Sheet",
@@ -3680,7 +3693,7 @@ def show_reports(company_key):
         if profit_loss_df.empty:
             st.info("No profit and loss activity has been posted yet.")
         else:
-            st.dataframe(profit_loss_df, use_container_width=True)
+            st.dataframe(format_currency_dataframe(profit_loss_df), use_container_width=True)
         _statement_export_buttons(
             "profit_and_loss",
             "Profit and Loss",
@@ -3790,7 +3803,7 @@ def show_dashboard(company_key, company_name, role):
                 recent_txns = recent_txns.drop(columns=["amount"]).rename(
                     columns={"date": "Date", "v_type": "Type", "narration": "Description"}
                 )
-                st.dataframe(recent_txns, use_container_width=True)
+                st.dataframe(format_currency_dataframe(recent_txns), use_container_width=True)
 
         with right_col:
             st.subheader("Low Stock Items")
@@ -3808,7 +3821,7 @@ def show_dashboard(company_key, company_name, role):
             if low_stock.empty:
                 st.success("All stock levels are adequate!")
             else:
-                st.dataframe(low_stock, use_container_width=True)
+                st.dataframe(format_currency_dataframe(low_stock), use_container_width=True)
 
         st.subheader("Quick Actions")
         action_col1, action_col2, action_col3, action_col4 = st.columns(4)
@@ -3970,7 +3983,7 @@ def show_audit_trail(company_key):
 
         if data:
             df = pd.DataFrame(data, columns=["Timestamp", "Company", "Role", "Action", "Module", "Details"])
-            st.dataframe(df, use_container_width=True)
+            st.dataframe(format_currency_dataframe(df), use_container_width=True)
             excel_bin = get_excel_bin(df)
             if excel_bin:
                 st.download_button("📥 Export Audit Trail", data=excel_bin, file_name="audit_trail.xlsx")
