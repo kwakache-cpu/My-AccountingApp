@@ -66,14 +66,16 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 GATEKEEPER_SYSTEM_PROMPT = (
-    "You are the Gatekeeper Accounting Expert. Explain accounting terms like Accounts "
-    "Payable and Chart of Accounts simply for Ghanaian businesses."
+    "You are a Chartered Accountant for a Ghanaian enterprise. "
+    "Analyze the provided ledger data to flag unusual trends, missing records, or tax liabilities."
 )
 try:
-    groq_api_key = os.getenv("GROQ_API_KEY") or st.secrets["GROQ_API_KEY"]
+    client = Groq(api_key=st.secrets["GROQ_API_KEY"])
 except Exception:
-    groq_api_key = None
-client = Groq(api_key=groq_api_key) if groq_api_key else None
+    try:
+        client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+    except Exception:
+        client = None
 FIREBASE_SYNC_STARTED = False
 FIREBASE_SYNC_LOCK = threading.Lock()
 FIREBASE_APP = None

@@ -296,7 +296,8 @@ BOG_DISPLAY_RATES = {
     "GBP": 15.47,
 }
 ACCOUNTING_ASSISTANT_SYSTEM_PROMPT = (
-    "You are a seasoned Chartered Accountant embedded in a Ghana-focused ERP. "
+    "You are a Chartered Accountant for a Ghanaian enterprise. "
+    "Analyze the provided ledger data to flag unusual trends, missing records, or tax liabilities. "
     "Answer with IFRS-aligned accounting guidance, double-entry discipline, and Ghana tax context, "
     "including VAT, NHIL, GETFund, and related indirect tax treatment where relevant. "
     "Use the user's selected presentation currency when discussing displayed amounts, but remind them "
@@ -719,6 +720,22 @@ def post_transaction(description, lines, company_key=None, reference=None, creat
                 """,
                 (entry_id, account_id, line["debit"], line["credit"]),
             )
+            conn.execute(
+                """
+                INSERT INTO transactions (company_key, transaction_date, account, description, debit, credit, reference, created_by)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    company_key,
+                    entry_date_iso,
+                    line["account_name"],
+                    description,
+                    line["debit"],
+                    line["credit"],
+                    reference,
+                    created_by,
+                ),
+            )
         if owns_connection:
             conn.commit()
         _push_transaction_to_cloud(
@@ -868,22 +885,6 @@ def show_journal_entries(company_key, role):
                     try:
                         conn = get_connection()
                         reference = f"JRN-{datetime.now().strftime('%Y%m%d%H%M%S')}"
-                        conn.execute(
-                            """
-                            INSERT INTO transactions (company_key, transaction_date, account, description, debit, credit, reference, created_by)
-                            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                            """,
-                            (
-                                company_key,
-                                entry_date.isoformat(),
-                                selected_account,
-                                description.strip(),
-                                float(debit or 0.0),
-                                float(credit or 0.0),
-                                reference,
-                                role,
-                            ),
-                        )
                         if debit > 0 and credit == 0:
                             journal_lines = [
                                 {"account_name": selected_account, "category": "Expense", "debit": float(debit), "credit": 0},
