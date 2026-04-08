@@ -1267,6 +1267,31 @@ def run_startup_db_patch():
 
 def main():
     run_startup_db_patch()
+    if "base_currency" not in st.session_state:
+        st.session_state.base_currency = "GHS"
+    if "exchange_rate" not in st.session_state:
+        st.session_state.exchange_rate = 1.0
+
+    selected_base_currency = str(st.session_state.get("base_currency", "GHS")).upper()
+    bog_rate = _get_bog_display_rate(selected_base_currency)
+    expected_rate = 1.0 if selected_base_currency == "GHS" else bog_rate
+    if abs(float(st.session_state.get("exchange_rate", 1.0)) - float(expected_rate)) > 0.000001:
+        st.session_state.exchange_rate = expected_rate
+
+    settings_conn = None
+    try:
+        settings_conn = get_connection()
+        if settings_conn:
+            settings_conn.execute(
+                "UPDATE system_settings SET base_currency = ?, display_currency = ?, exchange_rate = ?, updated_at = CURRENT_TIMESTAMP WHERE id = 1",
+                ("GHS", selected_base_currency, st.session_state.exchange_rate),
+            )
+            settings_conn.commit()
+    except Exception as session_sync_error:
+        logger.warning(f"Currency session sync failed: {session_sync_error}")
+    finally:
+        if settings_conn:
+            settings_conn.close()
 
 
 PRIMARY_NAV_ITEMS = [
@@ -1332,6 +1357,7 @@ def _render_primary_sidebar(user, include_settings=True):
         st.rerun()
     st.sidebar.divider()
     _render_currency_sidebar_controls("display_currency_primary")
+    render_accounting_assistant_sidebar(st.session_state.page)
 
 
 def _render_primary_page(user):

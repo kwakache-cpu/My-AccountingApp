@@ -707,3 +707,371 @@ def show_financial_reports(company_key, role=None):
 def show_reports(company_key, role=None):
     """Financial reports sidebar entry point."""
     show_financial_reports(company_key, role)
+
+
+def _safe_rate():
+    try:
+        rate = float(st.session_state.get("exchange_rate", 1.0) or 1.0)
+        return rate if rate > 0 else 1.0
+    except Exception:
+        return 1.0
+
+
+def _report_convert(value):
+    try:
+        return float(value or 0.0) / _safe_rate()
+    except Exception:
+        return 0.0
+
+
+def _safe_number(series, default=0.0):
+    try:
+        if series is None:
+            return float(default)
+        if hasattr(series, "sum"):
+            return float(series.sum())
+        return float(series)
+    except Exception:
+        return float(default)
+
+
+def _safe_dataframe(dataframe, columns):
+    if isinstance(dataframe, pd.DataFrame):
+        return dataframe.copy()
+    return pd.DataFrame(columns=columns)
+
+
+def _account_bucket(account_code, account_name, account_type):
+    code = str(account_code or "").strip()
+    name = str(account_name or "").strip().lower()
+    normalized_type = str(account_type or "").strip().title()
+    if normalized_type == "Asset":
+        if code.startswith("15") or "fixed asset" in name or "property" in name or "equipment" in name:
+            return "Non-Current Assets"
+        return "Current Assets"
+    if normalized_type == "Liability":
+        if "loan" in name and not code.startswith("20"):
+            return "Non-Current Liabilities"
+        return "Current Liabilities"
+    if normalized_type == "Equity":
+        return "Equity"
+    if normalized_type == "Income":
+        return "Revenue"
+    if normalized_type == "Expense":
+        if "depreciation" in name:
+            return "Operating Expenses"
+        return "Operating Expenses"
+    return normalized_type or "Unclassified"
+
+
+def _ifrs_account_display(dataframe):
+    df = _safe_dataframe(dataframe, [])
+    if df.empty:
+        return df
+    if "Account" in df.columns and "Account Code" in df.columns:
+        df["Account"] = df.apply(
+            lambda row: _account_label(row.get("Account Code"), row.get("Account")),
+            axis=1,
+        )
+    return df
+
+
+def get_ledger_balances(company_key, start_date=None, end_date=None, account_name=None):
+    conn = get_connection()
+    try:
+        query = """
+            SELECT
+                COALESCE(c.code, c.account_code, '') AS account_code,
+                COALESCE(c.name, c.account_name, '') AS account_name,
+                COALESCE(c.type, c.category, c.account_type, '') AS account_type,
+                COALESCE(SUM(jl.debit), 0) AS total_debit,
+                COALESCE(SUM(jl.credit), 0) AS total_credit
+            FROM journal_lines jl
+            JOIN journal_entries je ON je.id = jl.entry_id
+            JOIN chart_of_accounts c ON c.id = jl.account_id
+            WHERE je.company_key = ?
+        """
+        params = [company_key]
+        if start_date:
+            query += " AND date(je.date) >= date(?)"
+            params.append(_resolve_date(start_date))
+        if end_date:
+            query += " AND date(je.date) <= date(?)"
+            params.append(_resolve_date(end_date))
+        if account_name:
+            query += " AND lower(COALESCE(c.name, c.account_name, '')) LIKE ?"
+            params.append(f"%{str(account_name).lower()}%")
+        query += """
+            GROUP BY COALESCE(c.code, c.account_code, ''), COALESCE(c.name, c.account_name, ''), COALESCE(c.type, c.category, c.account_type, '')
+            ORDER BY COALESCE(c.code, c.account_code, ''), COALESCE(c.name, c.account_name, '')
+        """
+        rows = conn.execute(query, params).fetchall()
+        if not rows:
+            return {}
+        balances = {}
+        for row in rows:
+            debit = float(row["total_debit"] or 0.0)
+            credit = float(row["total_credit"] or 0.0)
+            account_type = str(row["account_type"] or "")
+            balance = debit - credit if _normal_balance(account_type) == "debit" else credit - debit
+            balances[str(row["account_name"] or "")] = {
+                "account_code": str(row["account_code"] or ""),
+                "account_type": account_type,
+                "debit": debit,
+                "credit": credit,
+                "balance": balance,
+            }
+        return balances
+    except Exception:
+        return {}
+    finally:
+        conn.close()
+
+
+def get_trial_balance(company_key, start_date=None, end_date=None, account_name=None):
+    try:
+        balances = get_ledger_balances(company_key, start_date, end_date, account_name)
+        if not balances:
+            return pd.DataFrame(columns=["Account Code", "Account", "Type", "Debit (GHS)", "Credit (GHS)", "Balance (GHS)", "Balanced"])
+        rows = []
+        total_debits = 0.0
+        total_credits = 0.0
+        for account_name_key, payload in balances.items():
+            debit = float(payload.get("debit", 0.0))
+            credit = float(payload.get("credit", 0.0))
+            total_debits += debit
+            total_credits += credit
+            rows.append(
+                {
+                    "Account Code": payload.get("account_code", ""),
+                    "Account": account_name_key,
+                    "Type": payload.get("account_type", ""),
+                    "Debit (GHS)": debit,
+                    "Credit (GHS)": credit,
+                    "Balance (GHS)": float(payload.get("balance", 0.0)),
+                }
+            )
+        balanced = abs(total_debits - total_credits) < 0.01
+        df = pd.DataFrame(rows)
+        df["Balanced"] = "Yes" if balanced else "No"
+        return df.sort_values(["Account Code", "Account"], na_position="last").reset_index(drop=True)
+    except Exception:
+        return pd.DataFrame(columns=["Account Code", "Account", "Type", "Debit (GHS)", "Credit (GHS)", "Balance (GHS)", "Balanced"])
+
+
+def get_income_statement(company_key, start_date=None, end_date=None, account_name=None):
+    try:
+        tb = get_trial_balance(company_key, start_date, end_date, account_name)
+        if tb.empty:
+            return pd.DataFrame(columns=["Category", "Account Code", "Account", "Amount (GHS)"])
+        rows = []
+        income_total = 0.0
+        expense_total = 0.0
+        for _, row in tb.iterrows():
+            account_type = str(row.get("Type", "")).title()
+            if account_type == "Income":
+                amount = float(row.get("Credit (GHS)", 0.0) - row.get("Debit (GHS)", 0.0))
+                income_total += amount
+                rows.append(
+                    {
+                        "Category": "Revenue",
+                        "Account Code": row.get("Account Code", ""),
+                        "Account": row.get("Account", ""),
+                        "Amount (GHS)": amount,
+                    }
+                )
+            elif account_type == "Expense":
+                amount = float(row.get("Debit (GHS)", 0.0) - row.get("Credit (GHS)", 0.0))
+                expense_total += amount
+                category = _account_bucket(row.get("Account Code", ""), row.get("Account", ""), account_type)
+                rows.append(
+                    {
+                        "Category": category,
+                        "Account Code": row.get("Account Code", ""),
+                        "Account": row.get("Account", ""),
+                        "Amount (GHS)": amount,
+                    }
+                )
+        rows.append(
+            {
+                "Category": "Profit for the Period",
+                "Account Code": "",
+                "Account": "Net Profit",
+                "Amount (GHS)": income_total - expense_total,
+            }
+        )
+        return pd.DataFrame(rows)
+    except Exception:
+        return pd.DataFrame(columns=["Category", "Account Code", "Account", "Amount (GHS)"])
+
+
+def get_balance_sheet(company_key, start_date=None, end_date=None, account_name=None):
+    try:
+        tb = get_trial_balance(company_key, start_date, end_date, account_name)
+        if tb.empty:
+            return pd.DataFrame(columns=["Category", "Account Code", "Account", "Amount (GHS)"])
+        rows = []
+        for _, row in tb.iterrows():
+            account_type = str(row.get("Type", "")).title()
+            if account_type not in ("Asset", "Liability", "Equity"):
+                continue
+            amount = (
+                float(row.get("Debit (GHS)", 0.0) - row.get("Credit (GHS)", 0.0))
+                if account_type == "Asset"
+                else float(row.get("Credit (GHS)", 0.0) - row.get("Debit (GHS)", 0.0))
+            )
+            rows.append(
+                {
+                    "Category": _account_bucket(row.get("Account Code", ""), row.get("Account", ""), account_type),
+                    "Account Code": row.get("Account Code", ""),
+                    "Account": row.get("Account", ""),
+                    "Amount (GHS)": amount,
+                }
+            )
+        return pd.DataFrame(rows)
+    except Exception:
+        return pd.DataFrame(columns=["Category", "Account Code", "Account", "Amount (GHS)"])
+
+
+def get_cash_flow_statement(company_key, start_date=None, end_date=None, account_name=None):
+    try:
+        income_df = get_income_statement(company_key, start_date, end_date, account_name)
+        bs_df = get_balance_sheet(company_key, start_date, end_date, account_name)
+        net_profit = _safe_number(income_df.loc[income_df["Account"] == "Net Profit", "Amount (GHS)"]) if not income_df.empty else 0.0
+        depreciation = _safe_number(income_df.loc[income_df["Account"].astype(str).str.contains("Depreciation", case=False, na=False), "Amount (GHS)"]) if not income_df.empty else 0.0
+        receivables = _safe_number(bs_df.loc[bs_df["Account"].astype(str).str.contains("Receivable", case=False, na=False), "Amount (GHS)"]) if not bs_df.empty else 0.0
+        inventory = _safe_number(bs_df.loc[bs_df["Account"].astype(str).str.contains("Inventory", case=False, na=False), "Amount (GHS)"]) if not bs_df.empty else 0.0
+        payables = _safe_number(bs_df.loc[bs_df["Account"].astype(str).str.contains("Payable", case=False, na=False), "Amount (GHS)"]) if not bs_df.empty else 0.0
+        fixed_assets = _safe_number(bs_df.loc[bs_df["Category"] == "Non-Current Assets", "Amount (GHS)"]) if not bs_df.empty else 0.0
+        capital = _safe_number(bs_df.loc[bs_df["Account"].astype(str).str.contains("Capital|Equity", case=False, na=False), "Amount (GHS)"]) if not bs_df.empty else 0.0
+        operating = net_profit + depreciation - receivables - inventory + payables
+        investing = -fixed_assets
+        financing = capital
+        return pd.DataFrame(
+            [
+                {"Section": "Operating Activities", "Line Item": "Profit for the Period", "Amount (GHS)": net_profit},
+                {"Section": "Operating Activities", "Line Item": "Depreciation and Non-Cash Adjustments", "Amount (GHS)": depreciation},
+                {"Section": "Operating Activities", "Line Item": "Working Capital Changes", "Amount (GHS)": -receivables - inventory + payables},
+                {"Section": "Operating Activities", "Line Item": "Net Cash from Operating Activities", "Amount (GHS)": operating},
+                {"Section": "Investing Activities", "Line Item": "Acquisition of Non-Current Assets", "Amount (GHS)": investing},
+                {"Section": "Financing Activities", "Line Item": "Capital Contributions and Equity Movements", "Amount (GHS)": financing},
+                {"Section": "Net Movement", "Line Item": "Net Increase or Decrease in Cash", "Amount (GHS)": operating + investing + financing},
+            ]
+        )
+    except Exception:
+        return pd.DataFrame(columns=["Section", "Line Item", "Amount (GHS)"])
+
+
+def get_changes_in_equity(company_key, start_date=None, end_date=None, account_name=None):
+    try:
+        bs_df = get_balance_sheet(company_key, start_date, end_date, account_name)
+        income_df = get_income_statement(company_key, start_date, end_date, account_name)
+        opening_equity = _safe_number(bs_df.loc[bs_df["Account"].astype(str).str.contains("Opening Balance Equity", case=False, na=False), "Amount (GHS)"]) if not bs_df.empty else 0.0
+        owner_capital = _safe_number(bs_df.loc[bs_df["Account"].astype(str).str.contains("Owner Capital|Capital", case=False, na=False), "Amount (GHS)"]) if not bs_df.empty else 0.0
+        retained_earnings = _safe_number(bs_df.loc[bs_df["Account"].astype(str).str.contains("Retained Earnings", case=False, na=False), "Amount (GHS)"]) if not bs_df.empty else 0.0
+        net_profit = _safe_number(income_df.loc[income_df["Account"] == "Net Profit", "Amount (GHS)"]) if not income_df.empty else 0.0
+        return pd.DataFrame(
+            [
+                {"Account Code": "", "Line Item": "Opening Equity", "Amount (GHS)": opening_equity},
+                {"Account Code": "", "Line Item": "Capital Contributions", "Amount (GHS)": owner_capital},
+                {"Account Code": "", "Line Item": "Retained Earnings", "Amount (GHS)": retained_earnings},
+                {"Account Code": "", "Line Item": "Profit for the Period", "Amount (GHS)": net_profit},
+                {"Account Code": "", "Line Item": "Closing Equity", "Amount (GHS)": opening_equity + owner_capital + retained_earnings + net_profit},
+            ]
+        )
+    except Exception:
+        return pd.DataFrame(columns=["Account Code", "Line Item", "Amount (GHS)"])
+
+
+def _convert_money_frame(dataframe):
+    if dataframe.empty:
+        return dataframe
+    df = dataframe.copy()
+    money_columns = [
+        column_name
+        for column_name in df.columns
+        if any(token in str(column_name) for token in ("(GHS)", "Amount", "Debit", "Credit", "Balance", "Movement"))
+    ]
+    for column_name in money_columns:
+        df[column_name] = pd.to_numeric(df[column_name], errors="coerce").fillna(0.0).map(_report_convert)
+    renamed_columns = {}
+    for column_name in df.columns:
+        if "(GHS)" in str(column_name):
+            renamed_columns[column_name] = str(column_name).replace("(GHS)", _money_label())
+    return df.rename(columns=renamed_columns)
+
+
+def show_financial_reports(company_key, role=None):
+    st.header("📊 Financial Reports")
+    try:
+        start_date, end_date, account_name = _filter_controls(f"financial_ifrs_safe_{company_key}")
+    except Exception:
+        start_date, end_date, account_name = None, None, None
+
+    try:
+        trial_balance_df = get_trial_balance(company_key, start_date, end_date, account_name)
+    except Exception:
+        trial_balance_df = pd.DataFrame(columns=["Account Code", "Account", "Type", "Debit (GHS)", "Credit (GHS)", "Balance (GHS)", "Balanced"])
+    try:
+        income_statement_df = get_income_statement(company_key, start_date, end_date, account_name)
+    except Exception:
+        income_statement_df = pd.DataFrame(columns=["Category", "Account Code", "Account", "Amount (GHS)"])
+    try:
+        balance_sheet_df = get_balance_sheet(company_key, start_date, end_date, account_name)
+    except Exception:
+        balance_sheet_df = pd.DataFrame(columns=["Category", "Account Code", "Account", "Amount (GHS)"])
+    try:
+        cash_flow_df = get_cash_flow_statement(company_key, start_date, end_date, account_name)
+    except Exception:
+        cash_flow_df = pd.DataFrame(columns=["Section", "Line Item", "Amount (GHS)"])
+    try:
+        equity_df = get_changes_in_equity(company_key, start_date, end_date, account_name)
+    except Exception:
+        equity_df = pd.DataFrame(columns=["Account Code", "Line Item", "Amount (GHS)"])
+    try:
+        depreciation_df = get_depreciation_schedule(company_key)
+    except Exception:
+        depreciation_df = pd.DataFrame(columns=["Asset Name", "Category", "Purchase Date", "Cost (GHS)", "Useful Life (Years)", "Residual Value (GHS)", "Method", "Rate (%)", "Accumulated Depreciation (GHS)", "Book Value (GHS)", "Last Depreciation Date", "Status"])
+
+    total_debits = _safe_number(trial_balance_df.get("Debit (GHS)"))
+    total_credits = _safe_number(trial_balance_df.get("Credit (GHS)"))
+    total_assets = _safe_number(balance_sheet_df.loc[balance_sheet_df["Category"].isin(["Current Assets", "Non-Current Assets"]), "Amount (GHS)"]) if not balance_sheet_df.empty else 0.0
+    total_liabilities = _safe_number(balance_sheet_df.loc[balance_sheet_df["Category"].isin(["Current Liabilities", "Non-Current Liabilities"]), "Amount (GHS)"]) if not balance_sheet_df.empty else 0.0
+    total_equity = _safe_number(balance_sheet_df.loc[balance_sheet_df["Category"] == "Equity", "Amount (GHS)"]) if not balance_sheet_df.empty else 0.0
+    net_profit = _safe_number(income_statement_df.loc[income_statement_df["Account"] == "Net Profit", "Amount (GHS)"]) if not income_statement_df.empty else 0.0
+    balanced = abs(total_debits - total_credits) < 0.01
+
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Trial Balance", "Balanced" if balanced else "Out of Balance")
+    col2.metric("Profit for the Period", format_currency(_report_convert(net_profit)))
+    col3.metric("Balance Sheet", "Balanced" if abs(total_assets - (total_liabilities + total_equity)) < 0.01 else "Needs Review")
+    st.caption(f"Debit/Credit Validation: {'Balanced' if balanced else 'Needs review'}")
+
+    tabs = st.tabs(
+        [
+            "Trial Balance",
+            "Statement of Profit or Loss",
+            "Statement of Financial Position",
+            "Statement of Cash Flows",
+            "Statement of Changes in Equity",
+            "Depreciation Schedule",
+        ]
+    )
+    report_defs = [
+        ("Trial Balance", trial_balance_df),
+        ("Statement of Profit or Loss", income_statement_df),
+        ("Statement of Financial Position", balance_sheet_df),
+        ("Statement of Cash Flows", cash_flow_df),
+        ("Statement of Changes in Equity", equity_df),
+        ("Depreciation Schedule", depreciation_df),
+    ]
+    for tab, (label, df) in zip(tabs, report_defs):
+        with tab:
+            display_df = _ifrs_account_display(_convert_money_frame(_safe_dataframe(df, [])))
+            st.dataframe(display_df, use_container_width=True)
+            _csv_button(label, display_df, f"{label}_ifrs_safe_{company_key}")
+
+
+def show_reports(company_key, role=None):
+    """Financial reports sidebar entry point."""
+    show_financial_reports(company_key, role)
