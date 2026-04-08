@@ -15,6 +15,7 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from modules import (
     BOG_DISPLAY_RATES,
+    accounting_ai_response,
     format_currency,
     get_exchange_rate,
     initialize_paystack_payment,
@@ -1358,6 +1359,34 @@ def _render_primary_sidebar(user, include_settings=True):
     st.sidebar.divider()
     _render_currency_sidebar_controls("display_currency_primary")
     render_accounting_assistant_sidebar(st.session_state.page)
+    st.sidebar.divider()
+    currency = st.sidebar.selectbox(
+        "Display Currency",
+        ["GHS", "USD", "EUR", "GBP"],
+        index=["GHS", "USD", "EUR", "GBP"].index(str(st.session_state.get("base_currency", "GHS")).upper())
+        if str(st.session_state.get("base_currency", "GHS")).upper() in ["GHS", "USD", "EUR", "GBP"]
+        else 0,
+        key="display_currency_visible_fallback",
+    )
+    st.session_state.base_currency = currency
+    rates = {"GHS": 1.0, "USD": 11.65, "EUR": 13.34, "GBP": 15.47}
+    st.session_state.exchange_rate = rates[currency]
+    fallback_history_key = "sidebar_accounting_ai_history"
+    if fallback_history_key not in st.session_state:
+        st.session_state[fallback_history_key] = [
+            {"role": "assistant", "content": "Ask an IFRS or Ghana tax question and I will answer using your selected display currency."}
+        ]
+    fallback_container = st.sidebar.container(height=160)
+    with fallback_container:
+        for message in st.session_state[fallback_history_key][-6:]:
+            speaker = "AI" if message["role"] == "assistant" else "You"
+            st.markdown(f"**{speaker}:** {message['content']}")
+    sidebar_question = st.sidebar.chat_input("Ask Accounting AI...", key="sidebar_accounting_ai_fallback")
+    if sidebar_question:
+        st.session_state[fallback_history_key].append({"role": "user", "content": sidebar_question})
+        sidebar_reply = accounting_ai_response(st.session_state.page, st.session_state[fallback_history_key])
+        st.session_state[fallback_history_key].append({"role": "assistant", "content": sidebar_reply})
+        st.rerun()
 
 
 def _render_primary_page(user):

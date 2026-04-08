@@ -776,6 +776,19 @@ def _ifrs_account_display(dataframe):
     return df
 
 
+def _display_table_with_rate(df_original):
+    df_display = _safe_dataframe(df_original, [])
+    if df_display.empty:
+        st.table(df_display)
+        return df_display
+    if "Amount" in df_display.columns:
+        df_display["Amount"] = pd.to_numeric(df_display["Amount"], errors="coerce").fillna(0.0) / _safe_rate()
+    if "Amount (GHS)" in df_display.columns:
+        df_display["Amount (GHS)"] = pd.to_numeric(df_display["Amount (GHS)"], errors="coerce").fillna(0.0) / _safe_rate()
+    st.table(df_display)
+    return df_display
+
+
 def get_ledger_balances(company_key, start_date=None, end_date=None, account_name=None):
     conn = get_connection()
     try:
@@ -1068,7 +1081,7 @@ def show_financial_reports(company_key, role=None):
     for tab, (label, df) in zip(tabs, report_defs):
         with tab:
             display_df = _ifrs_account_display(_convert_money_frame(_safe_dataframe(df, [])))
-            st.dataframe(display_df, use_container_width=True)
+            _display_table_with_rate(display_df)
             _csv_button(label, display_df, f"{label}_ifrs_safe_{company_key}")
 
 
