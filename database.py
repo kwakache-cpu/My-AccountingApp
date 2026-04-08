@@ -768,6 +768,7 @@ def init_db():
         user_column_defs = {
             "company_key": "TEXT",
             "full_name": "TEXT",
+            "user_id": "TEXT",
             "login_key": "TEXT",
             "password_hash": "TEXT",
             "role": "TEXT",
@@ -778,6 +779,7 @@ def init_db():
             if column_name not in user_columns:
                 cursor.execute(f"ALTER TABLE users ADD COLUMN {column_name} {column_def}")
         cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_login_key ON users(login_key)")
+        cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_user_id ON users(user_id)")
 
         # --- TABLE 10: CUSTOMER / VENDOR PROFILES ---
         cursor.execute("""

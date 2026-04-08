@@ -209,6 +209,11 @@ def _hash_staff_password(password):
     return hashlib.sha256(password.encode("utf-8")).hexdigest()
 
 
+def _generate_user_id(company_key, staff_name, login_key):
+    seed = f"{company_key}|{staff_name.strip()}|{login_key.strip()}|{datetime.now().isoformat()}|{random.randint(1000,9999)}"
+    return hashlib.sha256(seed.encode("utf-8")).hexdigest()
+
+
 def _clear_streamlit_state(*keys):
     for key in keys:
         st.session_state.pop(key, None)
@@ -310,12 +315,16 @@ def format_currency_dataframe(dataframe):
     if not isinstance(dataframe, pd.DataFrame) or dataframe.empty:
         return dataframe
     df = dataframe.copy()
-    keywords = ("price", "amount", "total", "balance", "cost", "value", "salary", "net")
+    cols_to_fix = ['Price', 'Cost', 'Amount', 'Total', 'Balance']
+    exchange_rate = st.session_state.get("exchange_rate") or get_exchange_rate()
+    safe_rate = float(exchange_rate) if float(exchange_rate or 0) > 0 else 1.0
     for column_name in df.columns:
-        if any(token in str(column_name).lower() for token in keywords):
+        if any(key.lower() in str(column_name).lower() for key in cols_to_fix):
             numeric_series = pd.to_numeric(df[column_name], errors="coerce")
             if numeric_series.notna().any():
-                df[column_name] = numeric_series.fillna(0.0).map(format_currency)
+                df[column_name] = numeric_series.fillna(0.0).apply(
+                    lambda x: f"{st.session_state.currency_symbol}{float(x)/safe_rate:,.2f}"
+                )
     return df
 
 
@@ -2058,10 +2067,22 @@ def show_chart_of_accounts(company_key, role):
 # ==========================================
 def show_company_setup(company_key, company_name, role):
     st.header("⚙️ System Configuration")
+    if role not in ("Master Admin", "Sub-Admin"):
+        st.error("Access Denied")
+        return
     st.subheader("Company Profile")
     conn = None
     try:
         conn = get_connection()
+        conn.execute("ALTER TABLE users ADD COLUMN user_id TEXT")
+    except sqlite3.Error:
+        pass
+    try:
+        if conn:
+            conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_user_id_runtime ON users(user_id)")
+    except sqlite3.Error:
+        pass
+    try:
         company = conn.execute("SELECT * FROM companies WHERE key = ?", (company_key,)).fetchone()
         company_data = dict(company) if company is not None else {}
         if company:
@@ -2122,26 +2143,37 @@ def show_company_setup(company_key, company_name, role):
                 with st.form("company_setup_staff_form"):
                     staff_name = st.text_input("Full Name")
                     staff_role = st.selectbox("Role", ["Bookkeeper", "Staff"])
+                    manual_login_key = st.text_input("Staff Login Key (Manual)")
                     staff_password = st.text_input("Assign Password", type="password")
                     submitted = st.form_submit_button("Create Staff Login")
 
                     if submitted:
                         if not staff_name.strip():
                             st.warning("Enter a staff name before creating a login.")
+                        elif not manual_login_key.strip():
+                            st.warning("Enter a manual staff login key before creating the staff login.")
                         elif not staff_password:
                             st.warning("Assign a password before creating the staff login.")
                         else:
-                            login_key = _generate_staff_login_key(company_key, staff_role)
                             try:
+                                existing_key = conn.execute(
+                                    "SELECT 1 FROM users WHERE login_key = ? LIMIT 1",
+                                    (manual_login_key.strip(),),
+                                ).fetchone()
+                                if existing_key:
+                                    st.error("This staff login key already exists. Choose a different manual key.")
+                                    return
+                                user_id = _generate_user_id(company_key, staff_name, manual_login_key)
                                 conn.execute(
                                     """
-                                    INSERT INTO users (company_key, full_name, login_key, password_hash, role, status)
-                                    VALUES (?, ?, ?, ?, ?, 'Active')
+                                    INSERT INTO users (company_key, full_name, user_id, login_key, password_hash, role, status)
+                                    VALUES (?, ?, ?, ?, ?, ?, 'Active')
                                     """,
                                     (
                                         company_key,
                                         staff_name.strip(),
-                                        login_key,
+                                        user_id,
+                                        manual_login_key.strip(),
                                         _hash_staff_password(staff_password),
                                         staff_role,
                                     ),
@@ -2153,15 +2185,15 @@ def show_company_setup(company_key, company_name, role):
                                     role,
                                     "Staff Login Created",
                                     "Company Setup",
-                                    f"{staff_name.strip()} created as {staff_role} with key {login_key}",
+                                    f"{staff_name.strip()} created as {staff_role} with user_id {user_id[:12]}...",
                                 )
-                                st.success(f"Staff login created. Login key: {login_key}")
+                                st.success("Staff login created successfully.")
                             except Exception as exc:
                                 st.error(f"Could not create staff login: {exc}")
 
                 users = conn.execute(
                     """
-                    SELECT full_name, role, login_key, status, created_at
+                    SELECT full_name, role, user_id, status, created_at
                     FROM users
                     WHERE company_key = ?
                     ORDER BY created_at DESC
@@ -2171,7 +2203,10 @@ def show_company_setup(company_key, company_name, role):
                 if users:
                     users_df = pd.DataFrame(
                         users,
-                        columns=["Full Name", "Role", "Login Key", "Status", "Created At"],
+                        columns=["Full Name", "Role", "User ID", "Status", "Created At"],
+                    )
+                    users_df["User ID"] = users_df["User ID"].fillna("").map(
+                        lambda value: f"{str(value)[:8]}..." if str(value) else ""
                     )
                     st.dataframe(format_currency_dataframe(users_df), use_container_width=True)
                 else:
