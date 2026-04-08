@@ -1,9 +1,13 @@
 import streamlit as st
 import pandas as pd
-from database import check_and_repair_db, ensure_schema_integrity, get_connection
+from database import DB_PATH, check_and_repair_db, ensure_schema_integrity, get_connection
 from database import init_db as base_init_db
 from groq import Groq
+import json
 import logging
+import os
+import threading
+import time
 from datetime import date, datetime, timedelta
 import hashlib
 import random
@@ -13,6 +17,15 @@ import smtplib
 import sqlite3
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
+
+try:
+    import firebase_admin
+    from firebase_admin import credentials, initialize_app, storage
+except Exception:
+    firebase_admin = None
+    credentials = None
+    initialize_app = None
+    storage = None
 from modules import (
     BOG_DISPLAY_RATES,
     accounting_ai_response,
@@ -60,6 +73,105 @@ try:
 except Exception:
     groq_api_key = None
 client = Groq(api_key=groq_api_key) if groq_api_key else None
+FIREBASE_SYNC_STARTED = False
+FIREBASE_SYNC_LOCK = threading.Lock()
+FIREBASE_APP = None
+FIREBASE_BUCKET_NAME = None
+FIREBASE_OBJECT_NAME = "backups/eka_enterprise_v3.db"
+
+
+def _init_firebase_storage_client():
+    global FIREBASE_APP, FIREBASE_BUCKET_NAME
+    if firebase_admin is None or credentials is None or initialize_app is None or storage is None:
+        return None
+    if FIREBASE_APP is not None:
+        return FIREBASE_APP
+    try:
+        firebase_key_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "firebase_key.json")
+        if not os.path.exists(firebase_key_path):
+            return None
+        with open(firebase_key_path, "r", encoding="utf-8") as firebase_file:
+            firebase_info = json.load(firebase_file)
+        project_id = str(firebase_info.get("project_id") or "").strip()
+        if not project_id:
+            return None
+        FIREBASE_BUCKET_NAME = f"{project_id}.appspot.com"
+        firebase_cred = credentials.Certificate(firebase_key_path)
+        FIREBASE_APP = initialize_app(
+            firebase_cred,
+            {"storageBucket": FIREBASE_BUCKET_NAME},
+            name="eka-silent-sync",
+        )
+        return FIREBASE_APP
+    except ValueError:
+        try:
+            FIREBASE_APP = firebase_admin.get_app("eka-silent-sync")
+            return FIREBASE_APP
+        except Exception:
+            return None
+    except Exception:
+        return None
+
+
+def _get_firebase_bucket():
+    app = _init_firebase_storage_client()
+    if app is None or storage is None:
+        return None
+    try:
+        return storage.bucket(app=app)
+    except Exception:
+        return None
+
+
+def _sync_cloud_db_down_if_newer():
+    bucket = _get_firebase_bucket()
+    if bucket is None:
+        return
+    try:
+        blob = bucket.blob(FIREBASE_OBJECT_NAME)
+        if not blob.exists():
+            return
+        blob.reload()
+        remote_updated = blob.updated.timestamp() if blob.updated else 0.0
+        local_updated = os.path.getmtime(DB_PATH) if os.path.exists(DB_PATH) else 0.0
+        if remote_updated > local_updated:
+            blob.download_to_filename(DB_PATH)
+    except Exception:
+        return
+
+
+def _upload_local_db_to_cloud():
+    bucket = _get_firebase_bucket()
+    if bucket is None or not os.path.exists(DB_PATH):
+        return
+    try:
+        blob = bucket.blob(FIREBASE_OBJECT_NAME)
+        blob.upload_from_filename(DB_PATH)
+    except Exception:
+        return
+
+
+def _firebase_ghost_sync_worker():
+    while True:
+        try:
+            _upload_local_db_to_cloud()
+        except Exception:
+            pass
+        time.sleep(7200)
+
+
+def _start_firebase_ghost_sync():
+    global FIREBASE_SYNC_STARTED
+    with FIREBASE_SYNC_LOCK:
+        if FIREBASE_SYNC_STARTED:
+            return
+        FIREBASE_SYNC_STARTED = True
+        sync_thread = threading.Thread(
+            target=_firebase_ghost_sync_worker,
+            name="eka-firebase-ghost-sync",
+            daemon=True,
+        )
+        sync_thread.start()
 
 # 1. Boot System
 def init_db():
@@ -1272,7 +1384,9 @@ def run_startup_db_patch():
 
 
 def main():
+    _sync_cloud_db_down_if_newer()
     run_startup_db_patch()
+    _start_firebase_ghost_sync()
     if "base_currency" not in st.session_state:
         st.session_state.base_currency = "GHS"
     if "exchange_rate" not in st.session_state:

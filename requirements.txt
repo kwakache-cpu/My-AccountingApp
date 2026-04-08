@@ -4,6 +4,7 @@ streamlit
 groq
 pandas
 python-dateutil
+firebase-admin
 pyzbar
 opencv-python-headless
 pyzbar

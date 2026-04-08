@@ -1,0 +1,13 @@
+{
+  "type": "service_account",
+  "project_id": "eka-erp-cloud-vault",
+  "private_key_id": "b3fa67b4c02e679616f82fc47cebe0c0b8a694cb",
+  "private_key": "-----BEGIN PRIVATE KEY-----\nMIIEvAIBADANBgkqhkiG9w0BAQEFAASCBKYwggSiAgEAAoIBAQCjBSEvhDeWDDZf\nIHJJ2oSFO48BG6u2geV1rvIOMQUGgV73IoJBxsIklIakHnMSGSdjI7oLhqcQado6\nbbM8uuKqu/acFU2md5h12ayr7fGAhG2a78y/ZHaPcg7lVQGzSRsX1A5dWr/r1VyM\ndWzLNscd4PycEPHRM88y2EEVQc8lBiu5OdmAQ8oMd/NASufI8k7cDyLxK8zXCsW3\njJhg44Sg6X4oxpnPlgPai/O83Gwbm7l+6kJgnsCVRPyETyPdmLLWJmnVvwHE9lXy\njVUZEp3mw9N0AKM8EOt1h+S5ioVJY2e3m9iOkZ6xzzh+s214+zDdIowjSqy1jBC5\n+mVOOQbdAgMBAAECggEACmTQ1Vk+PAxiSRVmBAxxJ5eBCiaL/7JvgV3apAn/Eoec\nGPCz0mLMTQ3FOeCRIKXG65zDB2oZ68N7/P6yj1wxCIa8df4rucHlUBpFVp7wp2uK\nG3dPnCJZJtM0XO3bEmXGWvITymL3Wp97a58vBRPkhSSrpn20FU0S2GCOYb8U6HzO\nrgXbd/B7R2Pu7JIFFrgI5eT2zMsG++I1DaDVXbWCNFH9BOn61NUvvzPpMuHMOisi\nxH7Tmfe67lLt1uyvKN7gp+BtZSt3Ak0F/0GVk0+q+ic205AOl8ClIHqsdE2WEuBO\ndTCiqPgCj2/o7/GAMzHFxOmqM+DpwFAP9WOeI2htwQKBgQDP1TnJgpLwb8bLwk5F\n/ZHPYPSO30BZt/L7M5eG4kVIDslT8LHYiHAD7TxEkKXjE/ZiRRMXyDfYTCaWdmM4\nWO3vhciRoyvY4GCYmLwo6qU3QRc3t+QUrhji5NlcEJR0/DxDXtg7V97CqoBz1yrQ\ntaWOAEpGk703/nxXDmUo3tIYoQKBgQDIzSVQDppxpsmz4gmkK0/bajPuPOC2D13S\nbckzxTRISHjbd7S0m3rg/pQf2oPYpajGiclv1qiXOjWEPKKr3AezrO82S9Mz0Ac3\nd63kyEBaUCKboD4fADclE65DH+BCsemEv78eyO4h77EEEuAfP2ZdMR7IJYZPe24u\nSwXnDzXYvQKBgBNSgp3eeuTJr5TQCtDtAzphjDsgPG5a8Mc0A7lxnflWDpe0QASe\norNqwfip7hJPj8+RFnZWkgKVCd1hQlZBxlVHfd80aWYvbiuhv5SaRCP/9DWk7hqS\nGRQ3LJInpHW/4aZt0fKqd7ZnfavHbF6dFLhABKfNIoFrMooxd2w2UxghAoGAUS9o\nM5sD5Il7qYftP/vm+J5SyrLAY7uIwmhy3cSQo9zxSEJ4xEDMiKVFPC+7+N7ZgxP4\nZohSd3ooYwOk/XkjgAieWsSDasJj+JAhtYslQZ5+r481LpGGui3f2fHMWQrXkD16\nRzcT2JKxbiU3ikq211zhxigtynrsDDl29HmY2r0CgYBV7u8swUPjRrLCQhyn6E8M\nwLkfFO6fGeMMug5qekBQzTy5juc8MbA4NejFNZbYhzIZCGqIT5csIzfN46G08cW+\nZUldBhBSmigl2ByBHbUCAoWwVeFmS3845ifE23X1Lu15hnx+NMgLdtcmzoLRSfo2\n3Dgx93e+94Yz0ifvJinA5w==\n-----END PRIVATE KEY-----\n",
+  "client_email": "firebase-adminsdk-fbsvc@eka-erp-cloud-vault.iam.gserviceaccount.com",
+  "client_id": "110501785624948244963",
+  "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+  "token_uri": "https://oauth2.googleapis.com/token",
+  "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
+  "client_x509_cert_url": "https://www.googleapis.com/robot/v1/metadata/x509/firebase-adminsdk-fbsvc%40eka-erp-cloud-vault.iam.gserviceaccount.com",
+  "universe_domain": "googleapis.com"
+}

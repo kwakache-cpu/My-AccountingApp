@@ -315,15 +315,16 @@ def format_currency_dataframe(dataframe):
     if not isinstance(dataframe, pd.DataFrame) or dataframe.empty:
         return dataframe
     df = dataframe.copy()
-    cols_to_fix = ['Price', 'Cost', 'Amount', 'Total', 'Balance']
+    cols_to_fix = ['Price', 'Cost', 'Amount', 'Total', 'Balance', 'Value', 'Salary', 'Net']
     exchange_rate = st.session_state.get("exchange_rate") or get_exchange_rate()
     safe_rate = float(exchange_rate) if float(exchange_rate or 0) > 0 else 1.0
+    currency_symbol = get_currency_symbol()
     for column_name in df.columns:
         if any(key.lower() in str(column_name).lower() for key in cols_to_fix):
             numeric_series = pd.to_numeric(df[column_name], errors="coerce")
             if numeric_series.notna().any():
                 df[column_name] = numeric_series.fillna(0.0).apply(
-                    lambda x: f"{st.session_state.currency_symbol}{float(x)/safe_rate:,.2f}"
+                    lambda x: f"{currency_symbol}{float(x)/safe_rate:,.2f}"
                 )
     return df
 
