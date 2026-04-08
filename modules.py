@@ -120,8 +120,10 @@ def _get_active_company_id(expected_company_id=None):
 
 def _get_groq_client():
     """Create a Groq client only when the API key is available."""
+    if st.session_state.get("ai_active") is False:
+        return None
     try:
-        api_key = os.getenv("GROQ_API_KEY") or st.secrets["GROQ_API_KEY"]
+        api_key = st.secrets["GROQ_API_KEY"]
     except Exception:
         api_key = None
     if not api_key:
@@ -296,16 +298,7 @@ BOG_DISPLAY_RATES = {
     "GBP": 15.47,
 }
 ACCOUNTING_ASSISTANT_SYSTEM_PROMPT = (
-    "You are a Chartered Accountant for a Ghanaian enterprise. "
-    "Analyze the provided ledger data to flag unusual trends, missing records, or tax liabilities. "
-    "Answer with IFRS-aligned accounting guidance, double-entry discipline, and Ghana tax context, "
-    "including VAT, NHIL, GETFund, and related indirect tax treatment where relevant. "
-    "Use the user's selected presentation currency when discussing displayed amounts, but remind them "
-    "that the ERP base ledger remains in GHS unless explicitly stated otherwise. "
-    "When possible, analyze the transaction history, inventory positions, receivables, payables, "
-    "and journal patterns available in the ERP before giving advice. "
-    "Keep answers practical, concise, professional, and suitable for finance leadership and business operators. "
-    "Do not invent transactions or legal conclusions that are unsupported."
+    "You are a professional Chartered Accountant. Provide clear, accurate financial guidance based on the ERP data."
 )
 
 
@@ -489,7 +482,7 @@ def _load_accounting_ai_context(company_key):
 
 def accounting_ai_response(module_selection, chat_history):
     groq_client = _get_groq_client()
-    if not groq_client:
+    if st.session_state.get("ai_active") is False:
         return (
             "The Accounting Assistant is unavailable because the `GROQ_API_KEY` secret is not configured. "
             "You can still use the module data and reports normally."
@@ -516,7 +509,7 @@ def accounting_ai_response(module_selection, chat_history):
 
     try:
         completion = groq_client.chat.completions.create(
-            model="llama-3.1-8b-instant",
+            model="llama3-8b-8192",
             messages=messages,
             temperature=0.3,
         )
@@ -4277,7 +4270,7 @@ def show_ai_assistant(client_id):
         st.markdown(user_question)
 
     groq_client = _get_groq_client()
-    if not groq_client:
+    if st.session_state.get("ai_active") is False:
         fallback_response = (
             "AI insights are unavailable because the `GROQ_API_KEY` secret is not configured. "
             "Your 30-day data snapshot is still available above for manual review."
@@ -4302,7 +4295,7 @@ def show_ai_assistant(client_id):
         with st.chat_message("assistant"):
             with st.spinner("Reviewing your accounting records..."):
                 completion = groq_client.chat.completions.create(
-                    model="llama-3.1-8b-instant",
+                    model="llama3-8b-8192",
                     messages=[
                         {
                             "role": "system",

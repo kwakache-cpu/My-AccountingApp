@@ -66,16 +66,18 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 GATEKEEPER_SYSTEM_PROMPT = (
-    "You are a Chartered Accountant for a Ghanaian enterprise. "
-    "Analyze the provided ledger data to flag unusual trends, missing records, or tax liabilities."
+    "You are a professional Chartered Accountant. Provide clear, accurate financial guidance based on the ERP data."
 )
-try:
-    client = Groq(api_key=st.secrets["GROQ_API_KEY"])
-except Exception:
-    try:
-        client = Groq(api_key=os.getenv("GROQ_API_KEY"))
-    except Exception:
-        client = None
+
+# Hard-check for the secret
+if "GROQ_API_KEY" in st.secrets:
+    api_key = st.secrets["GROQ_API_KEY"]
+    client = Groq(api_key=api_key)
+    st.session_state['ai_active'] = True
+else:
+    st.error("The app cannot see GROQ_API_KEY in Streamlit Secrets.")
+    st.session_state['ai_active'] = False
+    client = None
 FIREBASE_SYNC_STARTED = False
 FIREBASE_SYNC_LOCK = threading.Lock()
 FIREBASE_APP = None
@@ -581,12 +583,12 @@ def ask_gatekeeper_ai(menu_selection, chat_history):
     )
     messages.extend(chat_history[-8:])
 
-    if not client:
+    if st.session_state.get("ai_active") is False:
         return "Gatekeeper AI is unavailable because the `GROQ_API_KEY` secret is not configured."
 
     try:
         completion = client.chat.completions.create(
-            model="llama-3.1-8b-instant",
+            model="llama3-8b-8192",
             messages=messages,
             temperature=0.4,
         )
