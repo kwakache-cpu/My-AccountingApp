@@ -1,4 +1,5 @@
 from datetime import datetime
+import sqlite3
 
 import pandas as pd
 import streamlit as st
@@ -44,7 +45,10 @@ def _journal_df(company_key, start_date=None, end_date=None, account_name=None):
             query += " AND lower(COALESCE(c.name, c.account_name)) LIKE ?"
             params.append(f"%{str(account_name).lower()}%")
         query += " ORDER BY date(je.date), je.id, COALESCE(c.name, c.account_name)"
-        df = pd.read_sql_query(query, conn, params=params)
+        try:
+            df = pd.read_sql_query(query, conn, params=params)
+        except (pd.errors.DatabaseError, AttributeError, sqlite3.DatabaseError):
+            return pd.DataFrame()
         if not df.empty:
             df["date"] = pd.to_datetime(df["date"], errors="coerce")
         return df
@@ -155,7 +159,10 @@ def _filter_controls(prefix):
 
 
 def get_general_journal(company_key, start_date=None, end_date=None, account_name=None):
-    df = _journal_df(company_key, start_date, end_date, account_name)
+    try:
+        df = _journal_df(company_key, start_date, end_date, account_name)
+    except (pd.errors.DatabaseError, AttributeError, sqlite3.DatabaseError):
+        return pd.DataFrame()
     if df.empty:
         return pd.DataFrame(columns=["Date", "Entry ID", "Description", "Reference", "Created By", "Account Code", "Account", "Type", "Debit (GHS)", "Credit (GHS)"])
     df = df.rename(
