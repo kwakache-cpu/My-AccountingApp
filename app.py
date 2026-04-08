@@ -45,6 +45,7 @@ from modules import (
     show_company_setup,
     show_fixed_assets,
     show_inventory,
+    show_journal_entries,
     show_onboarding_payment,
     show_payroll,
     show_pos,
@@ -69,7 +70,7 @@ GATEKEEPER_SYSTEM_PROMPT = (
     "Payable and Chart of Accounts simply for Ghanaian businesses."
 )
 try:
-    groq_api_key = st.secrets.get("GROQ_API_KEY")
+    groq_api_key = os.getenv("GROQ_API_KEY") or st.secrets["GROQ_API_KEY"]
 except Exception:
     groq_api_key = None
 client = Groq(api_key=groq_api_key) if groq_api_key else None
@@ -1458,6 +1459,7 @@ PRIMARY_NAV_ITEMS = [
     ("📊 Dashboard", "Dashboard"),
     ("🛒 Point of Sale", "Point of Sale"),
     ("📦 Inventory Management", "Inventory Management"),
+    ("🧾 Journals", "Journals"),
     ("📅 Accounts Receivable", "Accounts Receivable"),
     ("📅 Accounts Payable", "Accounts Payable"),
     ("💰 Banking & Cash", "Banking & Cash"),
@@ -1546,6 +1548,8 @@ def _render_primary_page(user):
         show_pos(user["key"], user["name"], user["role"])
     elif st.session_state.page == "Inventory Management":
         show_inventory(user["key"], user["role"])
+    elif st.session_state.page == "Journals":
+        show_journal_entries(user["key"], user["role"])
     elif st.session_state.page == "Accounts Receivable":
         show_accounts_receivable(user["key"])
     elif st.session_state.page == "Accounts Payable":

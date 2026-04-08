@@ -121,7 +121,7 @@ def _get_active_company_id(expected_company_id=None):
 def _get_groq_client():
     """Create a Groq client only when the API key is available."""
     try:
-        api_key = st.secrets.get("GROQ_API_KEY")
+        api_key = os.getenv("GROQ_API_KEY") or st.secrets["GROQ_API_KEY"]
     except Exception:
         api_key = None
     if not api_key:
@@ -713,6 +713,128 @@ def save_transaction(description, lines, company_key=None, reference=None, creat
         entry_date=entry_date,
         conn=conn,
     )
+
+
+def show_journal_entries(company_key, role):
+    st.header("🧾 Journals")
+
+    conn = None
+    try:
+        conn = get_connection()
+        transactions_df = pd.read_sql_query(
+            """
+            SELECT transaction_date AS "Transaction Date",
+                   account AS "Account",
+                   description AS "Description",
+                   debit AS "Debit",
+                   credit AS "Credit",
+                   reference AS "Reference",
+                   created_by AS "Created By",
+                   created_at AS "Created At"
+            FROM transactions
+            WHERE company_key = ?
+            ORDER BY transaction_date DESC, id DESC
+            """,
+            conn,
+            params=(company_key,),
+        )
+    except Exception:
+        transactions_df = pd.DataFrame(
+            columns=[
+                "Transaction Date",
+                "Account",
+                "Description",
+                "Debit",
+                "Credit",
+                "Reference",
+                "Created By",
+                "Created At",
+            ]
+        )
+    finally:
+        if conn:
+            conn.close()
+
+    st.subheader("Journal Entries")
+    if transactions_df.empty:
+        st.info("No journal entries have been captured in the transactions table yet.")
+    else:
+        st.dataframe(format_currency_dataframe(transactions_df), use_container_width=True)
+
+    if st.button("Add Manual Entry", key=f"show_manual_journal_form_{company_key}"):
+        st.session_state[f"show_manual_journal_form_{company_key}"] = True
+
+    if st.session_state.get(f"show_manual_journal_form_{company_key}", False):
+        with st.form(f"manual_journal_entry_form_{company_key}"):
+            entry_date = st.date_input("Transaction Date", value=datetime.now().date(), key=f"journal_entry_date_{company_key}")
+            account = st.text_input("Account", key=f"journal_entry_account_{company_key}")
+            description = st.text_input("Description", key=f"journal_entry_description_{company_key}")
+            debit = st.number_input("Debit", min_value=0.0, step=0.01, key=f"journal_entry_debit_{company_key}")
+            credit = st.number_input("Credit", min_value=0.0, step=0.01, key=f"journal_entry_credit_{company_key}")
+            submitted = st.form_submit_button("Save Manual Entry")
+
+            if submitted:
+                if not account.strip():
+                    st.warning("Enter an account before saving the manual entry.")
+                elif debit <= 0 and credit <= 0:
+                    st.warning("Enter either a debit or a credit amount.")
+                elif debit > 0 and credit > 0 and round(float(debit) - float(credit), 2) != 0:
+                    st.warning("Enter one side only, or enter equal debit and credit values.")
+                else:
+                    suspense_amount = float(debit or credit)
+                    try:
+                        conn = get_connection()
+                        reference = f"JRN-{datetime.now().strftime('%Y%m%d%H%M%S')}"
+                        conn.execute(
+                            """
+                            INSERT INTO transactions (company_key, transaction_date, account, description, debit, credit, reference, created_by)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                            """,
+                            (
+                                company_key,
+                                entry_date.isoformat(),
+                                account.strip(),
+                                description.strip(),
+                                float(debit or 0.0),
+                                float(credit or 0.0),
+                                reference,
+                                role,
+                            ),
+                        )
+                        if debit > 0 and credit == 0:
+                            journal_lines = [
+                                {"account_name": account.strip(), "category": "Expense", "debit": float(debit), "credit": 0},
+                                {"account_name": "Suspense", "category": "Equity", "debit": 0, "credit": float(debit)},
+                            ]
+                        elif credit > 0 and debit == 0:
+                            journal_lines = [
+                                {"account_name": "Suspense", "category": "Equity", "debit": float(credit), "credit": 0},
+                                {"account_name": account.strip(), "category": "Income", "debit": 0, "credit": float(credit)},
+                            ]
+                        else:
+                            journal_lines = [
+                                {"account_name": account.strip(), "category": "Expense", "debit": float(debit), "credit": float(credit)},
+                            ]
+                        save_transaction(
+                            description.strip() or "Manual journal entry",
+                            journal_lines,
+                            company_key=company_key,
+                            reference=reference,
+                            created_by=role,
+                            entry_date=entry_date,
+                            conn=conn,
+                        )
+                        conn.commit()
+                        log_audit_action(conn, company_key, role, "Manual Journal Entry", "Journals", f"{account.strip()} saved for {format_currency(suspense_amount)}")
+                        conn.close()
+                        st.session_state[f"show_manual_journal_form_{company_key}"] = False
+                        st.success("Manual journal entry saved.")
+                        st.rerun()
+                    except Exception as exc:
+                        if conn:
+                            conn.rollback()
+                            conn.close()
+                        st.error(f"Could not save the manual journal entry: {exc}")
 
 
 def _inventory_offset_account(funding_source):

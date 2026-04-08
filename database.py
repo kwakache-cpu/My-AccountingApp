@@ -358,6 +358,22 @@ def ensure_schema_integrity(conn):
     )
     cursor.execute(
         """
+        CREATE TABLE IF NOT EXISTS transactions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            company_key TEXT NOT NULL,
+            transaction_date TEXT NOT NULL,
+            account TEXT NOT NULL,
+            description TEXT,
+            debit REAL DEFAULT 0,
+            credit REAL DEFAULT 0,
+            reference TEXT,
+            created_by TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+    cursor.execute(
+        """
         CREATE TABLE IF NOT EXISTS system_settings (
             id INTEGER PRIMARY KEY,
             master_price_per_month REAL DEFAULT 500,
