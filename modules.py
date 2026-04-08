@@ -1,4 +1,4 @@
-import logging
+﻿import logging
 import os
 import random
 import hashlib
@@ -371,6 +371,7 @@ def render_accounting_assistant_sidebar(module_selection):
                 ),
             }
         ]
+    st.sidebar.markdown(f"**AI Assistant ({get_currency_symbol()})**")
     st.sidebar.caption(module_selection)
     st.sidebar.caption(_selected_currency_context())
     history_container = st.sidebar.container(height=220)
@@ -1797,8 +1798,8 @@ def show_inventory(company_key, role):
                         edit_barcode = st.text_input("Barcode", value=str(edit_row.get("barcode") or ""))
                         edit_category = st.text_input("Category", value=str(edit_row["category"] or ""))
                         edit_qty = st.number_input("Quantity", min_value=0.0, value=float(edit_row["quantity"] or 0.0))
-                        edit_price = st.number_input("Selling Price (GH₵)", min_value=0.0, value=float(edit_row["unit_price"] or 0.0))
-                        edit_cost_price = st.number_input("Cost Price (GH₵)", min_value=0.0, value=float(edit_row["cost_price"] or 0.0))
+                        edit_price = st.number_input(f"Selling Price ({st.session_state.currency_symbol})", min_value=0.0, value=float(edit_row["unit_price"] or 0.0))
+                        edit_cost_price = st.number_input(f"Cost Price ({st.session_state.currency_symbol})", min_value=0.0, value=float(edit_row["cost_price"] or 0.0))
                         if st.form_submit_button("Edit Item"):
                             try:
                                 conn = get_connection()
@@ -1838,8 +1839,8 @@ def show_inventory(company_key, role):
             category = st.text_input("Category")
             opening_stock = st.number_input("Opening Stock Quantity", min_value=0.0, value=0.0)
             funding_source = st.selectbox("Inventory Funding Source", ["Cash", "Bank", "Mobile Money", "Accounts Payable"])
-            price = st.number_input("Selling Price (GH₵)", min_value=0.0, value=0.0)
-            cost_price = st.number_input("Cost Price (GH₵)", min_value=0.0, value=0.0)
+            price = st.number_input(f"Selling Price ({st.session_state.currency_symbol})", min_value=0.0, value=0.0)
+            cost_price = st.number_input(f"Cost Price ({st.session_state.currency_symbol})", min_value=0.0, value=0.0)
             submitted = st.form_submit_button("➕ Add New Item")
             if submitted and item_name:
                 try:
@@ -2284,7 +2285,7 @@ def show_pos(company_key, company_name, role):
                     st.rerun()
         else:
             selected_item = st.text_input("New Item Name", key=f"manual_pos_item_{company_key}")
-            manual_price = st.number_input("Manual Price (GH₵)", min_value=0.0, value=0.0, key=f"manual_pos_price_{company_key}")
+            manual_price = st.number_input(f"Manual Price ({st.session_state.currency_symbol})", min_value=0.0, value=0.0, key=f"manual_pos_price_{company_key}")
             qty_to_sell = st.number_input("Quantity", min_value=1, value=1, key=f"manual_pos_qty_{company_key}")
             if st.button("Add Manual Item", key=f"pos_add_manual_{company_key}"):
                 if selected_item and float(manual_price) > 0:
@@ -2772,9 +2773,9 @@ def show_payroll(company_key, role):
             col1, col2 = st.columns(2)
             with col1:
                 emp_name = st.text_input("Employee Name")
-                basic_salary = st.number_input("Basic Salary (GH₵)", min_value=0.0, step=0.01)
-                allowances = st.number_input("Allowances (GH₵)", min_value=0.0, step=0.01)
-                deductions = st.number_input("Deductions (GH₵)", min_value=0.0, step=0.01)
+                basic_salary = st.number_input(f"Basic Salary ({st.session_state.currency_symbol})", min_value=0.0, step=0.01)
+                allowances = st.number_input(f"Allowances ({st.session_state.currency_symbol})", min_value=0.0, step=0.01)
+                deductions = st.number_input(f"Deductions ({st.session_state.currency_symbol})", min_value=0.0, step=0.01)
             with col2:
                 month = st.selectbox("Month", ["January","February","March","April","May","June",
                                                "July","August","September","October","November","December"])
@@ -3131,10 +3132,10 @@ def show_fixed_assets(company_key, role):
                 asset_category = st.selectbox("Category", ["Vehicle", "Equipment", "Building", "Furniture", "Land", "Other"])
                 purchase_date = st.date_input("Purchase Date", datetime.now().date())
             with col2:
-                cost = st.number_input("Cost (GHS)", min_value=0.0, step=0.01)
+                cost = st.number_input(f"Cost ({st.session_state.currency_symbol})", min_value=0.0, step=0.01)
                 opening_book_value = st.number_input("Opening Book Value", min_value=0.0, step=0.01)
                 useful_life_years = st.number_input("Useful Life (Years)", min_value=0.0, step=1.0)
-                residual_value = st.number_input("Residual Value (GHS)", min_value=0.0, step=0.01)
+                residual_value = st.number_input(f"Residual Value ({st.session_state.currency_symbol})", min_value=0.0, step=0.01)
                 location = st.text_input("Location")
 
             if st.form_submit_button("Add Asset") and asset_name and cost > 0:
@@ -3977,3 +3978,4 @@ def show_audit_trail(company_key):
             st.info("No audit records found.")
     except Exception as e:
         st.error(f"Audit trail error: {e}")
+

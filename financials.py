@@ -4,7 +4,7 @@ import pandas as pd
 import streamlit as st
 
 from database import get_connection
-from modules import convert_amount_from_base, format_currency, get_display_currency, post_transaction, set_period_lock
+from modules import convert_amount_from_base, format_currency, get_currency_symbol, get_display_currency, post_transaction, set_period_lock
 
 
 def _resolve_date(value):
@@ -102,7 +102,7 @@ def _csv_button(label, dataframe, key):
 
 
 def _money_label():
-    return f"({get_display_currency()})"
+    return f"({get_currency_symbol()})"
 
 
 def _account_label(account_code, account_name):
