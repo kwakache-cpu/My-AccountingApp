@@ -23,6 +23,7 @@ def _journal_df(company_key, start_date=None, end_date=None, account_name=None):
                 je.description,
                 je.reference,
                 je.created_by,
+                COALESCE(c.code, c.account_code, '') AS account_code,
                 COALESCE(c.name, c.account_name) AS account_name,
                 COALESCE(c.type, c.category, c.account_type) AS account_type,
                 jl.debit,
@@ -61,13 +62,20 @@ def _chart_lookup():
     try:
         rows = conn.execute(
             """
-            SELECT COALESCE(name, account_name) AS account_name,
+            SELECT COALESCE(code, account_code, '') AS account_code,
+                   COALESCE(name, account_name) AS account_name,
                    COALESCE(type, category, account_type) AS account_type
             FROM chart_of_accounts
             ORDER BY COALESCE(name, account_name)
             """
         ).fetchall()
-        return {str(row["account_name"]): str(row["account_type"]) for row in rows}
+        return {
+            str(row["account_name"]): {
+                "account_type": str(row["account_type"]),
+                "account_code": str(row["account_code"] or ""),
+            }
+            for row in rows
+        }
     finally:
         conn.close()
 
@@ -129,7 +137,7 @@ def _filter_controls(prefix):
 def get_general_journal(company_key, start_date=None, end_date=None, account_name=None):
     df = _journal_df(company_key, start_date, end_date, account_name)
     if df.empty:
-        return pd.DataFrame(columns=["Date", "Entry ID", "Description", "Reference", "Created By", "Account", "Type", "Debit (GHS)", "Credit (GHS)"])
+        return pd.DataFrame(columns=["Date", "Entry ID", "Description", "Reference", "Created By", "Account Code", "Account", "Type", "Debit (GHS)", "Credit (GHS)"])
     df = df.rename(
         columns={
             "date": "Date",
@@ -137,6 +145,7 @@ def get_general_journal(company_key, start_date=None, end_date=None, account_nam
             "description": "Description",
             "reference": "Reference",
             "created_by": "Created By",
+            "account_code": "Account Code",
             "account_name": "Account",
             "account_type": "Type",
             "debit": "Debit (GHS)",
@@ -170,33 +179,33 @@ def get_purchases_journal(company_key, start_date=None, end_date=None, account_n
 def get_cash_book(company_key, start_date=None, end_date=None, account_name=None):
     df = get_general_journal(company_key, start_date, end_date, account_name)
     if df.empty:
-        return pd.DataFrame(columns=["Date", "Description", "Reference", "Account", "Debit (GHS)", "Credit (GHS)", "Movement (GHS)", "Running Balance (GHS)"])
+        return pd.DataFrame(columns=["Date", "Description", "Reference", "Account Code", "Account", "Debit (GHS)", "Credit (GHS)", "Movement (GHS)", "Running Balance (GHS)"])
     cash_df = df[df["Account"].isin(["Cash", "Bank", "Mobile Money"])].copy()
     if cash_df.empty:
-        return pd.DataFrame(columns=["Date", "Description", "Reference", "Account", "Debit (GHS)", "Credit (GHS)", "Movement (GHS)", "Running Balance (GHS)"])
+        return pd.DataFrame(columns=["Date", "Description", "Reference", "Account Code", "Account", "Debit (GHS)", "Credit (GHS)", "Movement (GHS)", "Running Balance (GHS)"])
     cash_df["Movement (GHS)"] = cash_df["Debit (GHS)"] - cash_df["Credit (GHS)"]
     cash_df["Running Balance (GHS)"] = cash_df["Movement (GHS)"].cumsum()
-    return cash_df[["Date", "Description", "Reference", "Account", "Debit (GHS)", "Credit (GHS)", "Movement (GHS)", "Running Balance (GHS)"]]
+    return cash_df[["Date", "Description", "Reference", "Account Code", "Account", "Debit (GHS)", "Credit (GHS)", "Movement (GHS)", "Running Balance (GHS)"]]
 
 
 def get_general_ledger(company_key, start_date=None, end_date=None, account_name=None):
     df = get_general_journal(company_key, start_date, end_date, account_name)
     if df.empty:
-        return pd.DataFrame(columns=["Date", "Account", "Description", "Reference", "Debit (GHS)", "Credit (GHS)", "Running Balance (GHS)"])
+        return pd.DataFrame(columns=["Date", "Account Code", "Account", "Description", "Reference", "Debit (GHS)", "Credit (GHS)", "Running Balance (GHS)"])
     frames = []
-    for account, group in df.groupby("Account", sort=True):
+    for (_account_code, account), group in df.groupby(["Account Code", "Account"], sort=True):
         running = (group["Debit (GHS)"] - group["Credit (GHS)"]) if _normal_balance(group["Type"].iloc[0]) == "debit" else (group["Credit (GHS)"] - group["Debit (GHS)"])
         ledger_group = group.copy()
         ledger_group["Running Balance (GHS)"] = running.cumsum()
-        frames.append(ledger_group[["Date", "Account", "Description", "Reference", "Debit (GHS)", "Credit (GHS)", "Running Balance (GHS)"]])
-    return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(columns=["Date", "Account", "Description", "Reference", "Debit (GHS)", "Credit (GHS)", "Running Balance (GHS)"])
+        frames.append(ledger_group[["Date", "Account Code", "Account", "Description", "Reference", "Debit (GHS)", "Credit (GHS)", "Running Balance (GHS)"]])
+    return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(columns=["Date", "Account Code", "Account", "Description", "Reference", "Debit (GHS)", "Credit (GHS)", "Running Balance (GHS)"])
 
 
 def get_trial_balance(company_key, start_date=None, end_date=None, account_name=None):
     df = _journal_df(company_key, start_date, end_date, account_name)
     if df.empty:
-        return pd.DataFrame(columns=["Account", "Type", "Debit (GHS)", "Credit (GHS)", "Balance (GHS)", "Balanced"])
-    grouped = df.groupby(["account_name", "account_type"], as_index=False)[["debit", "credit"]].sum()
+        return pd.DataFrame(columns=["Account Code", "Account", "Type", "Debit (GHS)", "Credit (GHS)", "Balance (GHS)", "Balanced"])
+    grouped = df.groupby(["account_code", "account_name", "account_type"], as_index=False)[["debit", "credit"]].sum()
     grouped["Balance (GHS)"] = grouped.apply(
         lambda row: (row["debit"] - row["credit"]) if _normal_balance(row["account_type"]) == "debit" else (row["credit"] - row["debit"]),
         axis=1,
@@ -204,7 +213,16 @@ def get_trial_balance(company_key, start_date=None, end_date=None, account_name=
     grouped = grouped[(grouped["debit"].abs() > 0.0001) | (grouped["credit"].abs() > 0.0001)].copy()
     balanced = abs(float(grouped["debit"].sum()) - float(grouped["credit"].sum())) < 0.01
     grouped["Balanced"] = "Yes" if balanced else "No"
-    return grouped.rename(columns={"account_name": "Account", "account_type": "Type", "debit": "Debit (GHS)", "credit": "Credit (GHS)"}).reset_index(drop=True)
+    grouped = grouped.rename(
+        columns={
+            "account_code": "Account Code",
+            "account_name": "Account",
+            "account_type": "Type",
+            "debit": "Debit (GHS)",
+            "credit": "Credit (GHS)",
+        }
+    ).reset_index(drop=True)
+    return grouped.sort_values(["Account Code", "Account"], na_position="last").reset_index(drop=True)
 
 
 def get_income_statement(company_key, start_date=None, end_date=None, account_name=None):
@@ -217,12 +235,12 @@ def get_income_statement(company_key, start_date=None, end_date=None, account_na
         if account_type == "Income":
             amount = float(row["Credit (GHS)"] - row["Debit (GHS)"])
             income_total += amount
-            rows.append({"Category": "Income", "Account": row["Account"], "Amount (GHS)": amount})
+            rows.append({"Category": "Revenue", "Account Code": row["Account Code"], "Account": row["Account"], "Amount (GHS)": amount})
         elif account_type == "Expense":
             amount = float(row["Debit (GHS)"] - row["Credit (GHS)"])
             expense_total += amount
-            rows.append({"Category": "Expense", "Account": row["Account"], "Amount (GHS)": amount})
-    rows.append({"Category": "Summary", "Account": "Net Profit", "Amount (GHS)": income_total - expense_total})
+            rows.append({"Category": "Operating Expenses", "Account Code": row["Account Code"], "Account": row["Account"], "Amount (GHS)": amount})
+    rows.append({"Category": "Profit for the Period", "Account Code": "", "Account": "Net Profit", "Amount (GHS)": income_total - expense_total})
     return pd.DataFrame(rows)
 
 
@@ -234,7 +252,8 @@ def get_balance_sheet(company_key, start_date=None, end_date=None, account_name=
         if account_type not in ("Asset", "Liability", "Equity"):
             continue
         amount = float(row["Debit (GHS)"] - row["Credit (GHS)"]) if account_type == "Asset" else float(row["Credit (GHS)"] - row["Debit (GHS)"])
-        rows.append({"Category": account_type, "Account": row["Account"], "Amount (GHS)": amount})
+        category_map = {"Asset": "Assets", "Liability": "Liabilities", "Equity": "Equity"}
+        rows.append({"Category": category_map.get(account_type, account_type), "Account Code": row["Account Code"], "Account": row["Account"], "Amount (GHS)": amount})
     return pd.DataFrame(rows)
 
 
@@ -274,11 +293,11 @@ def get_changes_in_equity(company_key, start_date=None, end_date=None, account_n
     net_profit = float(income_df.loc[income_df["Account"] == "Net Profit", "Amount (GHS)"].sum()) if not income_df.empty else 0.0
     return pd.DataFrame(
         [
-            {"Line Item": "Opening Balance Equity", "Amount (GHS)": opening_equity},
-            {"Line Item": "Owner Capital", "Amount (GHS)": owner_capital},
-            {"Line Item": "Retained Earnings", "Amount (GHS)": retained_earnings},
-            {"Line Item": "Net Profit for Period", "Amount (GHS)": net_profit},
-            {"Line Item": "Closing Equity", "Amount (GHS)": opening_equity + owner_capital + retained_earnings + net_profit},
+            {"Account Code": "", "Line Item": "Opening Balance Equity", "Amount (GHS)": opening_equity},
+            {"Account Code": "", "Line Item": "Owner Capital", "Amount (GHS)": owner_capital},
+            {"Account Code": "", "Line Item": "Retained Earnings", "Amount (GHS)": retained_earnings},
+            {"Account Code": "", "Line Item": "Profit for the Period", "Amount (GHS)": net_profit},
+            {"Account Code": "", "Line Item": "Closing Equity", "Amount (GHS)": opening_equity + owner_capital + retained_earnings + net_profit},
         ]
     )
 
@@ -338,7 +357,8 @@ def show_record_transaction(company_key, role):
             debit = c2.number_input(f"Debit {idx + 1}", min_value=0.0, step=0.01, key=f"manual_debit_{company_key}_{idx}")
             credit = c3.number_input(f"Credit {idx + 1}", min_value=0.0, step=0.01, key=f"manual_credit_{company_key}_{idx}")
             if account and (debit > 0 or credit > 0):
-                lines.append({"account_name": account, "category": accounts.get(account, "Expense"), "debit": debit, "credit": credit})
+                account_meta = accounts.get(account, {"account_type": "Expense", "account_code": ""})
+                lines.append({"account_name": account, "category": account_meta.get("account_type", "Expense"), "debit": debit, "credit": credit})
         if st.form_submit_button("Post Transaction"):
             try:
                 post_transaction(description or "Manual journal entry", lines, company_key=company_key, reference=reference, created_by=role, entry_date=tx_date)

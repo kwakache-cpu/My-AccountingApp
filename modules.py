@@ -215,6 +215,21 @@ def _clear_streamlit_state(*keys):
 
 
 BASE_CURRENCY = "GHS"
+BOG_DISPLAY_RATES = {
+    "GHS": 1.0,
+    "USD": 11.65,
+    "EUR": 13.34,
+    "GBP": 15.47,
+}
+ACCOUNTING_ASSISTANT_SYSTEM_PROMPT = (
+    "You are the Accounting Assistant for a Ghana-focused ERP. "
+    "Answer with IFRS-aligned accounting guidance and Ghana tax context, including VAT, NHIL, "
+    "GETFund, and COVID levy / related indirect tax treatment where relevant. "
+    "Use the user's selected presentation currency when discussing displayed amounts, but remind them "
+    "that the ERP base ledger remains in GHS unless explicitly stated otherwise. "
+    "Keep answers practical, concise, and suitable for business operators and accountants. "
+    "Do not invent transactions or legal conclusions that are unsupported."
+)
 
 
 def _normalize_account_category(category):
@@ -256,9 +271,14 @@ def get_exchange_rate():
     try:
         conn = get_connection()
         row = conn.execute(
-            "SELECT COALESCE(exchange_rate, 1.0) AS exchange_rate FROM system_settings WHERE id = 1"
+            "SELECT COALESCE(display_currency, 'GHS') AS display_currency, COALESCE(exchange_rate, 1.0) AS exchange_rate FROM system_settings WHERE id = 1"
         ).fetchone()
-        rate = float(row["exchange_rate"]) if row and row["exchange_rate"] not in (None, "") else 1.0
+        if row:
+            display_currency = str(row["display_currency"] or BASE_CURRENCY).upper()
+            fallback_rate = BOG_DISPLAY_RATES.get(display_currency, 1.0)
+            rate = float(row["exchange_rate"]) if row["exchange_rate"] not in (None, "") else fallback_rate
+        else:
+            rate = 1.0
         st.session_state.exchange_rate = rate
         return max(rate, 0.000001)
     except Exception:
@@ -274,7 +294,7 @@ def convert_amount_from_base(amount):
     rate = get_exchange_rate()
     if currency == BASE_CURRENCY or rate <= 0:
         return value
-    return value * rate
+    return value * (1.0 / rate)
 
 
 def format_currency(amount, currency=None):
@@ -286,7 +306,85 @@ def format_currency(amount, currency=None):
 def get_reporting_multiplier():
     currency = get_display_currency()
     rate = get_exchange_rate()
-    return 1.0 if currency == BASE_CURRENCY or rate <= 0 else rate
+    return 1.0 if currency == BASE_CURRENCY or rate <= 0 else (1.0 / rate)
+
+
+def _selected_currency_context():
+    display_currency = get_display_currency()
+    exchange_rate = get_exchange_rate()
+    return (
+        f"Base ledger currency: {BASE_CURRENCY}. "
+        f"Selected presentation currency: {display_currency}. "
+        f"Display conversion basis: 1 {display_currency} = {exchange_rate:,.4f} GHS."
+        if display_currency != BASE_CURRENCY
+        else f"Base ledger currency and presentation currency are both {BASE_CURRENCY}."
+    )
+
+
+def ask_accounting_assistant(module_selection, chat_history):
+    groq_client = _get_groq_client()
+    if not groq_client:
+        return (
+            "The Accounting Assistant is unavailable because the `GROQ_API_KEY` secret is not configured. "
+            "You can still use the module data and reports normally."
+        )
+
+    messages = [
+        {"role": "system", "content": ACCOUNTING_ASSISTANT_SYSTEM_PROMPT},
+        {
+            "role": "system",
+            "content": (
+                f"Current module: {module_selection}. "
+                f"{_selected_currency_context()} "
+                "Assume the user operates in Ghana unless they specify otherwise."
+            ),
+        },
+    ]
+    messages.extend(chat_history[-8:])
+
+    try:
+        completion = groq_client.chat.completions.create(
+            model="llama-3.1-8b-instant",
+            messages=messages,
+            temperature=0.3,
+        )
+        return completion.choices[0].message.content.strip()
+    except Exception as exc:
+        logger.error(f"Accounting assistant request failed: {exc}")
+        return "The Accounting Assistant could not complete this request right now. Please try again."
+
+
+def render_accounting_assistant_sidebar(module_selection):
+    history_key = f"accounting_sidebar_messages_{module_selection}"
+    if history_key not in st.session_state:
+        st.session_state[history_key] = [
+            {
+                "role": "assistant",
+                "content": (
+                    "Ask an accounting question about IFRS, Ghana taxes, payroll, VAT, NHIL, GETFund, "
+                    "or how the current module should be used."
+                ),
+            }
+        ]
+
+    with st.sidebar.expander("Accounting Assistant", expanded=False):
+        st.caption(module_selection)
+        st.caption(_selected_currency_context())
+
+        for message in st.session_state[history_key][-6:]:
+            with st.chat_message(message["role"]):
+                st.markdown(message["content"])
+
+        user_question = st.chat_input(
+            "Ask the Accounting Assistant...",
+            key=f"accounting_sidebar_input_{module_selection}",
+        )
+        if user_question:
+            st.session_state[history_key].append({"role": "user", "content": user_question})
+            with st.spinner("Accounting Assistant is reviewing your question..."):
+                answer = ask_accounting_assistant(module_selection, st.session_state[history_key])
+            st.session_state[history_key].append({"role": "assistant", "content": answer})
+            st.rerun()
 
 
 def is_period_locked(company_key, entry_date, conn=None):
@@ -3810,10 +3908,11 @@ def show_ai_assistant(client_id):
         return
 
     prompt = (
-        "You are an accounting data assessment assistant for a Ghana-focused ERP. "
+        f"{ACCOUNTING_ASSISTANT_SYSTEM_PROMPT}\n"
         "Use the supplied 30-day accounting summary to answer clearly, highlight anomalies, "
         "and suggest edits or follow-up checks when appropriate. "
         "Do not invent records that are not present.\n\n"
+        f"{_selected_currency_context()}\n"
         f"Client ID: {active_company_id}\n"
         f"30-day data summary:\n{data_summary}\n\n"
         f"User question: {user_question}"
@@ -3827,10 +3926,7 @@ def show_ai_assistant(client_id):
                     messages=[
                         {
                             "role": "system",
-                            "content": (
-                                "You are a careful accounting assistant. Base your answer only on the "
-                                "provided summary, note uncertainty, and keep suggestions practical."
-                            ),
+                            "content": ACCOUNTING_ASSISTANT_SYSTEM_PROMPT,
                         },
                         {"role": "user", "content": prompt},
                     ],

@@ -14,10 +14,12 @@ import sqlite3
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from modules import (
+    BOG_DISPLAY_RATES,
     format_currency,
     get_exchange_rate,
     initialize_paystack_payment,
     log_audit_action,
+    render_accounting_assistant_sidebar,
     show_accounts_payable,
     show_accounts_receivable,
     show_dashboard as show_dashboard_module,
@@ -180,6 +182,50 @@ def normalize_page_label(page_name):
 
 if 'exchange_rate' not in st.session_state:
     st.session_state.exchange_rate = 1.0
+
+
+def _get_bog_display_rate(currency_code):
+    return float(BOG_DISPLAY_RATES.get(str(currency_code or "GHS").upper(), 1.0))
+
+
+def _render_currency_sidebar_controls(selectbox_key):
+    settings_conn = get_connection()
+    try:
+        settings_row = settings_conn.execute(
+            "SELECT COALESCE(base_currency, 'GHS') AS base_currency, COALESCE(display_currency, 'GHS') AS display_currency, COALESCE(exchange_rate, 1.0) AS exchange_rate FROM system_settings WHERE id = 1"
+        ).fetchone()
+        base_currency = str(settings_row["base_currency"]) if settings_row else "GHS"
+        display_currency = str(settings_row["display_currency"]) if settings_row else "GHS"
+        current_rate = (
+            float(settings_row["exchange_rate"])
+            if settings_row and settings_row["exchange_rate"] not in (None, "")
+            else _get_bog_display_rate(display_currency)
+        )
+        currency_options = ["GHS", "USD", "EUR", "GBP"]
+        selected_currency = st.selectbox(
+            "Display Currency",
+            currency_options,
+            index=currency_options.index(display_currency) if display_currency in currency_options else 0,
+            key=selectbox_key,
+        )
+        selected_rate = _get_bog_display_rate(selected_currency)
+        st.caption(f"Base Currency: {base_currency}")
+        if selected_currency == "GHS":
+            st.caption("BoG April 2026 sync: 1 GHS = 1.00 GHS")
+        else:
+            st.caption(f"BoG April 2026 sync: 1 {selected_currency} = {selected_rate:,.2f} GHS")
+            st.caption(f"Display multiplier applied to base values: 1 / {selected_rate:,.2f}")
+        st.session_state.exchange_rate = selected_rate
+        st.session_state.display_currency = selected_currency
+        if selected_currency != display_currency or abs(current_rate - selected_rate) > 0.000001:
+            settings_conn.execute(
+                "UPDATE system_settings SET display_currency = ?, exchange_rate = ?, updated_at = CURRENT_TIMESTAMP WHERE id = 1",
+                (selected_currency, selected_rate),
+            )
+            settings_conn.commit()
+            st.rerun()
+    finally:
+        settings_conn.close()
 
 PAGE_LABELS = {
     "dashboard": "📊 Dashboard",
@@ -1288,38 +1334,7 @@ def _render_primary_sidebar(user, include_settings=True):
         st.rerun()
 
     with st.sidebar.expander("Currency", expanded=False):
-        settings_conn = get_connection()
-        settings_row = settings_conn.execute(
-            "SELECT COALESCE(base_currency, 'GHS') AS base_currency, COALESCE(display_currency, 'GHS') AS display_currency, COALESCE(exchange_rate, 1.0) AS exchange_rate FROM system_settings WHERE id = 1"
-        ).fetchone()
-        base_currency = str(settings_row["base_currency"]) if settings_row else "GHS"
-        display_currency = str(settings_row["display_currency"]) if settings_row else "GHS"
-        exchange_rate = float(settings_row["exchange_rate"]) if settings_row and settings_row["exchange_rate"] not in (None, "") else 1.0
-        currency_options = ["GHS", "USD", "EUR", "GBP"]
-        selected_currency = st.selectbox(
-            "Display Currency",
-            currency_options,
-            index=currency_options.index(display_currency) if display_currency in currency_options else 0,
-            key="display_currency_primary",
-        )
-        selected_rate = 1.0 if selected_currency == "GHS" else st.number_input(
-            f"Display Multiplier for {selected_currency}",
-            min_value=0.000001,
-            value=exchange_rate if display_currency == selected_currency and exchange_rate > 0 else 1.0,
-            step=0.01,
-            key="display_exchange_rate_primary",
-        )
-        st.caption(f"Base Currency: {base_currency}")
-        st.session_state.exchange_rate = selected_rate
-        if selected_currency != display_currency or abs(float(exchange_rate) - float(selected_rate)) > 0.000001:
-            settings_conn.execute(
-                "UPDATE system_settings SET display_currency = ?, exchange_rate = ?, updated_at = CURRENT_TIMESTAMP WHERE id = 1",
-                (selected_currency, selected_rate),
-            )
-            settings_conn.commit()
-            settings_conn.close()
-            st.rerun()
-        settings_conn.close()
+        _render_currency_sidebar_controls("display_currency_primary")
 
 
 def _render_primary_page(user):
@@ -1776,7 +1791,7 @@ else:
         selected_index = menu.index(current_page) if current_page in menu else 0
         choice = st.sidebar.selectbox("Navigation", menu, index=selected_index)
         st.session_state.page = choice
-        render_gatekeeper_ai_chat(choice)
+        render_accounting_assistant_sidebar(choice)
         display_choice_map = {
             "📊 Dashboard": "ðŸ  Dashboard",
             "🛒 Point of Sale": "ðŸ›’ Point of Sale",
@@ -1874,39 +1889,8 @@ else:
         choice = repair_ui_label(normalize_page_label(choice))
         st.session_state.page = choice
         with st.sidebar.expander("Currency", expanded=False):
-            settings_conn = get_connection()
-            settings_row = settings_conn.execute(
-                "SELECT COALESCE(base_currency, 'GHS') AS base_currency, COALESCE(display_currency, 'GHS') AS display_currency, COALESCE(exchange_rate, 1.0) AS exchange_rate FROM system_settings WHERE id = 1"
-            ).fetchone()
-            base_currency = str(settings_row["base_currency"]) if settings_row else "GHS"
-            display_currency = str(settings_row["display_currency"]) if settings_row else "GHS"
-            exchange_rate = float(settings_row["exchange_rate"]) if settings_row and settings_row["exchange_rate"] not in (None, "") else 1.0
-            currency_options = ["GHS", "USD", "EUR", "GBP"]
-            selected_currency = st.selectbox(
-                "Display Currency",
-                currency_options,
-                index=currency_options.index(display_currency) if display_currency in currency_options else 0,
-                key="display_currency_toggle",
-            )
-            selected_rate = 1.0 if selected_currency == "GHS" else st.number_input(
-                f"Display Multiplier for {selected_currency}",
-                min_value=0.000001,
-                value=exchange_rate if display_currency == selected_currency and exchange_rate > 0 else 1.0,
-                step=0.01,
-                key="display_exchange_rate_toggle",
-            )
-            st.caption(f"Base Currency: {base_currency}")
-            st.session_state.exchange_rate = selected_rate
-            if selected_currency != display_currency or abs(float(exchange_rate) - float(selected_rate)) > 0.000001:
-                settings_conn.execute(
-                    "UPDATE system_settings SET display_currency = ?, exchange_rate = ?, updated_at = CURRENT_TIMESTAMP WHERE id = 1",
-                    (selected_currency, selected_rate),
-                )
-                settings_conn.commit()
-                settings_conn.close()
-                st.rerun()
-            settings_conn.close()
-        render_gatekeeper_ai_chat(choice)
+            _render_currency_sidebar_controls("display_currency_toggle")
+        render_accounting_assistant_sidebar(choice)
         regular_choice_map = {
             "📊 Dashboard": "ðŸ  Dashboard",
             "🛒 Point of Sale": "ðŸ›’ Point of Sale",
