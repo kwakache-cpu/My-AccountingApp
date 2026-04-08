@@ -232,6 +232,10 @@ ACCOUNTING_ASSISTANT_SYSTEM_PROMPT = (
 )
 
 
+def get_currency_symbol():
+    return st.session_state.get("currency_symbol", "GH₵")
+
+
 def _normalize_account_category(category):
     normalized = str(category or "").strip().title()
     if normalized == "Revenue":
@@ -298,9 +302,8 @@ def convert_amount_from_base(amount):
 
 
 def format_currency(amount, currency=None):
-    active_currency = currency or get_display_currency()
     converted = convert_amount_from_base(amount)
-    return f"{active_currency} {converted:,.2f}"
+    return f"{get_currency_symbol()} {converted:,.2f}"
 
 
 def get_reporting_multiplier():
@@ -312,12 +315,14 @@ def get_reporting_multiplier():
 def _selected_currency_context():
     display_currency = get_display_currency()
     exchange_rate = get_exchange_rate()
+    currency_symbol = get_currency_symbol()
     return (
         f"Base ledger currency: {BASE_CURRENCY}. "
         f"Selected presentation currency: {display_currency}. "
+        f"Selected currency symbol: {currency_symbol}. "
         f"Display conversion basis: 1 {display_currency} = {exchange_rate:,.4f} GHS."
         if display_currency != BASE_CURRENCY
-        else f"Base ledger currency and presentation currency are both {BASE_CURRENCY}."
+        else f"Base ledger currency and presentation currency are both {BASE_CURRENCY}, using symbol {currency_symbol}."
     )
 
 
@@ -1306,7 +1311,7 @@ def _demo_notice():
 
 
 def format_money(value):
-    return f"GH₵ {value:,.2f}"
+    return f"{get_currency_symbol()} {convert_amount_from_base(value):,.2f}"
 
 
 def show_vault_dashboard_module(demo_on):
@@ -1751,7 +1756,7 @@ def show_inventory(company_key, role):
                     )
                 col1, col2, col3 = st.columns(3)
                 col1.metric("Total Items", len(df))
-                col2.metric("Total Value", f"GH₵ {df['total_value'].sum():,.2f}")
+                col2.metric(f"Total Value ({get_currency_symbol()})", format_currency(df["total_value"].sum()))
                 col3.metric("Low Stock Alerts", len(df[df['quantity'] < 10]))
                 if role in ("Master Admin", "Bookkeeper", "Sub-Admin") and "id" in df.columns:
                     st.markdown("Edit Stock Item")
@@ -2316,7 +2321,7 @@ def show_pos(company_key, company_name, role):
             )
             st.subheader("Active Sale Cart")
             st.dataframe(cart_df, use_container_width=True)
-            st.metric("Cart Total", f"GH₵ {cart_df['Line Total'].sum():,.2f}")
+            st.metric(f"Cart Total ({get_currency_symbol()})", format_currency(cart_df["Line Total"].sum()))
             remove_choice = st.selectbox(
                 "Remove Cart Line",
                 ["Keep all items"] + [f"{index + 1}. {line['name']} x{line['qty']}" for index, line in enumerate(cart)],
@@ -2655,8 +2660,8 @@ def show_banking(company_key, role):
     st.header("🏦 Banking & Cash")
     if role == "Demo":
         _demo_notice()
-        st.metric("Cash Balance", "GH₵ 8,300.00")
-        st.metric("Bank Balance", "GH₵ 15,000.00")
+        st.metric(f"Cash Balance ({get_currency_symbol()})", format_currency(8300.0))
+        st.metric(f"Bank Balance ({get_currency_symbol()})", format_currency(15000.0))
         return
 
     try:
@@ -2674,8 +2679,8 @@ def show_banking(company_key, role):
         conn.close()
 
         col1, col2 = st.columns(2)
-        col1.metric("Cash Balance", f"GH₵ {cash_total:,.2f}")
-        col2.metric("Bank Balance", f"GH₵ {bank_total:,.2f}")
+        col1.metric(f"Cash Balance ({get_currency_symbol()})", format_currency(cash_total))
+        col2.metric(f"Bank Balance ({get_currency_symbol()})", format_currency(bank_total))
     except Exception as e:
         st.error(f"Banking module error: {e}")
 
@@ -2700,7 +2705,7 @@ def show_aging(company_key, aging_type="Receivable"):
         ).fetchall()
         conn.close()
         if data:
-            df = pd.DataFrame(data, columns=["Date", "Description", "Amount (GH₵)"])
+            df = pd.DataFrame(data, columns=["Date", "Description", f"Amount ({get_currency_symbol()})"])
             df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
             df["Days Outstanding"] = (datetime.now() - df["Date"]).dt.days
             st.dataframe(df, use_container_width=True)
@@ -2735,10 +2740,10 @@ def show_taxation(company_key):
         total_tax = vat + nhil + getfund
 
         col1, col2, col3, col4 = st.columns(4)
-        col1.metric("Total Sales", f"GH₵ {total_sales:,.2f}")
-        col2.metric(f"VAT ({VAT_RATE*100:.1f}%)", f"GH₵ {vat:,.2f}")
-        col3.metric(f"NHIL ({NHIL_RATE*100:.1f}%)", f"GH₵ {nhil:,.2f}")
-        col4.metric("Total Tax Due", f"GH₵ {total_tax:,.2f}")
+        col1.metric(f"Total Sales ({get_currency_symbol()})", format_currency(total_sales))
+        col2.metric(f"VAT ({VAT_RATE*100:.1f}%) {get_currency_symbol()}", format_currency(vat))
+        col3.metric(f"NHIL ({NHIL_RATE*100:.1f}%) {get_currency_symbol()}", format_currency(nhil))
+        col4.metric(f"Total Tax Due ({get_currency_symbol()})", format_currency(total_tax))
     except Exception as e:
         st.error(f"Taxation module error: {e}")
 
@@ -3002,16 +3007,16 @@ def show_fixed_assets(company_key, role):
             (company_key,),
         ).fetchall()
         if data:
-            df = pd.DataFrame(data, columns=["ID", "Asset Name", "Category", "Purchase Date", "Cost (GH₵)",
+            df = pd.DataFrame(data, columns=["ID", "Asset Name", "Category", "Purchase Date", f"Cost ({get_currency_symbol()})",
                                               "Opening Book Value", "Dep. Rate (%)", "Accum. Dep.", "Current Value", "Location", "Status"])
             st.dataframe(df, use_container_width=True)
 
-            total_cost = df["Cost (GH₵)"].sum()
+            total_cost = df[f"Cost ({get_currency_symbol()})"].sum()
             total_book = df["Current Value"].sum()
             col1, col2, col3 = st.columns(3)
             col1.metric("Total Assets", len(df))
-            col2.metric("Total Cost", f"GH₵ {total_cost:,.2f}")
-            col3.metric("Total Book Value", f"GH₵ {total_book:,.2f}")
+            col2.metric(f"Total Cost ({get_currency_symbol()})", format_currency(total_cost))
+            col3.metric(f"Total Book Value ({get_currency_symbol()})", format_currency(total_book))
             if role in ("Master Admin", "Bookkeeper", "Sub-Admin"):
                 selected_asset_key = f"asset_edit_selected_{company_key}"
                 delete_asset_key = f"asset_delete_selected_{company_key}"

@@ -183,6 +183,8 @@ def normalize_page_label(page_name):
 
 if 'exchange_rate' not in st.session_state:
     st.session_state.exchange_rate = 1.0
+if 'currency_symbol' not in st.session_state:
+    st.session_state.currency_symbol = "GH₵"
 
 
 def _get_bog_display_rate(currency_code):
@@ -208,9 +210,11 @@ def _render_currency_sidebar_controls(selectbox_key):
             key=selectbox_key,
         )
         selected_rate = _get_bog_display_rate(selected_currency)
+        symbols = {"GHS": "GH₵", "USD": "$", "EUR": "€", "GBP": "£"}
         st.session_state.base_currency = selected_currency
         st.session_state.display_currency = selected_currency
         st.session_state.exchange_rate = selected_rate
+        st.session_state.currency_symbol = symbols.get(st.session_state.base_currency, "GH₵")
         if selected_currency == "GHS":
             st.sidebar.caption("BoG April 2026 sync: 1 GHS = 1.00 GHS")
         else:
@@ -1272,6 +1276,8 @@ def main():
         st.session_state.base_currency = "GHS"
     if "exchange_rate" not in st.session_state:
         st.session_state.exchange_rate = 1.0
+    symbols = {"GHS": "GH₵", "USD": "$", "EUR": "€", "GBP": "£"}
+    st.session_state.currency_symbol = symbols.get(st.session_state.base_currency, "GH₵")
 
     selected_base_currency = str(st.session_state.get("base_currency", "GHS")).upper()
     bog_rate = _get_bog_display_rate(selected_base_currency)
@@ -1371,6 +1377,8 @@ def _render_primary_sidebar(user, include_settings=True):
     st.session_state.base_currency = currency
     rates = {"GHS": 1.0, "USD": 11.65, "EUR": 13.34, "GBP": 15.47}
     st.session_state.exchange_rate = rates[currency]
+    symbols = {"GHS": "GH₵", "USD": "$", "EUR": "€", "GBP": "£"}
+    st.session_state.currency_symbol = symbols.get(st.session_state.base_currency, "GH₵")
     fallback_history_key = "sidebar_accounting_ai_history"
     if fallback_history_key not in st.session_state:
         st.session_state[fallback_history_key] = [
