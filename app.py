@@ -962,7 +962,8 @@ def login_ui():
                     (rec_name, rec_ans),
                 ).fetchone()
                 if res: 
-                    st.success(f"Identity Verified. Your Master Key is: {res[0]}")
+                    masked_key = f"{str(res[0])[:4]}****{str(res[0])[-4:]}" if res[0] else "****"
+                    st.success(f"Identity Verified. Your Master Key has been verified: {masked_key}")
                     log_audit_action(conn, res[0], "Recovery", "Successful key recovery", "Authentication")
                 else: 
                     st.error("Verification failed. Data does not match our records.")
@@ -1652,7 +1653,7 @@ else:
                     duration_months = st.number_input("Duration (Months)", min_value=1, max_value=24, value=12)
                     key_col, button_col = st.columns([3, 1])
                     with key_col:
-                        manual_key = st.text_input("System License Key", key="manual_key_input")
+                        manual_key = st.text_input("System License Key", type="password", key="manual_key_input")
                     with button_col:
                         st.write("")
                         st.write("")

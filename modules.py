@@ -315,7 +315,26 @@ def format_currency_dataframe(dataframe):
     if not isinstance(dataframe, pd.DataFrame) or dataframe.empty:
         return dataframe
     df = dataframe.copy()
-    cols_to_fix = ['Price', 'Cost', 'Amount', 'Total', 'Balance', 'Value', 'Salary', 'Net']
+    cols_to_fix = [
+        'Price',
+        'Cost',
+        'Amount',
+        'Total',
+        'Balance',
+        'Value',
+        'Salary',
+        'Net',
+        'Debit',
+        'Credit',
+        'Movement',
+        'Residual',
+        'Accumulated',
+        'Book',
+        'Revenue',
+        'Expense',
+        'Tax',
+        'Cash',
+    ]
     exchange_rate = st.session_state.get("exchange_rate") or get_exchange_rate()
     safe_rate = float(exchange_rate) if float(exchange_rate or 0) > 0 else 1.0
     currency_symbol = get_currency_symbol()
@@ -2144,7 +2163,7 @@ def show_company_setup(company_key, company_name, role):
                 with st.form("company_setup_staff_form"):
                     staff_name = st.text_input("Full Name")
                     staff_role = st.selectbox("Role", ["Bookkeeper", "Staff"])
-                    manual_login_key = st.text_input("Staff Login Key (Manual)")
+                    manual_login_key = st.text_input("Staff Login Key (Manual)", type="password")
                     staff_password = st.text_input("Assign Password", type="password")
                     submitted = st.form_submit_button("Create Staff Login")
 
