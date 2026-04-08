@@ -296,12 +296,14 @@ BOG_DISPLAY_RATES = {
     "GBP": 15.47,
 }
 ACCOUNTING_ASSISTANT_SYSTEM_PROMPT = (
-    "You are the Accounting Assistant for a Ghana-focused ERP. "
-    "Answer with IFRS-aligned accounting guidance and Ghana tax context, including VAT, NHIL, "
-    "GETFund, and COVID levy / related indirect tax treatment where relevant. "
+    "You are a seasoned Chartered Accountant embedded in a Ghana-focused ERP. "
+    "Answer with IFRS-aligned accounting guidance, double-entry discipline, and Ghana tax context, "
+    "including VAT, NHIL, GETFund, and related indirect tax treatment where relevant. "
     "Use the user's selected presentation currency when discussing displayed amounts, but remind them "
     "that the ERP base ledger remains in GHS unless explicitly stated otherwise. "
-    "Keep answers practical, concise, and suitable for business operators and accountants. "
+    "When possible, analyze the transaction history, inventory positions, receivables, payables, "
+    "and journal patterns available in the ERP before giving advice. "
+    "Keep answers practical, concise, professional, and suitable for finance leadership and business operators. "
     "Do not invent transactions or legal conclusions that are unsupported."
 )
 
@@ -437,6 +439,53 @@ def _selected_currency_context():
     )
 
 
+def _load_accounting_ai_context(company_key):
+    if not company_key:
+        return "No company context is currently loaded."
+    conn = None
+    try:
+        conn = get_connection()
+        transactions = []
+        inventory = []
+        try:
+            transactions = conn.execute(
+                """
+                SELECT transaction_date, account, description, debit, credit
+                FROM transactions
+                WHERE company_key = ?
+                ORDER BY transaction_date DESC, id DESC
+                LIMIT 8
+                """,
+                (company_key,),
+            ).fetchall()
+        except sqlite3.Error:
+            transactions = []
+        try:
+            inventory = conn.execute(
+                """
+                SELECT item_name, qty, cost_price, price
+                FROM inventory
+                WHERE company_key = ?
+                ORDER BY updated_at DESC, id DESC
+                LIMIT 8
+                """,
+                (company_key,),
+            ).fetchall()
+        except sqlite3.Error:
+            inventory = []
+        tx_summary = [dict(row) for row in transactions] if transactions else []
+        inventory_summary = [dict(row) for row in inventory] if inventory else []
+        return (
+            f"Recent transactions: {tx_summary if tx_summary else 'None available'}. "
+            f"Recent inventory rows: {inventory_summary if inventory_summary else 'None available'}."
+        )
+    except Exception:
+        return "Company transaction and inventory context is currently unavailable."
+    finally:
+        if conn:
+            conn.close()
+
+
 def accounting_ai_response(module_selection, chat_history):
     groq_client = _get_groq_client()
     if not groq_client:
@@ -445,6 +494,11 @@ def accounting_ai_response(module_selection, chat_history):
             "You can still use the module data and reports normally."
         )
 
+    company_key = (
+        st.session_state.get("company_id")
+        or st.session_state.get("user", {}).get("key")
+        or st.session_state.get("user", {}).get("company_key")
+    )
     messages = [
         {"role": "system", "content": ACCOUNTING_ASSISTANT_SYSTEM_PROMPT},
         {
@@ -452,6 +506,7 @@ def accounting_ai_response(module_selection, chat_history):
             "content": (
                 f"Current module: {module_selection}. "
                 f"{_selected_currency_context()} "
+                f"{_load_accounting_ai_context(company_key)} "
                 "Assume the user operates in Ghana unless they specify otherwise."
             ),
         },
@@ -716,7 +771,30 @@ def save_transaction(description, lines, company_key=None, reference=None, creat
 
 
 def show_journal_entries(company_key, role):
-    st.header("🧾 Journals")
+    st.header("🧾 General Journal")
+
+    account_options = []
+    chart_conn = None
+    try:
+        chart_conn = get_connection()
+        account_rows = chart_conn.execute(
+            """
+            SELECT COALESCE(account_code, '') AS account_code,
+                   COALESCE(name, account_name) AS account_name
+            FROM chart_of_accounts
+            ORDER BY COALESCE(account_code, ''), COALESCE(name, account_name)
+            """
+        ).fetchall()
+        account_options = [
+            f"{str(row['account_code']).strip()} - {str(row['account_name']).strip()}".strip(" -")
+            for row in account_rows
+            if str(row["account_name"] or "").strip()
+        ]
+    except Exception:
+        account_options = []
+    finally:
+        if chart_conn:
+            chart_conn.close()
 
     conn = None
     try:
@@ -767,19 +845,24 @@ def show_journal_entries(company_key, role):
     if st.session_state.get(f"show_manual_journal_form_{company_key}", False):
         with st.form(f"manual_journal_entry_form_{company_key}"):
             entry_date = st.date_input("Transaction Date", value=datetime.now().date(), key=f"journal_entry_date_{company_key}")
-            account = st.text_input("Account", key=f"journal_entry_account_{company_key}")
+            account = st.selectbox(
+                "Account",
+                account_options if account_options else ["Suspense"],
+                key=f"journal_entry_account_{company_key}",
+            )
             description = st.text_input("Description", key=f"journal_entry_description_{company_key}")
             debit = st.number_input("Debit", min_value=0.0, step=0.01, key=f"journal_entry_debit_{company_key}")
             credit = st.number_input("Credit", min_value=0.0, step=0.01, key=f"journal_entry_credit_{company_key}")
             submitted = st.form_submit_button("Save Manual Entry")
 
             if submitted:
-                if not account.strip():
+                selected_account = str(account or "").split(" - ", 1)[-1].strip()
+                if not selected_account:
                     st.warning("Enter an account before saving the manual entry.")
                 elif debit <= 0 and credit <= 0:
                     st.warning("Enter either a debit or a credit amount.")
-                elif debit > 0 and credit > 0 and round(float(debit) - float(credit), 2) != 0:
-                    st.warning("Enter one side only, or enter equal debit and credit values.")
+                elif debit > 0 and credit > 0:
+                    st.warning("Enter a debit or a credit amount for this manual line, not both.")
                 else:
                     suspense_amount = float(debit or credit)
                     try:
@@ -793,7 +876,7 @@ def show_journal_entries(company_key, role):
                             (
                                 company_key,
                                 entry_date.isoformat(),
-                                account.strip(),
+                                selected_account,
                                 description.strip(),
                                 float(debit or 0.0),
                                 float(credit or 0.0),
@@ -803,17 +886,17 @@ def show_journal_entries(company_key, role):
                         )
                         if debit > 0 and credit == 0:
                             journal_lines = [
-                                {"account_name": account.strip(), "category": "Expense", "debit": float(debit), "credit": 0},
+                                {"account_name": selected_account, "category": "Expense", "debit": float(debit), "credit": 0},
                                 {"account_name": "Suspense", "category": "Equity", "debit": 0, "credit": float(debit)},
                             ]
                         elif credit > 0 and debit == 0:
                             journal_lines = [
                                 {"account_name": "Suspense", "category": "Equity", "debit": float(credit), "credit": 0},
-                                {"account_name": account.strip(), "category": "Income", "debit": 0, "credit": float(credit)},
+                                {"account_name": selected_account, "category": "Income", "debit": 0, "credit": float(credit)},
                             ]
                         else:
                             journal_lines = [
-                                {"account_name": account.strip(), "category": "Expense", "debit": float(debit), "credit": float(credit)},
+                                {"account_name": selected_account, "category": "Expense", "debit": float(debit), "credit": float(credit)},
                             ]
                         save_transaction(
                             description.strip() or "Manual journal entry",
@@ -825,7 +908,7 @@ def show_journal_entries(company_key, role):
                             conn=conn,
                         )
                         conn.commit()
-                        log_audit_action(conn, company_key, role, "Manual Journal Entry", "Journals", f"{account.strip()} saved for {format_currency(suspense_amount)}")
+                        log_audit_action(conn, company_key, role, "Manual Journal Entry", "Journals", f"{selected_account} saved for {format_currency(suspense_amount)}")
                         conn.close()
                         st.session_state[f"show_manual_journal_form_{company_key}"] = False
                         st.success("Manual journal entry saved.")
@@ -2256,7 +2339,7 @@ def show_vouchers(company_key, role):
 # CHART OF ACCOUNTS
 # ==========================================
 def show_chart_of_accounts(company_key, role):
-    st.header("?? Chart of Accounts")
+    st.header("🗂️ Chart of Accounts")
     try:
         conn = get_connection()
         rows = conn.execute(

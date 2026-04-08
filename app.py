@@ -1459,7 +1459,9 @@ PRIMARY_NAV_ITEMS = [
     ("📊 Dashboard", "Dashboard"),
     ("🛒 Point of Sale", "Point of Sale"),
     ("📦 Inventory Management", "Inventory Management"),
-    ("🧾 Journals", "Journals"),
+    ("🧾 General Journal", "General Journal"),
+    ("📚 General Ledger", "General Ledger"),
+    ("🗂️ Chart of Accounts", "Chart of Accounts"),
     ("📅 Accounts Receivable", "Accounts Receivable"),
     ("📅 Accounts Payable", "Accounts Payable"),
     ("💰 Banking & Cash", "Banking & Cash"),
@@ -1548,8 +1550,12 @@ def _render_primary_page(user):
         show_pos(user["key"], user["name"], user["role"])
     elif st.session_state.page == "Inventory Management":
         show_inventory(user["key"], user["role"])
-    elif st.session_state.page == "Journals":
+    elif st.session_state.page == "General Journal":
         show_journal_entries(user["key"], user["role"])
+    elif st.session_state.page == "General Ledger":
+        show_ledger_viewer(user["key"], user["role"])
+    elif st.session_state.page == "Chart of Accounts":
+        show_chart_of_accounts(user["key"], user["role"])
     elif st.session_state.page == "Accounts Receivable":
         show_accounts_receivable(user["key"])
     elif st.session_state.page == "Accounts Payable":
