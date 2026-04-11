@@ -213,10 +213,18 @@ def _upload_local_db_to_cloud():
     bucket = _get_firebase_bucket()
     if bucket is None or not os.path.exists(DB_PATH):
         return
+    
+    # CRITICAL SAFETY: Prevent uploading blank database to cloud vault
+    if _is_db_empty():
+        logger.warning("🛡️ BLOCKED: Refused to upload blank database to Cloud Vault. Cloud Vault is the source of truth.")
+        return
+    
     try:
         blob = bucket.blob(FIREBASE_OBJECT_NAME)
         blob.upload_from_filename(DB_PATH)
+        logger.info("✅ Database synced to Cloud Vault")
     except Exception:
+        logger.error("Failed to upload database to Cloud Vault")
         return
 
 
@@ -624,7 +632,7 @@ def ask_gatekeeper_ai(user_input):
 
     try:
         response = client.chat.completions.create(
-            model="llama3-8b-8192",
+            model="llama-3.3-70b-versatile",
             messages=[
                 {
                     "role": "system",
@@ -1488,17 +1496,6 @@ def main():
     finally:
         if settings_conn:
             settings_conn.close()
-
-
-PRIMARY_NAV_ITEMS = [
-    ("📊 Dashboard", "Dashboard"),
-    ("🛒 Point of Sale", "Point of Sale"),
-    ("📦 Inventory Management", "Inventory Management"),
-    ("📊 Data Analytics", "Data Analytics"),
-    ("🧾 Financial Reports", "Financial Reports"),
-    ("📦 Asset Register", "Asset Register"),
-    ("⚙️ System Configuration", "System Configuration"),
-]
 
 
 PRIMARY_NAV_ITEMS = [

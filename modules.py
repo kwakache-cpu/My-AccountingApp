@@ -527,7 +527,7 @@ def accounting_ai_response(module_selection, chat_history):
 
     try:
         completion = groq_client.chat.completions.create(
-            model="llama3-8b-8192",
+            model="llama-3.3-70b-versatile",
             messages=messages,
             temperature=0.3,
             max_tokens=1024,
@@ -4316,7 +4316,7 @@ def show_ai_assistant(client_id):
         with st.chat_message("assistant"):
             with st.spinner("Reviewing your accounting records..."):
                 completion = groq_client.chat.completions.create(
-                    model="llama3-8b-8192",
+                    model="llama-3.3-70b-versatile",
                     messages=[
                         {
                             "role": "system",
