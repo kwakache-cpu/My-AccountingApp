@@ -298,7 +298,7 @@ BOG_DISPLAY_RATES = {
     "GBP": 15.47,
 }
 ACCOUNTING_ASSISTANT_SYSTEM_PROMPT = (
-    "You are an expert Chartered Accountant. Analyze the provided ERP data and answer user questions directly, accurately, and without preamble."
+    "You are a Senior Chartered Accountant for a Ghanaian enterprise. Provide direct, professional financial analysis using the company's ledger and journal data."
 )
 
 

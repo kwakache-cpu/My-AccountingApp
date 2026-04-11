@@ -71,7 +71,7 @@ GATEKEEPER_SYSTEM_PROMPT = (
 
 # Hard-check for the secret
 if "GROQ_API_KEY" in st.secrets:
-    api_key = st.secrets["GROQ_API_KEY"]
+    api_key = st.secrets["GROQ_API_KEY"].strip()
     try:
         client = Groq(api_key=api_key)
         st.session_state['ai_active'] = True
@@ -158,6 +158,40 @@ def _verify_cloud_vault_handshake():
         st.session_state.cloud_vault_status = "🔴 Cloud Vault: Local Mode"
 
 
+def _is_db_empty():
+    """Check if local database has no companies (is empty)."""
+    try:
+        conn = get_connection()
+        if not conn:
+            return True
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM companies")
+        count = cursor.fetchone()[0]
+        conn.close()
+        return count == 0
+    except Exception:
+        return True
+
+
+def _restore_db_from_cloud_vault():
+    """Pull database from Firebase Cloud Vault if local is empty."""
+    bucket = _get_firebase_bucket()
+    if bucket is None:
+        logger.warning("Cannot restore: Firebase bucket not available")
+        return False
+    try:
+        blob = bucket.blob(FIREBASE_OBJECT_NAME)
+        if not blob.exists():
+            logger.warning("Cloud Vault database not found")
+            return False
+        blob.download_to_filename(DB_PATH)
+        logger.info("✅ Company data restored from Cloud Vault")
+        return True
+    except Exception as exc:
+        logger.error(f"Cloud Vault restore failed: {exc}")
+        return False
+
+
 def _sync_cloud_db_down_if_newer():
     bucket = _get_firebase_bucket()
     if bucket is None:
@@ -214,6 +248,12 @@ def init_db():
     check_and_repair_db()
     base_init_db()
     check_and_repair_db()
+    
+    # CRITICAL: If local database is empty, restore from Cloud Vault
+    if _is_db_empty():
+        logger.info("📥 Local database is empty. Attempting restoration from Cloud Vault...")
+        _restore_db_from_cloud_vault()
+        check_and_repair_db()
 
     conn = None
     try:
