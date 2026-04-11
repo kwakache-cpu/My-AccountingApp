@@ -298,7 +298,7 @@ BOG_DISPLAY_RATES = {
     "GBP": 15.47,
 }
 ACCOUNTING_ASSISTANT_SYSTEM_PROMPT = (
-    "You are a professional Chartered Accountant. Provide clear, accurate financial guidance based on the ERP data."
+    "You are an expert Chartered Accountant. Analyze the provided ERP data and answer user questions directly, accurately, and without preamble."
 )
 
 
@@ -467,11 +467,29 @@ def _load_accounting_ai_context(company_key):
             ).fetchall()
         except sqlite3.Error:
             inventory = []
+        journal_entries = []
+        try:
+            journal_entries = conn.execute(
+                """
+                SELECT je.date, je.description, je.reference, jl.debit, jl.credit, c.name as account_name
+                FROM journal_entries je
+                JOIN journal_lines jl ON jl.entry_id = je.id
+                JOIN chart_of_accounts c ON c.id = jl.account_id
+                WHERE je.company_key = ?
+                ORDER BY je.date DESC, je.id DESC
+                LIMIT 5
+                """,
+                (company_key,),
+            ).fetchall()
+        except sqlite3.Error:
+            journal_entries = []
         tx_summary = [dict(row) for row in transactions] if transactions else []
         inventory_summary = [dict(row) for row in inventory] if inventory else []
+        journal_summary = [dict(row) for row in journal_entries] if journal_entries else []
         return (
             f"Recent transactions: {tx_summary if tx_summary else 'None available'}. "
-            f"Recent inventory rows: {inventory_summary if inventory_summary else 'None available'}."
+            f"Recent inventory rows: {inventory_summary if inventory_summary else 'None available'}. "
+            f"Recent General Journal entries: {journal_summary if journal_summary else 'None available'}."
         )
     except Exception:
         return "Company transaction and inventory context is currently unavailable."
@@ -512,11 +530,14 @@ def accounting_ai_response(module_selection, chat_history):
             model="llama3-8b-8192",
             messages=messages,
             temperature=0.3,
+            max_tokens=1024,
+            timeout=20.0,
         )
         return completion.choices[0].message.content.strip()
     except Exception as exc:
         logger.error(f"Accounting assistant request failed: {exc}")
-        return "The Accounting Assistant could not complete this request right now. Please try again."
+        st.error(str(exc))
+        return str(exc)
 
 
 def render_accounting_assistant_sidebar(module_selection):
@@ -4304,15 +4325,16 @@ def show_ai_assistant(client_id):
                         {"role": "user", "content": prompt},
                     ],
                     temperature=0.3,
+                    max_tokens=1024,
+                    timeout=20.0,
                 )
                 assistant_reply = completion.choices[0].message.content.strip()
                 st.markdown(assistant_reply)
         st.session_state[history_key].append({"role": "assistant", "content": assistant_reply})
     except Exception as exc:
         logger.error(f"AI assistant request failed: {exc}")
-        failure_message = (
-            "The AI assessment request failed just now. Please try again, or review the 30-day snapshot above."
-        )
+        st.error(str(exc))
+        failure_message = str(exc)
         st.session_state[history_key].append({"role": "assistant", "content": failure_message})
         with st.chat_message("assistant"):
             st.markdown(failure_message)

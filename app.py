@@ -72,8 +72,13 @@ GATEKEEPER_SYSTEM_PROMPT = (
 # Hard-check for the secret
 if "GROQ_API_KEY" in st.secrets:
     api_key = st.secrets["GROQ_API_KEY"]
-    client = Groq(api_key=api_key)
-    st.session_state['ai_active'] = True
+    try:
+        client = Groq(api_key=api_key)
+        st.session_state['ai_active'] = True
+    except Exception as exc:
+        st.toast(f"Failed to initialize Groq client: {exc}")
+        st.session_state['ai_active'] = False
+        client = None
 else:
     st.error("The app cannot see GROQ_API_KEY in Streamlit Secrets.")
     st.session_state['ai_active'] = False
