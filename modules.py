@@ -870,20 +870,48 @@ def show_journal_entries(company_key, role):
     else:
         st.dataframe(format_currency_dataframe(transactions_df), use_container_width=True)
 
-    if st.button("Add Manual Entry", key=f"show_manual_journal_form_{company_key}"):
-        st.session_state[f"show_manual_journal_form_{company_key}"] = True
+    # Initialize form state
+    form_key = f"show_manual_journal_form_{company_key}"
+    if form_key not in st.session_state:
+        st.session_state[form_key] = False
 
-    if st.session_state.get(f"show_manual_journal_form_{company_key}", False):
+    if st.button("Add Manual Entry", key=f"btn_manual_journal_{company_key}"):
+        st.session_state[form_key] = not st.session_state[form_key]
+
+    if st.session_state.get(form_key, False):
         with st.form(f"manual_journal_entry_form_{company_key}"):
-            entry_date = st.date_input("Transaction Date", value=datetime.now().date(), key=f"journal_entry_date_{company_key}")
-            account = st.selectbox(
-                "Account",
-                account_options if account_options else ["Suspense"],
-                key=f"journal_entry_account_{company_key}",
+            col1, col2 = st.columns(2)
+            with col1:
+                entry_date = st.date_input(
+                    "Transaction Date",
+                    value=datetime.now().date(),
+                    key=f"journal_entry_date_{company_key}"
+                )
+            with col2:
+                account = st.selectbox(
+                    "Account",
+                    account_options if account_options else ["Suspense"],
+                    key=f"journal_entry_account_{company_key}",
+                )
+            description = st.text_input(
+                "Description",
+                key=f"journal_entry_description_{company_key}"
             )
-            description = st.text_input("Description", key=f"journal_entry_description_{company_key}")
-            debit = st.number_input("Debit", min_value=0.0, step=0.01, key=f"journal_entry_debit_{company_key}")
-            credit = st.number_input("Credit", min_value=0.0, step=0.01, key=f"journal_entry_credit_{company_key}")
+            debit_col, credit_col = st.columns(2)
+            with debit_col:
+                debit = st.number_input(
+                    "Debit",
+                    min_value=0.0,
+                    step=0.01,
+                    key=f"journal_entry_debit_{company_key}"
+                )
+            with credit_col:
+                credit = st.number_input(
+                    "Credit",
+                    min_value=0.0,
+                    step=0.01,
+                    key=f"journal_entry_credit_{company_key}"
+                )
             submitted = st.form_submit_button("Save Manual Entry")
 
             if submitted:
@@ -925,7 +953,7 @@ def show_journal_entries(company_key, role):
                         conn.commit()
                         log_audit_action(conn, company_key, role, "Manual Journal Entry", "Journals", f"{selected_account} saved for {format_currency(suspense_amount)}")
                         conn.close()
-                        st.session_state[f"show_manual_journal_form_{company_key}"] = False
+                        st.session_state[form_key] = False
                         st.success("Manual journal entry saved.")
                         st.rerun()
                     except Exception as exc:
