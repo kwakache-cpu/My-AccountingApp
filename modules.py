@@ -123,7 +123,7 @@ def _get_groq_client():
     if st.session_state.get("ai_active") is False:
         return None
     try:
-        api_key = st.secrets["GROQ_API_KEY"]
+        api_key = st.secrets["GROQ_API_KEY"].strip()
     except Exception:
         api_key = None
     if not api_key:

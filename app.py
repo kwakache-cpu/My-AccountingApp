@@ -636,7 +636,7 @@ def ask_gatekeeper_ai(user_input):
             messages=[
                 {
                     "role": "system",
-                    "content": "You are a professional Chartered Accountant. Provide direct, helpful answers to user queries based on their ERP data.",
+                    "content": "You are a Senior Chartered Accountant for a Ghanaian enterprise. Provide direct, professional financial analysis without preamble. Answer user queries based on their ERP data confidently and concisely.",
                 },
                 {"role": "user", "content": user_input},
             ],
