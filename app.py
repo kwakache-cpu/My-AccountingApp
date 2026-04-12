@@ -1214,22 +1214,22 @@ def show_dashboard(company_key, company_name, role):
 
             with col1:
                 if st.button("🛒 New Sale", key="dash_pos", width='stretch'):
-                    st.session_state.page = PAGE_LABELS["pos"]
+                    st.session_state.page = "Point of Sale"
                     st.rerun()
 
             with col2:
                 if st.button("📦 Add Inventory", key="dash_inventory", width='stretch'):
-                    st.session_state.page = PAGE_LABELS["inventory"]
+                    st.session_state.page = "Inventory Management"
                     st.rerun()
 
             with col3:
                 if st.button("💳 Process Payroll", key="dash_payroll", width='stretch'):
-                    st.session_state.page = PAGE_LABELS["payroll"]
+                    st.session_state.page = "Payroll & Salaries"
                     st.rerun()
 
             with col4:
                 if st.button("📊 View Reports", key="dash_reports", width='stretch'):
-                    st.session_state.page = PAGE_LABELS["reports"]
+                    st.session_state.page = "Data Analytics"
                     st.rerun()
 
         finally:
@@ -1341,17 +1341,17 @@ def show_dashboard(company_key, company_name, role):
 
             st.subheader("Quick Actions")
             quick_col1, quick_col2, quick_col3, quick_col4 = st.columns(4)
-            if quick_col1.button("🛒 New Sale", key="dash_pos", width='stretch'):
-                st.session_state.page = PAGE_LABELS["pos"]
+            if quick_col1.button("🛒 New Sale", key="dash_pos_v2", width='stretch'):
+                st.session_state.page = "Point of Sale"
                 st.rerun()
-            if quick_col2.button("📦 Add Inventory", key="dash_inventory", width='stretch'):
-                st.session_state.page = PAGE_LABELS["inventory"]
+            if quick_col2.button("📦 Add Inventory", key="dash_inventory_v2", width='stretch'):
+                st.session_state.page = "Inventory Management"
                 st.rerun()
-            if quick_col3.button("💳 Process Payroll", key="dash_payroll", width='stretch'):
-                st.session_state.page = PAGE_LABELS["payroll"]
+            if quick_col3.button("💳 Process Payroll", key="dash_payroll_v2", width='stretch'):
+                st.session_state.page = "Payroll & Salaries"
                 st.rerun()
-            if quick_col4.button("📊 View Reports", key="dash_reports", width='stretch'):
-                st.session_state.page = PAGE_LABELS["reports"]
+            if quick_col4.button("📊 View Reports", key="dash_reports_v2", width='stretch'):
+                st.session_state.page = "Data Analytics"
                 st.rerun()
         finally:
             if conn:
