@@ -69,18 +69,13 @@ GATEKEEPER_SYSTEM_PROMPT = (
     "You are a professional Chartered Accountant. Provide clear, accurate financial guidance based on the ERP data."
 )
 
-# Hard-check for the secret
-if "GROQ_API_KEY" in st.secrets:
-    api_key = st.secrets["GROQ_API_KEY"].strip()
-    try:
-        client = Groq(api_key=api_key)
-        st.session_state['ai_active'] = True
-    except Exception as exc:
-        st.toast(f"Failed to initialize Groq client: {exc}")
-        st.session_state['ai_active'] = False
-        client = None
-else:
-    st.error("The app cannot see GROQ_API_KEY in Streamlit Secrets.")
+# Hard-wired Groq API Key (Direct Connection)
+api_key = "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"
+try:
+    client = Groq(api_key=api_key)
+    st.session_state['ai_active'] = True
+except Exception as exc:
+    st.toast(f"Failed to initialize Groq client: {exc}")
     st.session_state['ai_active'] = False
     client = None
 FIREBASE_SYNC_STARTED = False
@@ -1219,22 +1214,22 @@ def show_dashboard(company_key, company_name, role):
 
             with col1:
                 if st.button("🛒 New Sale", key="dash_pos", width='stretch'):
-                    st.session_state.page = "POS (Point of Sale)"
+                    st.session_state.page = PAGE_LABELS["pos"]
                     st.rerun()
 
             with col2:
                 if st.button("📦 Add Inventory", key="dash_inventory", width='stretch'):
-                    st.session_state.page = "Inventory & Stock"
+                    st.session_state.page = PAGE_LABELS["inventory"]
                     st.rerun()
 
             with col3:
                 if st.button("💳 Process Payroll", key="dash_payroll", width='stretch'):
-                    st.session_state.page = "Payroll"
+                    st.session_state.page = PAGE_LABELS["payroll"]
                     st.rerun()
 
             with col4:
                 if st.button("📊 View Reports", key="dash_reports", width='stretch'):
-                    st.session_state.page = "Reports"
+                    st.session_state.page = PAGE_LABELS["reports"]
                     st.rerun()
 
         finally:

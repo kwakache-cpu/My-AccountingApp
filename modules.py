@@ -123,12 +123,8 @@ def _get_groq_client():
     if st.session_state.get("ai_active") is False:
         return None
     try:
-        api_key = st.secrets["GROQ_API_KEY"].strip()
-    except Exception:
-        api_key = None
-    if not api_key:
-        return None
-    try:
+        # Use hard-wired API key directly
+        api_key = "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"
         return Groq(api_key=api_key)
     except Exception as exc:
         logger.warning(f"Failed to initialize Groq client: {exc}")
