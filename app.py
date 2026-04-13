@@ -879,6 +879,11 @@ def login_ui():
                 type="password",
                 key="v3_final_staff_password_field",
             )
+            security_answer = st.text_input(
+                "Security Answer",
+                type="password",
+                key="v3_final_security_answer_field",
+            )
             
             if st.button("Access Cloud Modules", key="v3_final_auth_submit_btn"):
                 try:
@@ -963,7 +968,7 @@ def login_ui():
 
                     user_login = conn.execute(
                         """
-                        SELECT u.company_key, c.name, u.role, u.full_name, u.password_hash
+                        SELECT u.company_key, c.name, u.role, u.full_name, u.password_hash, u.security_question, u.security_answer
                         FROM users u
                         JOIN companies c ON c.key = u.company_key
                         WHERE u.login_key = ?
@@ -975,6 +980,10 @@ def login_ui():
                     if user_login:
                         if not staff_password or hash_login_password(staff_password) != (user_login[4] or ""):
                             st.error("Invalid staff password. Please try again.")
+                            conn.close()
+                            return
+                        if not security_answer or hash_login_password(security_answer) != (user_login[6] or ""):
+                            st.error("Invalid security answer. Please try again.")
                             conn.close()
                             return
                         license_status = check_license_expiry_with_grace(user_login[0])
@@ -1027,25 +1036,68 @@ def login_ui():
 
     with t2:
         st.subheader("Cloud Recovery Protocol")
-        rec_name = st.text_input("Company Registered Name", key="v3_rec_name_input")
-        rec_ans = st.text_input("Security Recovery Answer", type="password", key="v3_rec_ans_input")
-        if st.button("Retrieve Master Key", key="v3_rec_action_btn"):
+        st.info("Use your login key and recovery answer to reset your password.")
+        forgot_login_key = st.text_input("Login Key", key="v3_forgot_login_key")
+        if st.button("Lookup Recovery Question", key="v3_lookup_recovery_question"):
             try:
                 conn = get_connection()
-                res = conn.execute(
-                    "SELECT key FROM companies WHERE name = ? AND recovery_answer = ?",
-                    (rec_name, rec_ans),
+                row = conn.execute(
+                    "SELECT company_key, security_question FROM users WHERE login_key = ? AND COALESCE(status, 'Active') = 'Active' LIMIT 1",
+                    (forgot_login_key.strip(),),
                 ).fetchone()
-                if res: 
-                    masked_key = f"{str(res[0])[:4]}****{str(res[0])[-4:]}" if res[0] else "****"
-                    st.success(f"Identity Verified. Your Master Key has been verified: {masked_key}")
-                    log_audit_action(conn, res[0], "Recovery", "Successful key recovery", "Authentication")
-                else: 
-                    st.error("Verification failed. Data does not match our records.")
+                if row and row["security_question"]:
+                    st.session_state.forgot_login_key = forgot_login_key.strip()
+                    st.session_state.forgot_security_question = row["security_question"]
+                    st.session_state.forgot_company_key = row["company_key"]
+                    st.success("Security question loaded. Answer it to reset your password.")
+                else:
+                    st.error("No active user found for that login key or no recovery question is set.")
                 conn.close()
             except Exception as e:
                 st.error("System error during recovery. Please try again.")
                 logger.error(f"Recovery error: {e}")
+
+        if st.session_state.get("forgot_security_question"):
+            st.markdown(f"**Recovery Question:** {st.session_state['forgot_security_question']}")
+            recovery_answer = st.text_input("Security Answer", type="password", key="v3_forgot_answer")
+            new_password = st.text_input("New Password", type="password", key="v3_forgot_new_password")
+            confirm_password = st.text_input("Confirm New Password", type="password", key="v3_forgot_confirm_password")
+            if st.button("Reset Password", key="v3_reset_password_btn"):
+                if not recovery_answer or not new_password:
+                    st.error("Enter both your recovery answer and a new password.")
+                elif new_password != confirm_password:
+                    st.error("New password and confirmation do not match.")
+                else:
+                    try:
+                        conn = get_connection()
+                        reset_row = conn.execute(
+                            "SELECT company_key, security_answer FROM users WHERE login_key = ? LIMIT 1",
+                            (st.session_state.get("forgot_login_key"),),
+                        ).fetchone()
+                        if reset_row and reset_row["security_answer"] == hash_login_password(recovery_answer):
+                            conn.execute(
+                                "UPDATE users SET password_hash = ? WHERE login_key = ?",
+                                (hash_login_password(new_password), st.session_state.get("forgot_login_key")),
+                            )
+                            conn.commit()
+                            log_audit_action(
+                                conn,
+                                reset_row["company_key"],
+                                "Recovery",
+                                "Password reset",
+                                "Authentication",
+                                branch_id=st.session_state.get("active_branch_id"),
+                            )
+                            st.success("Password has been reset successfully. Please login with your new password.")
+                            st.session_state.pop("forgot_login_key", None)
+                            st.session_state.pop("forgot_security_question", None)
+                            st.session_state.pop("forgot_company_key", None)
+                        else:
+                            st.error("Security answer does not match our records.")
+                        conn.close()
+                    except Exception as e:
+                        st.error("Unable to reset password at this time.")
+                        logger.error(f"Password reset error: {e}")
 
     with t3:
         show_onboarding_payment()
@@ -1384,6 +1436,10 @@ def run_startup_db_patch():
                 cursor.execute("ALTER TABLE companies ADD COLUMN subscription_expiry TEXT")
             if "deployment_status" not in company_columns:
                 cursor.execute("ALTER TABLE companies ADD COLUMN deployment_status TEXT DEFAULT 'Pending'")
+            if "number_of_branches" not in company_columns:
+                cursor.execute("ALTER TABLE companies ADD COLUMN number_of_branches INTEGER DEFAULT 1")
+            if "branch_price_per_month" not in company_columns:
+                cursor.execute("ALTER TABLE companies ADD COLUMN branch_price_per_month REAL DEFAULT 0.0")
             if "contact_email" not in company_columns:
                 cursor.execute("ALTER TABLE companies ADD COLUMN contact_email TEXT")
             cursor.execute(
@@ -1607,13 +1663,13 @@ def _render_primary_page(user):
     elif st.session_state.page == "Asset Register":
         show_fixed_assets(user["key"], user["role"])
     elif st.session_state.page == "Data Analytics":
-        show_reports(user["key"])
+        show_reports(user["key"], st.session_state.get("active_branch_id"))
     elif st.session_state.page == "Financial Reports":
         show_financial_reports(user["key"], user["role"])
     elif st.session_state.page == "Gatekeeper Admin":
         show_ai_assistant(user["key"])
     elif st.session_state.page == "System Audit Trail":
-        show_audit_trail(user["key"])
+        show_audit_trail(user["key"], user["role"], st.session_state.get("active_branch_id"))
     elif st.session_state.page == "System Configuration":
         show_company_setup(user["key"], user["name"], user["role"])
     else:
@@ -1728,6 +1784,8 @@ else:
                 with st.form("manual_deploy"):
                     company_name = st.text_input("Company Name")
                     plan_type = st.selectbox("Plan Type", ["Basic", "Premium", "Enterprise"])
+                    number_of_branches = st.number_input("Number of Branches", min_value=1, value=1, step=1)
+                    price_per_branch = st.number_input("Price per Branch (GHS)", min_value=0.0, value=0.0, step=10.0)
                     duration_months = st.number_input("Duration (Months)", min_value=1, max_value=24, value=12)
                     key_col, button_col = st.columns([3, 1])
                     with key_col:
@@ -1753,9 +1811,17 @@ else:
                             try:
                                 conn.execute(
                                     """INSERT INTO companies
-                                       (key, name, subscription_expiry, status, deployment_status)
-                                       VALUES (?, ?, ?, ?, ?)""",
-                                    (manual_key, company_name, new_expiry.isoformat(), "Active", "Live"),
+                                       (key, name, subscription_expiry, status, deployment_status, number_of_branches, branch_price_per_month)
+                                       VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                                    (
+                                        manual_key,
+                                        company_name,
+                                        new_expiry.isoformat(),
+                                        "Active",
+                                        "Live",
+                                        int(number_of_branches),
+                                        float(price_per_branch),
+                                    ),
                                 )
                                 conn.commit()
                                 st.success(f"License deployed for {company_name} until {new_expiry.date()}")
@@ -2068,7 +2134,7 @@ else:
         elif choice == "Sales/Purchase":
             show_sales_purchase("DEMO", "Demo", "Sales")
         elif choice == "📊 Data Analytics":
-            show_reports("DEMO")
+            show_reports("DEMO", None)
         elif choice == "Banking":
             show_banking("DEMO", "Demo")
         elif choice == "Taxation":
@@ -2176,9 +2242,9 @@ else:
         elif choice == "Taxation (VAT/NHIL)": show_taxation(u['key'])
         elif choice == "💳 Payroll & Salaries": show_payroll(u['key'], u['role'])
         elif choice == "🏛️ Asset Register": show_fixed_assets(u['key'], u['role'])
-        elif choice == "📊 Data Analytics": show_reports(u['key'])
+        elif choice == "📊 Data Analytics": show_reports(u['key'], None)
         elif choice == "🤖 Gatekeeper Admin": show_ai_assistant(u['key'])
-        elif choice == "System Audit Trail": show_audit_trail(u['key'])
+        elif choice == "System Audit Trail": show_audit_trail(u['key'], u['role'], None)
 
     st.sidebar.markdown("---")
     if st.sidebar.button("🔴 Secure Logout", width='stretch', key="v3_final_logout"):

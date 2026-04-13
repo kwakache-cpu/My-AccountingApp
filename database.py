@@ -368,10 +368,15 @@ def ensure_schema_integrity(conn):
             credit REAL DEFAULT 0,
             reference TEXT,
             created_by TEXT,
+            branch_id TEXT,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
         """
     )
+    cursor.execute("PRAGMA table_info(transactions)")
+    transaction_columns = {row[1] for row in cursor.fetchall()}
+    if "branch_id" not in transaction_columns:
+        cursor.execute("ALTER TABLE transactions ADD COLUMN branch_id TEXT")
     cursor.execute(
         """
         CREATE TABLE IF NOT EXISTS system_settings (
@@ -468,6 +473,8 @@ def init_db():
                 status TEXT DEFAULT 'Active',
                 deployment_status TEXT DEFAULT 'Pending',
                 plan_type TEXT DEFAULT 'Basic',
+                number_of_branches INTEGER DEFAULT 1,
+                branch_price_per_month REAL DEFAULT 0.0,
                 contact_email TEXT,
                 phone_number TEXT,
                 physical_address TEXT,
@@ -505,6 +512,18 @@ def init_db():
                 FOREIGN KEY (company_key) REFERENCES companies (key) ON DELETE CASCADE
             )
         """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS branches (
+                branch_id TEXT PRIMARY KEY,
+                company_key TEXT NOT NULL,
+                branch_name TEXT NOT NULL,
+                location TEXT,
+                branch_type TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (company_key) REFERENCES companies (key) ON DELETE CASCADE
+            )
+        """)
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_branches_company ON branches(company_key)")
         cursor.execute("PRAGMA table_info(inventory)")
         inventory_columns = {row[1] for row in cursor.fetchall()}
         inventory_column_defs = {
@@ -702,6 +721,7 @@ def init_db():
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 company_key TEXT,
+                branch_id TEXT,
                 user_role TEXT,
                 action TEXT NOT NULL,
                 module_name TEXT,
@@ -712,6 +732,7 @@ def init_db():
         cursor.execute("PRAGMA table_info(audit_logs)")
         audit_columns = {row[1] for row in cursor.fetchall()}
         audit_column_defs = {
+            "branch_id": "TEXT",
             "details": "TEXT",
             "ip_address": "TEXT",
         }
@@ -780,8 +801,11 @@ def init_db():
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 company_key TEXT NOT NULL,
                 full_name TEXT NOT NULL,
+                user_id TEXT,
                 login_key TEXT NOT NULL UNIQUE,
                 password_hash TEXT,
+                security_question TEXT,
+                security_answer TEXT,
                 role TEXT NOT NULL,
                 status TEXT DEFAULT 'Active',
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -796,6 +820,8 @@ def init_db():
             "user_id": "TEXT",
             "login_key": "TEXT",
             "password_hash": "TEXT",
+            "security_question": "TEXT",
+            "security_answer": "TEXT",
             "role": "TEXT",
             "status": "TEXT DEFAULT 'Active'",
             "created_at": "TIMESTAMP DEFAULT CURRENT_TIMESTAMP",

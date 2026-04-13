@@ -41,9 +41,25 @@ from database import (
 )
 
 
-def log_audit_action(conn, company_key, user_role, action, module_name, details=None):
+def log_audit_action(conn, company_key, user_role, action, module_name, details=None, branch_id=None):
     """Proxy audit logging so app.py can import the shared action from this module."""
-    return database_log_audit_action(conn, company_key, user_role, action, module_name, details)
+    return database_log_audit_action(conn, company_key, user_role, action, module_name, details, branch_id)
+
+
+def _hash_security_answer(answer):
+    return hashlib.sha256(str(answer or "").strip().lower().encode("utf-8")).hexdigest()
+
+
+def get_company_branches(company_key):
+    conn = get_connection()
+    try:
+        rows = conn.execute(
+            "SELECT branch_id, branch_name, location, branch_type FROM branches WHERE company_key = ? ORDER BY branch_name",
+            (company_key,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+    finally:
+        conn.close()
 
 
 # ==========================================
@@ -668,7 +684,7 @@ def _get_or_create_account(conn, account_name, category, parent_name=None):
     return int(cursor.lastrowid)
 
 
-def post_transaction(description, lines, company_key=None, reference=None, created_by=None, entry_date=None, conn=None):
+def post_transaction(description, lines, company_key=None, reference=None, created_by=None, entry_date=None, branch_id=None, conn=None):
     if not lines:
         raise ValueError("Transaction lines are required.")
 
@@ -715,10 +731,10 @@ def post_transaction(description, lines, company_key=None, reference=None, creat
     try:
         cursor = conn.execute(
             """
-            INSERT INTO journal_entries (company_key, date, description, reference, created_by)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO journal_entries (company_key, date, description, reference, created_by, branch_id)
+            VALUES (?, ?, ?, ?, ?, ?)
             """,
-            (company_key, entry_date_iso, description, reference, created_by),
+            (company_key, entry_date_iso, description, reference, created_by, branch_id),
         )
         entry_id = int(cursor.lastrowid)
         for line in normalized_lines:
@@ -732,8 +748,8 @@ def post_transaction(description, lines, company_key=None, reference=None, creat
             )
             conn.execute(
                 """
-                INSERT INTO transactions (company_key, transaction_date, account, description, debit, credit, reference, created_by)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO transactions (company_key, transaction_date, account, description, debit, credit, reference, created_by, branch_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     company_key,
@@ -744,6 +760,7 @@ def post_transaction(description, lines, company_key=None, reference=None, creat
                     line["credit"],
                     reference,
                     created_by,
+                    branch_id,
                 ),
             )
         if owns_connection:
@@ -785,7 +802,7 @@ def create_journal_entry(description, lines, company_key=None, reference=None, e
     )
 
 
-def save_transaction(description, lines, company_key=None, reference=None, created_by=None, entry_date=None, conn=None):
+def save_transaction(description, lines, company_key=None, reference=None, created_by=None, entry_date=None, branch_id=None, conn=None):
     return post_transaction(
         description,
         lines,
@@ -793,12 +810,31 @@ def save_transaction(description, lines, company_key=None, reference=None, creat
         reference=reference,
         created_by=created_by or st.session_state.get("user", {}).get("role", "System"),
         entry_date=entry_date,
+        branch_id=branch_id,
         conn=conn,
     )
 
 
 def show_journal_entries(company_key, role):
     st.header("🧾 General Journal")
+
+    branch_id = st.session_state.get("active_branch_id")
+    branches = get_company_branches(company_key)
+    if branches:
+        branch_options = [("All Branches", None)] + [
+            (f"{branch['branch_name']} ({branch['branch_type']})", branch['branch_id'])
+            for branch in branches
+        ]
+        branch_labels = [label for label, _ in branch_options]
+        selected_label = next((label for label, bid in branch_options if bid == branch_id), branch_labels[0])
+        selected_index = branch_labels.index(selected_label)
+        chosen_label = st.selectbox("Select Branch", branch_labels, index=selected_index, key=f"journal_branch_selector_{company_key}")
+        branch_id = branch_options[branch_labels.index(chosen_label)][1]
+        st.session_state.active_branch_id = branch_id
+        if branch_id:
+            st.info(f"Filtered to branch: {chosen_label}")
+        else:
+            st.info("Showing consolidated entries across all branches.")
 
     account_options = []
     chart_conn = None
@@ -826,8 +862,7 @@ def show_journal_entries(company_key, role):
     conn = None
     try:
         conn = get_connection()
-        transactions_df = pd.read_sql_query(
-            """
+        query = """
             SELECT transaction_date AS "Transaction Date",
                    account AS "Account",
                    description AS "Description",
@@ -838,11 +873,13 @@ def show_journal_entries(company_key, role):
                    created_at AS "Created At"
             FROM transactions
             WHERE company_key = ?
-            ORDER BY transaction_date DESC, id DESC
-            """,
-            conn,
-            params=(company_key,),
-        )
+        """
+        params = [company_key]
+        if branch_id:
+            query += "\n            AND branch_id = ?"
+            params.append(branch_id)
+        query += "\n            ORDER BY transaction_date DESC, id DESC"
+        transactions_df = pd.read_sql_query(query, conn, params=params)
     except Exception:
         transactions_df = pd.DataFrame(
             columns=[
@@ -893,6 +930,17 @@ def show_journal_entries(company_key, role):
                 "Description",
                 key=f"journal_entry_description_{company_key}"
             )
+            branch_for_entry = branch_id
+            if branches:
+                branch_names = ["All Branches"] + [b["branch_name"] for b in branches]
+                branch_choice = st.selectbox(
+                    "Branch",
+                    branch_names,
+                    index=0 if branch_id is None else next((i + 1 for i, b in enumerate(branches) if b["branch_id"] == branch_id), 0),
+                    key=f"journal_entry_branch_{company_key}",
+                )
+                if branch_choice != "All Branches":
+                    branch_for_entry = next((b["branch_id"] for b in branches if b["branch_name"] == branch_choice), branch_id)
             debit_col, credit_col = st.columns(2)
             with debit_col:
                 debit = st.number_input(
@@ -944,10 +992,11 @@ def show_journal_entries(company_key, role):
                             reference=reference,
                             created_by=role,
                             entry_date=entry_date,
+                            branch_id=branch_for_entry,
                             conn=conn,
                         )
                         conn.commit()
-                        log_audit_action(conn, company_key, role, "Manual Journal Entry", "Journals", f"{selected_account} saved for {format_currency(suspense_amount)}")
+                        log_audit_action(conn, company_key, role, "Manual Journal Entry", "Journals", f"{selected_account} saved for {format_currency(suspense_amount)}", branch_id=branch_for_entry)
                         conn.close()
                         st.session_state[form_key] = False
                         st.success("Manual journal entry saved.")
@@ -3926,8 +3975,10 @@ def _get_reports_data(conn, company_key):
         "ledger_rows": [dict(row) for row in (sales_rows + expense_rows + payroll_rows)],
     }
 
-def show_reports(company_key):
-    st.header("?? Data Analytics")
+def show_reports(company_key, branch_id=None):
+    st.header("📊 Data Analytics")
+    branch_id = branch_id if branch_id is not None else st.session_state.get("active_branch_id")
+    branch_clause = " AND je.branch_id = ?" if branch_id else ""
     conn = None
     try:
         conn = get_connection()
@@ -3955,12 +4006,14 @@ def show_reports(company_key):
             FROM journal_entries je
             JOIN journal_lines jl ON jl.entry_id = je.id
             JOIN chart_of_accounts c ON c.id = jl.account_id
-            WHERE je.company_key = ?
+            WHERE je.company_key = ?"""
+            + branch_clause +
+            """
             GROUP BY c.id, account_name, category
             HAVING ABS(SUM(jl.debit - jl.credit)) > 0.0001 OR ABS(SUM(jl.credit - jl.debit)) > 0.0001
             ORDER BY category, account_name
             """,
-            (company_key,),
+            (company_key,) + ((branch_id,) if branch_id else ()),
         ).fetchall()
 
         balance_sheet_rows = conn.execute(
@@ -3985,7 +4038,9 @@ def show_reports(company_key):
             FROM journal_entries je
             JOIN journal_lines jl ON jl.entry_id = je.id
             JOIN chart_of_accounts c ON c.id = jl.account_id
-            WHERE je.company_key = ?
+            WHERE je.company_key = ?"""
+            + branch_clause +
+            """
               AND CASE
                     WHEN COALESCE(c.category, c.account_type) = 'Income' THEN 'Revenue'
                     ELSE COALESCE(c.category, c.account_type)
@@ -3993,7 +4048,7 @@ def show_reports(company_key):
             GROUP BY c.id, category, account_name
             ORDER BY CASE category WHEN 'Asset' THEN 1 WHEN 'Liability' THEN 2 ELSE 3 END, account_name
             """,
-            (company_key,),
+            (company_key,) + ((branch_id,) if branch_id else ()),
         ).fetchall()
 
         pnl_rows = conn.execute(
@@ -4018,7 +4073,9 @@ def show_reports(company_key):
             FROM journal_entries je
             JOIN journal_lines jl ON jl.entry_id = je.id
             JOIN chart_of_accounts c ON c.id = jl.account_id
-            WHERE je.company_key = ?
+            WHERE je.company_key = ?"""
+            + branch_clause +
+            """
               AND CASE
                     WHEN COALESCE(c.category, c.account_type) = 'Income' THEN 'Revenue'
                     ELSE COALESCE(c.category, c.account_type)
@@ -4026,7 +4083,7 @@ def show_reports(company_key):
             GROUP BY c.id, category, account_name
             ORDER BY CASE category WHEN 'Revenue' THEN 1 ELSE 2 END, account_name
             """,
-            (company_key,),
+            (company_key,) + ((branch_id,) if branch_id else ()),
         ).fetchall()
     except Exception as e:
         st.error(f"Reports module error: {e}")
@@ -4367,23 +4424,29 @@ def show_ai_assistant(client_id):
 # ==========================================
 # SYSTEM AUDIT TRAIL
 # ==========================================
-def show_audit_trail(company_key):
+def show_audit_trail(company_key, role="User", branch_id=None):
     st.header("🔍 System Audit Trail")
     try:
         conn = get_connection()
         if company_key == "ADMIN" or company_key == "DEMO":
-            data = conn.execute(
-                "SELECT timestamp, company_key, user_role, action, module_name, details FROM audit_logs ORDER BY timestamp DESC LIMIT 100"
-            ).fetchall()
+            query = "SELECT timestamp, company_key, branch_id, user_role, action, module_name, details FROM audit_logs ORDER BY timestamp DESC LIMIT 100"
+            params = ()
+        elif role == "Master Admin":
+            if branch_id:
+                query = "SELECT timestamp, company_key, branch_id, user_role, action, module_name, details FROM audit_logs WHERE company_key = ? AND branch_id = ? ORDER BY timestamp DESC LIMIT 100"
+                params = (company_key, branch_id)
+            else:
+                query = "SELECT timestamp, company_key, branch_id, user_role, action, module_name, details FROM audit_logs WHERE company_key = ? ORDER BY timestamp DESC LIMIT 100"
+                params = (company_key,)
         else:
-            data = conn.execute(
-                "SELECT timestamp, company_key, user_role, action, module_name, details FROM audit_logs WHERE company_key = ? ORDER BY timestamp DESC LIMIT 100",
-                (company_key,),
-            ).fetchall()
+            query = "SELECT timestamp, company_key, branch_id, user_role, action, module_name, details FROM audit_logs WHERE company_key = ? ORDER BY timestamp DESC LIMIT 100"
+            params = (company_key,)
+
+        data = conn.execute(query, params).fetchall()
         conn.close()
 
         if data:
-            df = pd.DataFrame(data, columns=["Timestamp", "Company", "Role", "Action", "Module", "Details"])
+            df = pd.DataFrame(data, columns=["Timestamp", "Company", "Branch", "Role", "Action", "Module", "Details"])
             st.dataframe(format_currency_dataframe(df), use_container_width=True)
             excel_bin = get_excel_bin(df)
             if excel_bin:

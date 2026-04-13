@@ -14,7 +14,7 @@ def _resolve_date(value):
     return value.isoformat() if hasattr(value, "isoformat") else str(value)
 
 
-def _journal_df(company_key, start_date=None, end_date=None, account_name=None):
+def _journal_df(company_key, branch_id=None, start_date=None, end_date=None, account_name=None):
     conn = get_connection()
     try:
         query = """
@@ -35,6 +35,9 @@ def _journal_df(company_key, start_date=None, end_date=None, account_name=None):
             WHERE je.company_key = ?
         """
         params = [company_key]
+        if branch_id:
+            query += " AND je.branch_id = ?"
+            params.append(branch_id)
         if start_date:
             query += " AND date(je.date) >= date(?)"
             params.append(_resolve_date(start_date))
@@ -162,9 +165,9 @@ def _filter_controls(prefix):
     return start_date, end_date, account_name.strip()
 
 
-def get_general_journal(company_key, start_date=None, end_date=None, account_name=None):
+def get_general_journal(company_key, start_date=None, end_date=None, account_name=None, branch_id=None):
     try:
-        df = _journal_df(company_key, start_date, end_date, account_name)
+        df = _journal_df(company_key, branch_id=branch_id, start_date=start_date, end_date=end_date, account_name=account_name)
     except (pd.errors.DatabaseError, AttributeError, sqlite3.DatabaseError):
         return pd.DataFrame()
     if df.empty:
@@ -187,8 +190,8 @@ def get_general_journal(company_key, start_date=None, end_date=None, account_nam
     return df
 
 
-def get_sales_journal(company_key, start_date=None, end_date=None, account_name=None):
-    df = get_general_journal(company_key, start_date, end_date, account_name)
+def get_sales_journal(company_key, start_date=None, end_date=None, account_name=None, branch_id=None):
+    df = get_general_journal(company_key, start_date, end_date, account_name, branch_id=branch_id)
     if df.empty:
         return df
     return df[
@@ -197,8 +200,8 @@ def get_sales_journal(company_key, start_date=None, end_date=None, account_name=
     ].reset_index(drop=True)
 
 
-def get_purchases_journal(company_key, start_date=None, end_date=None, account_name=None):
-    df = get_general_journal(company_key, start_date, end_date, account_name)
+def get_purchases_journal(company_key, start_date=None, end_date=None, account_name=None, branch_id=None):
+    df = get_general_journal(company_key, start_date, end_date, account_name, branch_id=branch_id)
     if df.empty:
         return df
     return df[
@@ -207,8 +210,8 @@ def get_purchases_journal(company_key, start_date=None, end_date=None, account_n
     ].reset_index(drop=True)
 
 
-def get_cash_book(company_key, start_date=None, end_date=None, account_name=None):
-    df = get_general_journal(company_key, start_date, end_date, account_name)
+def get_cash_book(company_key, start_date=None, end_date=None, account_name=None, branch_id=None):
+    df = get_general_journal(company_key, start_date, end_date, account_name, branch_id=branch_id)
     if df.empty:
         return pd.DataFrame(columns=["Date", "Description", "Reference", "Account Code", "Account", "Debit (GHS)", "Credit (GHS)", "Movement (GHS)", "Running Balance (GHS)"])
     cash_df = df[df["Account"].isin(["Cash", "Bank", "Mobile Money"])].copy()
@@ -219,8 +222,8 @@ def get_cash_book(company_key, start_date=None, end_date=None, account_name=None
     return cash_df[["Date", "Description", "Reference", "Account Code", "Account", "Debit (GHS)", "Credit (GHS)", "Movement (GHS)", "Running Balance (GHS)"]]
 
 
-def get_general_ledger(company_key, start_date=None, end_date=None, account_name=None):
-    df = get_general_journal(company_key, start_date, end_date, account_name)
+def get_general_ledger(company_key, start_date=None, end_date=None, account_name=None, branch_id=None):
+    df = get_general_journal(company_key, start_date, end_date, account_name, branch_id=branch_id)
     if df.empty:
         return pd.DataFrame(columns=["Date", "Account Code", "Account", "Description", "Reference", "Debit (GHS)", "Credit (GHS)", "Running Balance (GHS)"])
     frames = []
@@ -561,14 +564,15 @@ def show_invoice_manager(company_key, role):
 
 def show_ledger_viewer(company_key, role):
     st.header("📚 Ledger Viewer")
+    branch_id = st.session_state.get("active_branch_id")
     start_date, end_date, account_name = _filter_controls(f"ledger_{company_key}")
     tabs = st.tabs(["General Journal", "Sales Journal", "Purchases Journal", "Cash Book", "General Ledger"])
     report_defs = [
-        ("General Journal", get_general_journal(company_key, start_date, end_date, account_name)),
-        ("Sales Journal", get_sales_journal(company_key, start_date, end_date, account_name)),
-        ("Purchases Journal", get_purchases_journal(company_key, start_date, end_date, account_name)),
-        ("Cash Book", get_cash_book(company_key, start_date, end_date, account_name)),
-        ("General Ledger", get_general_ledger(company_key, start_date, end_date, account_name)),
+        ("General Journal", get_general_journal(company_key, start_date, end_date, account_name, branch_id=branch_id)),
+        ("Sales Journal", get_sales_journal(company_key, start_date, end_date, account_name, branch_id=branch_id)),
+        ("Purchases Journal", get_purchases_journal(company_key, start_date, end_date, account_name, branch_id=branch_id)),
+        ("Cash Book", get_cash_book(company_key, start_date, end_date, account_name, branch_id=branch_id)),
+        ("General Ledger", get_general_ledger(company_key, start_date, end_date, account_name, branch_id=branch_id)),
     ]
     for tab, (label, df) in zip(tabs, report_defs):
         with tab:
@@ -578,14 +582,15 @@ def show_ledger_viewer(company_key, role):
 
 def show_ledger_viewer(company_key, role):
     st.header("📚 Ledger Viewer")
+    branch_id = st.session_state.get("active_branch_id")
     start_date, end_date, account_name = _filter_controls(f"ledger_override_{company_key}")
     tabs = st.tabs(["General Journal", "Sales Journal", "Purchases Journal", "Cash Book", "General Ledger"])
     report_defs = [
-        ("General Journal", get_general_journal(company_key, start_date, end_date, account_name)),
-        ("Sales Journal", get_sales_journal(company_key, start_date, end_date, account_name)),
-        ("Purchases Journal", get_purchases_journal(company_key, start_date, end_date, account_name)),
-        ("Cash Book", get_cash_book(company_key, start_date, end_date, account_name)),
-        ("General Ledger", get_general_ledger(company_key, start_date, end_date, account_name)),
+        ("General Journal", get_general_journal(company_key, start_date, end_date, account_name, branch_id=branch_id)),
+        ("Sales Journal", get_sales_journal(company_key, start_date, end_date, account_name, branch_id=branch_id)),
+        ("Purchases Journal", get_purchases_journal(company_key, start_date, end_date, account_name, branch_id=branch_id)),
+        ("Cash Book", get_cash_book(company_key, start_date, end_date, account_name, branch_id=branch_id)),
+        ("General Ledger", get_general_ledger(company_key, start_date, end_date, account_name, branch_id=branch_id)),
     ]
     for tab, (label, df) in zip(tabs, report_defs):
         with tab:
