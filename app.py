@@ -1669,6 +1669,12 @@ def _render_primary_sidebar(user, include_settings=True):
             logger.error(f"Branch selector error: {e}")
             st.session_state.active_branch_id = None
 
+    # Manage Branches for Master Admins
+    if user['role'] == 'Master Admin':
+        if st.sidebar.button("🏢 Manage Branches", key="manage_branches", use_container_width=True):
+            st.session_state.page = "Branch Management"
+            st.rerun()
+
     nav_items = PRIMARY_NAV_ITEMS if include_settings else [item for item in PRIMARY_NAV_ITEMS if item[1] != "System Configuration"]
     current_page = _ensure_valid_page()
     labels = [label for label, _key in nav_items]
@@ -1741,6 +1747,8 @@ def _render_primary_page(user):
         show_fixed_assets(user["key"], user["role"])
     elif st.session_state.page == "Data Analytics":
         show_reports(user["key"], st.session_state.get("active_branch_id"))
+    elif st.session_state.page == "Branch Management":
+        show_branch_management(user["key"], user["role"])
     elif st.session_state.page == "Financial Reports":
         show_financial_reports(user["key"], user["role"])
     elif st.session_state.page == "Gatekeeper Admin":

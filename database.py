@@ -524,6 +524,21 @@ def init_db():
             )
         """)
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_branches_company ON branches(company_key)")
+        cursor.execute("PRAGMA table_info(branches)")
+        branch_columns = {row[1] for row in cursor.fetchall()}
+        branch_column_defs = {
+            "branch_id": "TEXT",
+            "company_key": "TEXT",
+            "branch_name": "TEXT",
+            "location": "TEXT",
+            "branch_type": "TEXT",
+            "contact_number": "TEXT",
+            "branch_manager": "TEXT",
+            "created_at": "TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
+        }
+        for column_name, column_def in branch_column_defs.items():
+            if column_name not in branch_columns:
+                cursor.execute(f"ALTER TABLE branches ADD COLUMN {column_name} {column_def}")
         cursor.execute("PRAGMA table_info(inventory)")
         inventory_columns = {row[1] for row in cursor.fetchall()}
         inventory_column_defs = {

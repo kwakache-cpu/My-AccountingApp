@@ -4456,3 +4456,132 @@ def show_audit_trail(company_key, role="User", branch_id=None):
     except Exception as e:
         st.error(f"Audit trail error: {e}")
 
+
+def show_branch_management(company_key, role):
+    if role != "Master Admin":
+        st.error("Access denied. Only Master Admins can manage branches.")
+        return
+
+    from financials import get_income_statement
+
+    st.header("🏢 Branch Management")
+
+    tabs = st.tabs(["Branch List & Configuration", "Staff Assignment", "Branch Performance"])
+
+    with tabs[0]:
+        # Branch List
+        st.subheader("Current Branches")
+        conn = get_connection()
+        try:
+            branches = conn.execute("SELECT branch_id, branch_name, location, branch_type, contact_number, branch_manager, created_at FROM branches WHERE company_key = ? ORDER BY created_at DESC", (company_key,)).fetchall()
+            if branches:
+                df = pd.DataFrame(branches, columns=["Branch ID", "Branch Name", "Location", "Type", "Contact Number", "Branch Manager", "Created At"])
+                st.dataframe(df, use_container_width=True)
+            else:
+                st.info("No branches found. Add your first branch below.")
+        except Exception as e:
+            st.error(f"Error loading branches: {e}")
+        finally:
+            conn.close()
+
+        # Configuration Form
+        st.subheader("Add/Edit Branch")
+        with st.form("branch_form"):
+            branch_name = st.text_input("Branch Name", key="branch_name")
+            location = st.text_input("Location/Physical Address", key="branch_location")
+            contact_number = st.text_input("Contact Number", key="branch_contact")
+            branch_manager = st.text_input("Branch Manager Name", key="branch_manager")
+            branch_type = st.selectbox("Branch Type", ["Retail", "Warehouse", "Office", "Other"], key="branch_type")
+
+            submitted = st.form_submit_button("Save Branch")
+            if submitted:
+                if branch_name:
+                    conn = get_connection()
+                    try:
+                        branch_id = f"{company_key}-{branch_name.replace(' ', '_').lower()}"
+                        conn.execute("""
+                            INSERT OR REPLACE INTO branches (branch_id, company_key, branch_name, location, branch_type, contact_number, branch_manager)
+                            VALUES (?, ?, ?, ?, ?, ?, ?)
+                        """, (branch_id, company_key, branch_name, location or "", branch_type, contact_number or "", branch_manager or ""))
+                        conn.commit()
+                        log_audit_action(conn, company_key, "Master Admin", f"Added/Updated branch: {branch_name}", "Branch Management", branch_id=branch_id)
+                        st.success(f"Branch '{branch_name}' saved successfully.")
+                        # Sync to Firebase - TODO: implement
+                        # _sync_to_firebase(conn, company_key)
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Error saving branch: {e}")
+                    finally:
+                        conn.close()
+                else:
+                    st.error("Branch Name is required.")
+
+    with tabs[1]:
+        # Staff Assignment
+        st.subheader("Assign Staff to Branches")
+        conn = get_connection()
+        try:
+            # Get branches
+            branches = conn.execute("SELECT branch_id, branch_name FROM branches WHERE company_key = ? ORDER BY branch_name", (company_key,)).fetchall()
+            branch_options = {b[0]: b[1] for b in branches}
+            branch_options[""] = "Unassigned"
+
+            # Get users
+            users = conn.execute("SELECT id, full_name, role, branch_id FROM users WHERE company_key = ? AND role IN ('Bookkeeper', 'Staff') ORDER BY full_name", (company_key,)).fetchall()
+            for user in users:
+                user_id, full_name, user_role, current_branch = user
+                with st.expander(f"{full_name} ({user_role})"):
+                    selected_branch = st.selectbox(f"Assign {full_name} to branch", options=list(branch_options.keys()), format_func=lambda x: branch_options.get(x, "Unassigned"), index=list(branch_options.keys()).index(current_branch or ""), key=f"assign_{user_id}")
+                    if st.button(f"Update Assignment for {full_name}", key=f"update_{user_id}"):
+                        conn.execute("UPDATE users SET branch_id = ? WHERE id = ?", (selected_branch or None, user_id))
+                        conn.commit()
+                        log_audit_action(conn, company_key, "Master Admin", f"Assigned {full_name} to branch {selected_branch}", "Branch Management")
+                        st.success(f"Updated assignment for {full_name}.")
+                        st.rerun()
+        except Exception as e:
+            st.error(f"Error in staff assignment: {e}")
+        finally:
+            conn.close()
+
+    with tabs[2]:
+        # Branch Performance
+        st.subheader("Branch Performance Comparison")
+        conn = get_connection()
+        try:
+            branches = conn.execute("SELECT branch_id, branch_name FROM branches WHERE company_key = ? ORDER BY branch_name", (company_key,)).fetchall()
+            branch_options = [b[1] for b in branches]
+            if len(branches) >= 2:
+                col1, col2 = st.columns(2)
+                with col1:
+                    branch1 = st.selectbox("Select Branch 1", branch_options, key="perf_branch1")
+                with col2:
+                    branch2 = st.selectbox("Select Branch 2", branch_options, index=1 if len(branch_options) > 1 else 0, key="perf_branch2")
+
+                if branch1 and branch2 and branch1 != branch2:
+                    branch1_id = next(b[0] for b in branches if b[1] == branch1)
+                    branch2_id = next(b[0] for b in branches if b[1] == branch2)
+
+                    # Get income statements
+                    inc1 = get_income_statement(company_key, branch_id=branch1_id)
+                    inc2 = get_income_statement(company_key, branch_id=branch2_id)
+
+                    if not inc1.empty and not inc2.empty:
+                        st.subheader(f"Revenue vs Expenses: {branch1} vs {branch2}")
+                        col1, col2 = st.columns(2)
+                        with col1:
+                            st.markdown(f"**{branch1}**")
+                            st.dataframe(inc1, use_container_width=True)
+                        with col2:
+                            st.markdown(f"**{branch2}**")
+                            st.dataframe(inc2, use_container_width=True)
+                    else:
+                        st.info("No data available for selected branches.")
+                else:
+                    st.info("Select two different branches to compare.")
+            else:
+                st.info("At least two branches are required for comparison.")
+        except Exception as e:
+            st.error(f"Error in branch performance: {e}")
+        finally:
+            conn.close()
+
