@@ -913,7 +913,39 @@ def login_ui():
                         else:
                             st.error(f"Your license expired {license_status['days_left']} days ago. Please renew to access the system.")
                     
-                    # Branch Bookkeeper Check
+                    # Branch Access Key Login
+                    branch_auth = conn.execute(
+                        """
+                        SELECT b.branch_id, b.company_key, b.branch_name, b.branch_access_key, c.name
+                        FROM branches b
+                        JOIN companies c ON c.key = b.company_key
+                        WHERE b.branch_access_key = ?
+                          AND COALESCE(c.status, 'Active') = 'Active'
+                        LIMIT 1
+                        """,
+                        (access_key,),
+                    ).fetchone()
+                    if branch_auth:
+                        license_status = check_license_expiry_with_grace(branch_auth[1])
+                        if license_status['status'] != 'expired':
+                            st.session_state.auth = True
+                            st.session_state.user = {
+                                "key": branch_auth[1],
+                                "name": branch_auth[4],
+                                "role": "Branch_Bookkeeper",
+                                "branch_name": branch_auth[2],
+                                "branch_id": branch_auth[0],
+                            }
+                            st.session_state.company_id = branch_auth[1]
+                            st.session_state.active_branch_id = branch_auth[0]
+                            log_audit_action(conn, branch_auth[1], "Branch_Bookkeeper", "Successful login", "Authentication", branch_id=branch_auth[0])
+                            conn.close()
+                            st.session_state.login_attempts = 0
+                            st.rerun()
+                        else:
+                            st.error(f"Your license expired {license_status['days_left']} days ago. Please renew to access the system.")
+
+                    # Branch Bookkeeper / Staff Check
                     user_login = conn.execute(
                         """
                         SELECT u.company_key, c.name, u.role, u.full_name, u.branch_id
@@ -928,17 +960,24 @@ def login_ui():
                     if user_login:
                         license_status = check_license_expiry_with_grace(user_login[0])
                         if license_status['status'] != 'expired':
+                            role_name = user_login[2]
+                            if role_name == "Bookkeeper":
+                                role_name = "Branch_Bookkeeper"
+                            if user_login[4]:
+                                conn.execute(
+                                    "UPDATE branches SET branch_access_key = ? WHERE branch_id = ? AND COALESCE(branch_access_key, '') = ''",
+                                    (access_key, user_login[4]),
+                                )
                             st.session_state.auth = True
                             st.session_state.user = {
                                 "key": user_login[0],
                                 "name": user_login[1],
-                                "role": user_login[2],
+                                "role": role_name,
                                 "staff_name": user_login[3],
                             }
                             st.session_state.company_id = user_login[0]
-                            # Set active branch for bookkeepers
                             st.session_state.active_branch_id = user_login[4]
-                            log_audit_action(conn, user_login[0], user_login[2], "Successful login", "Authentication", branch_id=user_login[4])
+                            log_audit_action(conn, user_login[0], role_name, "Successful login", "Authentication", branch_id=user_login[4])
                             conn.close()
                             st.session_state.login_attempts = 0
                             st.rerun()
@@ -1554,7 +1593,7 @@ PRIMARY_NAV_ITEMS = [
 def _ensure_valid_page(default_page="Dashboard"):
     valid_pages = {page_key for _label, page_key in PRIMARY_NAV_ITEMS}
     current_page = st.session_state.get("page", default_page)
-    if current_page not in valid_pages:
+    if current_page not in valid_pages and current_page != 'branch_management':
         label_to_key = {label: key for label, key in PRIMARY_NAV_ITEMS}
         current_page = label_to_key.get(str(current_page), default_page)
     st.session_state.page = current_page
@@ -1598,7 +1637,7 @@ def _render_primary_sidebar(user, include_settings=True):
     # Manage Branches for Master Admins
     if user['role'] == 'Master Admin':
         if st.sidebar.button("🏢 Manage Branches", key="manage_branches", use_container_width=True):
-            st.session_state['current_page'] = 'branch_management'
+            st.session_state.page = 'branch_management'
             st.rerun()
 
     nav_items = PRIMARY_NAV_ITEMS if include_settings else [item for item in PRIMARY_NAV_ITEMS if item[1] != "System Configuration"]
@@ -1681,6 +1720,8 @@ def _render_primary_page(user):
         show_audit_trail(user["key"], user["role"], st.session_state.get("active_branch_id"))
     elif st.session_state.page == "System Configuration":
         show_company_setup(user["key"], user["name"], user["role"])
+    elif st.session_state.page == "branch_management":
+        show_branch_management(user["key"], user["role"])
     else:
         st.session_state.page = "Dashboard"
         st.rerun()
@@ -2220,6 +2261,8 @@ else:
             menu.insert(2, "🏢 Manage Branches")
         
         menu = [repair_ui_label(item) for item in menu]
+        if u['role'] in ("Bookkeeper", "Branch_Bookkeeper"):
+            menu = [item for item in menu if item not in ("System Audit Trail", "🤖 Gatekeeper Admin")]
         current_page = normalize_page_label(st.session_state.get("page")) or "🏠 Dashboard"
         current_page = repair_ui_label(current_page)
         selected_index = menu.index(current_page) if current_page in menu else 0
@@ -2262,9 +2305,9 @@ else:
         elif choice == "Taxation (VAT/NHIL)": show_taxation(u['key'])
         elif choice == "💳 Payroll & Salaries": show_payroll(u['key'], u['role'])
         elif choice == "🏛️ Asset Register": show_fixed_assets(u['key'], u['role'])
-        elif choice == "📊 Data Analytics": show_reports(u['key'], None)
+        elif choice == "📊 Data Analytics": show_reports(u['key'], st.session_state.get("active_branch_id"))
         elif choice == "🤖 Gatekeeper Admin": show_ai_assistant(u['key'])
-        elif choice == "System Audit Trail": show_audit_trail(u['key'], u['role'], None)
+        elif choice == "System Audit Trail": show_audit_trail(u['key'], u['role'], st.session_state.get("active_branch_id"))
 
     st.sidebar.markdown("---")
     if st.sidebar.button("🔴 Secure Logout", width='stretch', key="v3_final_logout"):

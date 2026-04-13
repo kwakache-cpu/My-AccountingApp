@@ -83,10 +83,17 @@ def ensure_schema_integrity(conn):
         "vouchers": {"status": "TEXT DEFAULT 'Active'"},
         "payroll": {"status": "TEXT DEFAULT 'Active'"},
         "inventory": {"opening_balance": "REAL DEFAULT 0", "barcode": "TEXT"},
+        "branches": {"contact_number": "TEXT", "branch_manager": "TEXT", "branch_access_key": "TEXT"},
         "fixed_assets": {"opening_book_value": "REAL DEFAULT 0"},
     }
 
     for table_name, columns in critical_columns.items():
+        cursor.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name = ?",
+            (table_name,),
+        )
+        if not cursor.fetchone():
+            continue
         cursor.execute(f"PRAGMA table_info({table_name})")
         existing_columns = {row[1] for row in cursor.fetchall()}
         for column_name, column_def in columns.items():
@@ -528,6 +535,9 @@ def init_db():
                 branch_name TEXT NOT NULL,
                 location TEXT,
                 branch_type TEXT,
+                branch_access_key TEXT UNIQUE,
+                contact_number TEXT,
+                branch_manager TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (company_key) REFERENCES companies (key) ON DELETE CASCADE
             )
@@ -541,6 +551,7 @@ def init_db():
             "branch_name": "TEXT",
             "location": "TEXT",
             "branch_type": "TEXT",
+            "branch_access_key": "TEXT",
             "contact_number": "TEXT",
             "branch_manager": "TEXT",
             "created_at": "TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
@@ -548,6 +559,7 @@ def init_db():
         for column_name, column_def in branch_column_defs.items():
             if column_name not in branch_columns:
                 cursor.execute(f"ALTER TABLE branches ADD COLUMN {column_name} {column_def}")
+        cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_branches_access_key ON branches(branch_access_key)")
         cursor.execute("PRAGMA table_info(inventory)")
         inventory_columns = {row[1] for row in cursor.fetchall()}
         inventory_column_defs = {

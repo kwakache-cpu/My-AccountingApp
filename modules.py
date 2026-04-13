@@ -3,6 +3,7 @@ import json
 import logging
 import os
 import random
+import string
 import hashlib
 import sqlite3
 import base64
@@ -826,15 +827,21 @@ def show_journal_entries(company_key, role):
             for branch in branches
         ]
         branch_labels = [label for label, _ in branch_options]
-        selected_label = next((label for label, bid in branch_options if bid == branch_id), branch_labels[0])
-        selected_index = branch_labels.index(selected_label)
-        chosen_label = st.selectbox("Select Branch", branch_labels, index=selected_index, key=f"journal_branch_selector_{company_key}")
-        branch_id = branch_options[branch_labels.index(chosen_label)][1]
-        st.session_state.active_branch_id = branch_id
-        if branch_id:
-            st.info(f"Filtered to branch: {chosen_label}")
+        if role == "Branch_Bookkeeper":
+            branch_id = st.session_state.get("active_branch_id")
+            selected_label = next((label for label, bid in branch_options if bid == branch_id), branch_labels[1] if len(branch_labels) > 1 else branch_labels[0])
+            st.markdown(f"**Branch-restricted view:** {selected_label}")
+            st.session_state.active_branch_id = branch_id
         else:
-            st.info("Showing consolidated entries across all branches.")
+            selected_label = next((label for label, bid in branch_options if bid == branch_id), branch_labels[0])
+            selected_index = branch_labels.index(selected_label)
+            chosen_label = st.selectbox("Select Branch", branch_labels, index=selected_index, key=f"journal_branch_selector_{company_key}")
+            branch_id = branch_options[branch_labels.index(chosen_label)][1]
+            st.session_state.active_branch_id = branch_id
+            if branch_id:
+                st.info(f"Filtered to branch: {chosen_label}")
+            else:
+                st.info("Showing consolidated entries across all branches.")
 
     account_options = []
     chart_conn = None
@@ -2190,7 +2197,7 @@ def show_inventory(company_key, role):
                 col1.metric("Total Items", len(df))
                 col2.metric(f"Total Value ({get_currency_symbol()})", format_currency(df["total_value"].sum()))
                 col3.metric("Low Stock Alerts", len(df[df['quantity'] < 10]))
-                if role in ("Master Admin", "Bookkeeper", "Sub-Admin") and "id" in df.columns:
+                if role in ("Master Admin", "Bookkeeper", "Branch_Bookkeeper", "Sub-Admin") and "id" in df.columns:
                     st.markdown("Edit Stock Item")
                     selected_edit_key = f"inventory_edit_selected_{company_key}"
                     delete_confirm_key = f"inventory_delete_confirm_{company_key}"
@@ -2385,7 +2392,7 @@ def show_vouchers(company_key, role):
         conn.close()
         if not df.empty:
             st.dataframe(format_currency_dataframe(df), use_container_width=True)
-            if role in ("Master Admin", "Bookkeeper", "Sub-Admin") and "ID" in df.columns:
+            if role in ("Master Admin", "Bookkeeper", "Branch_Bookkeeper", "Sub-Admin") and "ID" in df.columns:
                 expense_rows = df[df["Type"] == "Expense"]
                 if not expense_rows.empty:
                     selected_expense_key = f"expense_edit_selected_{company_key}"
@@ -2549,6 +2556,97 @@ def show_company_setup(company_key, company_name, role):
                             st.rerun()
 
             if role == "Master Admin":
+                st.markdown("---")
+                st.subheader("Branch Deployment")
+                try:
+                    conn = get_connection()
+                    branch_count = conn.execute("SELECT COUNT(*) FROM branches WHERE company_key = ?", (company_key,)).fetchone()[0] or 0
+                    max_branches_row = conn.execute("SELECT COALESCE(max_branches, 1) FROM companies WHERE key = ?", (company_key,)).fetchone()
+                    max_branches = int(max_branches_row[0]) if max_branches_row and max_branches_row[0] is not None else 1
+                    branches = conn.execute(
+                        "SELECT branch_id, branch_name, location, branch_access_key, branch_manager, created_at FROM branches WHERE company_key = ? ORDER BY created_at DESC",
+                        (company_key,),
+                    ).fetchall()
+                    conn.close()
+                except Exception as exc:
+                    st.error(f"Could not load branch deployment details: {exc}")
+                    branches = []
+                    branch_count = 0
+                    max_branches = 1
+
+                if branches:
+                    branch_df = pd.DataFrame(branches, columns=["Branch ID", "Branch Name", "Location", "Access Key", "Manager", "Created At"])
+                    st.dataframe(branch_df, use_container_width=True)
+
+                st.info(f"Current Branches: {branch_count} / {max_branches}")
+                if branch_count >= max_branches:
+                    st.warning("You have reached the maximum branch deployment limit. Contact your developer or system administrator to increase your limit.")
+                else:
+                    with st.form("branch_deployment_form"):
+                        branch_name = st.text_input("Branch Name", key="deploy_branch_name")
+                        location = st.text_input("Location / Physical Address", key="deploy_branch_location")
+                        branch_manager = st.text_input("Branch Manager Name", key="deploy_branch_manager")
+                        branch_type = st.selectbox("Branch Type", ["Retail", "Warehouse", "Office", "Other"], key="deploy_branch_type")
+                        if st.form_submit_button("Deploy Branch"):
+                            if not branch_name.strip():
+                                st.error("Enter a branch name.")
+                            else:
+                                conn = get_connection()
+                                try:
+                                    branch_id = f"{company_key}-{branch_name.replace(' ', '_').lower()}"
+                                    existing_branch = conn.execute("SELECT branch_access_key FROM branches WHERE branch_id = ?", (branch_id,)).fetchone()
+                                    if existing_branch and existing_branch[0]:
+                                        branch_access_key = existing_branch[0]
+                                    else:
+                                        branch_access_key = f"{branch_id}-{''.join(random.choices(string.ascii_uppercase + string.digits, k=12))}"
+                                    conn.execute(
+                                        """
+                                        INSERT OR REPLACE INTO branches
+                                        (branch_id, company_key, branch_name, location, branch_type, branch_access_key, branch_manager)
+                                        VALUES (?, ?, ?, ?, ?, ?, ?)
+                                        """,
+                                        (
+                                            branch_id,
+                                            company_key,
+                                            branch_name,
+                                            location or "",
+                                            branch_type,
+                                            branch_access_key,
+                                            branch_manager or "Branch Manager",
+                                        ),
+                                    )
+                                    hashed_password = _hash_security_answer("default123")
+                                    conn.execute(
+                                        """
+                                        INSERT OR IGNORE INTO users
+                                        (company_key, branch_id, full_name, login_key, password_hash, role, status)
+                                        VALUES (?, ?, ?, ?, ?, ?, 'Active')
+                                        """,
+                                        (
+                                            company_key,
+                                            branch_id,
+                                            branch_manager or "Branch Manager",
+                                            branch_access_key,
+                                            hashed_password,
+                                            "Branch_Bookkeeper",
+                                        ),
+                                    )
+                                    conn.commit()
+                                    log_audit_action(
+                                        conn,
+                                        company_key,
+                                        role,
+                                        f"Deployed branch {branch_name}",
+                                        "Branch Deployment",
+                                        branch_id=branch_id,
+                                    )
+                                    st.success(f"Branch {branch_name} deployed successfully. Access Key: {branch_access_key}")
+                                    st.rerun()
+                                except Exception as exc:
+                                    st.error(f"Could not deploy branch: {exc}")
+                                finally:
+                                    conn.close()
+
                 st.markdown("---")
                 st.subheader("Staff Management")
                 with st.form("company_setup_staff_form"):
@@ -2930,7 +3028,7 @@ def show_pos(company_key, company_name, role):
         if sales_rows:
             sales_df = pd.DataFrame(sales_rows, columns=["ID", "Date", "Narration", "Amount", "Status"])
             st.dataframe(format_currency_dataframe(sales_df), use_container_width=True)
-            if role in ("Master Admin", "Bookkeeper", "Sub-Admin"):
+            if role in ("Master Admin", "Bookkeeper", "Branch_Bookkeeper", "Sub-Admin"):
                 pos_void_confirm_key = f"pos_void_confirm_{company_key}"
                 for _, sale_row in sales_df.iterrows():
                     info_col, action_col = st.columns([4, 1])
@@ -3480,7 +3578,7 @@ def show_fixed_assets(company_key, role):
             col1.metric("Total Assets", len(df))
             col2.metric(f"Total Cost ({get_currency_symbol()})", format_currency(total_cost))
             col3.metric(f"Total Book Value ({get_currency_symbol()})", format_currency(total_book))
-            if role in ("Master Admin", "Bookkeeper", "Sub-Admin"):
+            if role in ("Master Admin", "Bookkeeper", "Branch_Bookkeeper", "Sub-Admin"):
                 selected_asset_key = f"asset_edit_selected_{company_key}"
                 delete_asset_key = f"asset_delete_selected_{company_key}"
                 for _, asset_row in df.iterrows():
@@ -3690,7 +3788,7 @@ def show_fixed_assets(company_key, role):
         col2.metric("Total Cost", format_currency(df["Cost (GHS)"].sum()))
         col3.metric("Total Book Value", format_currency(df["Current Value"].sum()))
 
-        if role in ("Master Admin", "Bookkeeper", "Sub-Admin"):
+        if role in ("Master Admin", "Bookkeeper", "Branch_Bookkeeper", "Sub-Admin"):
             selected_asset_key = f"asset_edit_selected_{company_key}"
             delete_asset_key = f"asset_delete_selected_{company_key}"
             for _, asset_row in df.iterrows():
@@ -4426,6 +4524,9 @@ def show_ai_assistant(client_id):
 # ==========================================
 def show_audit_trail(company_key, role="User", branch_id=None):
     st.header("🔍 System Audit Trail")
+    if role == "Branch_Bookkeeper":
+        st.error("Access denied. Branch Bookkeepers cannot view the audit trail.")
+        return
     try:
         conn = get_connection()
         if company_key == "ADMIN" or company_key == "DEMO":
@@ -4473,9 +4574,9 @@ def show_branch_management(company_key, role):
         st.subheader("Current Branches")
         conn = get_connection()
         try:
-            branches = conn.execute("SELECT branch_id, branch_name, location, branch_type, contact_number, branch_manager, created_at FROM branches WHERE company_key = ? ORDER BY created_at DESC", (company_key,)).fetchall()
+            branches = conn.execute("SELECT branch_id, branch_name, location, branch_type, branch_access_key, contact_number, branch_manager, created_at FROM branches WHERE company_key = ? ORDER BY created_at DESC", (company_key,)).fetchall()
             if branches:
-                df = pd.DataFrame(branches, columns=["Branch ID", "Branch Name", "Location", "Type", "Contact Number", "Branch Manager", "Created At"])
+                df = pd.DataFrame(branches, columns=["Branch ID", "Branch Name", "Location", "Type", "Access Key", "Contact Number", "Branch Manager", "Created At"])
                 st.dataframe(df, use_container_width=True)
             else:
                 st.info("No branches found. Add your first branch below.")
@@ -4516,20 +4617,24 @@ def show_branch_management(company_key, role):
                         conn = get_connection()
                         try:
                             branch_id = f"{company_key}-{branch_name.replace(' ', '_').lower()}"
+                            existing_branch = conn.execute("SELECT branch_access_key FROM branches WHERE branch_id = ?", (branch_id,)).fetchone()
+                            if existing_branch and existing_branch[0]:
+                                branch_access_key = existing_branch[0]
+                            else:
+                                branch_access_key = f"{branch_id}-{''.join(random.choices(string.ascii_uppercase + string.digits, k=12))}"
                             conn.execute("""
-                                INSERT OR REPLACE INTO branches (branch_id, company_key, branch_name, location, branch_type, contact_number, branch_manager)
-                                VALUES (?, ?, ?, ?, ?, ?, ?)
-                            """, (branch_id, company_key, branch_name, location or "", branch_type, contact_number or "", branch_manager or ""))
-                            # Generate Branch Bookkeeper Key
-                            bookkeeper_key = f"{branch_id}-bookkeeper"
+                                INSERT OR REPLACE INTO branches (branch_id, company_key, branch_name, location, branch_type, branch_access_key, contact_number, branch_manager)
+                                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                            """, (branch_id, company_key, branch_name, location or "", branch_type, branch_access_key, contact_number or "", branch_manager or ""))
+                            # Generate Branch Bookkeeper User
                             hashed_password = _hash_security_answer("default123")  # Default password
                             conn.execute("""
-                                INSERT INTO users (company_key, branch_id, full_name, login_key, password_hash, role, status)
-                                VALUES (?, ?, ?, ?, ?, 'Bookkeeper', 'Active')
-                            """, (company_key, branch_id, branch_manager or "Branch Manager", bookkeeper_key, hashed_password))
+                                INSERT OR IGNORE INTO users (company_key, branch_id, full_name, login_key, password_hash, role, status)
+                                VALUES (?, ?, ?, ?, ?, ?, 'Active')
+                            """, (company_key, branch_id, branch_manager or "Branch Manager", branch_access_key, hashed_password, 'Branch_Bookkeeper'))
                             conn.commit()
-                            log_audit_action(conn, company_key, "Master Admin", f"Added branch: {branch_name} with bookkeeper key: {bookkeeper_key}", "Branch Management", branch_id=branch_id)
-                            st.success(f"Branch '{branch_name}' saved successfully. Bookkeeper Key: {bookkeeper_key}")
+                            log_audit_action(conn, company_key, "Master Admin", f"Added branch: {branch_name} with access key: {branch_access_key}", "Branch Management", branch_id=branch_id)
+                            st.success(f"Branch '{branch_name}' saved successfully. Access Key: {branch_access_key}")
                             # Sync to Firebase - TODO: implement
                             # _sync_to_firebase(conn, company_key)
                             st.rerun()
@@ -4592,14 +4697,68 @@ def show_branch_management(company_key, role):
                     inc2 = get_income_statement(company_key, branch_id=branch2_id)
 
                     if not inc1.empty and not inc2.empty:
+                        def _branch_metrics(df):
+                            revenue = float(df.loc[df["Category"] == "Revenue", "Amount (GHS)"].sum()) if not df.empty else 0.0
+                            expense = float(df.loc[df["Category"] == "Operating Expenses", "Amount (GHS)"].sum()) if not df.empty else 0.0
+                            profit = float(df.loc[df["Account"] == "Net Profit", "Amount (GHS)"].sum()) if not df.empty else 0.0
+                            return revenue, expense, profit
+
+                        revenue1, expense1, profit1 = _branch_metrics(inc1)
+                        revenue2, expense2, profit2 = _branch_metrics(inc2)
+
+                        ar1 = conn.execute(
+                            "SELECT COALESCE(SUM(debit - credit), 0) FROM transactions WHERE company_key = ? AND branch_id = ? AND lower(account) LIKE 'accounts receivable%'",
+                            (company_key, branch1_id),
+                        ).fetchone()[0] or 0.0
+                        ar2 = conn.execute(
+                            "SELECT COALESCE(SUM(debit - credit), 0) FROM transactions WHERE company_key = ? AND branch_id = ? AND lower(account) LIKE 'accounts receivable%'",
+                            (company_key, branch2_id),
+                        ).fetchone()[0] or 0.0
+                        inventory_summary = conn.execute(
+                            "SELECT COUNT(*) AS item_count, COALESCE(SUM(qty * cost_price), 0) AS inventory_value FROM inventory WHERE company_key = ?",
+                            (company_key,),
+                        ).fetchone()
+                        inventory_items = int(inventory_summary[0] or 0)
+                        inventory_value = float(inventory_summary[1] or 0.0)
+
                         st.subheader(f"Revenue vs Expenses: {branch1} vs {branch2}")
-                        col1, col2 = st.columns(2)
-                        with col1:
-                            st.markdown(f"**{branch1}**")
-                            st.dataframe(inc1, use_container_width=True)
-                        with col2:
-                            st.markdown(f"**{branch2}**")
-                            st.dataframe(inc2, use_container_width=True)
+                        chart_df = pd.DataFrame(
+                            {
+                                "Revenue": [revenue1, revenue2],
+                                "Expenses": [expense1, expense2],
+                            },
+                            index=[branch1, branch2],
+                        )
+                        st.bar_chart(chart_df)
+
+                        st.markdown("### Branch Comparison Summary")
+                        summary_df = pd.DataFrame(
+                            [
+                                {
+                                    "Branch": branch1,
+                                    "Revenue": revenue1,
+                                    "Expenses": expense1,
+                                    "Net Profit": profit1,
+                                    "Accounts Receivable": ar1,
+                                },
+                                {
+                                    "Branch": branch2,
+                                    "Revenue": revenue2,
+                                    "Expenses": expense2,
+                                    "Net Profit": profit2,
+                                    "Accounts Receivable": ar2,
+                                },
+                            ]
+                        )
+                        st.dataframe(format_currency_dataframe(summary_df), use_container_width=True)
+
+                        st.markdown("### Consolidated Inventory & A/R Summary")
+                        col1, col2, col3, col4 = st.columns(4)
+                        col1.metric("Inventory Items", f"{inventory_items:,}")
+                        col2.metric("Inventory Value", format_currency(inventory_value))
+                        col3.metric(f"A/R ({branch1})", format_currency(ar1))
+                        col4.metric(f"A/R ({branch2})", format_currency(ar2))
+                        st.markdown("**Company-wide inventory values are consolidated. Branch-specific A/R is displayed for the selected branches.**")
                     else:
                         st.info("No data available for selected branches.")
                 else:
