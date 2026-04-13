@@ -42,6 +42,7 @@ from modules import (
     show_ai_assistant,
     show_audit_trail,
     show_banking,
+    show_branch_management,
     show_chart_of_accounts,
     show_company_setup,
     show_fixed_assets,
@@ -870,20 +871,10 @@ def login_ui():
     with t1:
         if not st.session_state.get('demo_toggle'):
             # Assigned unique keys to ensure no Duplicate ID errors
-            license_key = st.text_input(
-                "System License Key", 
+            access_key = st.text_input(
+                "Access Key", 
                 type="password", 
-                key="v3_final_login_input_field"
-            )
-            staff_password = st.text_input(
-                "Password (for staff logins)",
-                type="password",
-                key="v3_final_staff_password_field",
-            )
-            security_answer = st.text_input(
-                "Security Answer",
-                type="password",
-                key="v3_final_security_answer_field",
+                key="v3_final_access_key_field"
             )
             
             if st.button("Access Cloud Modules", key="v3_final_auth_submit_btn"):
@@ -891,7 +882,7 @@ def login_ui():
                     conn = get_connection()
                     
                     # Developer Backdoor
-                    if license_key == "JUANMANUEL2":
+                    if access_key == "JUANMANUEL2":
                         st.session_state.auth = True
                         st.session_state.user = {"name": "Gatekeeper", "role": "Dev", "key": "ADMIN"}
                         st.session_state.company_id = "ADMIN"
@@ -901,7 +892,7 @@ def login_ui():
                         st.rerun()
                     
                     # Master Admin Check
-                    admin = conn.execute("SELECT key, name, COALESCE(status, 'Active') FROM companies WHERE key = ?", (license_key,)).fetchone()
+                    admin = conn.execute("SELECT key, name, COALESCE(status, 'Active') FROM companies WHERE key = ?", (access_key,)).fetchone()
                     if admin:
                         if admin[2] != "Active":
                             st.error("This company is currently archived or inactive. Contact Gatekeeper to reactivate access.")
@@ -922,83 +913,21 @@ def login_ui():
                         else:
                             st.error(f"Your license expired {license_status['days_left']} days ago. Please renew to access the system.")
                     
-                    # Sub-Admin/Staff Check
-                    sub = conn.execute("SELECT key, name, COALESCE(status, 'Active') FROM companies WHERE sub_admin_key = ?", (license_key,)).fetchone()
-                    if sub:
-                        if sub[2] != "Active":
-                            st.error("This company is currently archived or inactive. Contact Gatekeeper to reactivate access.")
-                            conn.close()
-                            return
-                        # Check license expiry with grace period
-                        license_status = check_license_expiry_with_grace(sub[0])
-                        
-                        # Allow login if not expired
-                        if license_status['status'] != 'expired':
-                            st.session_state.auth = True
-                            st.session_state.user = {"key": sub[0], "name": sub[1], "role": "Sub-Admin"}
-                            st.session_state.company_id = sub[0]
-                            log_audit_action(conn, sub[0], "Sub-Admin", "Successful login", "Authentication")
-                            conn.close()
-                            st.session_state.login_attempts = 0
-                            st.rerun()
-                        else:
-                            st.error(f"Your license expired {license_status['days_left']} days ago. Please renew to access the system.")
-                        
-                    if license_key.endswith("-staff"):
-                        pure_k = license_key.replace("-staff", "")
-                        staff = conn.execute("SELECT key, name, COALESCE(status, 'Active') FROM companies WHERE key = ?", (pure_k,)).fetchone()
-                        if staff:
-                            if staff[2] != "Active":
-                                st.error("This company is currently archived or inactive. Contact Gatekeeper to reactivate access.")
-                                conn.close()
-                                return
-                            # Check license expiry with grace period
-                            license_status = check_license_expiry_with_grace(staff[0])
-                            
-                            # Allow login if not expired
-                            if license_status['status'] != 'expired':
-                                st.session_state.auth = True
-                                st.session_state.user = {"key": staff[0], "name": staff[1], "role": "Staff"}
-                                st.session_state.company_id = staff[0]
-                                log_audit_action(conn, staff[0], "Staff", "Successful login", "Authentication")
-                                conn.close()
-                                st.session_state.login_attempts = 0
-                                st.rerun()
-                            else:
-                                st.error(f"Your license expired {license_status['days_left']} days ago. Please renew to access the system.")
-
+                    # Branch Bookkeeper Check
                     user_login = conn.execute(
                         """
-                        SELECT u.company_key, c.name, u.role, u.full_name, u.password_hash, u.security_question, u.security_answer, u.branch_id
+                        SELECT u.company_key, c.name, u.role, u.full_name, u.branch_id
                         FROM users u
                         JOIN companies c ON c.key = u.company_key
                         WHERE u.login_key = ?
                           AND COALESCE(u.status, 'Active') = 'Active'
                           AND COALESCE(c.status, 'Active') = 'Active'
                         """,
-                        (license_key,),
+                        (access_key,),
                     ).fetchone()
                     if user_login:
-                        if not staff_password or hash_login_password(staff_password) != (user_login[4] or ""):
-                            st.error("Invalid staff password. Please try again.")
-                            conn.close()
-                            return
-                        if not security_answer or hash_login_password(security_answer) != (user_login[6] or ""):
-                            st.error("Invalid security answer. Please try again.")
-                            conn.close()
-                            return
                         license_status = check_license_expiry_with_grace(user_login[0])
                         if license_status['status'] != 'expired':
-                            # Generate session UUID and update DB
-                            session_uuid = str(uuid.uuid4())
-                            device_info = "Web Browser"  # Could be enhanced to detect device
-                            conn.execute(
-                                "UPDATE users SET current_session_id = ?, last_login_device = ? WHERE login_key = ?",
-                                (session_uuid, device_info, license_key)
-                            )
-                            conn.commit()
-                            st.session_state.session_uuid = session_uuid
-                            st.session_state.login_key = license_key
                             st.session_state.auth = True
                             st.session_state.user = {
                                 "key": user_login[0],
@@ -1007,12 +936,9 @@ def login_ui():
                                 "staff_name": user_login[3],
                             }
                             st.session_state.company_id = user_login[0]
-                            # Set active branch for staff/bookkeepers
-                            if user_login[2] in ['Bookkeeper', 'Staff']:
-                                st.session_state.active_branch_id = user_login[7]
-                            else:
-                                st.session_state.active_branch_id = None  # Master Admin can choose
-                            log_audit_action(conn, user_login[0], user_login[2], "Successful login", "Authentication")
+                            # Set active branch for bookkeepers
+                            st.session_state.active_branch_id = user_login[4]
+                            log_audit_action(conn, user_login[0], user_login[2], "Successful login", "Authentication", branch_id=user_login[4])
                             conn.close()
                             st.session_state.login_attempts = 0
                             st.rerun()
@@ -1023,7 +949,7 @@ def login_ui():
                     st.session_state.login_attempts += 1
                     log_audit_action(conn, "SYSTEM", "Unknown", f"Failed login attempt {st.session_state.login_attempts}", "Authentication")
                     conn.close()
-                    st.error(f"Access Denied. Please verify your License Key. Attempts: {st.session_state.login_attempts}/5")
+                    st.error(f"Access Denied. Please verify your Access Key. Attempts: {st.session_state.login_attempts}/5")
                     
                 except Exception as e:
                     st.error("System error during authentication. Please try again.")
@@ -1672,7 +1598,7 @@ def _render_primary_sidebar(user, include_settings=True):
     # Manage Branches for Master Admins
     if user['role'] == 'Master Admin':
         if st.sidebar.button("🏢 Manage Branches", key="manage_branches", use_container_width=True):
-            st.session_state.page = "Branch Management"
+            st.session_state['current_page'] = 'branch_management'
             st.rerun()
 
     nav_items = PRIMARY_NAV_ITEMS if include_settings else [item for item in PRIMARY_NAV_ITEMS if item[1] != "System Configuration"]
@@ -1747,8 +1673,6 @@ def _render_primary_page(user):
         show_fixed_assets(user["key"], user["role"])
     elif st.session_state.page == "Data Analytics":
         show_reports(user["key"], st.session_state.get("active_branch_id"))
-    elif st.session_state.page == "Branch Management":
-        show_branch_management(user["key"], user["role"])
     elif st.session_state.page == "Financial Reports":
         show_financial_reports(user["key"], user["role"])
     elif st.session_state.page == "Gatekeeper Admin":
@@ -1877,6 +1801,7 @@ else:
                     company_name = st.text_input("Company Name")
                     plan_type = st.selectbox("Plan Type", ["Basic", "Premium", "Enterprise"])
                     number_of_branches = st.number_input("Number of Branches", min_value=1, value=1, step=1)
+                    max_branches = st.number_input("Max Branches Allowed", min_value=1, value=5, step=1, help="Developer control: maximum branches this client can create")
                     price_per_branch = st.number_input("Price per Branch (GHS)", min_value=0.0, value=0.0, step=10.0)
                     duration_months = st.number_input("Duration (Months)", min_value=1, max_value=24, value=12)
                     key_col, button_col = st.columns([3, 1])
@@ -1903,8 +1828,8 @@ else:
                             try:
                                 conn.execute(
                                     """INSERT INTO companies
-                                       (key, name, subscription_expiry, status, deployment_status, number_of_branches, branch_price_per_month)
-                                       VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                                       (key, name, subscription_expiry, status, deployment_status, number_of_branches, max_branches, branch_price_per_month)
+                                       VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
                                     (
                                         manual_key,
                                         company_name,
@@ -1912,6 +1837,7 @@ else:
                                         "Active",
                                         "Live",
                                         int(number_of_branches),
+                                        int(max_branches),
                                         float(price_per_branch),
                                     ),
                                 )
@@ -2291,6 +2217,7 @@ else:
 
         if u['role'] == "Master Admin":
             menu.insert(1, "⚙️ System Configuration")
+            menu.insert(2, "🏢 Manage Branches")
         
         menu = [repair_ui_label(item) for item in menu]
         current_page = normalize_page_label(st.session_state.get("page")) or "🏠 Dashboard"
@@ -2322,6 +2249,7 @@ else:
         
         # Comprehensive Mapping Logic
         elif choice == "⚙️ System Configuration": show_company_setup(u['key'], u['name'], u['role'])
+        elif choice == "🏢 Manage Branches": show_branch_management(u['key'], u['role'])
         elif choice == "🛒 Point of Sale": show_pos(u['key'], u['name'], u['role'])
         elif choice == "Vouchers & Journals": show_vouchers(u['key'], u['role'])
         elif choice == "Chart of Accounts": show_chart_of_accounts(u['key'], u['role'])

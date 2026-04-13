@@ -4486,35 +4486,61 @@ def show_branch_management(company_key, role):
 
         # Configuration Form
         st.subheader("Add/Edit Branch")
-        with st.form("branch_form"):
-            branch_name = st.text_input("Branch Name", key="branch_name")
-            location = st.text_input("Location/Physical Address", key="branch_location")
-            contact_number = st.text_input("Contact Number", key="branch_contact")
-            branch_manager = st.text_input("Branch Manager Name", key="branch_manager")
-            branch_type = st.selectbox("Branch Type", ["Retail", "Warehouse", "Office", "Other"], key="branch_type")
+        conn = get_connection()
+        try:
+            current_count = conn.execute("SELECT COUNT(*) FROM branches WHERE company_key = ?", (company_key,)).fetchone()[0]
+            max_branches_row = conn.execute("SELECT max_branches FROM companies WHERE key = ?", (company_key,)).fetchone()
+            max_branches = max_branches_row[0] if max_branches_row else 1
+            if current_count >= max_branches:
+                st.warning(f"You have reached the maximum number of branches ({max_branches}). Contact support to increase your limit.")
+                can_add = False
+            else:
+                can_add = True
+        except Exception as e:
+            st.error(f"Error checking branch limit: {e}")
+            can_add = False
+        finally:
+            conn.close()
 
-            submitted = st.form_submit_button("Save Branch")
-            if submitted:
-                if branch_name:
-                    conn = get_connection()
-                    try:
-                        branch_id = f"{company_key}-{branch_name.replace(' ', '_').lower()}"
-                        conn.execute("""
-                            INSERT OR REPLACE INTO branches (branch_id, company_key, branch_name, location, branch_type, contact_number, branch_manager)
-                            VALUES (?, ?, ?, ?, ?, ?, ?)
-                        """, (branch_id, company_key, branch_name, location or "", branch_type, contact_number or "", branch_manager or ""))
-                        conn.commit()
-                        log_audit_action(conn, company_key, "Master Admin", f"Added/Updated branch: {branch_name}", "Branch Management", branch_id=branch_id)
-                        st.success(f"Branch '{branch_name}' saved successfully.")
-                        # Sync to Firebase - TODO: implement
-                        # _sync_to_firebase(conn, company_key)
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"Error saving branch: {e}")
-                    finally:
-                        conn.close()
-                else:
-                    st.error("Branch Name is required.")
+        if can_add:
+            with st.form("branch_form"):
+                branch_name = st.text_input("Branch Name", key="branch_name")
+                location = st.text_input("Location/Physical Address", key="branch_location")
+                contact_number = st.text_input("Contact Number", key="branch_contact")
+                branch_manager = st.text_input("Branch Manager Name", key="branch_manager")
+                branch_type = st.selectbox("Branch Type", ["Retail", "Warehouse", "Office", "Other"], key="branch_type")
+
+                submitted = st.form_submit_button("Save Branch")
+                if submitted:
+                    if branch_name:
+                        conn = get_connection()
+                        try:
+                            branch_id = f"{company_key}-{branch_name.replace(' ', '_').lower()}"
+                            conn.execute("""
+                                INSERT OR REPLACE INTO branches (branch_id, company_key, branch_name, location, branch_type, contact_number, branch_manager)
+                                VALUES (?, ?, ?, ?, ?, ?, ?)
+                            """, (branch_id, company_key, branch_name, location or "", branch_type, contact_number or "", branch_manager or ""))
+                            # Generate Branch Bookkeeper Key
+                            bookkeeper_key = f"{branch_id}-bookkeeper"
+                            hashed_password = _hash_security_answer("default123")  # Default password
+                            conn.execute("""
+                                INSERT INTO users (company_key, branch_id, full_name, login_key, password_hash, role, status)
+                                VALUES (?, ?, ?, ?, ?, 'Bookkeeper', 'Active')
+                            """, (company_key, branch_id, branch_manager or "Branch Manager", bookkeeper_key, hashed_password))
+                            conn.commit()
+                            log_audit_action(conn, company_key, "Master Admin", f"Added branch: {branch_name} with bookkeeper key: {bookkeeper_key}", "Branch Management", branch_id=branch_id)
+                            st.success(f"Branch '{branch_name}' saved successfully. Bookkeeper Key: {bookkeeper_key}")
+                            # Sync to Firebase - TODO: implement
+                            # _sync_to_firebase(conn, company_key)
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Error saving branch: {e}")
+                        finally:
+                            conn.close()
+                    else:
+                        st.error("Branch Name is required.")
+        else:
+            st.info("Cannot add more branches. Limit reached.")
 
     with tabs[1]:
         # Staff Assignment

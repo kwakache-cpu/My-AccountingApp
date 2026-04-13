@@ -474,6 +474,7 @@ def init_db():
                 deployment_status TEXT DEFAULT 'Pending',
                 plan_type TEXT DEFAULT 'Basic',
                 number_of_branches INTEGER DEFAULT 1,
+                max_branches INTEGER DEFAULT 1,
                 branch_price_per_month REAL DEFAULT 0.0,
                 contact_email TEXT,
                 phone_number TEXT,
@@ -488,6 +489,14 @@ def init_db():
         ensure_schema_integrity(conn)
         cursor.execute("PRAGMA table_info(companies)")
         company_columns = {row[1] for row in cursor.fetchall()}
+        company_column_defs = {
+            "number_of_branches": "INTEGER DEFAULT 1",
+            "max_branches": "INTEGER DEFAULT 1",
+            "branch_price_per_month": "REAL DEFAULT 0.0",
+        }
+        for column_name, column_def in company_column_defs.items():
+            if column_name not in company_columns:
+                cursor.execute(f"ALTER TABLE companies ADD COLUMN {column_name} {column_def}")
 
         # --- TABLE 2: INVENTORY & STOCK MASTER ---
         # Manages product levels, costs, and warehouse locations
