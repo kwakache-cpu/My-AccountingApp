@@ -1040,31 +1040,62 @@ def _convert_money_frame(dataframe):
 
 def show_financial_reports(company_key, role=None):
     st.header("📊 Financial Reports")
+    
+    # Consolidator for Master Admins
+    if role == "Master Admin":
+        if st.button("🔄 Generate Consolidated Group Reports", key=f"consolidator_{company_key}"):
+            st.session_state.consolidated_view = True
+            st.rerun()
+        if st.session_state.get("consolidated_view"):
+            if st.button("🔙 Back to Branch Reports", key=f"back_to_branch_{company_key}"):
+                st.session_state.consolidated_view = False
+                st.rerun()
+    
+    consolidated = st.session_state.get("consolidated_view", False) and role == "Master Admin"
+    
     try:
         start_date, end_date, account_name = _filter_controls(f"financial_ifrs_safe_{company_key}")
     except Exception:
         start_date, end_date, account_name = None, None, None
 
-    try:
-        trial_balance_df = get_trial_balance(company_key, start_date, end_date, account_name)
-    except Exception:
-        trial_balance_df = pd.DataFrame(columns=["Account Code", "Account", "Type", "Debit (GHS)", "Credit (GHS)", "Balance (GHS)", "Balanced"])
-    try:
-        income_statement_df = get_income_statement(company_key, start_date, end_date, account_name)
-    except Exception:
-        income_statement_df = pd.DataFrame(columns=["Category", "Account Code", "Account", "Amount (GHS)"])
-    try:
-        balance_sheet_df = get_balance_sheet(company_key, start_date, end_date, account_name)
-    except Exception:
-        balance_sheet_df = pd.DataFrame(columns=["Category", "Account Code", "Account", "Amount (GHS)"])
-    try:
-        cash_flow_df = get_cash_flow_statement(company_key, start_date, end_date, account_name)
-    except Exception:
+    if consolidated:
+        try:
+            trial_balance_df = get_trial_balance(company_key, start_date, end_date, account_name)  # Consolidated
+        except Exception:
+            trial_balance_df = pd.DataFrame(columns=["Account Code", "Account", "Type", "Debit (GHS)", "Credit (GHS)", "Balance (GHS)", "Balanced"])
+        try:
+            income_statement_df = get_consolidated_pnl(company_key, start_date, end_date)
+        except Exception:
+            income_statement_df = pd.DataFrame(columns=["Category", "Account Code", "Account", "Amount (GHS)"])
+        try:
+            balance_sheet_df = get_consolidated_balance_sheet(company_key, start_date, end_date)
+        except Exception:
+            balance_sheet_df = pd.DataFrame(columns=["Category", "Account Code", "Account", "Amount (GHS)"])
+        # For consolidated, skip cash flow and equity for now
         cash_flow_df = pd.DataFrame(columns=["Section", "Line Item", "Amount (GHS)"])
-    try:
-        equity_df = get_changes_in_equity(company_key, start_date, end_date, account_name)
-    except Exception:
         equity_df = pd.DataFrame(columns=["Account Code", "Line Item", "Amount (GHS)"])
+    else:
+        try:
+            trial_balance_df = get_trial_balance(company_key, start_date, end_date, account_name)
+        except Exception:
+            trial_balance_df = pd.DataFrame(columns=["Account Code", "Account", "Type", "Debit (GHS)", "Credit (GHS)", "Balance (GHS)", "Balanced"])
+        try:
+            income_statement_df = get_income_statement(company_key, start_date, end_date, account_name)
+        except Exception:
+            income_statement_df = pd.DataFrame(columns=["Category", "Account Code", "Account", "Amount (GHS)"])
+        try:
+            balance_sheet_df = get_balance_sheet(company_key, start_date, end_date, account_name)
+        except Exception:
+            balance_sheet_df = pd.DataFrame(columns=["Category", "Account Code", "Account", "Amount (GHS)"])
+        try:
+            cash_flow_df = get_cash_flow_statement(company_key, start_date, end_date, account_name)
+        except Exception:
+            cash_flow_df = pd.DataFrame(columns=["Section", "Line Item", "Amount (GHS)"])
+        try:
+            equity_df = get_changes_in_equity(company_key, start_date, end_date, account_name)
+        except Exception:
+            equity_df = pd.DataFrame(columns=["Account Code", "Line Item", "Amount (GHS)"])
+    
     try:
         depreciation_df = get_depreciation_schedule(company_key)
     except Exception:
@@ -1112,3 +1143,50 @@ def show_financial_reports(company_key, role=None):
 def show_reports(company_key, role=None):
     """Financial reports sidebar entry point."""
     show_financial_reports(company_key, role)
+
+
+def get_consolidated_pnl(company_key, start_date=None, end_date=None):
+    """Get consolidated Profit & Loss for all branches."""
+    # For now, since branch_id is optional, get all transactions for company
+    df = _journal_df(company_key, start_date=start_date, end_date=end_date)
+    if df.empty:
+        return pd.DataFrame(columns=["Category", "Account Code", "Account", "Amount (GHS)"])
+    
+    income_df = df[df["account_type"].isin(["Income", "Expense"])].copy()
+    if income_df.empty:
+        return pd.DataFrame(columns=["Category", "Account Code", "Account", "Amount (GHS)"])
+    
+    income_df["amount"] = income_df.apply(
+        lambda row: (row["credit"] - row["debit"]) if row["account_type"] == "Income" else (row["debit"] - row["credit"]),
+        axis=1,
+    )
+    grouped = income_df.groupby(["account_code", "account_name", "account_type"], as_index=False)["amount"].sum()
+    grouped["Category"] = grouped["account_type"].apply(lambda x: "Income" if x == "Income" else "Expenses")
+    grouped = grouped.rename(columns={"account_name": "Account", "account_code": "Account Code", "amount": "Amount (GHS)"})
+    grouped = grouped[["Category", "Account Code", "Account", "Amount (GHS)"]]
+    
+    # Add net profit
+    net_profit = grouped["Amount (GHS)"].sum()
+    net_row = pd.DataFrame([{"Category": "Net Profit", "Account Code": "", "Account": "Net Profit", "Amount (GHS)": net_profit}])
+    return pd.concat([grouped, net_row], ignore_index=True)
+
+
+def get_consolidated_balance_sheet(company_key, start_date=None, end_date=None):
+    """Get consolidated Balance Sheet for all branches."""
+    df = _journal_df(company_key, start_date=start_date, end_date=end_date)
+    if df.empty:
+        return pd.DataFrame(columns=["Category", "Account Code", "Account", "Amount (GHS)"])
+    
+    bs_df = df[df["account_type"].isin(["Asset", "Liability", "Equity"])].copy()
+    if bs_df.empty:
+        return pd.DataFrame(columns=["Category", "Account Code", "Account", "Amount (GHS)"])
+    
+    bs_df["amount"] = bs_df.apply(
+        lambda row: (row["debit"] - row["credit"]) if row["account_type"] == "Asset" else (row["credit"] - row["debit"]),
+        axis=1,
+    )
+    grouped = bs_df.groupby(["account_code", "account_name", "account_type"], as_index=False)["amount"].sum()
+    category_map = {"Asset": "Assets", "Liability": "Liabilities", "Equity": "Equity"}
+    grouped["Category"] = grouped["account_type"].map(category_map)
+    grouped = grouped.rename(columns={"account_name": "Account", "account_code": "Account Code", "amount": "Amount (GHS)"})
+    return grouped[["Category", "Account Code", "Account", "Amount (GHS)"]]

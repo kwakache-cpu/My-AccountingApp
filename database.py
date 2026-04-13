@@ -800,6 +800,7 @@ def init_db():
             CREATE TABLE IF NOT EXISTS users (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 company_key TEXT NOT NULL,
+                branch_id TEXT,
                 full_name TEXT NOT NULL,
                 user_id TEXT,
                 login_key TEXT NOT NULL UNIQUE,
@@ -808,14 +809,18 @@ def init_db():
                 security_answer TEXT,
                 role TEXT NOT NULL,
                 status TEXT DEFAULT 'Active',
+                current_session_id TEXT,
+                last_login_device TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (company_key) REFERENCES companies (key) ON DELETE CASCADE
+                FOREIGN KEY (company_key) REFERENCES companies (key) ON DELETE CASCADE,
+                FOREIGN KEY (branch_id) REFERENCES branches (branch_id) ON DELETE SET NULL
             )
         """)
         cursor.execute("PRAGMA table_info(users)")
         user_columns = {row[1] for row in cursor.fetchall()}
         user_column_defs = {
             "company_key": "TEXT",
+            "branch_id": "TEXT",
             "full_name": "TEXT",
             "user_id": "TEXT",
             "login_key": "TEXT",
@@ -824,6 +829,8 @@ def init_db():
             "security_answer": "TEXT",
             "role": "TEXT",
             "status": "TEXT DEFAULT 'Active'",
+            "current_session_id": "TEXT",
+            "last_login_device": "TEXT",
             "created_at": "TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
         }
         for column_name, column_def in user_column_defs.items():

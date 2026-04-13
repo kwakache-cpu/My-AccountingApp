@@ -17,6 +17,7 @@ import smtplib
 import sqlite3
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
+import uuid
 
 try:
     import firebase_admin
@@ -968,7 +969,7 @@ def login_ui():
 
                     user_login = conn.execute(
                         """
-                        SELECT u.company_key, c.name, u.role, u.full_name, u.password_hash, u.security_question, u.security_answer
+                        SELECT u.company_key, c.name, u.role, u.full_name, u.password_hash, u.security_question, u.security_answer, u.branch_id
                         FROM users u
                         JOIN companies c ON c.key = u.company_key
                         WHERE u.login_key = ?
@@ -988,6 +989,16 @@ def login_ui():
                             return
                         license_status = check_license_expiry_with_grace(user_login[0])
                         if license_status['status'] != 'expired':
+                            # Generate session ID and update DB
+                            session_id = str(uuid.uuid4())
+                            device_info = "Web Browser"  # Could be enhanced to detect device
+                            conn.execute(
+                                "UPDATE users SET current_session_id = ?, last_login_device = ? WHERE login_key = ?",
+                                (session_id, device_info, license_key)
+                            )
+                            conn.commit()
+                            st.session_state.current_session_id = session_id
+                            st.session_state.login_key = license_key
                             st.session_state.auth = True
                             st.session_state.user = {
                                 "key": user_login[0],
@@ -996,6 +1007,11 @@ def login_ui():
                                 "staff_name": user_login[3],
                             }
                             st.session_state.company_id = user_login[0]
+                            # Set active branch for staff/bookkeepers
+                            if user_login[2] in ['Bookkeeper', 'Staff']:
+                                st.session_state.active_branch_id = user_login[7]
+                            else:
+                                st.session_state.active_branch_id = None  # Master Admin can choose
                             log_audit_action(conn, user_login[0], user_login[2], "Successful login", "Authentication")
                             conn.close()
                             st.session_state.login_attempts = 0
@@ -1515,6 +1531,45 @@ def run_startup_db_patch():
             conn.close()
 
 
+def check_session_lock():
+    """Check if current session is still valid, revoke if another device logged in."""
+    if not st.session_state.get('auth') or not st.session_state.get('user'):
+        return True  # Not logged in, no check needed
+    
+    user = st.session_state.user
+    session_id = st.session_state.get('current_session_id')
+    if not session_id:
+        return True  # No session ID, allow
+    
+    try:
+        conn = get_connection()
+        # For users table login
+        if 'staff_name' in user:
+            current_db_session = conn.execute(
+                "SELECT current_session_id FROM users WHERE login_key = ? AND company_key = ?",
+                (st.session_state.get('login_key'), user['key'])
+            ).fetchone()
+        else:
+            # For company level, no session lock for now, as they might have multiple admins
+            conn.close()
+            return True
+        
+        if current_db_session and current_db_session[0] != session_id:
+            # Session revoked
+            st.session_state.auth = False
+            st.session_state.user = None
+            st.session_state.pop('current_session_id', None)
+            st.session_state.pop('login_key', None)
+            st.error("Access Revoked: This account is active on another device. Please purchase additional branch licenses for multi-device access.")
+            conn.close()
+            st.rerun()
+        conn.close()
+        return True
+    except Exception as e:
+        logger.error(f"Session lock check error: {e}")
+        return True
+
+
 def main():
     _sync_cloud_db_down_if_newer()
     run_startup_db_patch()
@@ -1591,6 +1646,28 @@ def _render_primary_sidebar(user, include_settings=True):
         """,
         unsafe_allow_html=True,
     )
+
+    # Branch selector for Master Admins
+    if user['role'] == 'Master Admin':
+        try:
+            conn = get_connection()
+            branches = conn.execute("SELECT branch_id, branch_name FROM branches WHERE company_key = ? ORDER BY branch_name", (user['key'],)).fetchall()
+            conn.close()
+            if branches:
+                branch_options = ["All Branches"] + [f"{b[1]} ({b[0]})" for b in branches]
+                current_branch = st.session_state.get("active_branch_id", "All Branches")
+                selected_branch_display = next((opt for opt in branch_options if current_branch in opt or (current_branch is None and opt == "All Branches")), "All Branches")
+                selected_branch = st.sidebar.selectbox("Active Branch", branch_options, index=branch_options.index(selected_branch_display) if selected_branch_display in branch_options else 0, key="branch_selector")
+                if selected_branch == "All Branches":
+                    st.session_state.active_branch_id = None
+                else:
+                    branch_id = selected_branch.split(" (")[-1].rstrip(")")
+                    st.session_state.active_branch_id = branch_id
+            else:
+                st.session_state.active_branch_id = None
+        except Exception as e:
+            logger.error(f"Branch selector error: {e}")
+            st.session_state.active_branch_id = None
 
     nav_items = PRIMARY_NAV_ITEMS if include_settings else [item for item in PRIMARY_NAV_ITEMS if item[1] != "System Configuration"]
     current_page = _ensure_valid_page()
@@ -1682,6 +1759,13 @@ main()
 if not st.session_state.auth or not check_session_timeout():
     login_ui()
 else:
+    check_session_lock()  # Check for session revocation
+    
+    # Renewal alert
+    license_status = check_license_expiry_with_grace(st.session_state.company_id)
+    if license_status['status'] == 'expiring_soon':
+        st.warning(f"⚠️ Your license expires in {license_status['days_left']} days. Please renew to avoid service interruption.")
+    
     update_activity()  # Update activity on each interaction
     u = st.session_state.user
     
@@ -1690,7 +1774,7 @@ else:
         st.title("Gatekeeper System Dashboard")
         
         # Tabs for different sections
-        tab1, tab2 = st.tabs(["System Overview", "License Management"])
+        tab1, tab2, tab3 = st.tabs(["System Overview", "License Management", "Manual Deployment"])
         
         with tab1:
             try:
