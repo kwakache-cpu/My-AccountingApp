@@ -989,15 +989,15 @@ def login_ui():
                             return
                         license_status = check_license_expiry_with_grace(user_login[0])
                         if license_status['status'] != 'expired':
-                            # Generate session ID and update DB
-                            session_id = str(uuid.uuid4())
+                            # Generate session UUID and update DB
+                            session_uuid = str(uuid.uuid4())
                             device_info = "Web Browser"  # Could be enhanced to detect device
                             conn.execute(
                                 "UPDATE users SET current_session_id = ?, last_login_device = ? WHERE login_key = ?",
-                                (session_id, device_info, license_key)
+                                (session_uuid, device_info, license_key)
                             )
                             conn.commit()
-                            st.session_state.current_session_id = session_id
+                            st.session_state.session_uuid = session_uuid
                             st.session_state.login_key = license_key
                             st.session_state.auth = True
                             st.session_state.user = {
@@ -1537,9 +1537,9 @@ def check_session_lock():
         return True  # Not logged in, no check needed
     
     user = st.session_state.user
-    session_id = st.session_state.get('current_session_id')
-    if not session_id:
-        return True  # No session ID, allow
+    session_uuid = st.session_state.get('session_uuid')
+    if not session_uuid:
+        return True  # No session UUID, allow
     
     try:
         conn = get_connection()
@@ -1554,13 +1554,13 @@ def check_session_lock():
             conn.close()
             return True
         
-        if current_db_session and current_db_session[0] != session_id:
+        if current_db_session and current_db_session[0] != session_uuid:
             # Session revoked
             st.session_state.auth = False
             st.session_state.user = None
-            st.session_state.pop('current_session_id', None)
+            st.session_state.pop('session_uuid', None)
             st.session_state.pop('login_key', None)
-            st.error("Access Revoked: This account is active on another device. Please purchase additional branch licenses for multi-device access.")
+            st.error("Account active on another device. Please upgrade for more branch licenses.")
             conn.close()
             st.rerun()
         conn.close()

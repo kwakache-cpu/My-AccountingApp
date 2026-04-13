@@ -898,13 +898,13 @@ def init_db():
 # 4. UTILITY FUNCTIONS
 # =================================================================
 
-def log_audit_action(conn, company_key, user_role, action, module_name, details=None):
+def log_audit_action(conn, company_key, user_role, action, module_name, details=None, branch_id=None):
     """Logs security events to the audit trail."""
     try:
         conn.execute("""
-            INSERT INTO audit_logs (company_key, user_role, action, module_name, details)
-            VALUES (?, ?, ?, ?, ?)
-        """, (company_key, user_role, action, module_name, details))
+            INSERT INTO audit_logs (company_key, user_role, action, module_name, details, branch_id)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, (company_key, user_role, action, module_name, details, branch_id))
         conn.commit()
     except Exception as e:
         logger.warning(f"Audit log failed: {e}")
