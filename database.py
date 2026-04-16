@@ -82,13 +82,22 @@ def ensure_schema_integrity(conn):
         "audit_logs": {"details": "TEXT", "branch_id": "TEXT"},
         "customers": {"customer_id": "TEXT", "current_balance": "REAL DEFAULT 0"},
         "customer_transactions": {"branch_id": "TEXT", "reference": "TEXT", "created_by": "TEXT", "transaction_date": "TEXT"},
-        "journal_entries": {"branch_id": "TEXT"},
+        "journal_entries": {
+            "branch_id": "TEXT",
+            "customer_id": "INTEGER",
+            "supplier_id": "INTEGER",
+            "inventory_item_id": "INTEGER",
+            "payment_id": "INTEGER",
+            "source_module": "TEXT",
+            "source_table": "TEXT",
+            "source_id": "INTEGER",
+        },
         "stock_movements": {"branch_id": "TEXT", "reason": "TEXT", "created_by": "TEXT", "created_at": "TIMESTAMP DEFAULT CURRENT_TIMESTAMP"},
         "transactions": {"branch_id": "TEXT"},
         "users": {"branch_id": "TEXT"},
         "vouchers": {"status": "TEXT DEFAULT 'Active'", "branch_id": "TEXT"},
         "payroll": {"status": "TEXT DEFAULT 'Active'"},
-        "inventory": {"opening_balance": "REAL DEFAULT 0", "barcode": "TEXT"},
+        "inventory": {"opening_balance": "REAL DEFAULT 0", "barcode": "TEXT", "inventory_account_id": "INTEGER", "cogs_account_id": "INTEGER"},
         "branches": {"contact_number": "TEXT", "branch_manager": "TEXT", "branch_access_key": "TEXT"},
         "fixed_assets": {"opening_book_value": "REAL DEFAULT 0"},
     }
@@ -132,6 +141,7 @@ def ensure_schema_integrity(conn):
         "name": "TEXT",
         "type": "TEXT",
         "parent_id": "INTEGER",
+        "code": "TEXT",
         "category": "TEXT",
         "account_code": "TEXT",
         "account_name": "TEXT",
@@ -143,6 +153,7 @@ def ensure_schema_integrity(conn):
         """
         UPDATE chart_of_accounts
         SET name = COALESCE(NULLIF(name, ''), account_name),
+            code = COALESCE(NULLIF(code, ''), NULLIF(account_code, '')),
             type = COALESCE(NULLIF(type, ''), NULLIF(account_type, ''), NULLIF(category, ''), 'Asset'),
             category = COALESCE(NULLIF(category, ''), NULLIF(type, ''), account_type),
             account_name = COALESCE(NULLIF(account_name, ''), name),
@@ -217,6 +228,13 @@ def ensure_schema_integrity(conn):
             reference TEXT,
             created_by TEXT,
             branch_id TEXT,
+            customer_id INTEGER,
+            supplier_id INTEGER,
+            inventory_item_id INTEGER,
+            payment_id INTEGER,
+            source_module TEXT,
+            source_table TEXT,
+            source_id INTEGER,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
         """
@@ -229,6 +247,13 @@ def ensure_schema_integrity(conn):
         "description": "TEXT",
         "reference": "TEXT",
         "created_by": "TEXT",
+        "customer_id": "INTEGER",
+        "supplier_id": "INTEGER",
+        "inventory_item_id": "INTEGER",
+        "payment_id": "INTEGER",
+        "source_module": "TEXT",
+        "source_table": "TEXT",
+        "source_id": "INTEGER",
         "created_at": "TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
     }.items():
         if column_name not in journal_entry_columns:
@@ -249,6 +274,8 @@ def ensure_schema_integrity(conn):
     )
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_journal_entries_company_date ON journal_entries(company_key, date)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_journal_lines_entry ON journal_lines(entry_id)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_journal_lines_entry_account ON journal_lines(entry_id, account_id)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_chart_of_accounts_type ON chart_of_accounts(type)")
     cursor.execute(
         """
         CREATE TABLE IF NOT EXISTS stock_movements (
@@ -654,6 +681,8 @@ def init_db():
             "unit": "TEXT DEFAULT 'pcs'",
             "cost_price": "REAL DEFAULT 0",
             "price": "REAL DEFAULT 0",
+            "inventory_account_id": "INTEGER",
+            "cogs_account_id": "INTEGER",
             "tax_rate": "REAL DEFAULT 0",
             "warehouse_location": "TEXT",
             "is_active": "INTEGER DEFAULT 1",

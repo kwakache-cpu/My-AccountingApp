@@ -40,6 +40,18 @@ from database import (
     get_firebase_runtime_config,
     log_audit_action as database_log_audit_action,
 )
+from accounting_engine import (
+    generate_balance_sheet,
+    generate_cash_flow_statement,
+    generate_income_statement,
+    get_account_id,
+    get_customer_balance,
+    get_customer_balances,
+    get_general_ledger as engine_get_general_ledger,
+    get_or_create_account as engine_get_or_create_account,
+    get_trial_balance as engine_get_trial_balance,
+    post_journal_entry,
+)
 
 
 def log_audit_action(conn, company_key, user_role, action, module_name, details=None, branch_id=None):
@@ -641,32 +653,6 @@ def set_period_lock(company_key, period_date, locked, locked_by=None):
 def _get_or_create_account(conn, account_name, category, parent_name=None):
     normalized_name = str(account_name or "").strip()
     normalized_category = _normalize_account_category(category)
-    if not normalized_name or not normalized_category:
-        raise ValueError("Account name and type are required.")
-
-    row = conn.execute(
-        """
-        SELECT id
-        FROM chart_of_accounts
-        WHERE lower(COALESCE(name, account_name)) = lower(?)
-        LIMIT 1
-        """,
-        (normalized_name,),
-    ).fetchone()
-    if row:
-        conn.execute(
-            """
-            UPDATE chart_of_accounts
-            SET type = COALESCE(NULLIF(type, ''), ?),
-                category = COALESCE(NULLIF(category, ''), ?),
-                account_name = COALESCE(NULLIF(account_name, ''), ?),
-                account_type = COALESCE(NULLIF(account_type, ''), ?)
-            WHERE id = ?
-            """,
-            (normalized_category, normalized_category, normalized_name, normalized_category, int(row["id"])),
-        )
-        return int(row["id"])
-
     parent_id = None
     if parent_name:
         parent_row = conn.execute(
@@ -674,15 +660,7 @@ def _get_or_create_account(conn, account_name, category, parent_name=None):
             (str(parent_name).strip(),),
         ).fetchone()
         parent_id = int(parent_row["id"]) if parent_row else None
-
-    cursor = conn.execute(
-        """
-        INSERT INTO chart_of_accounts (name, type, parent_id, category, account_name, account_type)
-        VALUES (?, ?, ?, ?, ?, ?)
-        """,
-        (normalized_name, normalized_category, parent_id, normalized_category, normalized_name, normalized_category),
-    )
-    return int(cursor.lastrowid)
+    return engine_get_or_create_account(conn, normalized_name, normalized_category, parent_id=parent_id)
 
 
 def post_transaction(description, lines, company_key=None, reference=None, created_by=None, entry_date=None, branch_id=None, conn=None):
@@ -697,90 +675,31 @@ def post_transaction(description, lines, company_key=None, reference=None, creat
     if is_period_locked(company_key, entry_date_iso, conn=conn):
         raise ValueError(f"The accounting period for {entry_date_iso[:7]} is locked.")
 
-    normalized_lines = []
-    total_debits = 0.0
-    total_credits = 0.0
-    for line in lines:
-        account_name = str(line.get("account_name") or line.get("name") or "").strip()
-        category = _normalize_account_category(line.get("category") or line.get("type"))
-        parent_name = line.get("parent_name")
-        debit = round(float(line.get("debit") or 0), 2)
-        credit = round(float(line.get("credit") or 0), 2)
-        if not account_name or not category:
-            raise ValueError("Each line requires an account name and type.")
-        if debit < 0 or credit < 0:
-            raise ValueError("Debit and credit values cannot be negative.")
-        if debit == 0 and credit == 0:
-            continue
-        normalized_lines.append({
-            "account_name": account_name,
-            "category": category,
-            "parent_name": parent_name,
-            "debit": debit,
-            "credit": credit,
-        })
-        total_debits += debit
-        total_credits += credit
-
-    total_debits = round(total_debits, 2)
-    total_credits = round(total_credits, 2)
-    if not normalized_lines:
-        raise ValueError("Transaction must include at least one non-zero line.")
-    if round(total_debits - total_credits, 2) != 0:
-        raise ValueError("Unbalanced transaction: total debits must equal total credits.")
-
     try:
-        cursor = conn.execute(
-            """
-            INSERT INTO journal_entries (company_key, date, description, reference, created_by, branch_id)
-            VALUES (?, ?, ?, ?, ?, ?)
-            """,
-            (company_key, entry_date_iso, description, reference, created_by, branch_id),
+        normalized_lines = []
+        for line in lines:
+            account_name = str(line.get("account_name") or line.get("name") or "").strip()
+            category = _normalize_account_category(line.get("category") or line.get("type"))
+            debit = round(float(line.get("debit") or 0), 2)
+            credit = round(float(line.get("credit") or 0), 2)
+            if not account_name or not category or (debit == 0 and credit == 0):
+                continue
+            account_id = _get_or_create_account(conn, account_name, category, line.get("parent_name"))
+            normalized_lines.append({"account_id": account_id, "debit": debit, "credit": credit})
+        entry_id = post_journal_entry(
+            company_key=company_key,
+            date=entry_date_iso,
+            description=description,
+            reference=reference,
+            lines=normalized_lines,
+            created_by=created_by,
+            branch_id=branch_id,
+            source_module="Operational Posting",
+            source_table="journal_entries",
+            conn=conn,
         )
-        entry_id = int(cursor.lastrowid)
-        for line in normalized_lines:
-            account_id = _get_or_create_account(conn, line["account_name"], line["category"], line.get("parent_name"))
-            conn.execute(
-                """
-                INSERT INTO journal_lines (entry_id, account_id, debit, credit)
-                VALUES (?, ?, ?, ?)
-                """,
-                (entry_id, account_id, line["debit"], line["credit"]),
-            )
-            conn.execute(
-                """
-                INSERT INTO transactions (company_key, transaction_date, account, description, debit, credit, reference, created_by, branch_id)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    company_key,
-                    entry_date_iso,
-                    line["account_name"],
-                    description,
-                    line["debit"],
-                    line["credit"],
-                    reference,
-                    created_by,
-                    branch_id,
-                ),
-            )
         if owns_connection:
             conn.commit()
-        _push_transaction_to_cloud(
-            entry_id,
-            {
-                "entry_id": entry_id,
-                "company_key": company_key,
-                "date": entry_date_iso,
-                "description": description,
-                "reference": reference,
-                "created_by": created_by,
-                "total_debits": total_debits,
-                "total_credits": total_credits,
-                "lines": normalized_lines,
-                "synced_at": datetime.now().isoformat(),
-            },
-        )
         return entry_id
     except Exception:
         if owns_connection:
@@ -871,22 +790,25 @@ def show_journal_entries(company_key, role):
     try:
         conn = get_connection()
         query = """
-            SELECT transaction_date AS "Transaction Date",
-                   account AS "Account",
-                   description AS "Description",
-                   debit AS "Debit",
-                   credit AS "Credit",
-                   reference AS "Reference",
-                   created_by AS "Created By",
-                   created_at AS "Created At"
-            FROM transactions
-            WHERE company_key = ?
+            SELECT je.date AS "Transaction Date",
+                   COALESCE(c.code, c.account_code, '') AS "Account Code",
+                   COALESCE(c.name, c.account_name) AS "Account",
+                   je.description AS "Description",
+                   jl.debit AS "Debit",
+                   jl.credit AS "Credit",
+                   je.reference AS "Reference",
+                   je.created_by AS "Created By",
+                   je.created_at AS "Created At"
+            FROM journal_entries je
+            JOIN journal_lines jl ON jl.entry_id = je.id
+            JOIN chart_of_accounts c ON c.id = jl.account_id
+            WHERE je.company_key = ?
         """
         params = [company_key]
         if branch_id:
-            query += "\n            AND branch_id = ?"
+            query += "\n            AND je.branch_id = ?"
             params.append(branch_id)
-        query += "\n            ORDER BY transaction_date DESC, id DESC"
+        query += "\n            ORDER BY date(je.date) DESC, je.id DESC"
         transactions_df = pd.read_sql_query(query, conn, params=params)
     except Exception:
         transactions_df = pd.DataFrame(
@@ -907,7 +829,7 @@ def show_journal_entries(company_key, role):
 
     st.subheader("Journal Entries")
     if transactions_df.empty:
-        st.info("No journal entries have been captured in the transactions table yet.")
+        st.info("No journal entries have been posted yet.")
     else:
         st.dataframe(format_currency_dataframe(transactions_df), use_container_width=True)
 
@@ -1232,6 +1154,8 @@ def _record_customer_ledger_transaction(
     branch_id=None,
     reference=None,
     transaction_date=None,
+    post_to_gl=False,
+    source_module="Accounts Receivable",
 ):
     transaction_type = str(transaction_type or "").strip().title()
     if transaction_type not in {"Debit", "Credit"}:
@@ -1250,8 +1174,33 @@ def _record_customer_ledger_transaction(
         raise ValueError("Selected customer could not be found.")
 
     current_balance = float(customer["current_balance"] or 0.0)
-    delta = amount if transaction_type == "Debit" else -amount
-    new_balance = current_balance + delta
+    if post_to_gl:
+        ar_account_id = get_account_id(conn, "Accounts Receivable", "Asset")
+        contra_account_id = get_account_id(conn, "Sales Revenue", "Income") if transaction_type == "Debit" else get_account_id(conn, "Cash", "Asset")
+        lines = (
+            [
+                {"account_id": ar_account_id, "debit": amount, "credit": 0},
+                {"account_id": contra_account_id, "debit": 0, "credit": amount},
+            ]
+            if transaction_type == "Debit"
+            else [
+                {"account_id": contra_account_id, "debit": amount, "credit": 0},
+                {"account_id": ar_account_id, "debit": 0, "credit": amount},
+            ]
+        )
+        post_journal_entry(
+            company_key=company_key,
+            date=tx_date,
+            description=description,
+            reference=reference,
+            lines=lines,
+            created_by=created_by,
+            branch_id=branch_id,
+            customer_id=int(customer_row_id),
+            source_module=source_module,
+            source_table="customer_transactions",
+            conn=conn,
+        )
 
     conn.execute(
         """
@@ -1273,21 +1222,13 @@ def _record_customer_ledger_transaction(
             created_by,
         ),
     )
-    conn.execute(
-        """
-        UPDATE customers
-        SET current_balance = ?,
-            phone = COALESCE(phone, ''),
-            email = COALESCE(email, '')
-        WHERE id = ? AND company_key = ?
-        """,
-        (new_balance, int(customer_row_id), company_key),
-    )
+    new_balance = get_customer_balance(company_key, int(customer_row_id), as_of_date=tx_date, conn=conn)
+    previous_balance = round(new_balance - (amount if transaction_type == "Debit" else -amount), 2)
     return {
         "customer_name": customer["name"],
-        "previous_balance": current_balance,
+        "previous_balance": previous_balance,
         "new_balance": new_balance,
-        "delta": delta,
+        "delta": amount if transaction_type == "Debit" else -amount,
         "transaction_date": tx_date,
     }
 
@@ -1309,10 +1250,11 @@ def show_debtors_by_city_report(company_key):
         city_options = ["All Cities"] + [row[0] for row in city_rows]
         selected_city = st.selectbox("Filter by City / Region", city_options, key=f"debtor_city_{company_key}")
 
+        customer_balance_map = {row["name"]: float(row["balance"] or 0.0) for row in get_customer_balances(company_key, conn=conn)}
         query = """
-            SELECT party_name, last_transaction, balance, COALESCE(NULLIF(city_region, ''), 'Unassigned') AS city_region
+            SELECT party_name, last_transaction, COALESCE(NULLIF(city_region, ''), 'Unassigned') AS city_region
             FROM counterparties
-            WHERE company_key = ? AND party_type = 'Customer' AND balance > 0
+            WHERE company_key = ? AND party_type = 'Customer'
         """
         params = [company_key]
         if selected_city != "All Cities":
@@ -1320,7 +1262,11 @@ def show_debtors_by_city_report(company_key):
             params.append(selected_city)
         query += " ORDER BY city_region, party_name"
 
-        debtors = conn.execute(query, tuple(params)).fetchall()
+        debtors = [
+            (row["party_name"], row["last_transaction"], customer_balance_map.get(row["party_name"], 0.0), row["city_region"])
+            for row in conn.execute(query, tuple(params)).fetchall()
+            if customer_balance_map.get(row["party_name"], 0.0) > 0
+        ]
         if not debtors:
             st.info("No debtor balances are available for the selected city.")
             return
@@ -1662,22 +1608,38 @@ def _import_inventory_from_excel(conn, company_key, file_obj):
             continue
         conn.execute(
             """
-            INSERT INTO inventory (company_key, item_name, barcode, category, opening_balance, qty, price, cost_price)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO inventory (company_key, item_name, barcode, category, opening_balance, qty, price, cost_price, inventory_account_id, cogs_account_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (company_key, item_name, barcode, category, opening_balance, qty, price, cost_price),
+            (
+                company_key,
+                item_name,
+                barcode,
+                category,
+                opening_balance,
+                qty,
+                price,
+                cost_price,
+                get_account_id(conn, "Inventory", "Asset"),
+                get_account_id(conn, "Cost of Goods Sold", "Expense"),
+            ),
         )
         opening_stock_value = round(float(opening_balance or 0) * float(cost_price or 0), 2)
         if opening_stock_value > 0:
             offset_account, offset_type = _inventory_offset_account("Accounts Payable")
-            create_journal_entry(
-                "Opening inventory balance",
-                [
-                    {"account_name": "Inventory", "category": "Asset", "debit": opening_stock_value, "credit": 0},
-                    {"account_name": offset_account, "category": offset_type, "debit": 0, "credit": opening_stock_value},
-                ],
+            post_journal_entry(
                 company_key=company_key,
+                date=datetime.now().date(),
+                description="Opening inventory balance",
                 reference=f"INV-IMPORT-{item_name}-{changed_rows + 1}",
+                lines=[
+                    {"account_id": get_account_id(conn, "Inventory", "Asset"), "debit": opening_stock_value, "credit": 0},
+                    {"account_id": get_account_id(conn, offset_account, offset_type), "debit": 0, "credit": opening_stock_value},
+                ],
+                created_by=st.session_state.get("user", {}).get("role", "System"),
+                branch_id=st.session_state.get("active_branch_id"),
+                source_module="Inventory Import",
+                source_table="inventory",
                 conn=conn,
             )
         changed_rows += 1
@@ -2484,7 +2446,7 @@ def show_inventory(company_key, role):
                 conn = get_connection()
                 stock_items = conn.execute(
                     """
-                    SELECT id, item_name, barcode, qty
+                    SELECT id, item_name, barcode, qty, cost_price, inventory_account_id, cogs_account_id
                     FROM inventory
                     WHERE company_key = ?
                     ORDER BY item_name
@@ -2538,6 +2500,38 @@ def show_inventory(company_key, role):
                                     """,
                                     (new_qty, selected_item_id, company_key),
                                 )
+                                movement_value = round(float(selected_item["cost_price"] or 0.0) * movement_qty, 2)
+                                if movement_value > 0:
+                                    inventory_account_id = int(selected_item["inventory_account_id"] or get_account_id(conn, "Inventory", "Asset"))
+                                    cogs_account_id = int(selected_item["cogs_account_id"] or get_account_id(conn, "Cost of Goods Sold", "Expense"))
+                                    if movement_type == "In":
+                                        offset_account_id = get_account_id(
+                                            conn,
+                                            "Accounts Payable" if reason == "Restock" else "Opening Balance Equity",
+                                            "Liability" if reason == "Restock" else "Equity",
+                                        )
+                                        journal_lines = [
+                                            {"account_id": inventory_account_id, "debit": movement_value, "credit": 0},
+                                            {"account_id": offset_account_id, "debit": 0, "credit": movement_value},
+                                        ]
+                                    else:
+                                        journal_lines = [
+                                            {"account_id": cogs_account_id, "debit": movement_value, "credit": 0},
+                                            {"account_id": inventory_account_id, "debit": 0, "credit": movement_value},
+                                        ]
+                                    post_journal_entry(
+                                        company_key=company_key,
+                                        date=datetime.now().date(),
+                                        description=f"Inventory movement - {selected_item['item_name']} ({reason})",
+                                        reference=f"STK-{selected_item_id}-{datetime.now().strftime('%Y%m%d%H%M%S')}",
+                                        lines=journal_lines,
+                                        created_by=role,
+                                        branch_id=branch_id,
+                                        inventory_item_id=selected_item_id,
+                                        source_module="Inventory",
+                                        source_table="stock_movements",
+                                        conn=conn,
+                                    )
                                 conn.execute(
                                     """
                                     INSERT INTO stock_movements (
@@ -2622,23 +2616,38 @@ def show_inventory(company_key, role):
                             return
                     conn.execute(
                         """
-                        INSERT INTO inventory (company_key, item_name, barcode, category, opening_balance, qty, price, cost_price)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        INSERT INTO inventory (company_key, item_name, barcode, category, opening_balance, qty, price, cost_price, inventory_account_id, cogs_account_id)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
-                        (company_key, item_name, normalized_barcode, category, opening_stock, opening_stock, price, cost_price),
+                        (
+                            company_key,
+                            item_name,
+                            normalized_barcode,
+                            category,
+                            opening_stock,
+                            opening_stock,
+                            price,
+                            cost_price,
+                            get_account_id(conn, "Inventory", "Asset"),
+                            get_account_id(conn, "Cost of Goods Sold", "Expense"),
+                        ),
                     )
                     opening_stock_value = round(float(opening_stock or 0) * float(cost_price or 0), 2)
                     if opening_stock_value > 0:
                         offset_account, offset_type = _inventory_offset_account(funding_source)
-                        create_journal_entry(
-                            "Opening inventory balance",
-                            [
-                                {"account_name": "Inventory", "category": "Asset", "debit": opening_stock_value, "credit": 0},
-                                {"account_name": offset_account, "category": offset_type, "debit": 0, "credit": opening_stock_value},
-                            ],
+                        post_journal_entry(
                             company_key=company_key,
+                            date=transaction_date,
+                            description="Opening inventory balance",
                             reference=f"INV-OPEN-{item_name}",
-                            entry_date=transaction_date,
+                            lines=[
+                                {"account_id": get_account_id(conn, "Inventory", "Asset"), "debit": opening_stock_value, "credit": 0},
+                                {"account_id": get_account_id(conn, offset_account, offset_type), "debit": 0, "credit": opening_stock_value},
+                            ],
+                            created_by=role,
+                            branch_id=st.session_state.get("active_branch_id"),
+                            source_module="Inventory",
+                            source_table="inventory",
                             conn=conn,
                         )
                     conn.commit()
@@ -3107,15 +3116,7 @@ def show_pos(company_key, company_name, role):
             "SELECT id, item_name, barcode, price, qty FROM inventory WHERE company_key = ? AND qty > 0",
             (company_key,),
         ).fetchall()
-        customers = conn.execute(
-            """
-            SELECT id, customer_id, name, current_balance
-            FROM customers
-            WHERE company_key = ?
-            ORDER BY name
-            """,
-            (company_key,),
-        ).fetchall()
+        customers = get_customer_balances(company_key, conn=conn)
         conn.close()
 
         company_label = company_row[0] if company_row else company_name
@@ -3255,7 +3256,7 @@ def show_pos(company_key, company_name, role):
         if payment_method == "On Credit":
             if customers:
                 customer_labels = [
-                    f"{row['name']} ({row['customer_id'] or f'CUST-{int(row['id']):06d}'}) | Balance {format_currency(float(row['current_balance'] or 0))}"
+                    f"{row['name']} ({row['customer_id']}) | Balance {format_currency(float(row['balance'] or 0))}"
                     for row in customers
                 ]
                 selected_credit_customer_label = st.selectbox("Credit Customer", customer_labels, key=f"pos_credit_customer_{company_key}")
@@ -3403,16 +3404,21 @@ def show_pos(company_key, company_name, role):
                         role,
                     ),
                 )
-                create_journal_entry(
-                    "POS sale",
-                    [
-                        {"account_name": receipt_account, "category": receipt_category, "debit": total, "credit": 0},
-                        {"account_name": "Sales Revenue", "category": "Income", "debit": 0, "credit": total},
-                    ],
+                post_journal_entry(
                     company_key=company_key,
+                    date=sale_date,
+                    description="POS sale",
                     reference=f"POS-{int(sale_cursor.lastrowid)}",
-                    entry_date=sale_date,
+                    lines=[
+                        {"account_id": get_account_id(conn, receipt_account, receipt_category), "debit": total, "credit": 0},
+                        {"account_id": get_account_id(conn, "Sales Revenue", "Income"), "debit": 0, "credit": total},
+                    ],
+                    created_by=role,
                     branch_id=branch_id,
+                    customer_id=selected_credit_customer_id if payment_method == "On Credit" else None,
+                    source_module="POS",
+                    source_table="vouchers",
+                    source_id=int(sale_cursor.lastrowid),
                     conn=conn,
                 )
                 if payment_method == "On Credit":
@@ -3440,16 +3446,20 @@ def show_pos(company_key, company_name, role):
                 else:
                     ledger_result = None
                 if cost_of_goods_sold > 0:
-                    create_journal_entry(
-                        "Inventory issued to cost of goods sold",
-                        [
-                            {"account_name": "Cost of Goods Sold", "category": "Expense", "debit": cost_of_goods_sold, "credit": 0},
-                            {"account_name": "Inventory", "category": "Asset", "debit": 0, "credit": cost_of_goods_sold},
-                        ],
+                    post_journal_entry(
                         company_key=company_key,
+                        date=sale_date,
+                        description="Inventory issued to cost of goods sold",
                         reference=f"COGS-{datetime.now().strftime('%Y%m%d%H%M%S')}",
-                        entry_date=sale_date,
+                        lines=[
+                            {"account_id": get_account_id(conn, "Cost of Goods Sold", "Expense"), "debit": cost_of_goods_sold, "credit": 0},
+                            {"account_id": get_account_id(conn, "Inventory", "Asset"), "debit": 0, "credit": cost_of_goods_sold},
+                        ],
+                        created_by=role,
                         branch_id=branch_id,
+                        customer_id=selected_credit_customer_id if payment_method == "On Credit" else None,
+                        source_module="POS",
+                        source_table="inventory",
                         conn=conn,
                     )
                 conn.commit()
@@ -3606,7 +3616,7 @@ def show_sales_purchase(company_key, role, doc_type="Sales"):
                      f"{party_name}: {narration}", role),
                 )
                 if doc_type == "Sales":
-                    customer_id = _get_or_create_party(conn, "customers", company_key, party_name)
+                    customer_id = _register_customer(conn, company_key, party_name)
                     conn.execute(
                         """
                         INSERT INTO invoices (company_key, customer_id, invoice_number, invoice_date, due_date, status, amount, currency, description, created_by)
@@ -3616,17 +3626,20 @@ def show_sales_purchase(company_key, role, doc_type="Sales"):
                     )
                     debit_account = "Cash" if status == "Paid" else "Accounts Receivable"
                     if status != "Draft":
-                        post_transaction(
-                            "Sales transaction",
-                            [
-                                {"account_name": debit_account, "category": "Asset", "debit": amount, "credit": 0},
-                                {"account_name": "Sales Revenue", "category": "Income", "debit": 0, "credit": amount},
-                            ],
+                        post_journal_entry(
                             company_key=company_key,
+                            date=doc_date,
+                            description="Sales transaction",
                             reference=tx_reference,
+                            lines=[
+                                {"account_id": get_account_id(conn, debit_account, "Asset"), "debit": amount, "credit": 0},
+                                {"account_id": get_account_id(conn, "Sales Revenue", "Income"), "debit": 0, "credit": amount},
+                            ],
                             created_by=role,
-                            entry_date=doc_date,
                             branch_id=branch_id,
+                            customer_id=customer_id,
+                            source_module="Sales Invoicing",
+                            source_table="invoices",
                             conn=conn,
                         )
                 else:
@@ -3641,17 +3654,20 @@ def show_sales_purchase(company_key, role, doc_type="Sales"):
                     credit_account = "Cash" if status == "Received" else "Accounts Payable"
                     credit_category = "Asset" if credit_account == "Cash" else "Liability"
                     if status != "Cancelled":
-                        post_transaction(
-                            "Purchase transaction",
-                            [
-                                {"account_name": "Inventory", "category": "Asset", "debit": amount, "credit": 0},
-                                {"account_name": credit_account, "category": credit_category, "debit": 0, "credit": amount},
-                            ],
+                        post_journal_entry(
                             company_key=company_key,
+                            date=doc_date,
+                            description="Purchase transaction",
                             reference=tx_reference,
+                            lines=[
+                                {"account_id": get_account_id(conn, "Inventory", "Asset"), "debit": amount, "credit": 0},
+                                {"account_id": get_account_id(conn, credit_account, credit_category), "debit": 0, "credit": amount},
+                            ],
                             created_by=role,
-                            entry_date=doc_date,
                             branch_id=branch_id,
+                            supplier_id=supplier_id,
+                            source_module="Purchase Orders",
+                            source_table="bills",
                             conn=conn,
                         )
                 balance_delta = amount if status == "Pending" else 0.0
@@ -3726,21 +3742,103 @@ def show_banking(company_key, role):
 
     try:
         conn = get_connection()
-        cash_total = conn.execute(
-            """SELECT COALESCE(SUM(credit) - SUM(debit), 0) FROM vouchers
-               WHERE company_key = ? AND payment_method = 'Cash' AND COALESCE(status, 'Active') != 'Void'""",
-            (company_key,),
-        ).fetchone()[0] or 0.0
-        bank_total = conn.execute(
-            """SELECT COALESCE(SUM(credit) - SUM(debit), 0) FROM vouchers
-               WHERE company_key = ? AND payment_method = 'Bank Transfer' AND COALESCE(status, 'Active') != 'Void'""",
-            (company_key,),
-        ).fetchone()[0] or 0.0
-        conn.close()
+        trial_balance = engine_get_trial_balance(company_key)
+        cash_total = sum(row["balance"] for row in trial_balance if row["account_name"] == "Cash")
+        bank_total = sum(row["balance"] for row in trial_balance if row["account_name"] in ("Bank", "Mobile Money"))
+        customers = get_customer_balances(company_key, conn=conn)
+        suppliers = conn.execute("SELECT id, name FROM suppliers WHERE company_key = ? ORDER BY name", (company_key,)).fetchall()
 
         col1, col2 = st.columns(2)
         col1.metric(f"Cash Balance ({get_currency_symbol()})", format_currency(cash_total))
         col2.metric(f"Bank Balance ({get_currency_symbol()})", format_currency(bank_total))
+
+        with st.expander("Record Payment", expanded=True):
+            with st.form(f"banking_payment_form_{company_key}", clear_on_submit=True):
+                payment_type = st.selectbox("Payment Type", ["Customer Receipt", "Supplier Payment"])
+                payment_method = st.selectbox("Method", ["Cash", "Bank", "Mobile Money"])
+                amount = st.number_input("Amount (GHS)", min_value=0.0, step=0.01)
+                payment_date = st.date_input("Payment Date", value=datetime.now().date(), key=f"banking_payment_date_{company_key}")
+                reference = st.text_input("Reference")
+                if payment_type == "Customer Receipt":
+                    customer_labels = [f"{row['name']} ({row['customer_id']})" for row in customers]
+                    selected_party = st.selectbox("Customer", customer_labels if customer_labels else [""])
+                else:
+                    supplier_labels = [f"{row['name']}" for row in suppliers]
+                    selected_party = st.selectbox("Supplier", supplier_labels if supplier_labels else [""])
+                submitted = st.form_submit_button("Post Payment")
+
+            if submitted:
+                if amount <= 0:
+                    st.warning("Enter an amount greater than zero.")
+                elif payment_type == "Customer Receipt" and not customers:
+                    st.warning("Create a customer before posting a receipt.")
+                elif payment_type == "Supplier Payment" and not suppliers:
+                    st.warning("Create a supplier before posting a supplier payment.")
+                else:
+                    cash_account = "Cash" if payment_method == "Cash" else ("Bank" if payment_method == "Bank" else "Mobile Money")
+                    payment_cursor = conn.execute(
+                        """
+                        INSERT INTO payments (company_key, payment_date, payment_type, customer_id, supplier_id, amount, currency, method, reference, created_by)
+                        VALUES (?, ?, ?, ?, ?, ?, 'GHS', ?, ?, ?)
+                        """,
+                        (
+                            company_key,
+                            payment_date.isoformat(),
+                            payment_type,
+                            int(customers[[f"{row['name']} ({row['customer_id']})" for row in customers].index(selected_party)]["id"]) if payment_type == "Customer Receipt" else None,
+                            int(suppliers[supplier_labels.index(selected_party)]["id"]) if payment_type == "Supplier Payment" else None,
+                            amount,
+                            payment_method,
+                            reference,
+                            role,
+                        ),
+                    )
+                    if payment_type == "Customer Receipt":
+                        selected_customer = customers[[f"{row['name']} ({row['customer_id']})" for row in customers].index(selected_party)]
+                        lines = [
+                            {"account_id": get_account_id(conn, cash_account, "Asset"), "debit": amount, "credit": 0},
+                            {"account_id": get_account_id(conn, "Accounts Receivable", "Asset"), "debit": 0, "credit": amount},
+                        ]
+                        post_journal_entry(
+                            company_key=company_key,
+                            date=payment_date,
+                            description=f"Customer receipt - {selected_customer['name']}",
+                            reference=reference or f"PAY-{int(payment_cursor.lastrowid)}",
+                            lines=lines,
+                            created_by=role,
+                            branch_id=st.session_state.get("active_branch_id"),
+                            customer_id=int(selected_customer["id"]),
+                            payment_id=int(payment_cursor.lastrowid),
+                            source_module="Banking",
+                            source_table="payments",
+                            source_id=int(payment_cursor.lastrowid),
+                            conn=conn,
+                        )
+                    else:
+                        selected_supplier = suppliers[supplier_labels.index(selected_party)]
+                        lines = [
+                            {"account_id": get_account_id(conn, "Accounts Payable", "Liability"), "debit": amount, "credit": 0},
+                            {"account_id": get_account_id(conn, cash_account, "Asset"), "debit": 0, "credit": amount},
+                        ]
+                        post_journal_entry(
+                            company_key=company_key,
+                            date=payment_date,
+                            description=f"Supplier payment - {selected_supplier['name']}",
+                            reference=reference or f"PAY-{int(payment_cursor.lastrowid)}",
+                            lines=lines,
+                            created_by=role,
+                            branch_id=st.session_state.get("active_branch_id"),
+                            supplier_id=int(selected_supplier["id"]),
+                            payment_id=int(payment_cursor.lastrowid),
+                            source_module="Banking",
+                            source_table="payments",
+                            source_id=int(payment_cursor.lastrowid),
+                            conn=conn,
+                        )
+                    conn.commit()
+                    st.success("Payment posted successfully.")
+                    st.rerun()
+        conn.close()
     except Exception as e:
         st.error(f"Banking module error: {e}")
 
@@ -3769,15 +3867,7 @@ def show_aging(company_key, aging_type="Receivable"):
         with tabs[0]:
             if aging_type == "Receivable":
                 conn = get_connection()
-                customer_rows = conn.execute(
-                    """
-                    SELECT id, customer_id, name, phone, email, current_balance
-                    FROM customers
-                    WHERE company_key = ?
-                    ORDER BY name
-                    """,
-                    (company_key,),
-                ).fetchall()
+                customer_rows = get_customer_balances(company_key, conn=conn)
 
                 register_col, transaction_col = st.columns(2)
                 with register_col:
@@ -3812,7 +3902,7 @@ def show_aging(company_key, aging_type="Receivable"):
                         st.info("Register at least one customer to start posting debits and credits.")
                     else:
                         customer_labels = [
-                            f"{row['name']} ({row['customer_id'] or f'CUST-{int(row['id']):06d}'}) | Balance {format_currency(float(row['current_balance'] or 0))}"
+                            f"{row['name']} ({row['customer_id']}) | Balance {format_currency(float(row['balance'] or 0))}"
                             for row in customer_rows
                         ]
                         with st.form(f"customer_transaction_form_{company_key}", clear_on_submit=True):
@@ -3838,15 +3928,7 @@ def show_aging(company_key, aging_type="Receivable"):
                                     branch_id=branch_id,
                                     reference=None,
                                     transaction_date=transaction_date,
-                                )
-                                _ensure_counterparty(
-                                    conn,
-                                    company_key,
-                                    result["customer_name"],
-                                    "Customer",
-                                    "",
-                                    result["transaction_date"],
-                                    float(amount) if transaction_type == "Debit" else -float(amount),
+                                    post_to_gl=True,
                                 )
                                 conn.commit()
                                 log_audit_action(
@@ -3862,19 +3944,14 @@ def show_aging(company_key, aging_type="Receivable"):
                                 conn.close()
                                 st.rerun()
 
-                customer_summary_rows = conn.execute(
-                    """
-                    SELECT customer_id, name, phone, email, current_balance
-                    FROM customers
-                    WHERE company_key = ?
-                    ORDER BY name
-                    """,
-                    (company_key,),
-                ).fetchall()
+                customer_summary_rows = get_customer_balances(company_key, conn=conn)
                 if customer_summary_rows:
                     st.markdown("Customer Balances")
                     customer_df = pd.DataFrame(
-                        customer_summary_rows,
+                        [
+                            (row["customer_id"], row["name"], row["phone"], row["email"], row["balance"])
+                            for row in customer_summary_rows
+                        ],
                         columns=["Customer ID", "Name", "Phone", "Email", "Current Balance"],
                     )
                     st.dataframe(format_currency_dataframe(customer_df), use_container_width=True, hide_index=True)
@@ -3902,8 +3979,22 @@ def show_aging(company_key, aging_type="Receivable"):
         with tabs[-1]:
             conn = get_connection()
             data = conn.execute(
-                "SELECT date, narration, credit FROM vouchers WHERE company_key = ? AND v_type = ? AND COALESCE(status, 'Active') != 'Void' ORDER BY date ASC",
-                (company_key, v_type),
+                """
+                SELECT je.date,
+                       je.description,
+                       CASE
+                           WHEN lower(COALESCE(c.name, c.account_name)) LIKE '%receivable%'
+                               THEN ROUND(jl.debit - jl.credit, 2)
+                           ELSE ROUND(jl.credit - jl.debit, 2)
+                       END AS amount
+                FROM journal_entries je
+                JOIN journal_lines jl ON jl.entry_id = je.id
+                JOIN chart_of_accounts c ON c.id = jl.account_id
+                WHERE je.company_key = ?
+                  AND lower(COALESCE(c.name, c.account_name)) LIKE ?
+                ORDER BY date(je.date) ASC, je.id ASC
+                """,
+                (company_key, "%receivable%" if aging_type == "Receivable" else "%payable%"),
             ).fetchall()
             conn.close()
             if data:
