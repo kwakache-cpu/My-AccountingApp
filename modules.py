@@ -2879,6 +2879,7 @@ def show_pos(company_key, company_name, role):
         items_df = pd.DataFrame(items, columns=["ID", "Item Name", "Barcode", "Price", "Qty"]) if items else pd.DataFrame()
         receipt_html_key = f"pos_receipt_html_{company_key}"
         receipt_print_trigger_key = f"pos_receipt_print_trigger_{company_key}"
+        trigger_print_key = "trigger_print"
 
         source_options = ["Keyboard Entry", "Camera Scanner", "Physical Scanner"]
         source_index = source_options.index(barcode_input_source) if barcode_input_source in source_options else 0
@@ -2904,18 +2905,6 @@ def show_pos(company_key, company_name, role):
             barcode_input_source = selected_barcode_source
 
         st.caption(f"Barcode input mode: {barcode_input_source}")
-        st.text_input(
-            "Barcode Search",
-            key=pos_scan_input_key,
-            placeholder="Scan barcode and the item will be added to the cart",
-            label_visibility="collapsed",
-            on_change=_set_input_pending,
-            args=(pos_scan_input_key, pos_pending_scan_key),
-        )
-        _focus_text_input("Barcode Search")
-        if barcode_input_source == "Camera Scanner":
-            _render_camera_scanner(f"pos_{company_key}", pos_pending_scan_key)
-
         pending_pos_barcode = str(st.session_state.get(pos_pending_scan_key, "") or "").strip()
         if pending_pos_barcode:
             conn = None
@@ -2945,99 +2934,123 @@ def show_pos(company_key, company_name, role):
                 st.session_state[pos_scan_input_key] = ""
                 st.rerun()
 
-        item_mode = st.radio(
-            "Item Entry Mode",
-            ["From Stock", "Manual Entry"],
-            horizontal=True,
-            key=f"pos_item_mode_{company_key}",
-        )
-        if item_mode == "From Stock":
-            if items_df.empty:
-                st.info("No stock available for sale. Switch to Manual Entry to continue.")
+        with st.form(key=f"pos_form_{company_key}", clear_on_submit=True):
+            st.text_input(
+                "Barcode Search",
+                key=pos_scan_input_key,
+                placeholder="Scan barcode and the item will be added to the cart",
+                label_visibility="collapsed",
+                on_change=_set_input_pending,
+                args=(pos_scan_input_key, pos_pending_scan_key),
+            )
+            _focus_text_input("Barcode Search")
+            if barcode_input_source == "Camera Scanner":
+                _render_camera_scanner(f"pos_{company_key}", pos_pending_scan_key)
+
+            item_mode = st.radio(
+                "Item Entry Mode",
+                ["From Stock", "Manual Entry"],
+                horizontal=True,
+                key=f"pos_item_mode_{company_key}",
+            )
+            if item_mode == "From Stock":
+                if items_df.empty:
+                    st.info("No stock available for sale. Switch to Manual Entry to continue.")
+                else:
+                    selected_item = st.selectbox("Select Item", items_df["Item Name"].tolist(), key=f"pos_item_{company_key}")
+                    qty_to_sell = st.number_input("Quantity", min_value=1, value=1, key=f"pos_qty_{company_key}")
+                    if st.form_submit_button("Add Selected Item", key=f"pos_add_selected_{company_key}"):
+                        item_row = items_df.loc[items_df["Item Name"] == selected_item].iloc[0]
+                        for _ in range(int(qty_to_sell)):
+                            _add_item_to_pos_cart(
+                                company_key,
+                                {
+                                    "id": int(item_row["ID"]),
+                                    "item_name": item_row["Item Name"],
+                                    "barcode": item_row["Barcode"],
+                                    "price": float(item_row["Price"] or 0.0),
+                                    "qty": float(item_row["Qty"] or 0.0),
+                                },
+                            )
+                        _trigger_scan_feedback(pos_message_key, f"Added {selected_item} x{int(qty_to_sell)} to the cart.")
+                        st.rerun()
             else:
-                selected_item = st.selectbox("Select Item", items_df["Item Name"].tolist(), key=f"pos_item_{company_key}")
-                qty_to_sell = st.number_input("Quantity", min_value=1, value=1, key=f"pos_qty_{company_key}")
-                if st.button("Add Selected Item", key=f"pos_add_selected_{company_key}"):
-                    item_row = items_df.loc[items_df["Item Name"] == selected_item].iloc[0]
-                    for _ in range(int(qty_to_sell)):
-                        _add_item_to_pos_cart(
-                            company_key,
+                selected_item = st.text_input("New Item Name", key=f"manual_pos_item_{company_key}")
+                manual_price = st.number_input(f"Manual Price ({st.session_state.currency_symbol})", min_value=0.0, value=0.0, key=f"manual_pos_price_{company_key}")
+                qty_to_sell = st.number_input("Quantity", min_value=1, value=1, key=f"manual_pos_qty_{company_key}")
+                if st.form_submit_button("Add Manual Item", key=f"pos_add_manual_{company_key}"):
+                    if selected_item and float(manual_price) > 0:
+                        cart = st.session_state.setdefault(cart_key, [])
+                        cart.append(
                             {
-                                "id": int(item_row["ID"]),
-                                "item_name": item_row["Item Name"],
-                                "barcode": item_row["Barcode"],
-                                "price": float(item_row["Price"] or 0.0),
-                                "qty": float(item_row["Qty"] or 0.0),
-                            },
+                                "inventory_item_id": None,
+                                "name": selected_item.strip(),
+                                "barcode": "",
+                                "price": float(manual_price),
+                                "available_qty": None,
+                                "qty": int(qty_to_sell),
+                                "line_total": int(qty_to_sell) * float(manual_price),
+                            }
                         )
-                    st.session_state[pos_scan_input_key] = ""
-                    _trigger_scan_feedback(pos_message_key, f"Added {selected_item} x{int(qty_to_sell)} to the cart.")
-                    st.rerun()
-        else:
-            selected_item = st.text_input("New Item Name", key=f"manual_pos_item_{company_key}")
-            manual_price = st.number_input(f"Manual Price ({st.session_state.currency_symbol})", min_value=0.0, value=0.0, key=f"manual_pos_price_{company_key}")
-            qty_to_sell = st.number_input("Quantity", min_value=1, value=1, key=f"manual_pos_qty_{company_key}")
-            if st.button("Add Manual Item", key=f"pos_add_manual_{company_key}"):
-                if selected_item and float(manual_price) > 0:
-                    cart = st.session_state.setdefault(cart_key, [])
-                    cart.append(
-                        {
-                            "inventory_item_id": None,
-                            "name": selected_item.strip(),
-                            "barcode": "",
-                            "price": float(manual_price),
-                            "available_qty": None,
-                            "qty": int(qty_to_sell),
-                            "line_total": int(qty_to_sell) * float(manual_price),
-                        }
-                    )
-                    st.session_state[pos_scan_input_key] = ""
-                    _clear_streamlit_state(
-                        f"manual_pos_item_{company_key}",
-                        f"manual_pos_price_{company_key}",
-                        f"manual_pos_qty_{company_key}",
-                    )
-                    _trigger_scan_feedback(pos_message_key, f"Added manual item {selected_item.strip()} to the cart.")
-                    st.rerun()
-                st.warning("Enter a valid manual item and price before adding it.")
+                        _trigger_scan_feedback(pos_message_key, f"Added manual item {selected_item.strip()} to the cart.")
+                        st.rerun()
+                    else:
+                        st.warning("Enter a valid manual item and price before adding it.")
 
         payment_method = st.selectbox("Payment Method", ["Cash", "Mobile Money", "Bank Transfer", "Cheque"])
         sale_date = st.date_input("Transaction Date", value=datetime.now().date(), key=f"pos_sale_date_{company_key}")
         cart = st.session_state.setdefault(cart_key, [])
         if cart:
             st.subheader("Active Sale Cart")
-            total_amount = 0.0
-            st.markdown(
-                "<div style='overflow-x:auto; padding-bottom:0.5rem;'>"
-                "<div style='display:grid; grid-template-columns: 1fr 4fr 1.2fr 1.5fr 2fr; gap:0.5rem; font-weight:bold; margin-bottom:0.5rem;'>"
-                "<div>#</div><div>Item</div><div style='text-align:right;'>Qty</div><div style='text-align:right;'>Price</div><div style='text-align:right;'>Total</div>"
-                "</div>",
-                unsafe_allow_html=True,
-            )
+            cart_rows = []
             for index, line in enumerate(cart, start=1):
-                line_total = float(line["qty"]) * float(line["price"])
-                total_amount += line_total
-                row_cols = st.columns([1, 4, 1.2, 1.5, 2])
-                row_cols[0].markdown(f"**{index}**")
-                row_cols[1].markdown(f"{line['name']}")
-                row_cols[2].markdown(f"<div style='text-align:right;'>{int(line['qty'])}</div>", unsafe_allow_html=True)
-                row_cols[3].markdown(f"<div style='text-align:right;'>{format_currency(line['price'])}</div>", unsafe_allow_html=True)
-                row_cols[4].markdown(f"<div style='text-align:right; font-weight:bold;'>{format_currency(line_total)}</div>", unsafe_allow_html=True)
-                action_cols = st.columns([1, 1, 1])
-                if action_cols[0].button("➕", key=f"pos_qty_inc_{company_key}_{index}"):
-                    cart[index - 1]["qty"] += 1
-                    cart[index - 1]["line_total"] = cart[index - 1]["qty"] * cart[index - 1]["price"]
-                    st.rerun()
-                if action_cols[1].button("➖", key=f"pos_qty_dec_{company_key}_{index}"):
-                    if cart[index - 1]["qty"] > 1:
-                        cart[index - 1]["qty"] -= 1
-                        cart[index - 1]["line_total"] = cart[index - 1]["qty"] * cart[index - 1]["price"]
-                    else:
-                        cart.pop(index - 1)
-                    st.rerun()
-                if action_cols[2].button("🗑️", key=f"pos_remove_item_{company_key}_{index}"):
-                    cart.pop(index - 1)
-                    st.rerun()
+                cart_rows.append(
+                    {
+                        "No.": index,
+                        "Item": line["name"],
+                        "Barcode": line.get("barcode", ""),
+                        "Qty": int(line["qty"]),
+                        "Unit Price": float(line["price"]),
+                        "Line Total": float(line["qty"]) * float(line["price"]),
+                    }
+                )
+            cart_df = pd.DataFrame(cart_rows)
+            edited_cart_df = st.data_editor(
+                cart_df,
+                hide_index=True,
+                num_rows="dynamic",
+                use_container_width=True,
+                column_config={
+                    "No.": st.column_config.NumberColumn("No.", disabled=True),
+                    "Item": st.column_config.TextColumn("Item", disabled=True),
+                    "Barcode": st.column_config.TextColumn("Barcode", disabled=True),
+                    "Qty": st.column_config.NumberColumn("Qty", min_value=1, step=1),
+                    "Unit Price": st.column_config.NumberColumn("Unit Price", disabled=True, format="%.2f"),
+                    "Line Total": st.column_config.NumberColumn("Line Total", disabled=True, format="%.2f"),
+                },
+                key=f"pos_cart_editor_{company_key}",
+            )
+            if edited_cart_df is not None:
+                updated_cart = []
+                for row_index, row in edited_cart_df.reset_index(drop=True).iterrows():
+                    if not str(row["Item"]).strip():
+                        continue
+                    original = cart[row_index] if row_index < len(cart) else {}
+                    updated_cart.append(
+                        {
+                            "inventory_item_id": original.get("inventory_item_id"),
+                            "name": row["Item"],
+                            "barcode": row["Barcode"] if str(row["Barcode"]).strip() else original.get("barcode", ""),
+                            "price": float(row["Unit Price"]),
+                            "available_qty": original.get("available_qty"),
+                            "qty": int(row["Qty"]),
+                            "line_total": int(row["Qty"]) * float(row["Unit Price"]),
+                        }
+                    )
+                if updated_cart != cart:
+                    st.session_state[cart_key] = updated_cart
+                    cart = updated_cart
+            total_amount = sum(float(line["qty"]) * float(line["price"]) for line in cart)
             st.markdown(
                 f"<div style='text-align:right; margin-top:1rem; font-size:1.1rem; font-weight:bold;'>Cart Total: {format_currency(total_amount)}</div>",
                 unsafe_allow_html=True,
@@ -3226,10 +3239,7 @@ def show_pos(company_key, company_name, role):
             st.subheader("Receipt Preview")
             st.markdown(st.session_state[receipt_html_key], unsafe_allow_html=True)
             if st.button("Print Receipt", key=f"receipt_print_btn_{company_key}"):
-                st.session_state[receipt_print_trigger_key] = True
-            if st.session_state.get(receipt_print_trigger_key):
-                components.html("<script>window.print();</script>", height=0)
-                st.session_state.pop(receipt_print_trigger_key, None)
+                st.session_state[trigger_print_key] = True
             st.download_button(
                 "Download Receipt",
                 data=st.session_state.get(receipt_key, ""),
@@ -3237,6 +3247,9 @@ def show_pos(company_key, company_name, role):
                 mime="text/plain",
                 key=f"receipt_download_{company_key}",
             )
+        if st.session_state.get('trigger_print'):
+            components.html("<script>window.print();</script>", height=0)
+            st.session_state['trigger_print'] = False
     except Exception as e:
         st.error(f"POS Error: {e}")
 # ==========================================
