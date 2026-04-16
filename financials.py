@@ -5,6 +5,15 @@ import pandas as pd
 import streamlit as st
 
 from database import get_connection, init_db
+from accounting_engine import (
+    close_fiscal_year,
+    generate_cash_flow_statement as engine_generate_cash_flow_statement,
+    get_account_id,
+    get_ap_aging_report,
+    get_ar_aging_report,
+    get_bank_reconciliation,
+    post_journal_entry,
+)
 from modules import convert_amount_from_base, format_currency, format_currency_dataframe, get_currency_symbol, get_display_currency, get_exchange_rate, post_transaction, set_period_lock
 
 
@@ -292,28 +301,17 @@ def get_balance_sheet(company_key, start_date=None, end_date=None, account_name=
 
 
 def get_cash_flow_statement(company_key, start_date=None, end_date=None, account_name=None):
-    income_df = get_income_statement(company_key, start_date, end_date, account_name)
-    bs_df = get_balance_sheet(company_key, start_date, end_date, account_name)
-    net_profit = float(income_df.loc[income_df["Account"] == "Net Profit", "Amount (GHS)"].sum()) if not income_df.empty else 0.0
-    depreciation = float(income_df.loc[income_df["Account"] == "Depreciation Expense", "Amount (GHS)"].sum()) if not income_df.empty else 0.0
-    receivables = float(bs_df.loc[bs_df["Account"] == "Accounts Receivable", "Amount (GHS)"].sum()) if not bs_df.empty else 0.0
-    inventory = float(bs_df.loc[bs_df["Account"] == "Inventory", "Amount (GHS)"].sum()) if not bs_df.empty else 0.0
-    payables = float(bs_df.loc[bs_df["Account"] == "Accounts Payable", "Amount (GHS)"].sum()) if not bs_df.empty else 0.0
-    fixed_assets = float(bs_df.loc[bs_df["Account"] == "Fixed Assets", "Amount (GHS)"].sum()) if not bs_df.empty else 0.0
-    capital = float(bs_df.loc[bs_df["Account"].isin(["Owner Capital", "Opening Balance Equity"]), "Amount (GHS)"].sum()) if not bs_df.empty else 0.0
-    loans = float(bs_df.loc[bs_df["Account"] == "Loans Payable", "Amount (GHS)"].sum()) if not bs_df.empty else 0.0
-    operating = net_profit + depreciation - receivables - inventory + payables
-    investing = -fixed_assets
-    financing = capital + loans
+    rows = engine_generate_cash_flow_statement(company_key, start_date, end_date)
+    if not rows:
+        return pd.DataFrame(columns=["Section", "Line Item", "Amount (GHS)"])
     return pd.DataFrame(
         [
-            {"Section": "Operating", "Line Item": "Net Profit", "Amount (GHS)": net_profit},
-            {"Section": "Operating", "Line Item": "Depreciation", "Amount (GHS)": depreciation},
-            {"Section": "Operating", "Line Item": "Working Capital Impact", "Amount (GHS)": -receivables - inventory + payables},
-            {"Section": "Operating", "Line Item": "Net Cash from Operations", "Amount (GHS)": operating},
-            {"Section": "Investing", "Line Item": "Net Fixed Asset Movement", "Amount (GHS)": investing},
-            {"Section": "Financing", "Line Item": "Capital and Loan Movement", "Amount (GHS)": financing},
-            {"Section": "Summary", "Line Item": "Net Cash Movement", "Amount (GHS)": operating + investing + financing},
+            {
+                "Section": row.get("section"),
+                "Line Item": row.get("line_item"),
+                "Amount (GHS)": row.get("amount", 0.0),
+            }
+            for row in rows
         ]
     )
 
@@ -393,10 +391,34 @@ def show_record_transaction(company_key, role):
             credit = c3.number_input(f"Credit {idx + 1}", min_value=0.0, step=0.01, key=f"manual_credit_{company_key}_{idx}")
             if account and (debit > 0 or credit > 0):
                 account_meta = account_map.get(account, {"account_type": "Expense", "account_code": ""})
-                lines.append({"account_name": account, "category": account_meta.get("account_type", "Expense"), "debit": debit, "credit": credit})
+                lines.append({"account_name": account, "account_type": account_meta.get("account_type", "Expense"), "debit": debit, "credit": credit})
         if st.form_submit_button("Post Transaction"):
             try:
-                post_transaction(description or "Manual journal entry", lines, company_key=company_key, reference=reference, created_by=role, entry_date=tx_date)
+                conn = get_connection()
+                journal_lines = [
+                    {
+                        "account_id": get_account_id(conn, line["account_name"], line["account_type"]),
+                        "debit": line["debit"],
+                        "credit": line["credit"],
+                    }
+                    for line in lines
+                ]
+                if not journal_lines:
+                    raise ValueError("Add at least one valid account line.")
+                post_journal_entry(
+                    company_key=company_key,
+                    date=tx_date,
+                    description=description or "Manual journal entry",
+                    reference=reference,
+                    lines=journal_lines,
+                    created_by=role,
+                    branch_id=st.session_state.get("active_branch_id"),
+                    source_module="Manual Journal",
+                    source_table="journal_entries",
+                    conn=conn,
+                )
+                conn.commit()
+                conn.close()
                 st.success("Transaction posted successfully.")
                 st.rerun()
             except Exception as exc:
@@ -462,16 +484,21 @@ def show_invoice_manager(company_key, role):
                     (company_key, customer_id, f"INV-{datetime.now().strftime('%Y%m%d%H%M%S')}", invoice_date.isoformat(), invoice_date.isoformat(), status, amount, description, role),
                 )
                 if status != "Draft":
-                    post_transaction(
-                        "Sales invoice",
-                        [
-                            {"account_name": "Cash" if status == "Paid" else "Accounts Receivable", "category": "Asset", "debit": amount, "credit": 0},
-                            {"account_name": "Sales Revenue", "category": "Income", "debit": 0, "credit": amount},
-                        ],
+                    post_journal_entry(
                         company_key=company_key,
+                        date=invoice_date,
+                        description="Sales invoice",
                         reference=f"INV-{cursor.lastrowid}",
+                        lines=[
+                            {"account_id": get_account_id(conn, "Cash" if status == "Paid" else "Accounts Receivable", "Asset"), "debit": amount, "credit": 0},
+                            {"account_id": get_account_id(conn, "Sales Revenue", "Income"), "debit": 0, "credit": amount},
+                        ],
                         created_by=role,
-                        entry_date=invoice_date,
+                        branch_id=st.session_state.get("active_branch_id"),
+                        customer_id=customer_id,
+                        source_module="Invoices",
+                        source_table="invoices",
+                        source_id=int(cursor.lastrowid),
                         conn=conn,
                     )
                 conn.commit()
@@ -506,16 +533,21 @@ def show_invoice_manager(company_key, role):
                 if status != "Draft":
                     credit_account = "Cash" if status == "Received" else "Accounts Payable"
                     credit_type = "Asset" if credit_account == "Cash" else "Liability"
-                    post_transaction(
-                        "Purchase bill",
-                        [
-                            {"account_name": "Inventory", "category": "Asset", "debit": amount, "credit": 0},
-                            {"account_name": credit_account, "category": credit_type, "debit": 0, "credit": amount},
-                        ],
+                    post_journal_entry(
                         company_key=company_key,
+                        date=bill_date,
+                        description="Purchase bill",
                         reference=f"BILL-{cursor.lastrowid}",
+                        lines=[
+                            {"account_id": get_account_id(conn, "Inventory", "Asset"), "debit": amount, "credit": 0},
+                            {"account_id": get_account_id(conn, credit_account, credit_type), "debit": 0, "credit": amount},
+                        ],
                         created_by=role,
-                        entry_date=bill_date,
+                        branch_id=st.session_state.get("active_branch_id"),
+                        supplier_id=supplier_id,
+                        source_module="Bills",
+                        source_table="bills",
+                        source_id=int(cursor.lastrowid),
                         conn=conn,
                     )
                 conn.commit()
@@ -540,18 +572,32 @@ def show_invoice_manager(company_key, role):
                     "INSERT INTO payments (company_key, payment_date, payment_type, amount, currency, method, reference, created_by) VALUES (?, ?, ?, ?, 'GHS', ?, ?, ?)",
                     (company_key, payment_date.isoformat(), payment_type, amount, payment_method, payment_ref, role),
                 )
+                payment_id = int(conn.execute("SELECT last_insert_rowid()").fetchone()[0])
                 lines = (
                     [
-                        {"account_name": "Cash", "category": "Asset", "debit": amount, "credit": 0},
-                        {"account_name": "Accounts Receivable", "category": "Asset", "debit": 0, "credit": amount},
+                        {"account_id": get_account_id(conn, "Cash", "Asset"), "debit": amount, "credit": 0},
+                        {"account_id": get_account_id(conn, "Accounts Receivable", "Asset"), "debit": 0, "credit": amount},
                     ]
                     if payment_type == "Customer Receipt"
                     else [
-                        {"account_name": "Accounts Payable", "category": "Liability", "debit": amount, "credit": 0},
-                        {"account_name": "Cash", "category": "Asset", "debit": 0, "credit": amount},
+                        {"account_id": get_account_id(conn, "Accounts Payable", "Liability"), "debit": amount, "credit": 0},
+                        {"account_id": get_account_id(conn, "Cash", "Asset"), "debit": 0, "credit": amount},
                     ]
                 )
-                post_transaction("Payment entry", lines, company_key=company_key, reference=payment_ref, created_by=role, entry_date=payment_date, conn=conn)
+                post_journal_entry(
+                    company_key=company_key,
+                    date=payment_date,
+                    description="Payment entry",
+                    reference=payment_ref,
+                    lines=lines,
+                    created_by=role,
+                    branch_id=st.session_state.get("active_branch_id"),
+                    payment_id=payment_id,
+                    source_module="Payments",
+                    source_table="payments",
+                    source_id=payment_id,
+                    conn=conn,
+                )
                 conn.commit()
                 conn.close()
                 st.rerun()
@@ -1040,6 +1086,22 @@ def _convert_money_frame(dataframe):
 
 def show_financial_reports(company_key, role=None):
     st.header("📊 Financial Reports")
+    with st.expander("Year-End Closing", expanded=False):
+        closing_date = st.date_input("Closing Date", value=datetime.now().date(), key=f"year_end_close_{company_key}")
+        if st.button("Post Year-End Closing Entry", key=f"year_end_close_btn_{company_key}"):
+            try:
+                entry_id = close_fiscal_year(
+                    company_key,
+                    closing_date,
+                    role or st.session_state.get("user", {}).get("role", "System"),
+                    branch_id=st.session_state.get("active_branch_id"),
+                )
+                if entry_id:
+                    st.success(f"Year-end closing entry posted as journal #{entry_id}.")
+                else:
+                    st.info("No net profit or loss balance was available to close.")
+            except Exception as exc:
+                st.error(f"Year-end closing failed: {exc}")
     
     # Consolidator for Master Admins
     if role == "Master Admin":

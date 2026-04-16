@@ -41,6 +41,8 @@ from database import (
     log_audit_action as database_log_audit_action,
 )
 from accounting_engine import (
+    get_ap_aging_report,
+    get_ar_aging_report,
     generate_balance_sheet,
     generate_cash_flow_statement,
     generate_income_statement,
@@ -48,6 +50,7 @@ from accounting_engine import (
     get_customer_balance,
     get_customer_balances,
     get_general_ledger as engine_get_general_ledger,
+    get_bank_reconciliation,
     get_or_create_account as engine_get_or_create_account,
     get_trial_balance as engine_get_trial_balance,
     post_journal_entry,
@@ -901,28 +904,30 @@ def show_journal_entries(company_key, role):
                     try:
                         conn = get_connection()
                         reference = f"JRN-{datetime.now().strftime('%Y%m%d%H%M%S')}"
+                        selected_account_id = get_account_id(conn, selected_account, "Expense" if debit > 0 else "Income")
+                        suspense_account_id = get_account_id(conn, "Suspense", "Equity")
                         if debit > 0 and credit == 0:
                             journal_lines = [
-                                {"account_name": selected_account, "category": "Expense", "debit": float(debit), "credit": 0},
-                                {"account_name": "Suspense", "category": "Equity", "debit": 0, "credit": float(debit)},
+                                {"account_id": selected_account_id, "debit": float(debit), "credit": 0},
+                                {"account_id": suspense_account_id, "debit": 0, "credit": float(debit)},
                             ]
                         elif credit > 0 and debit == 0:
                             journal_lines = [
-                                {"account_name": "Suspense", "category": "Equity", "debit": float(credit), "credit": 0},
-                                {"account_name": selected_account, "category": "Income", "debit": 0, "credit": float(credit)},
+                                {"account_id": suspense_account_id, "debit": float(credit), "credit": 0},
+                                {"account_id": selected_account_id, "debit": 0, "credit": float(credit)},
                             ]
                         else:
-                            journal_lines = [
-                                {"account_name": selected_account, "category": "Expense", "debit": float(debit), "credit": float(credit)},
-                            ]
-                        save_transaction(
-                            description.strip() or "Manual journal entry",
-                            journal_lines,
+                            raise ValueError("Manual entry requires a valid one-sided amount.")
+                        post_journal_entry(
                             company_key=company_key,
+                            date=entry_date,
+                            description=description.strip() or "Manual journal entry",
                             reference=reference,
+                            lines=journal_lines,
                             created_by=role,
-                            entry_date=entry_date,
                             branch_id=branch_for_entry,
+                            source_module="Manual Journal",
+                            source_table="journal_entries",
                             conn=conn,
                         )
                         conn.commit()
@@ -944,6 +949,35 @@ def _inventory_offset_account(funding_source):
         account_name = "Cash" if normalized == "cash" else ("Bank" if normalized == "bank" else "Mobile Money")
         return account_name, "Asset"
     return "Accounts Payable", "Liability"
+
+
+def _voucher_posting_lines(conn, v_type, amount):
+    normalized = str(v_type or "").strip().title()
+    amount = float(amount or 0.0)
+    if normalized in {"Sales", "Receipt"}:
+        return [
+            {"account_id": get_account_id(conn, "Cash", "Asset"), "debit": amount, "credit": 0},
+            {"account_id": get_account_id(conn, "Sales Revenue", "Income"), "debit": 0, "credit": amount},
+        ]
+    if normalized == "Payment":
+        return [
+            {"account_id": get_account_id(conn, "Accounts Payable", "Liability"), "debit": amount, "credit": 0},
+            {"account_id": get_account_id(conn, "Cash", "Asset"), "debit": 0, "credit": amount},
+        ]
+    if normalized == "Purchase":
+        return [
+            {"account_id": get_account_id(conn, "Inventory", "Asset"), "debit": amount, "credit": 0},
+            {"account_id": get_account_id(conn, "Accounts Payable", "Liability"), "debit": 0, "credit": amount},
+        ]
+    if normalized == "Expense":
+        return [
+            {"account_id": get_account_id(conn, "Repairs and Maintenance", "Expense"), "debit": amount, "credit": 0},
+            {"account_id": get_account_id(conn, "Cash", "Asset"), "debit": 0, "credit": amount},
+        ]
+    return [
+        {"account_id": get_account_id(conn, "Suspense", "Equity"), "debit": amount, "credit": 0},
+        {"account_id": get_account_id(conn, "Opening Balance Equity", "Equity"), "debit": 0, "credit": amount},
+    ]
 
 
 def _journal_reference_exists(conn, company_key, reference):
@@ -2190,14 +2224,31 @@ def show_vouchers_page(conn, demo_on):
         voucher_date = st.date_input("Date", value=datetime.now().date())
         submitted = st.form_submit_button("Post Voucher")
         if submitted and narration and amount > 0:
-            conn.execute(
-                "INSERT INTO vouchers (narration, amount, ref_no, date) VALUES (?, ?, ?, ?)",
-                (narration, amount, ref_no, voucher_date.isoformat()),
-            )
-            conn.commit()
-            log_system_event("INFO", "Vouchers", f"Posted voucher: {ref_no or narration}")
-            st.success("Voucher saved.")
-            st.rerun()
+            try:
+                cursor = conn.execute(
+                    "INSERT INTO vouchers (narration, amount, ref_no, date) VALUES (?, ?, ?, ?)",
+                    (narration, amount, ref_no, voucher_date.isoformat()),
+                )
+                post_journal_entry(
+                    company_key=st.session_state.get("company_id") or st.session_state.get("user", {}).get("key"),
+                    date=voucher_date,
+                    description=narration,
+                    reference=ref_no or f"VCH-{int(cursor.lastrowid)}",
+                    lines=_voucher_posting_lines(conn, "Journal", amount),
+                    created_by=st.session_state.get("user", {}).get("role", "System"),
+                    branch_id=st.session_state.get("active_branch_id"),
+                    source_module="Vouchers",
+                    source_table="vouchers",
+                    source_id=int(cursor.lastrowid),
+                    conn=conn,
+                )
+                conn.commit()
+                log_system_event("INFO", "Vouchers", f"Posted voucher: {ref_no or narration}")
+                st.success("Voucher saved.")
+                st.rerun()
+            except Exception as exc:
+                conn.rollback()
+                st.error(f"Voucher posting failed: {exc}")
 
     rows = conn.execute("SELECT narration, amount, ref_no, date FROM vouchers ORDER BY date DESC, id DESC").fetchall()
     if rows:
@@ -2701,10 +2752,23 @@ def show_vouchers(company_key, role):
                 else:
                     try:
                         conn = get_connection()
-                        conn.execute(
+                        voucher_cursor = conn.execute(
                             """INSERT INTO vouchers (company_key, branch_id, date, v_type, ledger, credit, reference_no, narration, created_by)
                                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                             (company_key, branch_id, v_date.isoformat(), v_type, v_type, amount, ref_no, narration, role),
+                        )
+                        post_journal_entry(
+                            company_key=company_key,
+                            date=v_date,
+                            description=narration,
+                            reference=ref_no or f"VCH-{int(voucher_cursor.lastrowid)}",
+                            lines=_voucher_posting_lines(conn, v_type, amount),
+                            created_by=role,
+                            branch_id=branch_id,
+                            source_module="Vouchers",
+                            source_table="vouchers",
+                            source_id=int(voucher_cursor.lastrowid),
+                            conn=conn,
                         )
                         conn.commit()
                         log_audit_action(conn, company_key, role, "Voucher Created", "Vouchers & Journals", f"Posted {v_type} voucher: {ref_no}", branch_id=branch_id)
@@ -3838,6 +3902,26 @@ def show_banking(company_key, role):
                     conn.commit()
                     st.success("Payment posted successfully.")
                     st.rerun()
+
+        with st.expander("Bank Reconciliation", expanded=False):
+            recon_start = st.date_input("Reconciliation Start", value=datetime.now().date().replace(day=1), key=f"bank_recon_start_{company_key}")
+            recon_end = st.date_input("Reconciliation End", value=datetime.now().date(), key=f"bank_recon_end_{company_key}")
+            reconciliation = get_bank_reconciliation(company_key, recon_start, recon_end)
+            summary = reconciliation.get("summary", {})
+            rc1, rc2, rc3 = st.columns(3)
+            rc1.metric("Journal Total", format_currency(summary.get("journal_total", 0.0)))
+            rc2.metric("Matched Total", format_currency(summary.get("matched_total", 0.0)))
+            rc3.metric("Unmatched Total", format_currency(summary.get("unmatched_total", 0.0)))
+            matched_df = pd.DataFrame(reconciliation.get("matched", []))
+            unmatched_df = pd.DataFrame(reconciliation.get("unmatched_journal", []))
+            if not matched_df.empty:
+                st.markdown("Matched Bank Items")
+                st.dataframe(format_currency_dataframe(matched_df), use_container_width=True, hide_index=True)
+            if not unmatched_df.empty:
+                st.markdown("Unmatched Journal Bank Items")
+                st.dataframe(format_currency_dataframe(unmatched_df), use_container_width=True, hide_index=True)
+            if matched_df.empty and unmatched_df.empty:
+                st.info("No bank or mobile-money journal movements found for the selected period.")
         conn.close()
     except Exception as e:
         st.error(f"Banking module error: {e}")
@@ -3977,30 +4061,29 @@ def show_aging(company_key, aging_type="Receivable"):
                 conn.close()
 
         with tabs[-1]:
-            conn = get_connection()
-            data = conn.execute(
-                """
-                SELECT je.date,
-                       je.description,
-                       CASE
-                           WHEN lower(COALESCE(c.name, c.account_name)) LIKE '%receivable%'
-                               THEN ROUND(jl.debit - jl.credit, 2)
-                           ELSE ROUND(jl.credit - jl.debit, 2)
-                       END AS amount
-                FROM journal_entries je
-                JOIN journal_lines jl ON jl.entry_id = je.id
-                JOIN chart_of_accounts c ON c.id = jl.account_id
-                WHERE je.company_key = ?
-                  AND lower(COALESCE(c.name, c.account_name)) LIKE ?
-                ORDER BY date(je.date) ASC, je.id ASC
-                """,
-                (company_key, "%receivable%" if aging_type == "Receivable" else "%payable%"),
-            ).fetchall()
-            conn.close()
+            data = get_ar_aging_report(company_key) if aging_type == "Receivable" else get_ap_aging_report(company_key)
             if data:
-                df = pd.DataFrame(data, columns=["Date", "Description", f"Amount ({get_currency_symbol()})"])
-                df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
-                df["Days Outstanding"] = (datetime.now() - df["Date"]).dt.days
+                if aging_type == "Receivable":
+                    df = pd.DataFrame(data)
+                    df = df.rename(
+                        columns={
+                            "customer_id": "Customer ID",
+                            "customer_name": "Customer Name",
+                            "days_outstanding": "Days Outstanding",
+                            "bucket": "Bucket",
+                            "balance": f"Amount ({get_currency_symbol()})",
+                        }
+                    )
+                else:
+                    df = pd.DataFrame(data)
+                    df = df.rename(
+                        columns={
+                            "supplier_name": "Supplier Name",
+                            "days_outstanding": "Days Outstanding",
+                            "bucket": "Bucket",
+                            "balance": f"Amount ({get_currency_symbol()})",
+                        }
+                    )
                 st.dataframe(format_currency_dataframe(df), use_container_width=True)
                 if aging_type == "Receivable":
                     show_debtors_by_city_report(company_key)
@@ -4121,16 +4204,19 @@ def show_payroll(company_key, role):
                     )
                     salary_credit_account = "Cash" if payment_status == "Paid" else "Payroll Payable"
                     salary_credit_type = "Asset" if salary_credit_account == "Cash" else "Liability"
-                    post_transaction(
-                        "Payroll accrual",
-                        [
-                            {"account_name": "Salary Expense", "category": "Expense", "debit": payroll_values["net_salary"], "credit": 0},
-                            {"account_name": salary_credit_account, "category": salary_credit_type, "debit": 0, "credit": payroll_values["net_salary"]},
-                        ],
+                    post_journal_entry(
                         company_key=company_key,
+                        date=datetime(int(year), ['January','February','March','April','May','June','July','August','September','October','November','December'].index(month)+1, 1).date(),
+                        description="Payroll accrual",
                         reference=f"PAY-{emp_name}-{month}-{year}",
+                        lines=[
+                            {"account_id": get_account_id(conn, "Salary Expense", "Expense"), "debit": payroll_values["net_salary"], "credit": 0},
+                            {"account_id": get_account_id(conn, salary_credit_account, salary_credit_type), "debit": 0, "credit": payroll_values["net_salary"]},
+                        ],
                         created_by=role,
-                        entry_date=datetime(int(year), ['January','February','March','April','May','June','July','August','September','October','November','December'].index(month)+1, 1).date(),
+                        branch_id=st.session_state.get("active_branch_id"),
+                        source_module="Payroll",
+                        source_table="payroll",
                         conn=conn,
                     )
                     conn.commit()

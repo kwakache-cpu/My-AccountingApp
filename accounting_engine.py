@@ -22,6 +22,9 @@ def _normal_balance(account_type):
     return "debit" if normalized in ("Asset", "Expense") else "credit"
 
 
+VALID_ACCOUNT_TYPES = {"Asset", "Liability", "Equity", "Income", "Expense"}
+
+
 def _period_locked(conn, company_key, entry_date):
     if not company_key or not entry_date:
         return False
@@ -225,11 +228,14 @@ def post_journal_entry(
         ).fetchone()
         if not account_row:
             raise ValueError(f"Account ID {account_id} does not exist.")
+        account_type = str(account_row["account_type"]).strip().title()
+        if account_type not in VALID_ACCOUNT_TYPES:
+            raise ValueError(f"Account ID {account_id} has invalid type '{account_type}'.")
         normalized_lines.append(
             {
                 "account_id": account_id,
                 "account_name": str(account_row["account_name"]),
-                "account_type": str(account_row["account_type"]),
+                "account_type": account_type,
                 "debit": debit,
                 "credit": credit,
             }
@@ -443,17 +449,257 @@ def generate_cash_flow_statement(company_key, start_date, end_date):
     cash_df = journal_df[journal_df["account_name"].isin(["Cash", "Bank", "Mobile Money"])].copy()
     if cash_df.empty:
         return []
-    operating = round(float((cash_df["debit"] - cash_df["credit"]).sum()), 2)
-    income_statement = generate_income_statement(company_key, start_date, end_date)
-    depreciation = round(
-        sum(row["amount"] for row in income_statement if "depreciation" in str(row["account_name"]).lower()),
-        2,
+    rows = []
+    totals = {"Operating Activities": 0.0, "Investing Activities": 0.0, "Financing Activities": 0.0}
+    for _, row in cash_df.iterrows():
+        description = str(row["description"] or "").lower()
+        other_side = journal_df[
+            (journal_df["entry_id"] == row["entry_id"]) & (journal_df["account_id"] != row["account_id"])
+        ]
+        counterpart_types = {str(value).title() for value in other_side["account_type"].tolist()}
+        counterpart_names = {str(value) for value in other_side["account_name"].tolist()}
+        movement = round(float(row["debit"] or 0.0) - float(row["credit"] or 0.0), 2)
+        if counterpart_types & {"Income", "Expense"} or "Accounts Receivable" in counterpart_names or "Accounts Payable" in counterpart_names:
+            section = "Operating Activities"
+        elif "Fixed Assets" in counterpart_names or "Inventory" in counterpart_names or "Accumulated Depreciation" in counterpart_names:
+            section = "Investing Activities"
+        elif counterpart_types & {"Equity", "Liability"} or "Owner Capital" in counterpart_names or "Retained Earnings" in counterpart_names:
+            section = "Financing Activities"
+        elif "depreciation" in description:
+            section = "Operating Activities"
+        else:
+            section = "Operating Activities"
+        totals[section] += movement
+        rows.append(
+            {
+                "section": section,
+                "line_item": row["description"],
+                "amount": movement,
+                "date": row["date"],
+                "reference": row["reference"],
+            }
+        )
+    rows.extend(
+        [
+            {"section": key, "line_item": f"Net Cash from {key}", "amount": round(value, 2), "date": None, "reference": None}
+            for key, value in totals.items()
+        ]
     )
-    return [
-        {"section": "Operating Activities", "line_item": "Net Cash Movement in Cash Accounts", "amount": operating},
-        {"section": "Operating Activities", "line_item": "Depreciation Add-Back", "amount": depreciation},
-        {"section": "Net Change", "line_item": "Net Cash Change", "amount": round(operating + depreciation, 2)},
-    ]
+    rows.append(
+        {
+            "section": "Net Change",
+            "line_item": "Net Cash Change",
+            "amount": round(sum(totals.values()), 2),
+            "date": None,
+            "reference": None,
+        }
+    )
+    return rows
+
+
+def _aging_bucket(days_outstanding):
+    if days_outstanding <= 30:
+        return "0-30 Days"
+    if days_outstanding <= 60:
+        return "31-60 Days"
+    if days_outstanding <= 90:
+        return "61-90 Days"
+    return "91+ Days"
+
+
+def get_ar_aging_report(company_key, as_of_date=None):
+    report_date = pd.Timestamp(as_of_date or datetime.now().date())
+    conn = get_connection()
+    try:
+        customers = conn.execute(
+            "SELECT id, customer_id, name, phone, email FROM customers WHERE company_key = ? ORDER BY name",
+            (company_key,),
+        ).fetchall()
+        rows = []
+        for customer in customers:
+            balance = get_customer_balance(company_key, int(customer["id"]), as_of_date=report_date.date(), conn=conn)
+            if abs(balance) < 0.005:
+                continue
+            tx_rows = conn.execute(
+                """
+                SELECT transaction_date, amount, description
+                FROM customer_transactions
+                WHERE company_key = ? AND customer_id = ? AND transaction_type = 'Debit'
+                ORDER BY date(transaction_date) ASC, id ASC
+                """,
+                (company_key, int(customer["id"])),
+            ).fetchall()
+            oldest_date = pd.Timestamp(report_date)
+            if tx_rows:
+                oldest_date = min(pd.Timestamp(row["transaction_date"]) for row in tx_rows if row["transaction_date"])
+            days = int((report_date - oldest_date).days) if oldest_date is not None else 0
+            rows.append(
+                {
+                    "customer_id": customer["customer_id"] or f"CUST-{int(customer['id']):06d}",
+                    "customer_name": customer["name"],
+                    "phone": customer["phone"],
+                    "email": customer["email"],
+                    "days_outstanding": days,
+                    "bucket": _aging_bucket(days),
+                    "balance": round(balance, 2),
+                }
+            )
+        return rows
+    finally:
+        conn.close()
+
+
+def get_ap_aging_report(company_key, as_of_date=None):
+    report_date = pd.Timestamp(as_of_date or datetime.now().date())
+    conn = get_connection()
+    try:
+        rows = conn.execute(
+            """
+            SELECT s.id, s.name, b.bill_date, b.amount, b.status
+            FROM bills b
+            JOIN suppliers s ON s.id = b.supplier_id
+            WHERE b.company_key = ? AND COALESCE(b.status, 'Draft') IN ('Pending', 'Received')
+            ORDER BY date(b.bill_date) ASC, b.id ASC
+            """,
+            (company_key,),
+        ).fetchall()
+        supplier_buckets = {}
+        for row in rows:
+            supplier_name = row["name"]
+            bill_date = pd.Timestamp(row["bill_date"]) if row["bill_date"] else report_date
+            days = int((report_date - bill_date).days)
+            supplier_buckets.setdefault(
+                supplier_name,
+                {
+                    "supplier_name": supplier_name,
+                    "days_outstanding": 0,
+                    "bucket": "0-30 Days",
+                    "balance": 0.0,
+                },
+            )
+            supplier_buckets[supplier_name]["balance"] += float(row["amount"] or 0.0)
+            supplier_buckets[supplier_name]["days_outstanding"] = max(supplier_buckets[supplier_name]["days_outstanding"], days)
+            supplier_buckets[supplier_name]["bucket"] = _aging_bucket(supplier_buckets[supplier_name]["days_outstanding"])
+        return list(supplier_buckets.values())
+    finally:
+        conn.close()
+
+
+def close_fiscal_year(company_key, closing_date, created_by, branch_id=None, conn=None):
+    closing_date = _resolve_date(closing_date)
+    owns_connection = conn is None
+    conn = conn or get_connection()
+    try:
+        income_statement = generate_income_statement(company_key, None, closing_date)
+        net_profit = round(sum(row["amount"] for row in income_statement if row["account_name"] == "Net Profit"), 2)
+        if abs(net_profit) < 0.005:
+            return None
+        income_rows = [row for row in get_trial_balance(company_key, end_date=closing_date) if str(row["account_type"]).title() == "Income" and abs(row["credit_total"] - row["debit_total"]) > 0.005]
+        expense_rows = [row for row in get_trial_balance(company_key, end_date=closing_date) if str(row["account_type"]).title() == "Expense" and abs(row["debit_total"] - row["credit_total"]) > 0.005]
+        lines = []
+        for row in income_rows:
+            amount = round(row["credit_total"] - row["debit_total"], 2)
+            lines.append({"account_id": row["account_id"], "debit": amount, "credit": 0})
+        for row in expense_rows:
+            amount = round(row["debit_total"] - row["credit_total"], 2)
+            lines.append({"account_id": row["account_id"], "debit": 0, "credit": amount})
+        retained_earnings_id = get_account_id(conn, "Retained Earnings", "Equity")
+        if net_profit >= 0:
+            lines.append({"account_id": retained_earnings_id, "debit": 0, "credit": net_profit})
+        else:
+            lines.append({"account_id": retained_earnings_id, "debit": abs(net_profit), "credit": 0})
+        entry_id = post_journal_entry(
+            company_key=company_key,
+            date=closing_date,
+            description=f"Year-end closing entry {closing_date[:4]}",
+            reference=f"YEC-{closing_date}",
+            lines=lines,
+            created_by=created_by,
+            branch_id=branch_id,
+            source_module="Year End Closing",
+            source_table="journal_entries",
+            conn=conn,
+        )
+        if owns_connection:
+            conn.commit()
+        return entry_id
+    finally:
+        if owns_connection and conn:
+            conn.close()
+
+
+def get_bank_reconciliation(company_key, start_date=None, end_date=None):
+    conn = get_connection()
+    try:
+        journal_df = _journal_dataframe(company_key, start_date=start_date, end_date=end_date, conn=conn)
+        bank_df = journal_df[journal_df["account_name"].isin(["Bank", "Mobile Money"])].copy()
+        if bank_df.empty:
+            return {"matched": [], "unmatched_journal": [], "summary": {"journal_total": 0.0, "matched_total": 0.0, "unmatched_total": 0.0}}
+        payment_rows = conn.execute(
+            """
+            SELECT id, payment_date, amount, method, reference, payment_type
+            FROM payments
+            WHERE company_key = ?
+              AND method IN ('Bank', 'Mobile Money')
+              {start_clause}
+              {end_clause}
+            ORDER BY date(payment_date), id
+            """.format(
+                start_clause="AND date(payment_date) >= date(?)" if start_date else "",
+                end_clause="AND date(payment_date) <= date(?)" if end_date else "",
+            ),
+            tuple(
+                [company_key]
+                + ([_resolve_date(start_date)] if start_date else [])
+                + ([_resolve_date(end_date)] if end_date else [])
+            ),
+        ).fetchall()
+        matched = []
+        unmatched = []
+        used_payment_ids = set()
+        for _, row in bank_df.iterrows():
+            movement = round(float(row["debit"] or 0.0) - float(row["credit"] or 0.0), 2)
+            match = next(
+                (
+                    payment
+                    for payment in payment_rows
+                    if int(payment["id"]) not in used_payment_ids
+                    and round(float(payment["amount"] or 0.0), 2) == abs(movement)
+                    and (not row["reference"] or not payment["reference"] or str(payment["reference"]) == str(row["reference"]))
+                ),
+                None,
+            )
+            journal_item = {
+                "date": row["date"],
+                "description": row["description"],
+                "reference": row["reference"],
+                "account": row["account_name"],
+                "movement": movement,
+            }
+            if match:
+                used_payment_ids.add(int(match["id"]))
+                matched.append(
+                    {
+                        **journal_item,
+                        "payment_id": int(match["id"]),
+                        "payment_date": match["payment_date"],
+                        "payment_reference": match["reference"],
+                        "payment_type": match["payment_type"],
+                    }
+                )
+            else:
+                unmatched.append(journal_item)
+        return {
+            "matched": matched,
+            "unmatched_journal": unmatched,
+            "summary": {
+                "journal_total": round(float(bank_df["debit"].sum() - bank_df["credit"].sum()), 2),
+                "matched_total": round(sum(item["movement"] for item in matched), 2),
+                "unmatched_total": round(sum(item["movement"] for item in unmatched), 2),
+            },
+        }
+    finally:
+        conn.close()
 
 
 def get_customer_balance(company_key, customer_id, as_of_date=None, conn=None):
