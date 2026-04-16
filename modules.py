@@ -2269,7 +2269,7 @@ def show_create_bill_page(company_key):
         supplier_options = [""] + [row["name"] for row in suppliers]
 
         # Initialize items in session state
-        if "bill_items" not in st.session_state:
+        if "bill_items" not in st.session_state or not isinstance(st.session_state.bill_items, list):
             st.session_state.bill_items = [{"item_name": "", "quantity": 1.0, "unit_price": 0.0}]
 
         # Convert to dataframe for editing
@@ -2293,7 +2293,8 @@ def show_create_bill_page(company_key):
         st.session_state.bill_items = edited_df.to_dict("records")
 
         # Calculate totals
-        total_amount = sum(item["quantity"] * item["unit_price"] for item in st.session_state.bill_items if item["item_name"].strip())
+        valid_rows = edited_df['item_name'].fillna('').str.strip() != ''
+        total_amount = (edited_df.loc[valid_rows, 'quantity'].fillna(0) * edited_df.loc[valid_rows, 'unit_price'].fillna(0)).sum()
 
         st.markdown(f"**Total Amount: GH₵ {total_amount:.2f}**")
 
@@ -5440,17 +5441,20 @@ def show_dashboard(company_key, company_name, role):
                 st.dataframe(format_currency_dataframe(low_stock), use_container_width=True)
 
         st.subheader("Quick Actions")
-        action_col1, action_col2, action_col3, action_col4 = st.columns(4)
+        action_col1, action_col2, action_col3, action_col4, action_col5 = st.columns(5)
         if action_col1.button("🛒 New Sale", key=f"dashboard_pos_{company_key}", use_container_width=True):
             st.session_state.page = "Point of Sale"
             st.rerun()
         if action_col2.button("📦 Add Inventory", key=f"dashboard_inventory_{company_key}", use_container_width=True):
             st.session_state.page = "Inventory Management"
             st.rerun()
-        if action_col3.button("🧾 Financial Reports", key=f"dashboard_financial_reports_{company_key}", use_container_width=True):
+        if action_col3.button("📄 Create New Bill", key=f"dashboard_create_bill_{company_key}", use_container_width=True):
+            st.session_state.page = "Create Bill"
+            st.rerun()
+        if action_col4.button("🧾 Financial Reports", key=f"dashboard_financial_reports_{company_key}", use_container_width=True):
             st.session_state.page = "Financial Reports"
             st.rerun()
-        if action_col4.button("📊 Data Analytics", key=f"dashboard_reports_{company_key}", use_container_width=True):
+        if action_col5.button("📊 Data Analytics", key=f"dashboard_reports_{company_key}", use_container_width=True):
             st.session_state.page = "Data Analytics"
             st.rerun()
     except Exception as exc:
