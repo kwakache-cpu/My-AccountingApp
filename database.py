@@ -80,6 +80,7 @@ def ensure_schema_integrity(conn):
     critical_columns = {
         "companies": {"contact_email": "TEXT", "barcode_input_source": "TEXT DEFAULT 'Keyboard Entry'"},
         "audit_logs": {"details": "TEXT"},
+        "journal_entries": {"branch_id": "TEXT"},
         "vouchers": {"status": "TEXT DEFAULT 'Active'"},
         "payroll": {"status": "TEXT DEFAULT 'Active'"},
         "inventory": {"opening_balance": "REAL DEFAULT 0", "barcode": "TEXT"},
@@ -210,6 +211,7 @@ def ensure_schema_integrity(conn):
             description TEXT NOT NULL,
             reference TEXT,
             created_by TEXT,
+            branch_id TEXT,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
         """

@@ -791,7 +791,7 @@ def post_transaction(description, lines, company_key=None, reference=None, creat
             conn.close()
 
 
-def create_journal_entry(description, lines, company_key=None, reference=None, entry_date=None, conn=None):
+def create_journal_entry(description, lines, company_key=None, reference=None, entry_date=None, branch_id=None, conn=None):
     return post_transaction(
         description,
         lines,
@@ -799,6 +799,7 @@ def create_journal_entry(description, lines, company_key=None, reference=None, e
         reference=reference,
         created_by=st.session_state.get("user", {}).get("role", "System"),
         entry_date=entry_date,
+        branch_id=branch_id,
         conn=conn,
     )
 
@@ -1614,6 +1615,10 @@ def _focus_text_input(input_label):
         }};
         focusTarget();
         setTimeout(focusTarget, 150);
+        setTimeout(focusTarget, 500);
+        setTimeout(focusTarget, 1000);
+        const focusInterval = setInterval(focusTarget, 1500);
+        setTimeout(() => clearInterval(focusInterval), 10000);
         </script>
         """,
         height=0,
@@ -2622,8 +2627,12 @@ def show_company_setup(company_key, company_name, role):
                         )
                         updated_barcode_input_source = st.selectbox(
                             "Default Barcode Input Mode",
-                            ["Keyboard Entry", "Camera Scanner"],
-                            index=0 if company_data.get("barcode_input_source", "Keyboard Entry") == "Keyboard Entry" else 1,
+                            ["Keyboard Entry", "Camera Scanner", "Physical Scanner"],
+                            index=["Keyboard Entry", "Camera Scanner", "Physical Scanner"].index(
+                                company_data.get("barcode_input_source", "Keyboard Entry")
+                                if company_data.get("barcode_input_source", "Keyboard Entry") in ["Keyboard Entry", "Camera Scanner", "Physical Scanner"]
+                                else "Keyboard Entry"
+                            ),
                         )
                         if st.form_submit_button("Update Client Settings"):
                             conn.execute(
@@ -2865,7 +2874,7 @@ def show_pos(company_key, company_name, role):
         barcode_input_source = company_row[1] if company_row and company_row[1] else "Keyboard Entry"
         items_df = pd.DataFrame(items, columns=["ID", "Item Name", "Barcode", "Price", "Qty"]) if items else pd.DataFrame()
 
-        source_options = ["Keyboard Entry", "Camera Scanner"]
+        source_options = ["Keyboard Entry", "Camera Scanner", "Physical Scanner"]
         source_index = source_options.index(barcode_input_source) if barcode_input_source in source_options else 0
         selected_barcode_source = st.selectbox(
             "Barcode Input Source",
@@ -3069,6 +3078,7 @@ def show_pos(company_key, company_name, role):
                         role,
                     ),
                 )
+                branch_id = st.session_state.get("active_branch_id")
                 create_journal_entry(
                     "POS sale",
                     [
@@ -3078,6 +3088,7 @@ def show_pos(company_key, company_name, role):
                     company_key=company_key,
                     reference=f"POS-{int(sale_cursor.lastrowid)}",
                     entry_date=sale_date,
+                    branch_id=branch_id,
                     conn=conn,
                 )
                 if cost_of_goods_sold > 0:
@@ -3090,6 +3101,7 @@ def show_pos(company_key, company_name, role):
                         company_key=company_key,
                         reference=f"COGS-{datetime.now().strftime('%Y%m%d%H%M%S')}",
                         entry_date=sale_date,
+                        branch_id=branch_id,
                         conn=conn,
                     )
                 conn.commit()
