@@ -1357,34 +1357,38 @@ def _build_receipt(company_name, items, total_amount, sale_date):
 
 def _build_receipt_html(company_name, items, total_amount, sale_date):
     rows = []
-    for item in items:
+    for index, item in enumerate(items, start=1):
         rows.append(
-            f"<tr><td>{item['name']}</td><td style='text-align:right'>{int(item['qty'])}</td>"
-            f"<td style='text-align:right'>{format_currency(item['price'])}</td>"
-            f"<td style='text-align:right'>{format_currency(item['qty'] * item['price'])}</td></tr>"
+            f"<tr>"
+            f"<td style='padding: 0.5rem 0.25rem; border-bottom:1px solid #ddd;'>{index}</td>"
+            f"<td style='padding: 0.5rem 0.25rem; border-bottom:1px solid #ddd;'>{item['name']}</td>"
+            f"<td style='padding: 0.5rem 0.25rem; border-bottom:1px solid #ddd; text-align:right;'>{int(item['qty'])}</td>"
+            f"<td style='padding: 0.5rem 0.25rem; border-bottom:1px solid #ddd; text-align:right;'>{format_currency(item['price'])}</td>"
+            f"<td style='padding: 0.5rem 0.25rem; border-bottom:1px solid #ddd; text-align:right;'>{format_currency(item['qty'] * item['price'])}</td>"
+            f"</tr>"
         )
     return f"""
-    <div class='receipt-preview printable'>
+    <div class='receipt-preview printable' style='font-family: Arial, sans-serif; color: #111;'>
         <div style='margin-bottom:1rem;'>
             <h2 style='margin:0;padding:0;'>{company_name}</h2>
-            <div>STANDARD POS RECEIPT</div>
-            <div>Date: {sale_date}</div>
+            <div style='font-size:0.95rem; color:#555;'>STANDARD POS RECEIPT</div>
+            <div style='font-size:0.9rem; color:#555;'>Date: {sale_date}</div>
         </div>
-        <table style='width:100%; border-collapse: collapse; margin-bottom:1rem;'>
+        <table style='width:100%; border-collapse: collapse; margin-bottom:1rem; font-size:0.95rem;'>
             <thead>
                 <tr>
-                    <th style='text-align:left; border-bottom:1px solid #333;'>Item</th>
-                    <th style='text-align:right; border-bottom:1px solid #333;'>Qty</th>
-                    <th style='text-align:right; border-bottom:1px solid #333;'>Price</th>
-                    <th style='text-align:right; border-bottom:1px solid #333;'>Total</th>
+                    <th style='text-align:left; padding:0.5rem 0.25rem; border-bottom:2px solid #333;'>#</th>
+                    <th style='text-align:left; padding:0.5rem 0.25rem; border-bottom:2px solid #333;'>Item</th>
+                    <th style='text-align:right; padding:0.5rem 0.25rem; border-bottom:2px solid #333;'>Qty</th>
+                    <th style='text-align:right; padding:0.5rem 0.25rem; border-bottom:2px solid #333;'>Price</th>
+                    <th style='text-align:right; padding:0.5rem 0.25rem; border-bottom:2px solid #333;'>Total</th>
                 </tr>
             </thead>
             <tbody>
                 {''.join(rows)}
             </tbody>
         </table>
-        <div style='text-align:right; font-weight:bold; margin-bottom:1rem;'>TOTAL: {format_currency(total_amount)}</div>
-        <button class='print-button' onclick='window.print()'>Print Receipt</button>
+        <div style='text-align:right; font-size:1rem; font-weight:bold; margin-bottom:1rem;'>TOTAL: {format_currency(total_amount)}</div>
     </div>
     """
 
@@ -2873,6 +2877,8 @@ def show_pos(company_key, company_name, role):
         company_label = company_row[0] if company_row else company_name
         barcode_input_source = company_row[1] if company_row and company_row[1] else "Keyboard Entry"
         items_df = pd.DataFrame(items, columns=["ID", "Item Name", "Barcode", "Price", "Qty"]) if items else pd.DataFrame()
+        receipt_html_key = f"pos_receipt_html_{company_key}"
+        receipt_print_trigger_key = f"pos_receipt_print_trigger_{company_key}"
 
         source_options = ["Keyboard Entry", "Camera Scanner", "Physical Scanner"]
         source_index = source_options.index(barcode_input_source) if barcode_input_source in source_options else 0
@@ -2964,6 +2970,7 @@ def show_pos(company_key, company_name, role):
                                 "qty": float(item_row["Qty"] or 0.0),
                             },
                         )
+                    st.session_state[pos_scan_input_key] = ""
                     _trigger_scan_feedback(pos_message_key, f"Added {selected_item} x{int(qty_to_sell)} to the cart.")
                     st.rerun()
         else:
@@ -2984,6 +2991,12 @@ def show_pos(company_key, company_name, role):
                             "line_total": int(qty_to_sell) * float(manual_price),
                         }
                     )
+                    st.session_state[pos_scan_input_key] = ""
+                    _clear_streamlit_state(
+                        f"manual_pos_item_{company_key}",
+                        f"manual_pos_price_{company_key}",
+                        f"manual_pos_qty_{company_key}",
+                    )
                     _trigger_scan_feedback(pos_message_key, f"Added manual item {selected_item.strip()} to the cart.")
                     st.rerun()
                 st.warning("Enter a valid manual item and price before adding it.")
@@ -2992,34 +3005,49 @@ def show_pos(company_key, company_name, role):
         sale_date = st.date_input("Transaction Date", value=datetime.now().date(), key=f"pos_sale_date_{company_key}")
         cart = st.session_state.setdefault(cart_key, [])
         if cart:
-            cart_df = pd.DataFrame(
-                [
-                    {
-                        "Item": row["name"],
-                        "Barcode": row.get("barcode") or "",
-                        "Qty": row["qty"],
-                        "Unit Price": row["price"],
-                        "Line Total": row["qty"] * row["price"],
-                    }
-                    for row in cart
-                ]
-            )
             st.subheader("Active Sale Cart")
-            st.dataframe(format_currency_dataframe(cart_df), use_container_width=True)
-            st.metric(f"Cart Total ({get_currency_symbol()})", format_currency(cart_df["Line Total"].sum()))
-            remove_choice = st.selectbox(
-                "Remove Cart Line",
-                ["Keep all items"] + [f"{index + 1}. {line['name']} x{line['qty']}" for index, line in enumerate(cart)],
-                key=f"pos_remove_line_{company_key}",
+            total_amount = 0.0
+            st.markdown(
+                "<div style='overflow-x:auto; padding-bottom:0.5rem;'>"
+                "<div style='display:grid; grid-template-columns: 1fr 4fr 1.2fr 1.5fr 2fr; gap:0.5rem; font-weight:bold; margin-bottom:0.5rem;'>"
+                "<div>#</div><div>Item</div><div style='text-align:right;'>Qty</div><div style='text-align:right;'>Price</div><div style='text-align:right;'>Total</div>"
+                "</div>",
+                unsafe_allow_html=True,
             )
-            remove_col, clear_col = st.columns(2)
-            if remove_col.button("🗑️ Delete Record", key=f"pos_remove_selected_{company_key}") and remove_choice != "Keep all items":
-                remove_index = int(remove_choice.split(".", 1)[0]) - 1
-                cart.pop(remove_index)
-                st.rerun()
+            for index, line in enumerate(cart, start=1):
+                line_total = float(line["qty"]) * float(line["price"])
+                total_amount += line_total
+                row_cols = st.columns([1, 4, 1.2, 1.5, 2])
+                row_cols[0].markdown(f"**{index}**")
+                row_cols[1].markdown(f"{line['name']}")
+                row_cols[2].markdown(f"<div style='text-align:right;'>{int(line['qty'])}</div>", unsafe_allow_html=True)
+                row_cols[3].markdown(f"<div style='text-align:right;'>{format_currency(line['price'])}</div>", unsafe_allow_html=True)
+                row_cols[4].markdown(f"<div style='text-align:right; font-weight:bold;'>{format_currency(line_total)}</div>", unsafe_allow_html=True)
+                action_cols = st.columns([1, 1, 1])
+                if action_cols[0].button("➕", key=f"pos_qty_inc_{company_key}_{index}"):
+                    cart[index - 1]["qty"] += 1
+                    cart[index - 1]["line_total"] = cart[index - 1]["qty"] * cart[index - 1]["price"]
+                    st.rerun()
+                if action_cols[1].button("➖", key=f"pos_qty_dec_{company_key}_{index}"):
+                    if cart[index - 1]["qty"] > 1:
+                        cart[index - 1]["qty"] -= 1
+                        cart[index - 1]["line_total"] = cart[index - 1]["qty"] * cart[index - 1]["price"]
+                    else:
+                        cart.pop(index - 1)
+                    st.rerun()
+                if action_cols[2].button("🗑️", key=f"pos_remove_item_{company_key}_{index}"):
+                    cart.pop(index - 1)
+                    st.rerun()
+            st.markdown(
+                f"<div style='text-align:right; margin-top:1rem; font-size:1.1rem; font-weight:bold;'>Cart Total: {format_currency(total_amount)}</div>",
+                unsafe_allow_html=True,
+            )
+            clear_col, checkout_col = st.columns([1, 1])
             if clear_col.button("Clear Cart", key=f"pos_clear_cart_{company_key}"):
                 st.session_state[cart_key] = []
                 st.rerun()
+            if checkout_col.button("Final Checkout", key=f"pos_final_checkout_{company_key}"):
+                process_pos_sale(print_receipt=True)
         else:
             st.info("Scan a barcode or add an item manually to start the sale.")
 
@@ -3121,6 +3149,12 @@ def show_pos(company_key, company_name, role):
                         total,
                         f"{sale_date.isoformat()} {datetime.now().strftime('%H:%M')}",
                     )
+                    st.session_state[receipt_html_key] = _build_receipt_html(
+                        company_label,
+                        line_items,
+                        total,
+                        f"{sale_date.isoformat()} {datetime.now().strftime('%H:%M')}",
+                    )
                 st.session_state[cart_key] = []
                 st.session_state[pos_success_key] = True
                 _clear_streamlit_state(
@@ -3136,10 +3170,11 @@ def show_pos(company_key, company_name, role):
                 st.error(f"Error processing sale: {e}")
 
         action_col1, action_col2 = st.columns(2)
-        if action_col1.button("Process Sale", key=f"process_sale_{company_key}"):
-            process_pos_sale(print_receipt=False)
-        if action_col2.button("🖨️ Save & Print Receipt", key=f"save_print_sale_{company_key}"):
+        if action_col1.button("Final Checkout", key=f"final_checkout_{company_key}"):
             process_pos_sale(print_receipt=True)
+        if action_col2.button("Clear Cart", key=f"clear_cart_post_{company_key}"):
+            st.session_state[cart_key] = []
+            st.rerun()
 
         st.subheader("Recent POS Transactions")
         conn = get_connection()
@@ -3186,19 +3221,18 @@ def show_pos(company_key, company_name, role):
                         _clear_streamlit_state(pos_void_confirm_key)
                         st.rerun()
 
-        if st.session_state.get(receipt_key):
+        if st.session_state.get(receipt_html_key):
             _inject_print_styles()
             st.subheader("Receipt Preview")
-            receipt_text = st.session_state[receipt_key]
-            receipt_html = receipt_text.replace("\n", "<br />")
-            st.markdown(
-                f"<div class='receipt-preview printable'><pre style='font-family: monospace; white-space: pre-wrap;'>{receipt_html}</pre>"
-                "<button class='print-button' onclick='window.print()'>Print Receipt</button></div>",
-                unsafe_allow_html=True,
-            )
+            st.markdown(st.session_state[receipt_html_key], unsafe_allow_html=True)
+            if st.button("Print Receipt", key=f"receipt_print_btn_{company_key}"):
+                st.session_state[receipt_print_trigger_key] = True
+            if st.session_state.get(receipt_print_trigger_key):
+                components.html("<script>window.print();</script>", height=0)
+                st.session_state.pop(receipt_print_trigger_key, None)
             st.download_button(
                 "Download Receipt",
-                data=receipt_text,
+                data=st.session_state.get(receipt_key, ""),
                 file_name=f"receipt_{company_key}.txt",
                 mime="text/plain",
                 key=f"receipt_download_{company_key}",
