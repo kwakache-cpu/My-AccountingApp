@@ -1288,9 +1288,17 @@ def init_db():
             """
             CREATE TABLE IF NOT EXISTS vouchers (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                company_key TEXT,
+                branch_id TEXT,
+                v_type TEXT,
+                ledger TEXT,
                 narration TEXT,
                 amount REAL,
                 ref_no TEXT,
+                reference_no TEXT,
+                credit REAL DEFAULT 0,
+                created_by TEXT,
+                status TEXT DEFAULT 'Active',
                 date TEXT
             )
             """
@@ -1722,6 +1730,7 @@ def _import_sales_from_excel(conn, company_key, doc_type, file_obj, created_by):
 
     changed_rows = 0
     ledger = "Sales Revenue" if doc_type == "Sales" else "Accounts Payable"
+    branch_id = st.session_state.get("active_branch_id")
     for _, row in imported_df.iterrows():
         row_id = row[column_map["id"]] if "id" in column_map and not pd.isna(row[column_map["id"]]) else None
         tx_date = pd.to_datetime(row[column_map["date"]], errors="coerce")
@@ -1739,10 +1748,10 @@ def _import_sales_from_excel(conn, company_key, doc_type, file_obj, created_by):
                 conn.execute(
                     """
                     UPDATE vouchers
-                    SET date = ?, v_type = ?, ledger = ?, credit = ?, narration = ?, created_by = ?
+                    SET date = ?, v_type = ?, ledger = ?, credit = ?, narration = ?, created_by = ?, branch_id = ?
                     WHERE company_key = ? AND id = ?
                     """,
-                    (tx_date_str, doc_type, ledger, amount, narration, created_by, company_key, int(row_id)),
+                    (tx_date_str, doc_type, ledger, amount, narration, created_by, branch_id, company_key, int(row_id)),
                 )
                 changed_rows += 1
                 continue
@@ -1757,19 +1766,19 @@ def _import_sales_from_excel(conn, company_key, doc_type, file_obj, created_by):
             conn.execute(
                 """
                 UPDATE vouchers
-                SET credit = ?, created_by = ?
+                SET credit = ?, created_by = ?, branch_id = ?
                 WHERE company_key = ? AND id = ?
                 """,
-                (amount, created_by, company_key, existing["id"]),
+                (amount, created_by, branch_id, company_key, existing["id"]),
             )
             changed_rows += 1
             continue
         conn.execute(
             """
-            INSERT INTO vouchers (company_key, date, v_type, ledger, credit, narration, created_by)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO vouchers (company_key, branch_id, date, v_type, ledger, credit, narration, created_by)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (company_key, tx_date_str, doc_type, ledger, amount, narration, created_by),
+            (company_key, branch_id, tx_date_str, doc_type, ledger, amount, narration, created_by),
         )
         changed_rows += 1
     return changed_rows
@@ -2438,6 +2447,7 @@ def show_inventory(company_key, role):
 # ==========================================
 def show_vouchers(company_key, role):
     st.header("📑 Vouchers & Journals")
+    branch_id = st.session_state.get("active_branch_id")
 
     with st.expander("➕ Create New Voucher", expanded=True):
         with st.form("voucher_entry_form"):
@@ -2459,12 +2469,12 @@ def show_vouchers(company_key, role):
                     try:
                         conn = get_connection()
                         conn.execute(
-                            """INSERT INTO vouchers (company_key, date, v_type, ledger, credit, reference_no, narration, created_by)
-                               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-                            (company_key, v_date.isoformat(), v_type, v_type, amount, ref_no, narration, role),
+                            """INSERT INTO vouchers (company_key, branch_id, date, v_type, ledger, credit, reference_no, narration, created_by)
+                               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                            (company_key, branch_id, v_date.isoformat(), v_type, v_type, amount, ref_no, narration, role),
                         )
                         conn.commit()
-                        log_audit_action(conn, company_key, role, "Voucher Created", "Vouchers & Journals", f"Posted {v_type} voucher: {ref_no}")
+                        log_audit_action(conn, company_key, role, "Voucher Created", "Vouchers & Journals", f"Posted {v_type} voucher: {ref_no}", branch_id=branch_id)
                         conn.close()
                         st.success("Voucher posted successfully!")
                         st.rerun()
@@ -2840,6 +2850,7 @@ def show_company_setup(company_key, company_name, role):
 def show_pos(company_key, company_name, role):
     st.header("🛒 Point of Sale")
     receipt_key = f"pos_receipt_{company_key}"
+    checkout_complete_key = f"pos_checkout_complete_{company_key}"
     pos_success_key = f"pos_sale_success_{company_key}"
     void_success_key = f"pos_void_success_{company_key}"
     pos_message_key = f"pos_message_{company_key}"
@@ -2916,58 +2927,6 @@ def show_pos(company_key, company_name, role):
             _focus_text_input("Barcode Search")
             if barcode_input_source == "Camera Scanner":
                 _render_camera_scanner(f"pos_{company_key}", pos_pending_scan_key)
-
-            item_mode = st.radio(
-                "Item Entry Mode",
-                ["From Stock", "Manual Entry"],
-                horizontal=True,
-                key=f"pos_item_mode_{company_key}",
-            )
-            if item_mode == "From Stock":
-                if items_df.empty:
-                    st.info("No stock available for sale. Switch to Manual Entry to continue.")
-                else:
-                    selected_item = st.selectbox("Select Item", items_df["Item Name"].tolist(), key=f"pos_item_{company_key}")
-                    qty_to_sell = st.number_input("Quantity", min_value=1, value=1, key=f"pos_qty_{company_key}")
-                    if st.form_submit_button("Add Selected Item", key=f"pos_add_selected_{company_key}"):
-                        item_row = items_df.loc[items_df["Item Name"] == selected_item].iloc[0]
-                        for _ in range(int(qty_to_sell)):
-                            _add_item_to_pos_cart(
-                                company_key,
-                                {
-                                    "id": int(item_row["ID"]),
-                                    "item_name": item_row["Item Name"],
-                                    "barcode": item_row["Barcode"],
-                                    "price": float(item_row["Price"] or 0.0),
-                                    "qty": float(item_row["Qty"] or 0.0),
-                                },
-                            )
-                        _trigger_scan_feedback(pos_message_key, f"Added {selected_item} x{int(qty_to_sell)} to the cart.")
-                        st.rerun()
-            else:
-                selected_item = st.text_input("New Item Name", key=f"manual_pos_item_{company_key}")
-                manual_price = st.number_input(f"Manual Price ({st.session_state.currency_symbol})", min_value=0.0, value=0.0, key=f"manual_pos_price_{company_key}")
-                qty_to_sell = st.number_input("Quantity", min_value=1, value=1, key=f"manual_pos_qty_{company_key}")
-                if st.form_submit_button("Add Manual Item", key=f"pos_add_manual_{company_key}"):
-                    if selected_item and float(manual_price) > 0:
-                        cart = st.session_state.setdefault(cart_key, [])
-                        cart.append(
-                            {
-                                "inventory_item_id": None,
-                                "name": selected_item.strip(),
-                                "barcode": "",
-                                "price": float(manual_price),
-                                "available_qty": None,
-                                "qty": int(qty_to_sell),
-                                "line_total": int(qty_to_sell) * float(manual_price),
-                            }
-                        )
-                        _trigger_scan_feedback(pos_message_key, f"Added manual item {selected_item.strip()} to the cart.")
-                        st.rerun()
-                    else:
-                        st.warning("Enter a valid manual item and price before adding it.")
-
-            # Handle barcode processing on form submit
             if st.form_submit_button("Scan Barcode"):
                 pending_pos_barcode = str(st.session_state.get(pos_scan_input_key, "") or "").strip()
                 if pending_pos_barcode:
@@ -2976,6 +2935,9 @@ def show_pos(company_key, company_name, role):
                         conn = get_connection()
                         matched_item = _lookup_inventory_by_barcode(conn, company_key, pending_pos_barcode)
                         if matched_item and float(matched_item["qty"] or 0) > 0:
+                            st.session_state[checkout_complete_key] = False
+                            st.session_state.pop(receipt_key, None)
+                            st.session_state.pop(receipt_html_key, None)
                             _add_item_to_pos_cart(company_key, matched_item)
                             _trigger_scan_feedback(
                                 pos_message_key,
@@ -2997,6 +2959,62 @@ def show_pos(company_key, company_name, role):
                         st.session_state[pos_scan_input_key] = ""
                         st.rerun()
 
+        with st.container():
+            item_mode = st.radio(
+                "Item Entry Mode",
+                ["From Stock", "Manual Entry"],
+                horizontal=True,
+                key=f"pos_item_mode_{company_key}",
+            )
+            if item_mode == "From Stock":
+                if items_df.empty:
+                    st.info("No stock available for sale. Switch to Manual Entry to continue.")
+                else:
+                    selected_item = st.selectbox("Select Item", items_df["Item Name"].tolist(), key=f"pos_item_{company_key}")
+                    qty_to_sell = st.number_input("Quantity", min_value=1, value=1, key=f"pos_qty_{company_key}")
+                    if st.button("Add Selected Item", key=f"pos_add_selected_{company_key}"):
+                        st.session_state[checkout_complete_key] = False
+                        st.session_state.pop(receipt_key, None)
+                        st.session_state.pop(receipt_html_key, None)
+                        item_row = items_df.loc[items_df["Item Name"] == selected_item].iloc[0]
+                        for _ in range(int(qty_to_sell)):
+                            _add_item_to_pos_cart(
+                                company_key,
+                                {
+                                    "id": int(item_row["ID"]),
+                                    "item_name": item_row["Item Name"],
+                                    "barcode": item_row["Barcode"],
+                                    "price": float(item_row["Price"] or 0.0),
+                                    "qty": float(item_row["Qty"] or 0.0),
+                                },
+                            )
+                        _trigger_scan_feedback(pos_message_key, f"Added {selected_item} x{int(qty_to_sell)} to the cart.")
+                        st.rerun()
+            else:
+                selected_item = st.text_input("New Item Name", key=f"manual_pos_item_{company_key}")
+                manual_price = st.number_input(f"Manual Price ({st.session_state.currency_symbol})", min_value=0.0, value=0.0, key=f"manual_pos_price_{company_key}")
+                qty_to_sell = st.number_input("Quantity", min_value=1, value=1, key=f"manual_pos_qty_{company_key}")
+                if st.button("Add Manual Item", key=f"pos_add_manual_{company_key}"):
+                    if selected_item and float(manual_price) > 0:
+                        st.session_state[checkout_complete_key] = False
+                        st.session_state.pop(receipt_key, None)
+                        st.session_state.pop(receipt_html_key, None)
+                        cart = st.session_state.setdefault(cart_key, [])
+                        cart.append(
+                            {
+                                "inventory_item_id": None,
+                                "name": selected_item.strip(),
+                                "barcode": "",
+                                "price": float(manual_price),
+                                "available_qty": None,
+                                "qty": int(qty_to_sell),
+                                "line_total": int(qty_to_sell) * float(manual_price),
+                            }
+                        )
+                        _trigger_scan_feedback(pos_message_key, f"Added manual item {selected_item.strip()} to the cart.")
+                        st.rerun()
+                    else:
+                        st.warning("Enter a valid manual item and price before adding it.")
 
         payment_method = st.selectbox("Payment Method", ["Cash", "Mobile Money", "Bank Transfer", "Cheque"])
         sale_date = st.date_input("Transaction Date", value=datetime.now().date(), key=f"pos_sale_date_{company_key}")
@@ -3036,6 +3054,8 @@ def show_pos(company_key, company_name, role):
                 for row_index, row in edited_cart_df.reset_index(drop=True).iterrows():
                     if not str(row["Item"]).strip():
                         continue
+                    if not row.get("Unit Price") or not row.get("Qty"):
+                        continue
                     try:
                         qty_val = row["Qty"]
                         price_val = row["Unit Price"]
@@ -3067,8 +3087,10 @@ def show_pos(company_key, company_name, role):
             clear_col, checkout_col = st.columns([1, 1])
             if clear_col.button("Clear Cart", key=f"pos_clear_cart_{company_key}"):
                 st.session_state[cart_key] = []
+                st.session_state[checkout_complete_key] = False
                 st.rerun()
             if checkout_col.button("Final Checkout", key=f"pos_final_checkout_{company_key}"):
+                st.session_state[checkout_complete_key] = True
                 process_pos_sale(print_receipt=True)
         else:
             st.info("Scan a barcode or add an item manually to start the sale.")
@@ -3076,6 +3098,7 @@ def show_pos(company_key, company_name, role):
         def process_pos_sale(print_receipt=False):
             sale_cart = st.session_state.get(cart_key, [])
             if not sale_cart:
+                st.session_state[checkout_complete_key] = False
                 st.warning("Add at least one item to the cart before processing the sale.")
                 return
 
@@ -3162,6 +3185,7 @@ def show_pos(company_key, company_name, role):
                     "POS Sale",
                     "POS",
                     f"Sold {narration} for GH₵{float(total):.2f}",
+                    branch_id=branch_id,
                 )
                 conn.close()
                 if print_receipt:
@@ -3177,6 +3201,7 @@ def show_pos(company_key, company_name, role):
                         total,
                         f"{sale_date.isoformat()} {datetime.now().strftime('%H:%M')}",
                     )
+                st.session_state[checkout_complete_key] = True
                 st.session_state[cart_key] = []
                 st.session_state[pos_success_key] = True
                 _clear_streamlit_state(
@@ -3193,9 +3218,11 @@ def show_pos(company_key, company_name, role):
 
         action_col1, action_col2 = st.columns(2)
         if action_col1.button("Final Checkout", key=f"final_checkout_{company_key}"):
+            st.session_state[checkout_complete_key] = True
             process_pos_sale(print_receipt=True)
         if action_col2.button("Clear Cart", key=f"clear_cart_post_{company_key}"):
             st.session_state[cart_key] = []
+            st.session_state[checkout_complete_key] = False
             st.rerun()
 
         st.subheader("Recent POS Transactions")
@@ -3243,7 +3270,7 @@ def show_pos(company_key, company_name, role):
                         _clear_streamlit_state(pos_void_confirm_key)
                         st.rerun()
 
-        if st.session_state.get(receipt_html_key):
+        if st.session_state.get(checkout_complete_key) and st.session_state.get(receipt_html_key):
             _inject_print_styles()
             st.subheader("Receipt Preview")
             st.markdown(st.session_state[receipt_html_key], unsafe_allow_html=True)
@@ -3266,6 +3293,7 @@ def show_pos(company_key, company_name, role):
 # ==========================================
 def show_sales_purchase(company_key, role, doc_type="Sales"):
     st.header(f"{'🧾 Sales Invoicing' if doc_type == 'Sales' else '📦 Purchase Orders'}")
+    branch_id = st.session_state.get("active_branch_id")
     if role == "Demo":
         _demo_notice()
         demo_data = pd.DataFrame({
@@ -3295,9 +3323,9 @@ def show_sales_purchase(company_key, role, doc_type="Sales"):
                 ledger = "Sales Revenue" if doc_type == "Sales" else "Accounts Payable"
                 tx_reference = f"{doc_type[:3].upper()}-{datetime.now().strftime('%Y%m%d%H%M%S')}"
                 conn.execute(
-                    """INSERT INTO vouchers (company_key, date, v_type, ledger, credit, narration, created_by)
-                       VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                    (company_key, doc_date.isoformat(), doc_type, ledger, amount,
+                    """INSERT INTO vouchers (company_key, branch_id, date, v_type, ledger, credit, narration, created_by)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (company_key, branch_id, doc_date.isoformat(), doc_type, ledger, amount,
                      f"{party_name}: {narration}", role),
                 )
                 if doc_type == "Sales":
@@ -3321,6 +3349,7 @@ def show_sales_purchase(company_key, role, doc_type="Sales"):
                             reference=tx_reference,
                             created_by=role,
                             entry_date=doc_date,
+                            branch_id=branch_id,
                             conn=conn,
                         )
                 else:
@@ -3345,6 +3374,7 @@ def show_sales_purchase(company_key, role, doc_type="Sales"):
                             reference=tx_reference,
                             created_by=role,
                             entry_date=doc_date,
+                            branch_id=branch_id,
                             conn=conn,
                         )
                 balance_delta = amount if status == "Pending" else 0.0
@@ -3358,7 +3388,7 @@ def show_sales_purchase(company_key, role, doc_type="Sales"):
                     balance_delta,
                 )
                 conn.commit()
-                log_audit_action(conn, company_key, role, f"{doc_type} Recorded", doc_type, f"{party_name} - GH₵{amount:.2f}")
+                log_audit_action(conn, company_key, role, f"{doc_type} Recorded", doc_type, f"{party_name} - GH₵{amount:.2f}", branch_id=branch_id)
                 conn.close()
                 st.success(f"{doc_type} saved successfully!")
                 st.rerun()

@@ -79,9 +79,11 @@ def ensure_schema_integrity(conn):
     cursor = conn.cursor()
     critical_columns = {
         "companies": {"contact_email": "TEXT", "barcode_input_source": "TEXT DEFAULT 'Keyboard Entry'"},
-        "audit_logs": {"details": "TEXT"},
+        "audit_logs": {"details": "TEXT", "branch_id": "TEXT"},
         "journal_entries": {"branch_id": "TEXT"},
-        "vouchers": {"status": "TEXT DEFAULT 'Active'"},
+        "transactions": {"branch_id": "TEXT"},
+        "users": {"branch_id": "TEXT"},
+        "vouchers": {"status": "TEXT DEFAULT 'Active'", "branch_id": "TEXT"},
         "payroll": {"status": "TEXT DEFAULT 'Active'"},
         "inventory": {"opening_balance": "REAL DEFAULT 0", "barcode": "TEXT"},
         "branches": {"contact_number": "TEXT", "branch_manager": "TEXT", "branch_access_key": "TEXT"},
@@ -598,6 +600,7 @@ def init_db():
             CREATE TABLE IF NOT EXISTS vouchers (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 company_key TEXT NOT NULL,
+                branch_id TEXT,
                 date TEXT NOT NULL,
                 v_type TEXT NOT NULL, -- Sales, Purchase, Expense, Journal
                 ledger TEXT NOT NULL,
@@ -617,6 +620,7 @@ def init_db():
         voucher_columns = {row[1] for row in cursor.fetchall()}
         voucher_column_defs = {
             "company_key": "TEXT",
+            "branch_id": "TEXT",
             "date": "TEXT",
             "v_type": "TEXT",
             "ledger": "TEXT",
