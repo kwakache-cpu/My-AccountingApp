@@ -2879,7 +2879,7 @@ def show_pos(company_key, company_name, role):
         items_df = pd.DataFrame(items, columns=["ID", "Item Name", "Barcode", "Price", "Qty"]) if items else pd.DataFrame()
         receipt_html_key = f"pos_receipt_html_{company_key}"
         receipt_print_trigger_key = f"pos_receipt_print_trigger_{company_key}"
-        trigger_print_key = "trigger_print"
+        do_print_key = "do_print"
 
         source_options = ["Keyboard Entry", "Camera Scanner", "Physical Scanner"]
         source_index = source_options.index(barcode_input_source) if barcode_input_source in source_options else 0
@@ -3240,7 +3240,7 @@ def show_pos(company_key, company_name, role):
             st.subheader("Receipt Preview")
             st.markdown(st.session_state[receipt_html_key], unsafe_allow_html=True)
             if st.button("Print Receipt", key=f"receipt_print_btn_{company_key}"):
-                st.session_state[trigger_print_key] = True
+                st.session_state[do_print_key] = True
             st.download_button(
                 "Download Receipt",
                 data=st.session_state.get(receipt_key, ""),
@@ -3248,9 +3248,9 @@ def show_pos(company_key, company_name, role):
                 mime="text/plain",
                 key=f"receipt_download_{company_key}",
             )
-        if st.session_state.get('trigger_print'):
+        if st.session_state.get('do_print'):
             components.html("<script>window.print();</script>", height=0)
-            st.session_state['trigger_print'] = False
+            st.session_state['do_print'] = False
     except Exception as e:
         st.error(f"POS Error: {e}")
 # ==========================================
