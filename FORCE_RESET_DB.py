@@ -30,6 +30,7 @@ def main():
             deployment_status TEXT DEFAULT 'Pending',
             plan_type TEXT DEFAULT 'Basic',
             contact_email TEXT,
+            barcode_input_source TEXT DEFAULT 'Keyboard Entry',
             phone_number TEXT,
             physical_address TEXT,
             industry TEXT,

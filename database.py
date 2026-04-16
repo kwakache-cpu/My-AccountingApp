@@ -78,7 +78,7 @@ def ensure_schema_integrity(conn):
     """Protect critical columns during upgrades to avoid missing-column crashes."""
     cursor = conn.cursor()
     critical_columns = {
-        "companies": {"contact_email": "TEXT"},
+        "companies": {"contact_email": "TEXT", "barcode_input_source": "TEXT DEFAULT 'Keyboard Entry'"},
         "audit_logs": {"details": "TEXT"},
         "vouchers": {"status": "TEXT DEFAULT 'Active'"},
         "payroll": {"status": "TEXT DEFAULT 'Active'"},

@@ -1354,6 +1354,93 @@ def _build_receipt(company_name, items, total_amount, sale_date):
     return "\n".join(lines)
 
 
+def _build_receipt_html(company_name, items, total_amount, sale_date):
+    rows = []
+    for item in items:
+        rows.append(
+            f"<tr><td>{item['name']}</td><td style='text-align:right'>{int(item['qty'])}</td>"
+            f"<td style='text-align:right'>{format_currency(item['price'])}</td>"
+            f"<td style='text-align:right'>{format_currency(item['qty'] * item['price'])}</td></tr>"
+        )
+    return f"""
+    <div class='receipt-preview printable'>
+        <div style='margin-bottom:1rem;'>
+            <h2 style='margin:0;padding:0;'>{company_name}</h2>
+            <div>STANDARD POS RECEIPT</div>
+            <div>Date: {sale_date}</div>
+        </div>
+        <table style='width:100%; border-collapse: collapse; margin-bottom:1rem;'>
+            <thead>
+                <tr>
+                    <th style='text-align:left; border-bottom:1px solid #333;'>Item</th>
+                    <th style='text-align:right; border-bottom:1px solid #333;'>Qty</th>
+                    <th style='text-align:right; border-bottom:1px solid #333;'>Price</th>
+                    <th style='text-align:right; border-bottom:1px solid #333;'>Total</th>
+                </tr>
+            </thead>
+            <tbody>
+                {''.join(rows)}
+            </tbody>
+        </table>
+        <div style='text-align:right; font-weight:bold; margin-bottom:1rem;'>TOTAL: {format_currency(total_amount)}</div>
+        <button class='print-button' onclick='window.print()'>Print Receipt</button>
+    </div>
+    """
+
+
+def _build_payslip_html(payroll_row):
+    return f"""
+    <div class='payslip-preview printable' style='font-family:sans-serif;'>
+        <div style='margin-bottom:1rem;'>
+            <h2 style='margin:0;padding:0;'>Payslip</h2>
+            <div>Employee: {payroll_row['Employee']}</div>
+            <div>Period: {payroll_row['Month']} {int(payroll_row['Year'])}</div>
+            <div>Status: {payroll_row['Payment Status']}</div>
+        </div>
+        <table style='width:100%; border-collapse: collapse; margin-bottom:1rem;'>
+            <tr><td style='border-bottom:1px solid #333;'>Basic Salary</td><td style='text-align:right;border-bottom:1px solid #333;'>{format_currency(payroll_row['Basic Salary'])}</td></tr>
+            <tr><td style='border-bottom:1px solid #333;'>Allowances</td><td style='text-align:right;border-bottom:1px solid #333;'>{format_currency(payroll_row['Allowances'])}</td></tr>
+            <tr><td style='border-bottom:1px solid #333;'>Deductions</td><td style='text-align:right;border-bottom:1px solid #333;'>{format_currency(payroll_row['Deductions'])}</td></tr>
+            <tr><td style='border-bottom:1px solid #333;'>SSNIT T1</td><td style='text-align:right;border-bottom:1px solid #333;'>{format_currency(payroll_row['SSNIT T1'])}</td></tr>
+            <tr><td style='border-bottom:1px solid #333;'>PAYE</td><td style='text-align:right;border-bottom:1px solid #333;'>{format_currency(payroll_row['PAYE'])}</td></tr>
+            <tr><td style='font-weight:bold;'>Net Salary</td><td style='text-align:right;font-weight:bold;'>{format_currency(payroll_row['Net Salary'])}</td></tr>
+        </table>
+        <button class='print-button' onclick='window.print()'>Print Payslip</button>
+    </div>
+    """
+
+
+def _inject_print_styles():
+    st.markdown(
+        """
+        <style>
+            @media print {
+                body * { visibility: hidden !important; }
+                .printable, .printable * { visibility: visible !important; }
+                .printable { position: absolute !important; top: 0; left: 0; width: 100% !important; }
+                .css-1d391kg, .css-1y0tads, .css-1d391kg, .css-1q8dd3j, header, section, nav, aside { display: none !important; }
+            }
+            .receipt-preview, .payslip-preview {
+                background: #fff;
+                padding: 1rem;
+                border: 1px solid #ddd;
+                border-radius: 8px;
+            }
+            .print-button {
+                background-color: #2563eb;
+                color: #fff;
+                border: none;
+                padding: 0.65rem 1rem;
+                border-radius: 4px;
+                cursor: pointer;
+            }
+            .print-button:hover { background-color: #1d4ed8; }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
 def _calculate_payroll_values(basic_salary, allowances, deductions=0.0):
     ssnit_t1_rate = 0.055
     ssnit_t2_rate = 0.05
@@ -2533,14 +2620,19 @@ def show_company_setup(company_key, company_name, role):
                             "Edit Plan Type",
                             value=str(company_data.get("plan_type") or "Basic"),
                         )
+                        updated_barcode_input_source = st.selectbox(
+                            "Default Barcode Input Mode",
+                            ["Keyboard Entry", "Camera Scanner"],
+                            index=0 if company_data.get("barcode_input_source", "Keyboard Entry") == "Keyboard Entry" else 1,
+                        )
                         if st.form_submit_button("Update Client Settings"):
                             conn.execute(
                                 """
                                 UPDATE companies
-                                SET contact_email = ?, plan_type = ?, updated_at = CURRENT_TIMESTAMP
+                                SET contact_email = ?, plan_type = ?, barcode_input_source = ?, updated_at = CURRENT_TIMESTAMP
                                 WHERE key = ?
                                 """,
-                                (updated_contact_email, updated_plan_type, company_key),
+                                (updated_contact_email, updated_plan_type, updated_barcode_input_source, company_key),
                             )
                             conn.commit()
                             log_audit_action(
@@ -2762,7 +2854,7 @@ def show_pos(company_key, company_name, role):
 
     try:
         conn = get_connection()
-        company_row = conn.execute("SELECT name FROM companies WHERE key = ?", (company_key,)).fetchone()
+        company_row = conn.execute("SELECT name, barcode_input_source FROM companies WHERE key = ?", (company_key,)).fetchone()
         items = conn.execute(
             "SELECT id, item_name, barcode, price, qty FROM inventory WHERE company_key = ? AND qty > 0",
             (company_key,),
@@ -2770,9 +2862,33 @@ def show_pos(company_key, company_name, role):
         conn.close()
 
         company_label = company_row[0] if company_row else company_name
+        barcode_input_source = company_row[1] if company_row and company_row[1] else "Keyboard Entry"
         items_df = pd.DataFrame(items, columns=["ID", "Item Name", "Barcode", "Price", "Qty"]) if items else pd.DataFrame()
 
-        st.caption("Scanner-ready checkout")
+        source_options = ["Keyboard Entry", "Camera Scanner"]
+        source_index = source_options.index(barcode_input_source) if barcode_input_source in source_options else 0
+        selected_barcode_source = st.selectbox(
+            "Barcode Input Source",
+            source_options,
+            index=source_index,
+            key=f"pos_barcode_source_{company_key}",
+        )
+        if selected_barcode_source != barcode_input_source:
+            try:
+                conn = get_connection()
+                conn.execute(
+                    "UPDATE companies SET barcode_input_source = ? WHERE key = ?",
+                    (selected_barcode_source, company_key),
+                )
+                conn.commit()
+            except Exception:
+                pass
+            finally:
+                if conn:
+                    conn.close()
+            barcode_input_source = selected_barcode_source
+
+        st.caption(f"Barcode input mode: {barcode_input_source}")
         st.text_input(
             "Barcode Search",
             key=pos_scan_input_key,
@@ -2782,7 +2898,8 @@ def show_pos(company_key, company_name, role):
             args=(pos_scan_input_key, pos_pending_scan_key),
         )
         _focus_text_input("Barcode Search")
-        _render_camera_scanner(f"pos_{company_key}", pos_pending_scan_key)
+        if barcode_input_source == "Camera Scanner":
+            _render_camera_scanner(f"pos_{company_key}", pos_pending_scan_key)
 
         pending_pos_barcode = str(st.session_state.get(pos_pending_scan_key, "") or "").strip()
         if pending_pos_barcode:
@@ -3058,11 +3175,18 @@ def show_pos(company_key, company_name, role):
                         st.rerun()
 
         if st.session_state.get(receipt_key):
+            _inject_print_styles()
             st.subheader("Receipt Preview")
-            st.code(st.session_state[receipt_key], language="text")
+            receipt_text = st.session_state[receipt_key]
+            receipt_html = receipt_text.replace("\n", "<br />")
+            st.markdown(
+                f"<div class='receipt-preview printable'><pre style='font-family: monospace; white-space: pre-wrap;'>{receipt_html}</pre>"
+                "<button class='print-button' onclick='window.print()'>Print Receipt</button></div>",
+                unsafe_allow_html=True,
+            )
             st.download_button(
                 "Download Receipt",
-                data=st.session_state[receipt_key],
+                data=receipt_text,
                 file_name=f"receipt_{company_key}.txt",
                 mime="text/plain",
                 key=f"receipt_download_{company_key}",
@@ -3314,6 +3438,7 @@ def show_taxation(company_key):
 # ==========================================
 def show_payroll(company_key, role):
     st.header("💳 Payroll & Salaries")
+    payroll_print_preview_key = f"payroll_print_preview_{company_key}"
 
     if role == "Demo":
         _demo_notice()
@@ -3426,7 +3551,8 @@ def show_payroll(company_key, role):
                 selected_payroll_key = f"payroll_edit_selected_{company_key}"
                 void_payroll_key = f"payroll_void_selected_{company_key}"
                 for _, payroll_list_row in df.iterrows():
-                    name_col, edit_col, void_col = st.columns([4, 1, 1])
+                    info_cols = st.columns([3, 1, 1, 1])
+                    name_col, edit_col, void_col, print_col = info_cols
                     name_col.caption(
                         f"{payroll_list_row['Employee']} | Salary GH₵ {float(payroll_list_row['Basic Salary']):,.2f} | "
                         f"Net GH₵ {float(payroll_list_row['Net Salary']):,.2f} | {payroll_list_row['Status']}"
@@ -3435,6 +3561,10 @@ def show_payroll(company_key, role):
                         st.session_state[selected_payroll_key] = int(payroll_list_row["ID"])
                     if payroll_list_row["Status"] != "Void" and void_col.button("Void", key=f"payroll_void_btn_{company_key}_{int(payroll_list_row['ID'])}"):
                         st.session_state[void_payroll_key] = int(payroll_list_row["ID"])
+                    if print_col.button("Print", key=f"payroll_print_btn_{company_key}_{int(payroll_list_row['ID'])}"):
+                        st.session_state[payroll_print_preview_key] = _build_payslip_html(payroll_list_row)
+                        st.session_state[f"payroll_print_record_id_{company_key}"] = int(payroll_list_row['ID'])
+                        st.rerun()
                 void_payroll_id = st.session_state.get(void_payroll_key)
                 if void_payroll_id is not None:
                     st.warning("Are you sure you want to void this payroll entry?")
@@ -3492,8 +3622,23 @@ def show_payroll(company_key, role):
                         _clear_streamlit_state(selected_payroll_key, void_payroll_key)
                         st.success("Entry Updated")
                         st.rerun()
+            if role != "Master Admin":
+                for _, payroll_list_row in df.iterrows():
+                    info_col, print_col = st.columns([4, 1])
+                    info_col.caption(
+                        f"{payroll_list_row['Employee']} | Salary GH₵ {float(payroll_list_row['Basic Salary']):,.2f} | "
+                        f"Net GH₵ {float(payroll_list_row['Net Salary']):,.2f} | {payroll_list_row['Status']}"
+                    )
+                    if print_col.button("Print Payslip", key=f"payroll_print_btn_{company_key}_{int(payroll_list_row['ID'])}"):
+                        st.session_state[payroll_print_preview_key] = _build_payslip_html(payroll_list_row)
+                        st.session_state[f"payroll_print_record_id_{company_key}"] = int(payroll_list_row['ID'])
+                        st.rerun()
         else:
             st.info("No payroll records found.")
+        if st.session_state.get(payroll_print_preview_key):
+            _inject_print_styles()
+            st.subheader("Payslip Preview")
+            st.markdown(st.session_state[payroll_print_preview_key], unsafe_allow_html=True)
     except Exception as e:
         st.error(f"Error loading payroll: {e}")
     finally:
