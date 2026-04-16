@@ -17,8 +17,12 @@ import streamlit.components.v1 as components
 from dateutil.relativedelta import relativedelta
 from groq import Groq
 from PIL import Image
-import cv2
-from pyzbar import pyzbar
+try:
+    import cv2
+    from pyzbar import pyzbar
+except ImportError:
+    cv2 = None
+    pyzbar = None
 
 try:
     import firebase_admin
@@ -53,6 +57,7 @@ from accounting_engine import (
     get_bank_reconciliation,
     get_or_create_account as engine_get_or_create_account,
     get_supplier_balance,
+    get_supplier_balances,
     get_trial_balance as engine_get_trial_balance,
     post_journal_entry,
 )
@@ -1693,6 +1698,35 @@ def _set_input_pending(source_key, pending_key):
         st.session_state[pending_key] = pending_value
 
 
+def _sync_data_editor_to_session(editor_key, session_key):
+    """Syncs a Streamlit data_editor (by key) back into a session_state list.
+
+    Args:
+        editor_key: the st.data_editor widget key
+        session_key: the session_state key to write the records to
+    """
+    try:
+        val = st.session_state.get(editor_key)
+        if val is None:
+            st.session_state[session_key] = []
+            return
+        # If the data_editor stores a DataFrame-like object, convert to records
+        if hasattr(val, "to_dict"):
+            st.session_state[session_key] = val.to_dict("records")
+        else:
+            st.session_state[session_key] = val
+    except Exception:
+        # Fallback: ensure session key exists
+        existing = st.session_state.get(session_key)
+        if existing is None:
+            st.session_state[session_key] = []
+
+
+def save_bill_state():
+    """Save bill items from data_editor to session_state."""
+    _sync_data_editor_to_session("bill_items_editor", "bill_items")
+
+
 def _trigger_scan_feedback(message_key, message, level="success", beep_key=None):
     st.session_state[message_key] = {"level": level, "text": message}
     if beep_key:
@@ -1743,6 +1777,8 @@ def _focus_text_input(input_label):
 
 def process_scan(image):
     """Decode a barcode/QR value from a camera image and return the scanned text."""
+    if pyzbar is None:
+        return None
     decoded = pyzbar.decode(image)
     if not decoded:
         return None
@@ -2286,11 +2322,9 @@ def show_create_bill_page(company_key):
             },
             hide_index=True,
             num_rows="dynamic",
+            on_change=save_bill_state,
             key="bill_items_editor"
         )
-
-        # Update session state
-        st.session_state.bill_items = edited_df.to_dict("records")
 
         # Calculate totals
         valid_rows = edited_df['item_name'].fillna('').str.strip() != ''
@@ -3439,6 +3473,33 @@ def show_pos(company_key, company_name, role):
 
         st.caption(f"Barcode input mode: {barcode_input_source}")
 
+        # Manual Entry - always visible at the top
+        st.subheader("Manual Item Entry")
+        manual_item_name = st.text_input("New Item Name", key=f"manual_pos_item_{company_key}")
+        manual_price = st.number_input(f"Manual Price ({st.session_state.currency_symbol})", min_value=0.0, value=0.0, key=f"manual_pos_price_{company_key}")
+        manual_qty = st.number_input("Quantity", min_value=1, value=1, key=f"manual_pos_qty_{company_key}")
+        if st.button("Add Manual Item", key=f"pos_add_manual_{company_key}"):
+            if manual_item_name and float(manual_price) > 0:
+                st.session_state[checkout_complete_key] = False
+                st.session_state.pop(receipt_key, None)
+                st.session_state.pop(receipt_html_key, None)
+                cart = st.session_state.setdefault(cart_key, [])
+                cart.append(
+                    {
+                        "inventory_item_id": None,
+                        "name": manual_item_name.strip(),
+                        "barcode": "",
+                        "price": float(manual_price),
+                        "available_qty": None,
+                        "qty": int(manual_qty),
+                        "line_total": int(manual_qty) * float(manual_price),
+                    }
+                )
+                _trigger_scan_feedback(pos_message_key, f"Added manual item {manual_item_name.strip()} to the cart.")
+                st.rerun()
+            else:
+                st.warning("Enter a valid manual item and price before adding it.")
+
         with st.form(key=f"pos_form_{company_key}", clear_on_submit=True):
             st.text_input(
                 "Barcode Search",
@@ -3514,30 +3575,7 @@ def show_pos(company_key, company_name, role):
                         _trigger_scan_feedback(pos_message_key, f"Added {selected_item} x{int(qty_to_sell)} to the cart.")
                         st.rerun()
             else:
-                selected_item = st.text_input("New Item Name", key=f"manual_pos_item_{company_key}")
-                manual_price = st.number_input(f"Manual Price ({st.session_state.currency_symbol})", min_value=0.0, value=0.0, key=f"manual_pos_price_{company_key}")
-                qty_to_sell = st.number_input("Quantity", min_value=1, value=1, key=f"manual_pos_qty_{company_key}")
-                if st.button("Add Manual Item", key=f"pos_add_manual_{company_key}"):
-                    if selected_item and float(manual_price) > 0:
-                        st.session_state[checkout_complete_key] = False
-                        st.session_state.pop(receipt_key, None)
-                        st.session_state.pop(receipt_html_key, None)
-                        cart = st.session_state.setdefault(cart_key, [])
-                        cart.append(
-                            {
-                                "inventory_item_id": None,
-                                "name": selected_item.strip(),
-                                "barcode": "",
-                                "price": float(manual_price),
-                                "available_qty": None,
-                                "qty": int(qty_to_sell),
-                                "line_total": int(qty_to_sell) * float(manual_price),
-                            }
-                        )
-                        _trigger_scan_feedback(pos_message_key, f"Added manual item {selected_item.strip()} to the cart.")
-                        st.rerun()
-                    else:
-                        st.warning("Enter a valid manual item and price before adding it.")
+                st.info("No stock available for sale. Switch to Manual Entry to continue.")
 
         payment_method = st.selectbox("Payment Method", ["Cash", "Mobile Money", "Bank Transfer", "Cheque", "On Credit"])
         selected_credit_customer_id = None
@@ -3582,6 +3620,8 @@ def show_pos(company_key, company_name, role):
                     "Unit Price": st.column_config.NumberColumn("Unit Price", disabled=True, format="%.2f"),
                     "Line Total": st.column_config.NumberColumn("Line Total", disabled=True, format="%.2f"),
                 },
+                on_change=_sync_data_editor_to_session,
+                args=(f"pos_cart_editor_{company_key}", cart_key),
                 key=f"pos_cart_editor_{company_key}",
             )
             if edited_cart_df is not None:
@@ -4281,6 +4321,116 @@ def show_aging(company_key, aging_type="Receivable"):
                         ledger_df = pd.DataFrame(
                             customer_tx_rows,
                             columns=["Customer", "Date", "Type", "Amount", "Description", "Reference", "Recorded By"],
+                        )
+                        st.dataframe(format_currency_dataframe(ledger_df), use_container_width=True, hide_index=True)
+                conn.close()
+
+            elif aging_type == "Payable":
+                conn = get_connection()
+                supplier_rows = get_supplier_balances(company_key, conn=conn)
+
+                register_col, transaction_col = st.columns(2)
+                with register_col:
+                    st.subheader("Add Supplier")
+                    with st.form(f"supplier_register_form_{company_key}", clear_on_submit=True):
+                        supplier_name = st.text_input("Supplier Name")
+                        supplier_phone = st.text_input("Phone")
+                        supplier_email = st.text_input("Email")
+                        register_submitted = st.form_submit_button("Save Supplier")
+                    if register_submitted:
+                        if not supplier_name.strip():
+                            st.warning("Enter a supplier name.")
+                        else:
+                            supplier_row_id = _register_supplier(conn, company_key, supplier_name, supplier_phone, supplier_email)
+                            conn.commit()
+                            log_audit_action(
+                                conn,
+                                company_key,
+                                role,
+                                "Supplier Registered",
+                                "Accounts Payable",
+                                f"Registered supplier {supplier_name.strip()}",
+                                branch_id=None,
+                            )
+                            st.success("Supplier saved.")
+                            conn.close()
+                            st.rerun()
+
+                with transaction_col:
+                    st.subheader("Credit Supplier")
+                    if not supplier_rows:
+                        st.info("Register at least one supplier to start posting debits and credits.")
+                    else:
+                        supplier_labels = [
+                            f"{row['name']} | Balance {format_currency(float(row['balance'] or 0))}"
+                            for row in supplier_rows
+                        ]
+                        with st.form(f"supplier_transaction_form_{company_key}", clear_on_submit=True):
+                            selected_supplier_label = st.selectbox("Supplier", supplier_labels)
+                            transaction_type = st.selectbox("Transaction Type", ["Debit", "Credit"])
+                            amount = st.number_input(f"Amount ({st.session_state.currency_symbol})", min_value=0.0, step=0.01)
+                            description = st.text_input("Description")
+                            transaction_date = st.date_input("Transaction Date", value=datetime.now().date(), key=f"supplier_tx_date_{company_key}")
+                            tx_submitted = st.form_submit_button("Post Transaction")
+                        if tx_submitted:
+                            if amount <= 0 or not description.strip():
+                                st.warning("Enter a valid amount and description.")
+                            else:
+                                selected_supplier = supplier_rows[supplier_labels.index(selected_supplier_label)]
+                                result = _record_supplier_ledger_transaction(
+                                    conn,
+                                    company_key,
+                                    int(selected_supplier["id"]),
+                                    transaction_type,
+                                    amount,
+                                    description.strip(),
+                                    role,
+                                    reference=None,
+                                    transaction_date=transaction_date,
+                                    post_to_gl=True,
+                                )
+                                conn.commit()
+                                log_audit_action(
+                                    conn,
+                                    company_key,
+                                    role,
+                                    f"Supplier Ledger {transaction_type}",
+                                    "Accounts Payable",
+                                    f"{result['supplier_name']} | {description.strip()} | {format_currency(amount)} | Balance {format_currency(result['previous_balance'])} -> {format_currency(result['new_balance'])}",
+                                    branch_id=None,
+                                )
+                                st.success(f"{transaction_type} posted for {result['supplier_name']}.")
+                                conn.close()
+                                st.rerun()
+
+                supplier_summary_rows = get_supplier_balances(company_key, conn=conn)
+                if supplier_summary_rows:
+                    st.markdown("Supplier Balances")
+                    supplier_df = pd.DataFrame(
+                        [
+                            (row["name"], row["phone"], row["email"], row["balance"])
+                            for row in supplier_summary_rows
+                        ],
+                        columns=["Name", "Phone", "Email", "Current Balance"],
+                    )
+                    st.dataframe(format_currency_dataframe(supplier_df), use_container_width=True, hide_index=True)
+
+                    supplier_tx_rows = conn.execute(
+                        """
+                        SELECT s.name, st.transaction_date, st.transaction_type, st.amount, st.description, st.reference, st.created_by
+                        FROM supplier_transactions st
+                        JOIN suppliers s ON s.id = st.supplier_id
+                        WHERE st.company_key = ?
+                        ORDER BY st.transaction_date DESC, st.id DESC
+                        LIMIT 100
+                        """,
+                        (company_key,),
+                    ).fetchall()
+                    if supplier_tx_rows:
+                        st.markdown("Ledger Transactions")
+                        ledger_df = pd.DataFrame(
+                            supplier_tx_rows,
+                            columns=["Supplier", "Date", "Type", "Amount", "Description", "Reference", "Recorded By"],
                         )
                         st.dataframe(format_currency_dataframe(ledger_df), use_container_width=True, hide_index=True)
                 conn.close()
@@ -5582,6 +5732,71 @@ def show_ai_assistant(client_id):
         st.session_state[history_key].append({"role": "assistant", "content": failure_message})
         with st.chat_message("assistant"):
             st.markdown(failure_message)
+
+
+# ==========================================
+# SUPPLIER MANAGEMENT FUNCTIONS
+# ==========================================
+def _register_supplier(name, phone, company_key):
+    """Insert a new supplier into the suppliers table."""
+    conn = get_connection()
+    try:
+        cursor = conn.execute(
+            "INSERT INTO suppliers (name, phone, email, company_key) VALUES (?, ?, '', ?)",
+            (name.strip(), phone.strip() if phone else "", company_key),
+        )
+        supplier_id = cursor.lastrowid
+        conn.commit()
+        return supplier_id
+    finally:
+        conn.close()
+
+
+def _record_supplier_ledger_transaction(conn, company_key, supplier_id, transaction_type, amount, description, role, reference=None, transaction_date=None, post_to_gl=True):
+    """Record a debit/credit to a specific supplier's account."""
+    if transaction_type not in ["Debit", "Credit"]:
+        raise ValueError("Transaction type must be 'Debit' or 'Credit'")
+    
+    if transaction_type == "Debit":
+        debit = amount
+        credit = 0
+    else:
+        debit = 0
+        credit = amount
+    
+    # Post to supplier ledger
+    conn.execute(
+        """
+        INSERT INTO supplier_ledger (supplier_id, date, description, debit, credit, balance, reference)
+        VALUES (?, ?, ?, ?, ?, 
+                COALESCE((SELECT balance FROM supplier_ledger WHERE supplier_id = ? ORDER BY id DESC LIMIT 1), 0) + ? - ?,
+                ?)
+        """,
+        (supplier_id, transaction_date or datetime.now().date(), description, debit, credit, supplier_id, debit, credit, reference or ""),
+    )
+    
+    if post_to_gl:
+        # Post to general ledger
+        supplier_name = conn.execute("SELECT name FROM suppliers WHERE id = ?", (supplier_id,)).fetchone()[0]
+        post_journal_entry(
+            company_key=company_key,
+            date=transaction_date or datetime.now().date(),
+            description=f"{description} - {supplier_name}",
+            reference=reference or f"SUP-{supplier_id}-{datetime.now().strftime('%Y%m%d%H%M%S')}",
+            lines=[
+                {
+                    "account_id": get_account_id(conn, "Accounts Payable", "Liability"),
+                    "debit": debit,
+                    "credit": credit,
+                },
+                {
+                    "account_id": get_account_id(conn, "Cash" if transaction_type == "Credit" else "Purchases", "Asset" if transaction_type == "Credit" else "Expense"),
+                    "debit": credit,
+                    "credit": debit,
+                },
+            ],
+            created_by=role,
+        )
 
 
 # ==========================================
