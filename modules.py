@@ -2905,34 +2905,6 @@ def show_pos(company_key, company_name, role):
             barcode_input_source = selected_barcode_source
 
         st.caption(f"Barcode input mode: {barcode_input_source}")
-        pending_pos_barcode = str(st.session_state.get(pos_pending_scan_key, "") or "").strip()
-        if pending_pos_barcode:
-            conn = None
-            try:
-                conn = get_connection()
-                matched_item = _lookup_inventory_by_barcode(conn, company_key, pending_pos_barcode)
-                if matched_item and float(matched_item["qty"] or 0) > 0:
-                    _add_item_to_pos_cart(company_key, matched_item)
-                    _trigger_scan_feedback(
-                        pos_message_key,
-                        f"Added {matched_item['item_name']} to the active sale.",
-                        "success",
-                        pos_scan_beep_key,
-                    )
-                else:
-                    _trigger_scan_feedback(
-                        pos_message_key,
-                        f"No in-stock item found for barcode {pending_pos_barcode}.",
-                        "warning",
-                    )
-            except Exception as exc:
-                st.error(f"POS barcode scan failed: {exc}")
-            finally:
-                if conn:
-                    conn.close()
-                st.session_state.pop(pos_pending_scan_key, None)
-                st.session_state[pos_scan_input_key] = ""
-                st.rerun()
 
         with st.form(key=f"pos_form_{company_key}", clear_on_submit=True):
             st.text_input(
@@ -2940,8 +2912,6 @@ def show_pos(company_key, company_name, role):
                 key=pos_scan_input_key,
                 placeholder="Scan barcode and the item will be added to the cart",
                 label_visibility="collapsed",
-                on_change=_set_input_pending,
-                args=(pos_scan_input_key, pos_pending_scan_key),
             )
             _focus_text_input("Barcode Search")
             if barcode_input_source == "Camera Scanner":
@@ -2996,6 +2966,37 @@ def show_pos(company_key, company_name, role):
                         st.rerun()
                     else:
                         st.warning("Enter a valid manual item and price before adding it.")
+
+            # Handle barcode processing on form submit
+            if st.form_submit_button("Scan Barcode"):
+                pending_pos_barcode = str(st.session_state.get(pos_scan_input_key, "") or "").strip()
+                if pending_pos_barcode:
+                    conn = None
+                    try:
+                        conn = get_connection()
+                        matched_item = _lookup_inventory_by_barcode(conn, company_key, pending_pos_barcode)
+                        if matched_item and float(matched_item["qty"] or 0) > 0:
+                            _add_item_to_pos_cart(company_key, matched_item)
+                            _trigger_scan_feedback(
+                                pos_message_key,
+                                f"Added {matched_item['item_name']} to the active sale.",
+                                "success",
+                                pos_scan_beep_key,
+                            )
+                        else:
+                            _trigger_scan_feedback(
+                                pos_message_key,
+                                f"No in-stock item found for barcode {pending_pos_barcode}.",
+                                "warning",
+                            )
+                    except Exception as exc:
+                        st.error(f"POS barcode scan failed: {exc}")
+                    finally:
+                        if conn:
+                            conn.close()
+                        st.session_state[pos_scan_input_key] = ""
+                        st.rerun()
+
 
         payment_method = st.selectbox("Payment Method", ["Cash", "Mobile Money", "Bank Transfer", "Cheque"])
         sale_date = st.date_input("Transaction Date", value=datetime.now().date(), key=f"pos_sale_date_{company_key}")
