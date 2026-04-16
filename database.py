@@ -90,14 +90,26 @@ def ensure_schema_integrity(conn):
             "payment_id": "INTEGER",
             "source_module": "TEXT",
             "source_table": "TEXT",
+            "source_type": "TEXT",
             "source_id": "INTEGER",
+            "reversed_entry_id": "INTEGER",
+            "is_voided": "INTEGER DEFAULT 0",
+            "voided_at": "TIMESTAMP",
+            "voided_by": "TEXT",
+            "approval_status": "TEXT DEFAULT 'Posted'",
         },
         "stock_movements": {"branch_id": "TEXT", "reason": "TEXT", "created_by": "TEXT", "created_at": "TIMESTAMP DEFAULT CURRENT_TIMESTAMP"},
         "transactions": {"branch_id": "TEXT"},
         "users": {"branch_id": "TEXT"},
-        "vouchers": {"status": "TEXT DEFAULT 'Active'", "branch_id": "TEXT"},
+        "vouchers": {"status": "TEXT DEFAULT 'Active'", "branch_id": "TEXT", "approval_status": "TEXT DEFAULT 'Draft'", "is_voided": "INTEGER DEFAULT 0", "voided_at": "TIMESTAMP", "voided_by": "TEXT"},
         "payroll": {"status": "TEXT DEFAULT 'Active'"},
         "inventory": {"opening_balance": "REAL DEFAULT 0", "barcode": "TEXT", "inventory_account_id": "INTEGER", "cogs_account_id": "INTEGER"},
+        "invoices": {"invoice_number": "TEXT", "input_vat": "REAL DEFAULT 0", "output_vat": "REAL DEFAULT 0", "approval_status": "TEXT DEFAULT 'Draft'"},
+        "bills": {"bill_number": "TEXT", "input_vat": "REAL DEFAULT 0", "output_vat": "REAL DEFAULT 0", "approval_status": "TEXT DEFAULT 'Draft'"},
+        "payments": {"invoice_id": "INTEGER", "bill_id": "INTEGER", "bank_account_id": "INTEGER", "approval_status": "TEXT DEFAULT 'Draft'"},
+        "bank_accounts": {"company_key": "TEXT", "branch_id": "TEXT", "account_name": "TEXT", "account_number": "TEXT", "bank_name": "TEXT", "currency": "TEXT DEFAULT 'GHS'", "account_type": "TEXT", "balance": "REAL DEFAULT 0", "created_by": "TEXT", "created_at": "TIMESTAMP DEFAULT CURRENT_TIMESTAMP"},
+        "payment_allocations": {"company_key": "TEXT", "payment_id": "INTEGER", "invoice_id": "INTEGER", "bill_id": "INTEGER", "amount": "REAL DEFAULT 0", "currency": "TEXT DEFAULT 'GHS'", "branch_id": "TEXT", "created_by": "TEXT", "allocated_at": "TIMESTAMP DEFAULT CURRENT_TIMESTAMP"},
+        "recurring_transactions": {"company_key": "TEXT", "branch_id": "TEXT", "description": "TEXT", "frequency": "TEXT", "next_run_date": "TEXT", "last_run_at": "TIMESTAMP", "is_active": "INTEGER DEFAULT 1", "created_by": "TEXT", "created_at": "TIMESTAMP DEFAULT CURRENT_TIMESTAMP", "source_module": "TEXT", "source_table": "TEXT", "source_id": "INTEGER", "recurrence_payload": "TEXT"},
         "branches": {"contact_number": "TEXT", "branch_manager": "TEXT", "branch_access_key": "TEXT"},
         "fixed_assets": {"opening_book_value": "REAL DEFAULT 0"},
     }
@@ -234,7 +246,13 @@ def ensure_schema_integrity(conn):
             payment_id INTEGER,
             source_module TEXT,
             source_table TEXT,
+            source_type TEXT,
             source_id INTEGER,
+            reversed_entry_id INTEGER,
+            is_voided INTEGER DEFAULT 0,
+            voided_at TIMESTAMP,
+            voided_by TEXT,
+            approval_status TEXT DEFAULT 'Posted',
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
         """
@@ -253,7 +271,13 @@ def ensure_schema_integrity(conn):
         "payment_id": "INTEGER",
         "source_module": "TEXT",
         "source_table": "TEXT",
+        "source_type": "TEXT",
         "source_id": "INTEGER",
+        "reversed_entry_id": "INTEGER",
+        "is_voided": "INTEGER DEFAULT 0",
+        "voided_at": "TIMESTAMP",
+        "voided_by": "TEXT",
+        "approval_status": "TEXT DEFAULT 'Posted'",
         "created_at": "TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
     }.items():
         if column_name not in journal_entry_columns:
@@ -390,7 +414,10 @@ def ensure_schema_integrity(conn):
             invoice_date TEXT NOT NULL,
             due_date TEXT,
             status TEXT DEFAULT 'Draft',
+            approval_status TEXT DEFAULT 'Draft',
             amount REAL DEFAULT 0,
+            input_vat REAL DEFAULT 0,
+            output_vat REAL DEFAULT 0,
             currency TEXT DEFAULT 'GHS',
             description TEXT,
             created_by TEXT,
@@ -399,6 +426,7 @@ def ensure_schema_integrity(conn):
         )
         """
     )
+    cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_invoices_company_invoice_number ON invoices(company_key, invoice_number)")
     cursor.execute(
         """
         CREATE TABLE IF NOT EXISTS bills (
@@ -409,7 +437,10 @@ def ensure_schema_integrity(conn):
             bill_date TEXT NOT NULL,
             due_date TEXT,
             status TEXT DEFAULT 'Draft',
+            approval_status TEXT DEFAULT 'Draft',
             amount REAL DEFAULT 0,
+            input_vat REAL DEFAULT 0,
+            output_vat REAL DEFAULT 0,
             currency TEXT DEFAULT 'GHS',
             description TEXT,
             created_by TEXT,
@@ -418,6 +449,27 @@ def ensure_schema_integrity(conn):
         )
         """
     )
+    cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_bills_company_bill_number ON bills(company_key, bill_number)")
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS bank_accounts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            company_key TEXT NOT NULL,
+            branch_id TEXT,
+            account_name TEXT NOT NULL,
+            account_number TEXT,
+            bank_name TEXT,
+            account_type TEXT DEFAULT 'Bank',
+            currency TEXT DEFAULT 'GHS',
+            balance REAL DEFAULT 0,
+            created_by TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (company_key) REFERENCES companies(key) ON DELETE CASCADE,
+            FOREIGN KEY (branch_id) REFERENCES branches(branch_id) ON DELETE SET NULL
+        )
+        """
+    )
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_bank_accounts_company ON bank_accounts(company_key)")
     cursor.execute(
         """
         CREATE TABLE IF NOT EXISTS payments (
@@ -429,15 +481,67 @@ def ensure_schema_integrity(conn):
             supplier_id INTEGER,
             invoice_id INTEGER,
             bill_id INTEGER,
+            bank_account_id INTEGER,
             amount REAL DEFAULT 0,
             currency TEXT DEFAULT 'GHS',
             method TEXT,
             reference TEXT,
+            approval_status TEXT DEFAULT 'Draft',
             created_by TEXT,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (bank_account_id) REFERENCES bank_accounts(id)
         )
         """
     )
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS payment_allocations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            company_key TEXT NOT NULL,
+            payment_id INTEGER NOT NULL,
+            invoice_id INTEGER,
+            bill_id INTEGER,
+            amount REAL DEFAULT 0,
+            currency TEXT DEFAULT 'GHS',
+            branch_id TEXT,
+            created_by TEXT,
+            allocated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (company_key) REFERENCES companies(key) ON DELETE CASCADE,
+            FOREIGN KEY (payment_id) REFERENCES payments(id) ON DELETE CASCADE,
+            FOREIGN KEY (invoice_id) REFERENCES invoices(id) ON DELETE CASCADE,
+            FOREIGN KEY (bill_id) REFERENCES bills(id) ON DELETE CASCADE,
+            FOREIGN KEY (branch_id) REFERENCES branches(branch_id) ON DELETE SET NULL
+        )
+        """
+    )
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_payment_allocations_payment ON payment_allocations(payment_id)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_payment_allocations_invoice ON payment_allocations(invoice_id)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_payment_allocations_bill ON payment_allocations(bill_id)")
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS recurring_transactions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            company_key TEXT NOT NULL,
+            branch_id TEXT,
+            description TEXT NOT NULL,
+            frequency TEXT NOT NULL,
+            amount REAL DEFAULT 0,
+            next_run_date TEXT NOT NULL,
+            last_run_at TIMESTAMP,
+            is_active INTEGER DEFAULT 1,
+            source_module TEXT,
+            source_table TEXT,
+            source_id INTEGER,
+            created_by TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            recurrence_payload TEXT,
+            FOREIGN KEY (company_key) REFERENCES companies(key) ON DELETE CASCADE,
+            FOREIGN KEY (branch_id) REFERENCES branches(branch_id) ON DELETE SET NULL
+        )
+        """
+    )
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_recurring_transactions_company ON recurring_transactions(company_key)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_recurring_transactions_next_run ON recurring_transactions(next_run_date)")
     cursor.execute(
         """
         CREATE TABLE IF NOT EXISTS payroll_records (

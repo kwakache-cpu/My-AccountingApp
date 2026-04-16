@@ -470,34 +470,46 @@ def show_invoice_manager(company_key, role):
         with st.form(f"invoice_form_{company_key}"):
             customer_name = st.selectbox("Customer", [""] + customers)
             amount = st.number_input("Amount (GHS)", min_value=0.0, step=0.01)
+            output_vat_rate = st.number_input("Output VAT Rate (%)", min_value=0.0, max_value=100.0, step=0.5, value=0.0, key=f"invoice_vat_rate_{company_key}")
             status = st.selectbox("Status", ["Draft", "Pending", "Paid"])
             invoice_date = st.date_input("Invoice Date", value=datetime.now().date(), key=f"invoice_date_{company_key}")
             description = st.text_input("Description", key=f"invoice_description_{company_key}")
             if st.form_submit_button("Save Invoice") and customer_name and amount > 0:
                 conn = get_connection()
                 customer_id = _party_id(conn, "customers", company_key, customer_name)
-                cursor = conn.execute(
-                    """
-                    INSERT INTO invoices (company_key, customer_id, invoice_number, invoice_date, due_date, status, amount, currency, description, created_by)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, 'GHS', ?, ?)
-                    """,
-                    (company_key, customer_id, f"INV-{datetime.now().strftime('%Y%m%d%H%M%S')}", invoice_date.isoformat(), invoice_date.isoformat(), status, amount, description, role),
-                )
+                output_vat = round(amount * (output_vat_rate or 0.0) / 100.0, 2)
+                try:
+                    cursor = conn.execute(
+                        """
+                        INSERT INTO invoices (company_key, customer_id, invoice_number, invoice_date, due_date, status, amount, output_vat, currency, description, created_by)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'GHS', ?, ?)
+                        """,
+                        (company_key, customer_id, f"INV-{datetime.now().strftime('%Y%m%d%H%M%S')}", invoice_date.isoformat(), invoice_date.isoformat(), status, amount, output_vat, description, role),
+                    )
+                except sqlite3.IntegrityError as e:
+                    conn.close()
+                    st.error(f"Unable to create invoice: {e}")
+                    st.stop()
+
                 if status != "Draft":
+                    journal_lines = [
+                        {"account_id": get_account_id(conn, "Cash" if status == "Paid" else "Accounts Receivable", "Asset"), "debit": amount + output_vat, "credit": 0},
+                        {"account_id": get_account_id(conn, "Sales Revenue", "Income"), "debit": 0, "credit": amount},
+                    ]
+                    if output_vat > 0:
+                        journal_lines.append({"account_id": get_account_id(conn, "VAT Payable", "Liability"), "debit": 0, "credit": output_vat})
                     post_journal_entry(
                         company_key=company_key,
                         date=invoice_date,
                         description="Sales invoice",
                         reference=f"INV-{cursor.lastrowid}",
-                        lines=[
-                            {"account_id": get_account_id(conn, "Cash" if status == "Paid" else "Accounts Receivable", "Asset"), "debit": amount, "credit": 0},
-                            {"account_id": get_account_id(conn, "Sales Revenue", "Income"), "debit": 0, "credit": amount},
-                        ],
+                        lines=journal_lines,
                         created_by=role,
                         branch_id=st.session_state.get("active_branch_id"),
                         customer_id=customer_id,
                         source_module="Invoices",
                         source_table="invoices",
+                        source_type="Invoice",
                         source_id=int(cursor.lastrowid),
                         conn=conn,
                     )
@@ -517,36 +529,49 @@ def show_invoice_manager(company_key, role):
         with st.form(f"bill_form_{company_key}"):
             supplier_name = st.selectbox("Supplier", [""] + suppliers)
             amount = st.number_input("Amount (GHS)", min_value=0.0, step=0.01, key=f"bill_amount_{company_key}")
+            input_vat_rate = st.number_input("Input VAT Rate (%)", min_value=0.0, max_value=100.0, step=0.5, value=0.0, key=f"bill_vat_rate_{company_key}")
             status = st.selectbox("Status", ["Draft", "Pending", "Received"], key=f"bill_status_{company_key}")
             bill_date = st.date_input("Bill Date", value=datetime.now().date(), key=f"bill_date_{company_key}")
             description = st.text_input("Description", key=f"bill_description_{company_key}")
             if st.form_submit_button("Save Bill") and supplier_name and amount > 0:
                 conn = get_connection()
                 supplier_id = _party_id(conn, "suppliers", company_key, supplier_name)
-                cursor = conn.execute(
-                    """
-                    INSERT INTO bills (company_key, supplier_id, bill_number, bill_date, due_date, status, amount, currency, description, created_by)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, 'GHS', ?, ?)
-                    """,
-                    (company_key, supplier_id, f"BILL-{datetime.now().strftime('%Y%m%d%H%M%S')}", bill_date.isoformat(), bill_date.isoformat(), status, amount, description, role),
-                )
+                input_vat = round(amount * (input_vat_rate or 0.0) / 100.0, 2)
+                try:
+                    cursor = conn.execute(
+                        """
+                        INSERT INTO bills (company_key, supplier_id, bill_number, bill_date, due_date, status, amount, input_vat, currency, description, created_by)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'GHS', ?, ?)
+                        """,
+                        (company_key, supplier_id, f"BILL-{datetime.now().strftime('%Y%m%d%H%M%S')}", bill_date.isoformat(), bill_date.isoformat(), status, amount, input_vat, description, role),
+                    )
+                except sqlite3.IntegrityError as e:
+                    conn.close()
+                    st.error(f"Unable to create bill: {e}")
+                    st.stop()
+
                 if status != "Draft":
+                    due_amount = amount + input_vat
                     credit_account = "Cash" if status == "Received" else "Accounts Payable"
                     credit_type = "Asset" if credit_account == "Cash" else "Liability"
+                    journal_lines = [
+                        {"account_id": get_account_id(conn, "Inventory", "Asset"), "debit": amount, "credit": 0},
+                        {"account_id": get_account_id(conn, "VAT Receivable", "Asset"), "debit": input_vat, "credit": 0} if input_vat > 0 else None,
+                        {"account_id": get_account_id(conn, credit_account, credit_type), "debit": 0, "credit": due_amount},
+                    ]
+                    journal_lines = [line for line in journal_lines if line]
                     post_journal_entry(
                         company_key=company_key,
                         date=bill_date,
                         description="Purchase bill",
                         reference=f"BILL-{cursor.lastrowid}",
-                        lines=[
-                            {"account_id": get_account_id(conn, "Inventory", "Asset"), "debit": amount, "credit": 0},
-                            {"account_id": get_account_id(conn, credit_account, credit_type), "debit": 0, "credit": amount},
-                        ],
+                        lines=journal_lines,
                         created_by=role,
                         branch_id=st.session_state.get("active_branch_id"),
                         supplier_id=supplier_id,
                         source_module="Bills",
                         source_table="bills",
+                        source_type="Bill",
                         source_id=int(cursor.lastrowid),
                         conn=conn,
                     )

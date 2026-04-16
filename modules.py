@@ -52,6 +52,7 @@ from accounting_engine import (
     get_general_ledger as engine_get_general_ledger,
     get_bank_reconciliation,
     get_or_create_account as engine_get_or_create_account,
+    get_supplier_balance,
     get_trial_balance as engine_get_trial_balance,
     post_journal_entry,
 )
@@ -1894,11 +1895,17 @@ def get_financial_metrics():
             "SELECT COALESCE(SUM(amount), 0) FROM sales_invoices WHERE status = 'Paid'"
         ).fetchone()[0] or 0.0
         payables = conn.execute(
-            "SELECT COALESCE(SUM(amount), 0) FROM accounts_payable WHERE status = 'Unpaid'"
+            """
+            SELECT COALESCE(SUM(jl.credit - jl.debit), 0)
+            FROM journal_entries je
+            JOIN journal_lines jl ON jl.entry_id = je.id
+            JOIN chart_of_accounts c ON c.id = jl.account_id
+            WHERE lower(COALESCE(NULLIF(c.name, ''), NULLIF(c.account_name, ''), '')) LIKE 'accounts payable%'
+            """
         ).fetchone()[0] or 0.0
         has_data = (
             (conn.execute("SELECT COUNT(*) FROM sales_invoices").fetchone()[0] or 0)
-            + (conn.execute("SELECT COUNT(*) FROM accounts_payable").fetchone()[0] or 0)
+            + (conn.execute("SELECT COUNT(*) FROM bills").fetchone()[0] or 0)
         ) > 0
     finally:
         conn.close()
@@ -2139,6 +2146,7 @@ def show_sales_invoices_page(conn, demo_on):
 
 def show_accounts_payable_page(conn, demo_on):
     st.subheader("Accounts Payable")
+    st.caption("Legacy notice: `accounts_payable` is now read-only. New supplier liabilities are created as bills and posted to the journal.")
     if demo_on:
         _demo_notice()
         demo_df = pd.DataFrame(
@@ -2147,28 +2155,99 @@ def show_accounts_payable_page(conn, demo_on):
         st.dataframe(format_currency_dataframe(demo_df), use_container_width=True)
         return
 
+    company_key = (
+        st.session_state.get("company_id")
+        or st.session_state.get("user", {}).get("key")
+        or st.session_state.get("user", {}).get("company_key")
+    )
+    role = st.session_state.get("user", {}).get("role", "System")
+    branch_id = st.session_state.get("active_branch_id")
+    if not company_key:
+        st.warning("No active company was found for Accounts Payable.")
+        return
+
     with st.form("accounts_payable_form"):
         supplier_name = st.text_input("Supplier Name")
+        bill_category = st.selectbox("Bill Posting", ["Expense", "Inventory"])
         amount = st.number_input("Amount (GH₵)", min_value=0.0, value=0.0)
-        status = st.selectbox("Status", ["Unpaid", "Paid"])
-        payable_date = st.date_input("Date", value=datetime.now().date())
-        submitted = st.form_submit_button("Save Payable")
+        status = st.selectbox("Bill Status", ["Pending", "Received"])
+        description = st.text_input("Description")
+        payable_date = st.date_input("Bill Date", value=datetime.now().date())
+        submitted = st.form_submit_button("Create Bill")
         if submitted and supplier_name and amount > 0:
-            conn.execute(
-                "INSERT INTO accounts_payable (supplier_name, amount, status, date) VALUES (?, ?, ?, ?)",
-                (supplier_name, amount, status, payable_date.isoformat()),
+            supplier_id = _get_or_create_party(conn, "suppliers", company_key, supplier_name.strip())
+            bill_number = f"BILL-{datetime.now().strftime('%Y%m%d%H%M%S')}"
+            posting_account_name = "Inventory" if bill_category == "Inventory" else "Purchases"
+            posting_account_type = "Asset" if bill_category == "Inventory" else "Expense"
+            cursor = conn.execute(
+                """
+                INSERT INTO bills (company_key, supplier_id, bill_number, bill_date, due_date, status, amount, currency, description, created_by)
+                VALUES (?, ?, ?, ?, ?, ?, ?, 'GHS', ?, ?)
+                """,
+                (
+                    company_key,
+                    supplier_id,
+                    bill_number,
+                    payable_date.isoformat(),
+                    payable_date.isoformat(),
+                    status,
+                    amount,
+                    description.strip() or f"{bill_category} bill",
+                    role,
+                ),
+            )
+            bill_id = int(cursor.lastrowid)
+            post_journal_entry(
+                company_key=company_key,
+                date=payable_date,
+                description=description.strip() or f"{bill_category} bill for {supplier_name.strip()}",
+                reference=bill_number,
+                lines=[
+                    {
+                        "account_id": get_account_id(conn, posting_account_name, posting_account_type),
+                        "debit": float(amount),
+                        "credit": 0,
+                    },
+                    {
+                        "account_id": get_account_id(conn, "Accounts Payable", "Liability"),
+                        "debit": 0,
+                        "credit": float(amount),
+                    },
+                ],
+                created_by=role,
+                branch_id=branch_id,
+                supplier_id=supplier_id,
+                source_module="Accounts Payable",
+                source_table="bills",
+                source_id=bill_id,
+                conn=conn,
             )
             conn.commit()
-            log_system_event("INFO", "Accounts Payable", f"Saved payable for {supplier_name}")
-            st.success("Payable saved.")
+            log_system_event("INFO", "Accounts Payable", f"Created bill {bill_number} for {supplier_name}")
+            st.success("Bill created and posted to the journal.")
             st.rerun()
 
-    rows = conn.execute("SELECT supplier_name, amount, status, date FROM accounts_payable ORDER BY date DESC, id DESC").fetchall()
+    rows = conn.execute(
+        """
+        SELECT b.bill_number, b.bill_date, s.id AS supplier_id, s.name AS supplier_name, b.description, b.amount, b.status
+        FROM bills b
+        JOIN suppliers s ON s.id = b.supplier_id
+        WHERE b.company_key = ?
+        ORDER BY date(b.bill_date) DESC, b.id DESC
+        """,
+        (company_key,),
+    ).fetchall()
     if rows:
-        df = pd.DataFrame(rows, columns=["Supplier Name", "Amount", "Status", "Date"])
+        df = pd.DataFrame(rows, columns=["Bill Number", "Date", "Supplier ID", "Supplier Name", "Description", "Amount", "Status"])
+        df["Supplier Balance"] = df["Supplier ID"].map(lambda supplier_id: get_supplier_balance(company_key, int(supplier_id), conn=conn))
+        df = df.drop(columns=["Supplier ID"])
         st.dataframe(format_currency_dataframe(df), use_container_width=True)
+        aging_rows = get_ap_aging_report(company_key, as_of_date=datetime.now().date())
+        if aging_rows:
+            st.markdown("Supplier Aging")
+            st.dataframe(format_currency_dataframe(pd.DataFrame(aging_rows)), use_container_width=True, hide_index=True)
     else:
-        st.caption("No payables yet.")
+        st.caption("No bills created yet.")
 
 
 def show_chart_of_accounts_page(conn, demo_on):
@@ -4800,14 +4879,12 @@ def _get_reports_data(conn, company_key):
     ).fetchone()[0] or 0.0
     accounts_payable = conn.execute(
         """
-        SELECT COALESCE(SUM(credit - debit), 0)
-        FROM vouchers
-        WHERE company_key = ?
-          AND COALESCE(status, 'Active') != 'Void'
-          AND (
-                lower(COALESCE(ledger, '')) LIKE '%accounts payable%'
-                OR v_type = 'Purchase'
-              )
+        SELECT COALESCE(SUM(jl.credit - jl.debit), 0)
+        FROM journal_entries je
+        JOIN journal_lines jl ON jl.entry_id = je.id
+        JOIN chart_of_accounts c ON c.id = jl.account_id
+        WHERE je.company_key = ?
+          AND lower(COALESCE(NULLIF(c.name, ''), NULLIF(c.account_name, ''), '')) LIKE 'accounts payable%'
         """,
         (company_key,),
     ).fetchone()[0] or 0.0

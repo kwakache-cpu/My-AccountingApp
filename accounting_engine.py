@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+import json
 import sqlite3
 
 import pandas as pd
@@ -186,7 +187,9 @@ def post_journal_entry(
     payment_id=None,
     source_module=None,
     source_table=None,
+    source_type=None,
     source_id=None,
+    approval_status="Posted",
     conn=None,
 ):
     if not lines:
@@ -256,9 +259,10 @@ def post_journal_entry(
             INSERT INTO journal_entries (
                 company_key, date, description, reference, created_by, branch_id,
                 customer_id, supplier_id, inventory_item_id, payment_id,
-                source_module, source_table, source_id
+                source_module, source_table, source_type, source_id,
+                approval_status
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 company_key,
@@ -273,7 +277,9 @@ def post_journal_entry(
                 payment_id,
                 source_module,
                 source_table,
+                source_type,
                 source_id,
+                approval_status,
             ),
         )
         entry_id = int(cursor.lastrowid)
@@ -300,6 +306,342 @@ def post_journal_entry(
             conn.close()
 
 
+def reverse_journal_entry(entry_id, created_by=None, reversal_date=None, reason=None, branch_id=None, conn=None):
+    owns_connection = conn is None
+    conn = conn or get_connection()
+    try:
+        original = conn.execute("SELECT * FROM journal_entries WHERE id = ?", (entry_id,)).fetchone()
+        if not original:
+            raise ValueError(f"Journal entry {entry_id} not found.")
+        if original["is_voided"]:
+            raise ValueError(f"Journal entry {entry_id} is already voided.")
+        if str(original["source_type"] or "").lower() == "reversal":
+            raise ValueError("Cannot reverse a reversal entry.")
+        if original["reversed_entry_id"]:
+            raise ValueError(f"Journal entry {entry_id} has already been reversed.")
+
+        reversal_date = _resolve_date(reversal_date or datetime.now().date())
+        reversal_lines = []
+        for row in conn.execute("SELECT account_id, debit, credit FROM journal_lines WHERE entry_id = ?", (entry_id,)):
+            reversal_lines.append({"account_id": int(row["account_id"]), "debit": float(row["credit"] or 0.0), "credit": float(row["debit"] or 0.0)})
+        if not reversal_lines:
+            raise ValueError(f"Journal entry {entry_id} contains no lines to reverse.")
+
+        reference = f"REV-{entry_id}-{datetime.now().strftime('%Y%m%d%H%M%S')}"
+        description = f"Reversal of journal entry {entry_id}"
+        if reason:
+            description = f"{description}: {reason}"
+
+        reversal_id = post_journal_entry(
+            company_key=original["company_key"],
+            date=reversal_date,
+            description=description,
+            reference=reference,
+            lines=reversal_lines,
+            created_by=created_by or original["created_by"],
+            branch_id=branch_id or original["branch_id"],
+            source_module="Journal Reversal",
+            source_table="journal_entries",
+            source_type="Reversal",
+            source_id=entry_id,
+            approval_status="Posted",
+            conn=conn,
+        )
+        conn.execute(
+            "UPDATE journal_entries SET reversed_entry_id = ? WHERE id = ?",
+            (reversal_id, entry_id),
+        )
+        if owns_connection:
+            conn.commit()
+        return reversal_id
+    except Exception:
+        if owns_connection:
+            conn.rollback()
+        raise
+    finally:
+        if owns_connection and conn:
+            conn.close()
+
+
+def void_journal_entry(entry_id, voided_by=None, voided_at=None, reason=None, branch_id=None, conn=None):
+    owns_connection = conn is None
+    conn = conn or get_connection()
+    try:
+        original = conn.execute("SELECT * FROM journal_entries WHERE id = ?", (entry_id,)).fetchone()
+        if not original:
+            raise ValueError(f"Journal entry {entry_id} not found.")
+        if original["is_voided"]:
+            raise ValueError(f"Journal entry {entry_id} is already voided.")
+
+        reversal_id = reverse_journal_entry(
+            entry_id,
+            created_by=voided_by or original["created_by"],
+            reversal_date=voided_at or datetime.now().date(),
+            reason=reason or "Voided by user",
+            branch_id=branch_id or original["branch_id"],
+            conn=conn,
+        )
+        voided_timestamp = _resolve_date(voided_at or datetime.now().date())
+        conn.execute(
+            "UPDATE journal_entries SET is_voided = 1, voided_at = ?, voided_by = ?, approval_status = 'Voided' WHERE id = ?",
+            (voided_timestamp, voided_by or original["created_by"], entry_id),
+        )
+        if owns_connection:
+            conn.commit()
+        return reversal_id
+    except Exception:
+        if owns_connection:
+            conn.rollback()
+        raise
+    finally:
+        if owns_connection and conn:
+            conn.close()
+
+
+def allocate_payment(payment_id, invoice_id=None, bill_id=None, amount=None, created_by=None, branch_id=None, conn=None):
+    if amount is None or amount <= 0:
+        raise ValueError("Allocation amount must be a positive number.")
+    if not invoice_id and not bill_id:
+        raise ValueError("Either invoice_id or bill_id must be provided for payment allocation.")
+    owns_connection = conn is None
+    conn = conn or get_connection()
+    try:
+        payment = conn.execute("SELECT * FROM payments WHERE id = ?", (payment_id,)).fetchone()
+        if not payment:
+            raise ValueError(f"Payment {payment_id} does not exist.")
+
+        if invoice_id:
+            invoice = conn.execute("SELECT amount FROM invoices WHERE id = ?", (invoice_id,)).fetchone()
+            if not invoice:
+                raise ValueError(f"Invoice {invoice_id} does not exist.")
+            outstanding = float(invoice["amount"] or 0.0) - float(conn.execute("SELECT COALESCE(SUM(amount), 0) FROM payment_allocations WHERE invoice_id = ?", (invoice_id,)).fetchone()[0] or 0.0)
+            if amount > outstanding:
+                raise ValueError(f"Allocation amount exceeds outstanding invoice balance ({outstanding:.2f}).")
+        if bill_id:
+            bill = conn.execute("SELECT amount FROM bills WHERE id = ?", (bill_id,)).fetchone()
+            if not bill:
+                raise ValueError(f"Bill {bill_id} does not exist.")
+            outstanding = float(bill["amount"] or 0.0) - float(conn.execute("SELECT COALESCE(SUM(amount), 0) FROM payment_allocations WHERE bill_id = ?", (bill_id,)).fetchone()[0] or 0.0)
+            if amount > outstanding:
+                raise ValueError(f"Allocation amount exceeds outstanding bill balance ({outstanding:.2f}).")
+
+        cursor = conn.execute(
+            "INSERT INTO payment_allocations (company_key, payment_id, invoice_id, bill_id, amount, currency, branch_id, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                payment["company_key"],
+                payment_id,
+                invoice_id,
+                bill_id,
+                amount,
+                payment["currency"],
+                branch_id or payment["branch_id"],
+                created_by or payment["created_by"],
+            ),
+        )
+        if owns_connection:
+            conn.commit()
+        return int(cursor.lastrowid)
+    except Exception:
+        if owns_connection:
+            conn.rollback()
+        raise
+    finally:
+        if owns_connection and conn:
+            conn.close()
+
+
+def get_payment_allocations(payment_id=None, invoice_id=None, bill_id=None, conn=None):
+    owns_connection = conn is None
+    conn = conn or get_connection()
+    try:
+        query = "SELECT * FROM payment_allocations WHERE 1=1"
+        params = []
+        if payment_id:
+            query += " AND payment_id = ?"
+            params.append(payment_id)
+        if invoice_id:
+            query += " AND invoice_id = ?"
+            params.append(invoice_id)
+        if bill_id:
+            query += " AND bill_id = ?"
+            params.append(bill_id)
+        return [dict(row) for row in conn.execute(query, tuple(params)).fetchall()]
+    finally:
+        if owns_connection and conn:
+            conn.close()
+
+
+def create_bank_account(company_key, account_name, bank_name=None, account_number=None, currency="GHS", account_type="Bank", branch_id=None, opening_balance=0.0, created_by=None, conn=None):
+    owns_connection = conn is None
+    conn = conn or get_connection()
+    try:
+        cursor = conn.execute(
+            "INSERT INTO bank_accounts (company_key, branch_id, account_name, account_number, bank_name, account_type, currency, balance, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (company_key, branch_id, account_name, account_number, bank_name, account_type, currency, opening_balance, created_by),
+        )
+        if owns_connection:
+            conn.commit()
+        return int(cursor.lastrowid)
+    except Exception:
+        if owns_connection:
+            conn.rollback()
+        raise
+    finally:
+        if owns_connection and conn:
+            conn.close()
+
+
+def get_bank_account(account_id, conn=None):
+    owns_connection = conn is None
+    conn = conn or get_connection()
+    try:
+        row = conn.execute("SELECT * FROM bank_accounts WHERE id = ?", (account_id,)).fetchone()
+        return dict(row) if row else None
+    finally:
+        if owns_connection and conn:
+            conn.close()
+
+
+def get_bank_accounts(company_key, branch_id=None, conn=None):
+    owns_connection = conn is None
+    conn = conn or get_connection()
+    try:
+        query = "SELECT * FROM bank_accounts WHERE company_key = ?"
+        params = [company_key]
+        if branch_id:
+            query += " AND branch_id = ?"
+            params.append(branch_id)
+        return [dict(row) for row in conn.execute(query, tuple(params)).fetchall()]
+    finally:
+        if owns_connection and conn:
+            conn.close()
+
+
+def _next_recurrence_date(current_date, frequency):
+    if frequency == "Daily":
+        return current_date + pd.Timedelta(days=1)
+    if frequency == "Weekly":
+        return current_date + pd.Timedelta(weeks=1)
+    if frequency == "Monthly":
+        return current_date + pd.DateOffset(months=1)
+    if frequency == "Quarterly":
+        return current_date + pd.DateOffset(months=3)
+    if frequency == "Yearly":
+        return current_date + pd.DateOffset(years=1)
+    raise ValueError(f"Unsupported recurrence frequency: {frequency}")
+
+
+def schedule_recurring_transaction(company_key, description, frequency, amount, next_run_date, lines, created_by, branch_id=None, source_module=None, source_table=None, source_id=None, active=True, conn=None):
+    if frequency not in {"Daily", "Weekly", "Monthly", "Quarterly", "Yearly"}:
+        raise ValueError("Frequency must be one of Daily, Weekly, Monthly, Quarterly, Yearly.")
+    owns_connection = conn is None
+    conn = conn or get_connection()
+    try:
+        payload = json.dumps(lines)
+        cursor = conn.execute(
+            "INSERT INTO recurring_transactions (company_key, branch_id, description, frequency, amount, next_run_date, is_active, source_module, source_table, source_id, created_by, recurrence_payload) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (company_key, branch_id, description, frequency, amount, _resolve_date(next_run_date), 1 if active else 0, source_module, source_table, source_id, created_by, payload),
+        )
+        if owns_connection:
+            conn.commit()
+        return int(cursor.lastrowid)
+    except Exception:
+        if owns_connection:
+            conn.rollback()
+        raise
+    finally:
+        if owns_connection and conn:
+            conn.close()
+
+
+def get_due_recurring_transactions(company_key=None, run_date=None, conn=None):
+    owns_connection = conn is None
+    conn = conn or get_connection()
+    try:
+        today = _resolve_date(run_date or datetime.now().date())
+        query = "SELECT * FROM recurring_transactions WHERE is_active = 1 AND date(next_run_date) <= date(?)"
+        params = [today]
+        if company_key:
+            query = "SELECT * FROM recurring_transactions WHERE is_active = 1 AND company_key = ? AND date(next_run_date) <= date(?)"
+            params = [company_key, today]
+        return [dict(row) for row in conn.execute(query, tuple(params)).fetchall()]
+    finally:
+        if owns_connection and conn:
+            conn.close()
+
+
+def run_recurring_transactions(company_key=None, run_date=None, conn=None):
+    owns_connection = conn is None
+    conn = conn or get_connection()
+    try:
+        due = get_due_recurring_transactions(company_key=company_key, run_date=run_date, conn=conn)
+        count = 0
+        for row in due:
+            payload = row.get("recurrence_payload")
+            if not payload:
+                continue
+            lines = json.loads(payload)
+            entry_date = _resolve_date(run_date or row["next_run_date"] or datetime.now().date())
+            try:
+                post_journal_entry(
+                    company_key=row["company_key"],
+                    date=entry_date,
+                    description=f"Recurring: {row['description']}",
+                    reference=f"REC-{row['id']}-{datetime.now().strftime('%Y%m%d%H%M%S')}",
+                    lines=lines,
+                    created_by=row["created_by"],
+                    branch_id=row["branch_id"],
+                    source_module=row["source_module"],
+                    source_table=row["source_table"],
+                    source_type="Recurring",
+                    source_id=row["source_id"],
+                    conn=conn,
+                )
+                next_run = _next_recurrence_date(pd.Timestamp(entry_date), row["frequency"]).date()
+                conn.execute(
+                    "UPDATE recurring_transactions SET last_run_at = ?, next_run_date = ? WHERE id = ?",
+                    (datetime.now().isoformat(), next_run.isoformat(), row["id"]),
+                )
+                count += 1
+            except Exception:
+                continue
+        if owns_connection:
+            conn.commit()
+        return count
+    finally:
+        if owns_connection and conn:
+            conn.close()
+
+
+def post_vat_transaction(company_key, date, description, net_amount, vat_amount, vat_type, created_by, branch_id=None, source_module=None, source_table=None, source_id=None, conn=None):
+    if vat_type not in {"InputVAT", "OutputVAT"}:
+        raise ValueError("vat_type must be 'InputVAT' or 'OutputVAT'.")
+    if vat_amount < 0:
+        raise ValueError("VAT amount cannot be negative.")
+    total_amount = net_amount + vat_amount
+    vat_account = "VAT Payable" if vat_type == "OutputVAT" else "VAT Receivable"
+    revenue_account = "Sales Revenue" if vat_type == "OutputVAT" else "Inventory"
+    lines = [
+        {"account_id": get_account_id(conn, revenue_account, "Income" if vat_type == "OutputVAT" else "Asset"), "debit": net_amount if vat_type == "InputVAT" else 0, "credit": net_amount if vat_type == "OutputVAT" else 0},
+        {"account_id": get_account_id(conn, vat_account, "Liability" if vat_type == "OutputVAT" else "Asset"), "debit": vat_amount if vat_type == "InputVAT" else 0, "credit": vat_amount if vat_type == "OutputVAT" else 0},
+        {"account_id": get_account_id(conn, "Cash" if vat_type == "OutputVAT" else "Accounts Payable", "Asset" if vat_type == "OutputVAT" else "Liability"), "debit": total_amount if vat_type == "OutputVAT" else 0, "credit": total_amount if vat_type == "InputVAT" else 0},
+    ]
+    return post_journal_entry(
+        company_key=company_key,
+        date=date,
+        description=description,
+        reference=f"VAT-{source_id}" if source_id else None,
+        lines=lines,
+        created_by=created_by,
+        branch_id=branch_id,
+        source_module=source_module,
+        source_table=source_table,
+        source_type="VAT",
+        source_id=source_id,
+        conn=conn,
+    )
+
+
 def _journal_base_query():
     return f"""
         SELECT
@@ -315,7 +657,13 @@ def _journal_base_query():
             je.payment_id,
             je.source_module,
             je.source_table,
+            je.source_type,
             je.source_id,
+            je.reversed_entry_id,
+            je.is_voided,
+            je.voided_at,
+            je.voided_by,
+            je.approval_status,
             c.id AS account_id,
             COALESCE(NULLIF(c.code, ''), NULLIF(c.account_code, ''), '') AS account_code,
             {_coa_name_expression()} AS account_name,
@@ -354,8 +702,8 @@ def _journal_dataframe(company_key, start_date=None, end_date=None, branch_id=No
             conn.close()
 
 
-def get_trial_balance(company_key, start_date=None, end_date=None):
-    df = _journal_dataframe(company_key, start_date=start_date, end_date=end_date)
+def get_trial_balance(company_key, start_date=None, end_date=None, branch_id=None):
+    df = _journal_dataframe(company_key, start_date=start_date, end_date=end_date, branch_id=branch_id)
     if df.empty:
         return []
     grouped = (
@@ -410,11 +758,11 @@ def get_general_ledger(company_key, account_id, start_date, end_date):
     return rows
 
 
-def generate_income_statement(company_key, start_date, end_date):
+def generate_income_statement(company_key, start_date, end_date, branch_id=None):
     rows = []
     total_income = 0.0
     total_expenses = 0.0
-    for row in get_trial_balance(company_key, start_date=start_date, end_date=end_date):
+    for row in get_trial_balance(company_key, start_date=start_date, end_date=end_date, branch_id=branch_id):
         account_type = str(row["account_type"]).title()
         if account_type == "Income":
             amount = round(row["credit_total"] - row["debit_total"], 2)
@@ -428,22 +776,22 @@ def generate_income_statement(company_key, start_date, end_date):
     return rows
 
 
-def generate_balance_sheet(company_key, as_of_date):
+def generate_balance_sheet(company_key, as_of_date, branch_id=None):
     rows = []
-    for row in get_trial_balance(company_key, end_date=as_of_date):
+    for row in get_trial_balance(company_key, end_date=as_of_date, branch_id=branch_id):
         account_type = str(row["account_type"]).title()
         if account_type not in {"Asset", "Liability", "Equity"}:
             continue
         amount = round(row["debit_total"] - row["credit_total"], 2) if account_type == "Asset" else round(row["credit_total"] - row["debit_total"], 2)
         rows.append({"category": account_type, "account_id": row["account_id"], "account_code": row["account_code"], "account_name": row["account_name"], "amount": amount})
-    profit_rows = generate_income_statement(company_key, None, as_of_date)
+    profit_rows = generate_income_statement(company_key, None, as_of_date, branch_id=branch_id)
     net_profit = next((row["amount"] for row in profit_rows if row["account_name"] == "Net Profit"), 0.0)
     rows.append({"category": "Equity", "account_id": None, "account_code": "", "account_name": "Current Period Earnings", "amount": round(net_profit, 2)})
     return rows
 
 
-def generate_cash_flow_statement(company_key, start_date, end_date):
-    journal_df = _journal_dataframe(company_key, start_date=start_date, end_date=end_date)
+def generate_cash_flow_statement(company_key, start_date, end_date, branch_id=None):
+    journal_df = _journal_dataframe(company_key, start_date=start_date, end_date=end_date, branch_id=branch_id)
     if journal_df.empty:
         return []
     cash_df = journal_df[journal_df["account_name"].isin(["Cash", "Bank", "Mobile Money"])].copy()
@@ -549,38 +897,106 @@ def get_ar_aging_report(company_key, as_of_date=None):
         conn.close()
 
 
+def get_supplier_balance(company_key, supplier_id, as_of_date=None, conn=None):
+    owns_connection = conn is None
+    conn = conn or get_connection()
+    try:
+        row = conn.execute(
+            f"""
+            SELECT COALESCE(SUM(jl.credit - jl.debit), 0) AS balance
+            FROM journal_entries je
+            JOIN journal_lines jl ON jl.entry_id = je.id
+            JOIN chart_of_accounts c ON c.id = jl.account_id
+            WHERE je.company_key = ?
+              AND je.supplier_id = ?
+              AND lower({_coa_name_expression()}) LIKE 'accounts payable%'
+              {"AND date(je.date) <= date(?)" if as_of_date else ""}
+            """,
+            (company_key, int(supplier_id), _resolve_date(as_of_date)) if as_of_date else (company_key, int(supplier_id)),
+        ).fetchone()
+        return round(float(row["balance"] or 0.0), 2) if row else 0.0
+    finally:
+        if owns_connection and conn:
+            conn.close()
+
+
+def get_supplier_balances(company_key, as_of_date=None, conn=None):
+    owns_connection = conn is None
+    conn = conn or get_connection()
+    try:
+        rows = conn.execute(
+            """
+            SELECT id, name, email, phone, address
+            FROM suppliers
+            WHERE company_key = ?
+            ORDER BY name
+            """,
+            (company_key,),
+        ).fetchall()
+        return [
+            {
+                "id": int(row["id"]),
+                "name": row["name"],
+                "email": row["email"],
+                "phone": row["phone"],
+                "address": row["address"],
+                "balance": get_supplier_balance(company_key, int(row["id"]), as_of_date=as_of_date, conn=conn),
+            }
+            for row in rows
+        ]
+    finally:
+        if owns_connection and conn:
+            conn.close()
+
+
 def get_ap_aging_report(company_key, as_of_date=None):
     report_date = pd.Timestamp(as_of_date or datetime.now().date())
     conn = get_connection()
     try:
-        rows = conn.execute(
+        suppliers = conn.execute(
             """
-            SELECT s.id, s.name, b.bill_date, b.amount, b.status
-            FROM bills b
-            JOIN suppliers s ON s.id = b.supplier_id
-            WHERE b.company_key = ? AND COALESCE(b.status, 'Draft') IN ('Pending', 'Received')
-            ORDER BY date(b.bill_date) ASC, b.id ASC
+            SELECT id, name, email, phone, address
+            FROM suppliers
+            WHERE company_key = ?
+            ORDER BY name
             """,
             (company_key,),
         ).fetchall()
-        supplier_buckets = {}
-        for row in rows:
-            supplier_name = row["name"]
-            bill_date = pd.Timestamp(row["bill_date"]) if row["bill_date"] else report_date
-            days = int((report_date - bill_date).days)
-            supplier_buckets.setdefault(
-                supplier_name,
+        rows = []
+        for supplier in suppliers:
+            supplier_id = int(supplier["id"])
+            balance = get_supplier_balance(company_key, supplier_id, as_of_date=report_date.date(), conn=conn)
+            if abs(balance) < 0.005:
+                continue
+            oldest_row = conn.execute(
+                f"""
+                SELECT MIN(date(je.date)) AS oldest_open_date
+                FROM journal_entries je
+                JOIN journal_lines jl ON jl.entry_id = je.id
+                JOIN chart_of_accounts c ON c.id = jl.account_id
+                WHERE je.company_key = ?
+                  AND je.supplier_id = ?
+                  AND jl.credit > 0
+                  AND lower({_coa_name_expression()}) LIKE 'accounts payable%'
+                  AND date(je.date) <= date(?)
+                """,
+                (company_key, supplier_id, _resolve_date(report_date.date())),
+            ).fetchone()
+            oldest_date = pd.Timestamp(oldest_row["oldest_open_date"]) if oldest_row and oldest_row["oldest_open_date"] else report_date
+            days = int((report_date - oldest_date).days)
+            rows.append(
                 {
-                    "supplier_name": supplier_name,
-                    "days_outstanding": 0,
-                    "bucket": "0-30 Days",
-                    "balance": 0.0,
-                },
+                    "supplier_id": supplier_id,
+                    "supplier_name": supplier["name"],
+                    "email": supplier["email"],
+                    "phone": supplier["phone"],
+                    "address": supplier["address"],
+                    "days_outstanding": days,
+                    "bucket": _aging_bucket(days),
+                    "balance": round(balance, 2),
+                }
             )
-            supplier_buckets[supplier_name]["balance"] += float(row["amount"] or 0.0)
-            supplier_buckets[supplier_name]["days_outstanding"] = max(supplier_buckets[supplier_name]["days_outstanding"], days)
-            supplier_buckets[supplier_name]["bucket"] = _aging_bucket(supplier_buckets[supplier_name]["days_outstanding"])
-        return list(supplier_buckets.values())
+        return rows
     finally:
         conn.close()
 
