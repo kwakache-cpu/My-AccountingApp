@@ -2369,7 +2369,124 @@ def show_inventory(company_key, role):
 
     with tabs[1]:
         st.subheader("Stock In / Out")
-        st.info("Stock movement recording coming soon.")
+        if role == "Demo":
+            st.info("Stock movement recording is disabled in Demo mode.")
+        else:
+            conn = None
+            try:
+                conn = get_connection()
+                stock_items = conn.execute(
+                    """
+                    SELECT id, item_name, barcode, qty
+                    FROM inventory
+                    WHERE company_key = ?
+                    ORDER BY item_name
+                    """,
+                    (company_key,),
+                ).fetchall()
+                movement_reasons = ["Restock", "Damage", "Sale", "Return", "Adjustment", "Transfer", "Other"]
+                branch_id = st.session_state.get("active_branch_id")
+
+                if not stock_items:
+                    st.info("Add inventory items first before recording stock movements.")
+                else:
+                    stock_options = [
+                        (
+                            f"{row['item_name']} | Barcode {row['barcode'] or 'N/A'} | Available {float(row['qty'] or 0):,.2f}",
+                            int(row["id"]),
+                        )
+                        for row in stock_items
+                    ]
+                    option_labels = [label for label, _ in stock_options]
+                    selected_label = st.selectbox(
+                        "Select Item",
+                        option_labels,
+                        key=f"stock_movement_item_{company_key}",
+                    )
+                    selected_item_id = next(item_id for label, item_id in stock_options if label == selected_label)
+                    selected_item = next(row for row in stock_items if int(row["id"]) == selected_item_id)
+
+                    with st.form(f"stock_movement_form_{company_key}", clear_on_submit=True):
+                        movement_type = st.selectbox("Movement Type", ["In", "Out"], key=f"stock_movement_type_{company_key}")
+                        quantity = st.number_input("Quantity", min_value=0.01, value=1.0, step=1.0, key=f"stock_movement_qty_{company_key}")
+                        reason = st.selectbox("Reason", movement_reasons, key=f"stock_movement_reason_{company_key}")
+                        submitted = st.form_submit_button("Record Movement")
+
+                    if submitted:
+                        current_qty = float(selected_item["qty"] or 0.0)
+                        movement_qty = float(quantity or 0.0)
+                        if movement_qty <= 0:
+                            st.warning("Enter a quantity greater than zero.")
+                        else:
+                            delta = movement_qty if movement_type == "In" else -movement_qty
+                            new_qty = current_qty + delta
+                            if movement_type == "Out" and new_qty < 0:
+                                st.error(f"Cannot record stock out of {movement_qty:,.2f}. Available quantity is {current_qty:,.2f}.")
+                            else:
+                                conn.execute(
+                                    """
+                                    UPDATE inventory
+                                    SET qty = ?, updated_at = CURRENT_TIMESTAMP
+                                    WHERE id = ? AND company_key = ?
+                                    """,
+                                    (new_qty, selected_item_id, company_key),
+                                )
+                                conn.execute(
+                                    """
+                                    INSERT INTO stock_movements (
+                                        company_key, branch_id, inventory_item_id, item_name,
+                                        movement_type, quantity, reason, previous_qty, new_qty, created_by
+                                    )
+                                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                    """,
+                                    (
+                                        company_key,
+                                        branch_id,
+                                        selected_item_id,
+                                        selected_item["item_name"],
+                                        movement_type,
+                                        movement_qty,
+                                        reason,
+                                        current_qty,
+                                        new_qty,
+                                        role,
+                                    ),
+                                )
+                                conn.commit()
+                                log_audit_action(
+                                    conn,
+                                    company_key,
+                                    role,
+                                    f"Inventory Stock {movement_type}",
+                                    "Inventory",
+                                    f"{selected_item['item_name']} | Qty {movement_qty:,.2f} | Reason: {reason} | {current_qty:,.2f} -> {new_qty:,.2f}",
+                                    branch_id=branch_id,
+                                )
+                                st.success(f"Recorded stock {movement_type.lower()} for {selected_item['item_name']}. New quantity: {new_qty:,.2f}.")
+                                st.rerun()
+
+                    movement_rows = conn.execute(
+                        """
+                        SELECT created_at, item_name, movement_type, quantity, reason, previous_qty, new_qty, created_by
+                        FROM stock_movements
+                        WHERE company_key = ?
+                        ORDER BY created_at DESC, id DESC
+                        LIMIT 25
+                        """,
+                        (company_key,),
+                    ).fetchall()
+                    if movement_rows:
+                        st.markdown("Recent Stock Movements")
+                        movement_df = pd.DataFrame(
+                            movement_rows,
+                            columns=["Date", "Item", "Type", "Qty", "Reason", "Previous Qty", "New Qty", "Recorded By"],
+                        )
+                        st.dataframe(movement_df, use_container_width=True, hide_index=True)
+            except Exception as exc:
+                st.error(f"Stock movement error: {exc}")
+            finally:
+                if conn:
+                    conn.close()
 
     with tabs[2]:
         st.subheader("Items Management")

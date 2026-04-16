@@ -81,6 +81,7 @@ def ensure_schema_integrity(conn):
         "companies": {"contact_email": "TEXT", "barcode_input_source": "TEXT DEFAULT 'Keyboard Entry'"},
         "audit_logs": {"details": "TEXT", "branch_id": "TEXT"},
         "journal_entries": {"branch_id": "TEXT"},
+        "stock_movements": {"branch_id": "TEXT", "reason": "TEXT", "created_by": "TEXT", "created_at": "TIMESTAMP DEFAULT CURRENT_TIMESTAMP"},
         "transactions": {"branch_id": "TEXT"},
         "users": {"branch_id": "TEXT"},
         "vouchers": {"status": "TEXT DEFAULT 'Active'", "branch_id": "TEXT"},
@@ -246,6 +247,29 @@ def ensure_schema_integrity(conn):
     )
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_journal_entries_company_date ON journal_entries(company_key, date)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_journal_lines_entry ON journal_lines(entry_id)")
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS stock_movements (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            company_key TEXT NOT NULL,
+            branch_id TEXT,
+            inventory_item_id INTEGER NOT NULL,
+            item_name TEXT NOT NULL,
+            movement_type TEXT NOT NULL,
+            quantity REAL NOT NULL,
+            reason TEXT,
+            previous_qty REAL DEFAULT 0,
+            new_qty REAL DEFAULT 0,
+            created_by TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (inventory_item_id) REFERENCES inventory(id) ON DELETE CASCADE,
+            FOREIGN KEY (company_key) REFERENCES companies(key) ON DELETE CASCADE,
+            FOREIGN KEY (branch_id) REFERENCES branches(branch_id) ON DELETE SET NULL
+        )
+        """
+    )
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_stock_movements_company_created ON stock_movements(company_key, created_at DESC)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_stock_movements_item ON stock_movements(inventory_item_id)")
 
     cursor.execute(
         """
@@ -593,6 +617,46 @@ def init_db():
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_inv_comp ON inventory(company_key);")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_inv_name ON inventory(item_name);")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_inv_barcode ON inventory(barcode);")
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS stock_movements (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                company_key TEXT NOT NULL,
+                branch_id TEXT,
+                inventory_item_id INTEGER NOT NULL,
+                item_name TEXT NOT NULL,
+                movement_type TEXT NOT NULL,
+                quantity REAL NOT NULL,
+                reason TEXT,
+                previous_qty REAL DEFAULT 0,
+                new_qty REAL DEFAULT 0,
+                created_by TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (company_key) REFERENCES companies (key) ON DELETE CASCADE,
+                FOREIGN KEY (branch_id) REFERENCES branches (branch_id) ON DELETE SET NULL,
+                FOREIGN KEY (inventory_item_id) REFERENCES inventory (id) ON DELETE CASCADE
+            )
+        """)
+        cursor.execute("PRAGMA table_info(stock_movements)")
+        stock_movement_columns = {row[1] for row in cursor.fetchall()}
+        stock_movement_column_defs = {
+            "company_key": "TEXT",
+            "branch_id": "TEXT",
+            "inventory_item_id": "INTEGER",
+            "item_name": "TEXT",
+            "movement_type": "TEXT",
+            "quantity": "REAL DEFAULT 0",
+            "reason": "TEXT",
+            "previous_qty": "REAL DEFAULT 0",
+            "new_qty": "REAL DEFAULT 0",
+            "created_by": "TEXT",
+            "created_at": "TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
+        }
+        for column_name, column_def in stock_movement_column_defs.items():
+            if column_name not in stock_movement_columns:
+                cursor.execute(f"ALTER TABLE stock_movements ADD COLUMN {column_name} {column_def}")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_stock_movements_company_created ON stock_movements(company_key, created_at DESC)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_stock_movements_item ON stock_movements(inventory_item_id)")
 
         # --- TABLE 3: FINANCIAL VOUCHERS & GENERAL LEDGER ---
         # Central ledger for POS sales, expenses, and journals
