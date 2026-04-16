@@ -3019,14 +3019,14 @@ def show_pos(company_key, company_name, role):
             edited_cart_df = st.data_editor(
                 cart_df,
                 hide_index=True,
-                num_rows="dynamic",
+                num_rows="fixed",
                 use_container_width=True,
                 column_config={
                     "No.": st.column_config.NumberColumn("No.", disabled=True),
-                    "Item": st.column_config.TextColumn("Item", disabled=True),
-                    "Barcode": st.column_config.TextColumn("Barcode", disabled=True),
-                    "Qty": st.column_config.NumberColumn("Qty", min_value=1, step=1),
-                    "Unit Price": st.column_config.NumberColumn("Unit Price", disabled=True, format="%.2f"),
+                    "Item": st.column_config.TextColumn("Item"),
+                    "Barcode": st.column_config.TextColumn("Barcode"),
+                    "Qty": st.column_config.NumberColumn("Qty", min_value=1, step=1, required=True),
+                    "Unit Price": st.column_config.NumberColumn("Unit Price", format="%.2f"),
                     "Line Total": st.column_config.NumberColumn("Line Total", disabled=True, format="%.2f"),
                 },
                 key=f"pos_cart_editor_{company_key}",
@@ -3036,18 +3036,26 @@ def show_pos(company_key, company_name, role):
                 for row_index, row in edited_cart_df.reset_index(drop=True).iterrows():
                     if not str(row["Item"]).strip():
                         continue
-                    original = cart[row_index] if row_index < len(cart) else {}
-                    updated_cart.append(
-                        {
-                            "inventory_item_id": original.get("inventory_item_id"),
-                            "name": row["Item"],
-                            "barcode": row["Barcode"] if str(row["Barcode"]).strip() else original.get("barcode", ""),
-                            "price": float(row["Unit Price"]),
-                            "available_qty": original.get("available_qty"),
-                            "qty": int(row["Qty"]),
-                            "line_total": int(row["Qty"]) * float(row["Unit Price"]),
-                        }
-                    )
+                    try:
+                        qty_val = row["Qty"]
+                        price_val = row["Unit Price"]
+                        if qty_val is None or price_val is None:
+                            continue
+                        original = cart[row_index] if row_index < len(cart) else {}
+                        updated_cart.append(
+                            {
+                                "inventory_item_id": original.get("inventory_item_id"),
+                                "name": row["Item"],
+                                "barcode": row["Barcode"] if str(row["Barcode"]).strip() else original.get("barcode", ""),
+                                "price": float(price_val),
+                                "available_qty": original.get("available_qty"),
+                                "qty": int(qty_val),
+                                "line_total": int(qty_val) * float(price_val),
+                            }
+                        )
+                    except (ValueError, TypeError) as e:
+                        st.warning(f"Skipping row with invalid data: {e}")
+                        continue
                 if updated_cart != cart:
                     st.session_state[cart_key] = updated_cart
                     cart = updated_cart
