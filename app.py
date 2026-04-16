@@ -1536,6 +1536,8 @@ def check_session_lock():
 
 
 def main():
+    st.cache_data.clear()
+    st.cache_resource.clear()
     _sync_cloud_db_down_if_newer()
     run_startup_db_patch()
     _start_firebase_ghost_sync()

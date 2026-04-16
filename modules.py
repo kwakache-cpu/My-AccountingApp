@@ -3023,10 +3023,10 @@ def show_pos(company_key, company_name, role):
                 use_container_width=True,
                 column_config={
                     "No.": st.column_config.NumberColumn("No.", disabled=True),
-                    "Item": st.column_config.TextColumn("Item"),
-                    "Barcode": st.column_config.TextColumn("Barcode"),
+                    "Item": st.column_config.TextColumn("Item", disabled=True),
+                    "Barcode": st.column_config.TextColumn("Barcode", disabled=True),
                     "Qty": st.column_config.NumberColumn("Qty", min_value=1, step=1, required=True),
-                    "Unit Price": st.column_config.NumberColumn("Unit Price", format="%.2f"),
+                    "Unit Price": st.column_config.NumberColumn("Unit Price", disabled=True, format="%.2f"),
                     "Line Total": st.column_config.NumberColumn("Line Total", disabled=True, format="%.2f"),
                 },
                 key=f"pos_cart_editor_{company_key}",
@@ -3059,7 +3059,7 @@ def show_pos(company_key, company_name, role):
                 if updated_cart != cart:
                     st.session_state[cart_key] = updated_cart
                     cart = updated_cart
-            total_amount = sum(float(line["qty"]) * float(line["price"]) for line in cart)
+            total_amount = sum(float(line.get("qty", 0)) * float(line.get("price", 0)) for line in cart if line.get("qty") is not None and line.get("price") is not None)
             st.markdown(
                 f"<div style='text-align:right; margin-top:1rem; font-size:1.1rem; font-weight:bold;'>Cart Total: {format_currency(total_amount)}</div>",
                 unsafe_allow_html=True,
