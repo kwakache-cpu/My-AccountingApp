@@ -127,6 +127,12 @@ def ensure_schema_integrity(conn):
             if column_name not in existing_columns:
                 cursor.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_def}")
 
+    # Specific check for journal_entries branch_id
+    cursor.execute("PRAGMA table_info(journal_entries)")
+    je_columns = {row[1] for row in cursor.fetchall()}
+    if "branch_id" not in je_columns:
+        cursor.execute("ALTER TABLE journal_entries ADD COLUMN branch_id TEXT")
+
     cursor.execute("PRAGMA table_info(stock)")
     stock_columns = {row[1] for row in cursor.fetchall()}
     if stock_columns and "barcode" not in stock_columns:
@@ -450,6 +456,21 @@ def ensure_schema_integrity(conn):
         """
     )
     cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_bills_company_bill_number ON bills(company_key, bill_number)")
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS bill_lines (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            bill_id INTEGER NOT NULL,
+            item_name TEXT NOT NULL,
+            quantity REAL DEFAULT 1,
+            unit_price REAL DEFAULT 0,
+            line_total REAL DEFAULT 0,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (bill_id) REFERENCES bills(id) ON DELETE CASCADE
+        )
+        """
+    )
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_bill_lines_bill_id ON bill_lines(bill_id)")
     cursor.execute(
         """
         CREATE TABLE IF NOT EXISTS bank_accounts (

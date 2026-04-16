@@ -2250,6 +2250,150 @@ def show_accounts_payable_page(conn, demo_on):
         st.caption("No bills created yet.")
 
 
+def show_create_bill_page(company_key):
+    conn = get_connection()
+    try:
+        demo_on = st.session_state.get("demo_mode", False)
+        st.subheader("Create Bill")
+        if demo_on:
+            _demo_notice()
+            return
+
+        role = st.session_state.get("user", {}).get("role", "System")
+        branch_id = st.session_state.get("active_branch_id")
+        if not company_key:
+            st.warning("No active company was found.")
+            return
+
+        suppliers = conn.execute("SELECT id, name FROM suppliers WHERE company_key = ? ORDER BY name", (company_key,)).fetchall()
+        supplier_options = [""] + [row["name"] for row in suppliers]
+
+        # Initialize items in session state
+        if "bill_items" not in st.session_state:
+            st.session_state.bill_items = [{"item_name": "", "quantity": 1.0, "unit_price": 0.0}]
+
+        # Convert to dataframe for editing
+        items_df = pd.DataFrame(st.session_state.bill_items)
+        if items_df.empty:
+            items_df = pd.DataFrame(columns=["item_name", "quantity", "unit_price"])
+
+        edited_df = st.data_editor(
+            items_df,
+            column_config={
+                "item_name": st.column_config.TextColumn("Item Name", width="large"),
+                "quantity": st.column_config.NumberColumn("Quantity", min_value=0.0, step=0.01),
+                "unit_price": st.column_config.NumberColumn("Unit Price", min_value=0.0, step=0.01),
+            },
+            hide_index=True,
+            num_rows="dynamic",
+            key="bill_items_editor"
+        )
+
+        # Update session state
+        st.session_state.bill_items = edited_df.to_dict("records")
+
+        # Calculate totals
+        total_amount = sum(item["quantity"] * item["unit_price"] for item in st.session_state.bill_items if item["item_name"].strip())
+
+        st.markdown(f"**Total Amount: GH₵ {total_amount:.2f}**")
+
+        with st.form("create_bill_form"):
+            supplier_name = st.selectbox("Supplier", supplier_options)
+            bill_date = st.date_input("Bill Date", value=datetime.now().date())
+            bill_category = st.selectbox("Bill Posting", ["Expense", "Inventory"])
+            description = st.text_input("Description")
+
+            submitted = st.form_submit_button("Submit")
+
+            if submitted:
+                if not supplier_name:
+                    st.error("Supplier is required.")
+                    return
+                valid_items = [item for item in st.session_state.bill_items if item["item_name"].strip() and item["quantity"] > 0 and item["unit_price"] > 0]
+                if not valid_items:
+                    st.error("At least one valid item is required.")
+                    return
+                total_amount = sum(item["quantity"] * item["unit_price"] for item in valid_items)
+                if total_amount <= 0:
+                    st.error("Total amount must be greater than 0.")
+                    return
+
+                supplier_id = next((row["id"] for row in suppliers if row["name"] == supplier_name), None)
+                if not supplier_id:
+                    st.error("Invalid supplier.")
+                    return
+
+                bill_number = f"BILL-{datetime.now().strftime('%Y%m%d%H%M%S')}"
+                posting_account_name = "Inventory" if bill_category == "Inventory" else "Purchases"
+                posting_account_type = "Asset" if bill_category == "Inventory" else "Expense"
+
+                cursor = conn.execute(
+                    """
+                    INSERT INTO bills (company_key, supplier_id, bill_number, bill_date, due_date, status, amount, currency, description, created_by)
+                    VALUES (?, ?, ?, ?, ?, 'Pending', ?, 'GHS', ?, ?)
+                    """,
+                    (
+                        company_key,
+                        supplier_id,
+                        bill_number,
+                        bill_date.isoformat(),
+                        bill_date.isoformat(),
+                        total_amount,
+                        description.strip() or f"{bill_category} bill",
+                        role,
+                    ),
+                )
+                bill_id = int(cursor.lastrowid)
+
+                # Insert bill lines
+                for item in valid_items:
+                    line_total = item["quantity"] * item["unit_price"]
+                    conn.execute(
+                        """
+                        INSERT INTO bill_lines (bill_id, item_name, quantity, unit_price, line_total)
+                        VALUES (?, ?, ?, ?, ?)
+                        """,
+                        (bill_id, item["item_name"].strip(), item["quantity"], item["unit_price"], line_total),
+                    )
+
+                # Post journal entry
+                post_journal_entry(
+                    company_key=company_key,
+                    date=bill_date,
+                    description=description.strip() or f"{bill_category} bill for {supplier_name}",
+                    reference=bill_number,
+                    lines=[
+                        {
+                            "account_id": get_account_id(conn, posting_account_name, posting_account_type),
+                            "debit": total_amount,
+                            "credit": 0,
+                        },
+                        {
+                            "account_id": get_account_id(conn, "Accounts Payable", "Liability"),
+                            "debit": 0,
+                            "credit": total_amount,
+                        },
+                    ],
+                    created_by=role,
+                    branch_id=branch_id,
+                    supplier_id=supplier_id,
+                    source_module="Create Bill",
+                    source_table="bills",
+                    source_type="Bill",
+                    source_id=bill_id,
+                    conn=conn,
+                )
+
+                conn.commit()
+                log_system_event("INFO", "Create Bill", f"Created bill {bill_number} for {supplier_name}")
+                st.success(f"Bill created successfully with ID {bill_id}.")
+                # Reset items
+                st.session_state.bill_items = [{"item_name": "", "quantity": 1.0, "unit_price": 0.0}]
+                st.rerun()
+    finally:
+        conn.close()
+
+
 def show_chart_of_accounts_page(conn, demo_on):
     st.subheader("Chart of Accounts")
     if demo_on:
@@ -3304,7 +3448,8 @@ def show_pos(company_key, company_name, role):
             _focus_text_input("Barcode Search")
             if barcode_input_source == "Camera Scanner":
                 _render_camera_scanner(f"pos_{company_key}", pos_pending_scan_key)
-            if st.form_submit_button("Scan Barcode"):
+            submitted = st.form_submit_button("Scan Barcode")
+            if submitted:
                 pending_pos_barcode = str(st.session_state.get(pos_scan_input_key, "") or "").strip()
                 if pending_pos_barcode:
                     conn = None

@@ -37,6 +37,7 @@ from modules import (
     render_accounting_assistant_sidebar,
     show_accounts_payable,
     show_accounts_receivable,
+    show_create_bill_page,
     show_dashboard as show_dashboard_module,
     show_aging,
     show_ai_assistant,
@@ -1580,7 +1581,8 @@ PRIMARY_NAV_ITEMS = [
     ("🗂️ Chart of Accounts", "Chart of Accounts"),
     ("📅 Accounts Receivable", "Accounts Receivable"),
     ("📅 Accounts Payable", "Accounts Payable"),
-    ("💰 Banking & Cash", "Banking & Cash"),
+    ("� Create Bill", "Create Bill"),
+    ("�💰 Banking & Cash", "Banking & Cash"),
     ("📅 Taxation (VAT/NHIL)", "Taxation (VAT/NHIL)"),
     ("📅 Payroll & Salaries", "Payroll & Salaries"),
     ("🏛️ Asset Register", "Asset Register"),
@@ -1704,6 +1706,8 @@ def _render_primary_page(user):
         show_accounts_receivable(user["key"])
     elif st.session_state.page == "Accounts Payable":
         show_accounts_payable(user["key"])
+    elif st.session_state.page == "Create Bill":
+        show_create_bill_page(user["key"])
     elif st.session_state.page == "Banking & Cash":
         show_banking(user["key"], user["role"])
     elif st.session_state.page == "Taxation (VAT/NHIL)":
