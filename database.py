@@ -80,6 +80,8 @@ def ensure_schema_integrity(conn):
     critical_columns = {
         "companies": {"contact_email": "TEXT", "barcode_input_source": "TEXT DEFAULT 'Keyboard Entry'"},
         "audit_logs": {"details": "TEXT", "branch_id": "TEXT"},
+        "customers": {"customer_id": "TEXT", "current_balance": "REAL DEFAULT 0"},
+        "customer_transactions": {"branch_id": "TEXT", "reference": "TEXT", "created_by": "TEXT", "transaction_date": "TEXT"},
         "journal_entries": {"branch_id": "TEXT"},
         "stock_movements": {"branch_id": "TEXT", "reason": "TEXT", "created_by": "TEXT", "created_at": "TIMESTAMP DEFAULT CURRENT_TIMESTAMP"},
         "transactions": {"branch_id": "TEXT"},
@@ -276,16 +278,66 @@ def ensure_schema_integrity(conn):
         CREATE TABLE IF NOT EXISTS customers (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             company_key TEXT NOT NULL,
+            customer_id TEXT,
             name TEXT NOT NULL,
             email TEXT,
             phone TEXT,
             address TEXT,
+            current_balance REAL DEFAULT 0,
             currency TEXT DEFAULT 'GHS',
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             UNIQUE(company_key, name)
         )
         """
     )
+    cursor.execute("PRAGMA table_info(customers)")
+    customer_columns = {row[1] for row in cursor.fetchall()}
+    customer_column_defs = {
+        "company_key": "TEXT",
+        "customer_id": "TEXT",
+        "name": "TEXT",
+        "email": "TEXT",
+        "phone": "TEXT",
+        "address": "TEXT",
+        "current_balance": "REAL DEFAULT 0",
+        "currency": "TEXT DEFAULT 'GHS'",
+        "created_at": "TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
+    }
+    for column_name, column_def in customer_column_defs.items():
+        if column_name not in customer_columns:
+            cursor.execute(f"ALTER TABLE customers ADD COLUMN {column_name} {column_def}")
+    cursor.execute(
+        """
+        UPDATE customers
+        SET customer_id = COALESCE(NULLIF(customer_id, ''), printf('CUST-%06d', id)),
+            current_balance = COALESCE(current_balance, 0)
+        """
+    )
+    cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_customers_company_customer_id ON customers(company_key, customer_id)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_customers_company_name ON customers(company_key, name)")
+
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS customer_transactions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            company_key TEXT NOT NULL,
+            customer_id INTEGER NOT NULL,
+            branch_id TEXT,
+            transaction_type TEXT NOT NULL,
+            amount REAL NOT NULL,
+            description TEXT,
+            reference TEXT,
+            transaction_date TEXT NOT NULL,
+            created_by TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (company_key) REFERENCES companies(key) ON DELETE CASCADE,
+            FOREIGN KEY (customer_id) REFERENCES customers(id) ON DELETE CASCADE,
+            FOREIGN KEY (branch_id) REFERENCES branches(branch_id) ON DELETE SET NULL
+        )
+        """
+    )
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_customer_transactions_customer_date ON customer_transactions(customer_id, transaction_date DESC)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_customer_transactions_company_date ON customer_transactions(company_key, transaction_date DESC)")
     cursor.execute(
         """
         CREATE TABLE IF NOT EXISTS suppliers (

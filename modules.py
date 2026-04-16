@@ -1185,6 +1185,113 @@ def _get_or_create_party(conn, table_name, company_key, party_name):
     return int(cursor.lastrowid)
 
 
+def _register_customer(conn, company_key, name, phone="", email="", branch_id=None):
+    existing = conn.execute(
+        """
+        SELECT id, customer_id, name, phone, email, current_balance
+        FROM customers
+        WHERE company_key = ? AND name = ?
+        """,
+        (company_key, name.strip()),
+    ).fetchone()
+    if existing:
+        conn.execute(
+            """
+            UPDATE customers
+            SET phone = COALESCE(NULLIF(?, ''), phone),
+                email = COALESCE(NULLIF(?, ''), email)
+            WHERE id = ? AND company_key = ?
+            """,
+            (phone.strip(), email.strip(), int(existing["id"]), company_key),
+        )
+        return int(existing["id"])
+
+    cursor = conn.execute(
+        """
+        INSERT INTO customers (company_key, name, phone, email, customer_id, current_balance, currency)
+        VALUES (?, ?, ?, ?, NULL, 0, 'GHS')
+        """,
+        (company_key, name.strip(), phone.strip(), email.strip()),
+    )
+    customer_row_id = int(cursor.lastrowid)
+    conn.execute(
+        "UPDATE customers SET customer_id = COALESCE(NULLIF(customer_id, ''), ?) WHERE id = ? AND company_key = ?",
+        (f"CUST-{customer_row_id:06d}", customer_row_id, company_key),
+    )
+    return customer_row_id
+
+
+def _record_customer_ledger_transaction(
+    conn,
+    company_key,
+    customer_row_id,
+    transaction_type,
+    amount,
+    description,
+    created_by,
+    branch_id=None,
+    reference=None,
+    transaction_date=None,
+):
+    transaction_type = str(transaction_type or "").strip().title()
+    if transaction_type not in {"Debit", "Credit"}:
+        raise ValueError("Transaction type must be Debit or Credit.")
+
+    amount = float(amount or 0.0)
+    if amount <= 0:
+        raise ValueError("Amount must be greater than zero.")
+
+    tx_date = transaction_date.isoformat() if hasattr(transaction_date, "isoformat") else (transaction_date or datetime.now().date().isoformat())
+    customer = conn.execute(
+        "SELECT id, name, current_balance FROM customers WHERE id = ? AND company_key = ?",
+        (int(customer_row_id), company_key),
+    ).fetchone()
+    if not customer:
+        raise ValueError("Selected customer could not be found.")
+
+    current_balance = float(customer["current_balance"] or 0.0)
+    delta = amount if transaction_type == "Debit" else -amount
+    new_balance = current_balance + delta
+
+    conn.execute(
+        """
+        INSERT INTO customer_transactions (
+            company_key, customer_id, branch_id, transaction_type, amount,
+            description, reference, transaction_date, created_by
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            company_key,
+            int(customer_row_id),
+            branch_id,
+            transaction_type,
+            amount,
+            description,
+            reference,
+            tx_date,
+            created_by,
+        ),
+    )
+    conn.execute(
+        """
+        UPDATE customers
+        SET current_balance = ?,
+            phone = COALESCE(phone, ''),
+            email = COALESCE(email, '')
+        WHERE id = ? AND company_key = ?
+        """,
+        (new_balance, int(customer_row_id), company_key),
+    )
+    return {
+        "customer_name": customer["name"],
+        "previous_balance": current_balance,
+        "new_balance": new_balance,
+        "delta": delta,
+        "transaction_date": tx_date,
+    }
+
+
 def show_debtors_by_city_report(company_key):
     st.subheader("Debtors by City")
     conn = None
@@ -3000,6 +3107,15 @@ def show_pos(company_key, company_name, role):
             "SELECT id, item_name, barcode, price, qty FROM inventory WHERE company_key = ? AND qty > 0",
             (company_key,),
         ).fetchall()
+        customers = conn.execute(
+            """
+            SELECT id, customer_id, name, current_balance
+            FROM customers
+            WHERE company_key = ?
+            ORDER BY name
+            """,
+            (company_key,),
+        ).fetchall()
         conn.close()
 
         company_label = company_row[0] if company_row else company_name
@@ -3133,7 +3249,19 @@ def show_pos(company_key, company_name, role):
                     else:
                         st.warning("Enter a valid manual item and price before adding it.")
 
-        payment_method = st.selectbox("Payment Method", ["Cash", "Mobile Money", "Bank Transfer", "Cheque"])
+        payment_method = st.selectbox("Payment Method", ["Cash", "Mobile Money", "Bank Transfer", "Cheque", "On Credit"])
+        selected_credit_customer_id = None
+        selected_credit_customer_label = None
+        if payment_method == "On Credit":
+            if customers:
+                customer_labels = [
+                    f"{row['name']} ({row['customer_id'] or f'CUST-{int(row['id']):06d}'}) | Balance {format_currency(float(row['current_balance'] or 0))}"
+                    for row in customers
+                ]
+                selected_credit_customer_label = st.selectbox("Credit Customer", customer_labels, key=f"pos_credit_customer_{company_key}")
+                selected_credit_customer_id = int(customers[customer_labels.index(selected_credit_customer_label)]["id"])
+            else:
+                st.warning("Register a customer in Accounts Receivable before using On Credit.")
         sale_date = st.date_input("Transaction Date", value=datetime.now().date(), key=f"pos_sale_date_{company_key}")
         cart = st.session_state.setdefault(cart_key, [])
         if cart:
@@ -3218,6 +3346,10 @@ def show_pos(company_key, company_name, role):
                 st.session_state[checkout_complete_key] = False
                 st.warning("Add at least one item to the cart before processing the sale.")
                 return
+            if payment_method == "On Credit" and not selected_credit_customer_id:
+                st.session_state[checkout_complete_key] = False
+                st.warning("Select a customer before processing an on-credit sale.")
+                return
 
             try:
                 conn = get_connection()
@@ -3253,14 +3385,17 @@ def show_pos(company_key, company_name, role):
                     "Mobile Money": ("Mobile Money", "Asset"),
                     "Bank Transfer": ("Bank", "Asset"),
                     "Cheque": ("Bank", "Asset"),
+                    "On Credit": ("Accounts Receivable", "Asset"),
                 }
                 receipt_account, receipt_category = payment_account_map.get(payment_method, ("Cash", "Asset"))
                 narration = ", ".join(f"{item['name']} x{item['qty']}" for item in line_items)
+                branch_id = st.session_state.get("active_branch_id")
                 sale_cursor = conn.execute(
-                    """INSERT INTO vouchers (company_key, date, v_type, ledger, credit, payment_method, narration, status, created_by)
-                       VALUES (?, ?, 'Sales', 'Sales Revenue', ?, ?, ?, 'Active', ?)""",
+                    """INSERT INTO vouchers (company_key, branch_id, date, v_type, ledger, credit, payment_method, narration, status, created_by)
+                       VALUES (?, ?, ?, 'Sales', 'Sales Revenue', ?, ?, ?, 'Active', ?)""",
                     (
                         company_key,
+                        branch_id,
                         sale_date.isoformat(),
                         total,
                         payment_method,
@@ -3268,7 +3403,6 @@ def show_pos(company_key, company_name, role):
                         role,
                     ),
                 )
-                branch_id = st.session_state.get("active_branch_id")
                 create_journal_entry(
                     "POS sale",
                     [
@@ -3281,6 +3415,30 @@ def show_pos(company_key, company_name, role):
                     branch_id=branch_id,
                     conn=conn,
                 )
+                if payment_method == "On Credit":
+                    ledger_result = _record_customer_ledger_transaction(
+                        conn,
+                        company_key,
+                        selected_credit_customer_id,
+                        "Debit",
+                        total,
+                        f"POS sale on credit: {narration}",
+                        role,
+                        branch_id=branch_id,
+                        reference=f"POS-{int(sale_cursor.lastrowid)}",
+                        transaction_date=sale_date,
+                    )
+                    _ensure_counterparty(
+                        conn,
+                        company_key,
+                        ledger_result["customer_name"],
+                        "Customer",
+                        "",
+                        sale_date.isoformat(),
+                        total,
+                    )
+                else:
+                    ledger_result = None
                 if cost_of_goods_sold > 0:
                     create_journal_entry(
                         "Inventory issued to cost of goods sold",
@@ -3301,7 +3459,9 @@ def show_pos(company_key, company_name, role):
                     role,
                     "POS Sale",
                     "POS",
-                    f"Sold {narration} for GH₵{float(total):.2f}",
+                    f"Sold {narration} for GH₵{float(total):.2f}" + (
+                        f" on credit to {ledger_result['customer_name']}" if ledger_result else ""
+                    ),
                     branch_id=branch_id,
                 )
                 conn.close()
@@ -3598,21 +3758,163 @@ def show_aging(company_key, aging_type="Receivable"):
         status_filter = "Pending"
 
     try:
-        conn = get_connection()
-        data = conn.execute(
-            "SELECT date, narration, credit FROM vouchers WHERE company_key = ? AND v_type = ? AND COALESCE(status, 'Active') != 'Void' ORDER BY date ASC",
-            (company_key, v_type),
-        ).fetchall()
-        conn.close()
-        if data:
-            df = pd.DataFrame(data, columns=["Date", "Description", f"Amount ({get_currency_symbol()})"])
-            df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
-            df["Days Outstanding"] = (datetime.now() - df["Date"]).dt.days
-            st.dataframe(format_currency_dataframe(df), use_container_width=True)
-            if aging_type == "Receivable":
-                show_debtors_by_city_report(company_key)
+        if aging_type == "Receivable":
+            branch_id = st.session_state.get("active_branch_id")
+            active_user = st.session_state.get("user") or {}
+            role = active_user.get("role", "User")
+            tabs = st.tabs(["Customer Ledger", "Aging View"])
         else:
-            st.info(f"No {aging_type} records found.")
+            tabs = [st.container()]
+
+        with tabs[0]:
+            if aging_type == "Receivable":
+                conn = get_connection()
+                customer_rows = conn.execute(
+                    """
+                    SELECT id, customer_id, name, phone, email, current_balance
+                    FROM customers
+                    WHERE company_key = ?
+                    ORDER BY name
+                    """,
+                    (company_key,),
+                ).fetchall()
+
+                register_col, transaction_col = st.columns(2)
+                with register_col:
+                    st.subheader("Add Customer")
+                    with st.form(f"customer_register_form_{company_key}", clear_on_submit=True):
+                        customer_name = st.text_input("Customer Name")
+                        customer_phone = st.text_input("Phone")
+                        customer_email = st.text_input("Email")
+                        register_submitted = st.form_submit_button("Save Customer")
+                    if register_submitted:
+                        if not customer_name.strip():
+                            st.warning("Enter a customer name.")
+                        else:
+                            customer_row_id = _register_customer(conn, company_key, customer_name, customer_phone, customer_email, branch_id=branch_id)
+                            conn.commit()
+                            log_audit_action(
+                                conn,
+                                company_key,
+                                role,
+                                "Customer Registered",
+                                "Accounts Receivable",
+                                f"Registered customer {customer_name.strip()}",
+                                branch_id=branch_id,
+                            )
+                            st.success("Customer saved.")
+                            conn.close()
+                            st.rerun()
+
+                with transaction_col:
+                    st.subheader("Credit Customer")
+                    if not customer_rows:
+                        st.info("Register at least one customer to start posting debits and credits.")
+                    else:
+                        customer_labels = [
+                            f"{row['name']} ({row['customer_id'] or f'CUST-{int(row['id']):06d}'}) | Balance {format_currency(float(row['current_balance'] or 0))}"
+                            for row in customer_rows
+                        ]
+                        with st.form(f"customer_transaction_form_{company_key}", clear_on_submit=True):
+                            selected_customer_label = st.selectbox("Customer", customer_labels)
+                            transaction_type = st.selectbox("Transaction Type", ["Debit", "Credit"])
+                            amount = st.number_input(f"Amount ({st.session_state.currency_symbol})", min_value=0.0, step=0.01)
+                            description = st.text_input("Description")
+                            transaction_date = st.date_input("Transaction Date", value=datetime.now().date(), key=f"customer_tx_date_{company_key}")
+                            tx_submitted = st.form_submit_button("Post Transaction")
+                        if tx_submitted:
+                            if amount <= 0 or not description.strip():
+                                st.warning("Enter a valid amount and description.")
+                            else:
+                                selected_customer = customer_rows[customer_labels.index(selected_customer_label)]
+                                result = _record_customer_ledger_transaction(
+                                    conn,
+                                    company_key,
+                                    int(selected_customer["id"]),
+                                    transaction_type,
+                                    amount,
+                                    description.strip(),
+                                    role,
+                                    branch_id=branch_id,
+                                    reference=None,
+                                    transaction_date=transaction_date,
+                                )
+                                _ensure_counterparty(
+                                    conn,
+                                    company_key,
+                                    result["customer_name"],
+                                    "Customer",
+                                    "",
+                                    result["transaction_date"],
+                                    float(amount) if transaction_type == "Debit" else -float(amount),
+                                )
+                                conn.commit()
+                                log_audit_action(
+                                    conn,
+                                    company_key,
+                                    role,
+                                    f"Customer Ledger {transaction_type}",
+                                    "Accounts Receivable",
+                                    f"{result['customer_name']} | {description.strip()} | {format_currency(amount)} | Balance {format_currency(result['previous_balance'])} -> {format_currency(result['new_balance'])}",
+                                    branch_id=branch_id,
+                                )
+                                st.success(f"{transaction_type} posted for {result['customer_name']}.")
+                                conn.close()
+                                st.rerun()
+
+                customer_summary_rows = conn.execute(
+                    """
+                    SELECT customer_id, name, phone, email, current_balance
+                    FROM customers
+                    WHERE company_key = ?
+                    ORDER BY name
+                    """,
+                    (company_key,),
+                ).fetchall()
+                if customer_summary_rows:
+                    st.markdown("Customer Balances")
+                    customer_df = pd.DataFrame(
+                        customer_summary_rows,
+                        columns=["Customer ID", "Name", "Phone", "Email", "Current Balance"],
+                    )
+                    st.dataframe(format_currency_dataframe(customer_df), use_container_width=True, hide_index=True)
+
+                    customer_tx_rows = conn.execute(
+                        """
+                        SELECT c.name, ct.transaction_date, ct.transaction_type, ct.amount, ct.description, ct.reference, ct.created_by
+                        FROM customer_transactions ct
+                        JOIN customers c ON c.id = ct.customer_id
+                        WHERE ct.company_key = ?
+                        ORDER BY ct.transaction_date DESC, ct.id DESC
+                        LIMIT 100
+                        """,
+                        (company_key,),
+                    ).fetchall()
+                    if customer_tx_rows:
+                        st.markdown("Ledger Transactions")
+                        ledger_df = pd.DataFrame(
+                            customer_tx_rows,
+                            columns=["Customer", "Date", "Type", "Amount", "Description", "Reference", "Recorded By"],
+                        )
+                        st.dataframe(format_currency_dataframe(ledger_df), use_container_width=True, hide_index=True)
+                conn.close()
+
+        with tabs[-1]:
+            conn = get_connection()
+            data = conn.execute(
+                "SELECT date, narration, credit FROM vouchers WHERE company_key = ? AND v_type = ? AND COALESCE(status, 'Active') != 'Void' ORDER BY date ASC",
+                (company_key, v_type),
+            ).fetchall()
+            conn.close()
+            if data:
+                df = pd.DataFrame(data, columns=["Date", "Description", f"Amount ({get_currency_symbol()})"])
+                df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
+                df["Days Outstanding"] = (datetime.now() - df["Date"]).dt.days
+                st.dataframe(format_currency_dataframe(df), use_container_width=True)
+                if aging_type == "Receivable":
+                    show_debtors_by_city_report(company_key)
+            else:
+                st.info(f"No {aging_type} records found.")
     except Exception as e:
         st.error(f"Aging module error: {e}")
 
