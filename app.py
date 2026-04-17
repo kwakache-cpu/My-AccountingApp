@@ -1869,10 +1869,14 @@ def _render_primary_page(user):
     elif st.session_state.page == "Asset Register":
         show_fixed_assets(user["key"], user["role"])
     elif st.session_state.page == "Data Analytics":
+<<<<<<< HEAD
         if user["role"] == "Demo":
             show_reports("DEMO", None)
         else:
             show_reports(user["key"], st.session_state.get("active_branch_id", "Main"))
+=======
+        show_reports(user["key"], st.session_state.get("active_branch_id"))
+>>>>>>> parent of bb3780c (data analytics)
     elif st.session_state.page == "Financial Reports":
         show_financial_reports(user["key"], user["role"])
     elif st.session_state.page == "Gatekeeper Admin":

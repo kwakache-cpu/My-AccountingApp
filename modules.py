@@ -5473,10 +5473,8 @@ def show_reports(company_key, branch_id=None):
         )
 
 
-def show_reports(company_key, branch_id=None):
+def show_reports(company_key):
     """Route report navigation to the IFRS financial reporting suite."""
-    if not branch_id:
-        branch_id = "Main"
     from financials import show_financial_reports, show_ledger_viewer, show_record_transaction
 
     tabs = st.tabs(["📊 Financial Statements", "📚 Ledger", "🧾 Record Transaction"])
@@ -5489,10 +5487,8 @@ def show_reports(company_key, branch_id=None):
 
 
 # Final UI-safe reports override.
-def show_reports(company_key, branch_id=None):
+def show_reports(company_key):
     """Route report navigation to the IFRS financial reporting suite."""
-    if not branch_id:
-        branch_id = "Main"
     from financials import show_financial_reports, show_ledger_viewer, show_record_transaction
 
     tabs = st.tabs(["📊 Financial Statements", "📚 Ledger", "🧾 Record Transaction"])
