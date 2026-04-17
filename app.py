@@ -1827,7 +1827,7 @@ def _render_primary_page(user):
     elif st.session_state.page == "Asset Register":
         show_fixed_assets(user["key"], user["role"])
     elif st.session_state.page == "Data Analytics":
-        show_reports(user["key"], st.session_state.get("active_branch_id"))
+        show_reports(user["key"], st.session_state.get("active_branch_id", "Main"))
     elif st.session_state.page == "Financial Reports":
         show_financial_reports(user["key"], user["role"])
     elif st.session_state.page == "Gatekeeper Admin":
