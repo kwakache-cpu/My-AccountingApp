@@ -1613,7 +1613,7 @@ PRIMARY_NAV_ITEMS = [
     ("🧾 General Journal", "General Journal"),
     ("📚 General Ledger", "General Ledger"),
     ("🗂️ Chart of Accounts", "Chart of Accounts"),
-    ("� Data Analytics", "Data Analytics"),
+    ("📊 Data Analytics", "Data Analytics"),
     ("🧾 Financial Reports", "Financial Reports"),
     ("📅 System Audit Trail", "System Audit Trail"),
     ("⚙️ System Configuration", "System Configuration"),
@@ -1683,17 +1683,8 @@ def _render_primary_sidebar(user, include_settings=True):
             logger.error(f"Branch selector error: {e}")
             st.session_state.active_branch_id = None
 
-    # Manage Branches for Master Admins
-    if user['role'] == 'Master Admin':
-        if st.sidebar.button("🏢 Manage Branches", key="manage_branches", use_container_width=True):
-            st.session_state.page = 'branch_management'
-            st.rerun()
-
     current_page = _ensure_valid_page()
 
-    current_page = _ensure_valid_page()
-
-    # Single navigation menu with all pages
     if user['role'] == "Demo":
         menu_options = [
             "📊 Dashboard",
@@ -1717,93 +1708,72 @@ def _render_primary_sidebar(user, include_settings=True):
             "🤖 Gatekeeper Admin": "Gatekeeper Admin",
             "Audit Trail": "Audit Trail"
         }
+
+        current_display = next((label for label, target in page_mapping.items() if target == current_page), menu_options[0])
+        selected_display = st.sidebar.radio("Navigation", menu_options, index=menu_options.index(current_display), key="main_navigation_radio")
+        selected_page = page_mapping.get(selected_display, current_page)
+        if selected_page != current_page:
+            st.session_state.page = selected_page
+            st.rerun()
+
     else:
-        menu_options = [
-            "🏠 Dashboard",
-            "🛒 Point of Sale", 
-            "Vouchers & Journals",
-            "Chart of Accounts",
-            "📦 Inventory Management",
-            "Sales Invoicing",
-            "Purchase Orders",
-            "Banking & Cash",
-            "Accounts Receivable",
-            "Accounts Payable",
-            "Taxation (VAT/NHIL)",
-            "💳 Payroll & Salaries",
-            "🏛️ Asset Register",
-            "📊 Data Analytics",
-            "🤖 Gatekeeper Admin",
-            "System Audit Trail",
-            "⚙️ System Configuration",
-            "🏢 Manage Branches",
-            "🧾 Customers",
-            "📄 Create Invoice",
-            "💳 Receive Payment (Customer)",
-            "🏷️ Suppliers",
-            "📝 Create Bill",
-            "💸 Supplier Payment",
-            "📔 Customer Ledger",
-            "📔 Supplier Ledger", 
-            "🧾 General Journal",
-            "📚 General Ledger",
-            "🗂️ Chart of Accounts",
-            "🧾 Financial Reports"
+        sidebar_groups = [
+            (
+                "Transactions",
+                [
+                    ("🛒 Point of Sale", "Point of Sale"),
+                    ("📜 Vouchers & Journals", "Vouchers & Journals"),
+                    ("📝 Create Bill", "Create Bill"),
+                    ("💰 Banking & Cash", "Banking & Cash"),
+                ],
+            ),
+            (
+                "Ledgers",
+                [
+                    ("🗂️ Chart of Accounts", "Chart of Accounts"),
+                    ("📈 Accounts Receivable", "Accounts Receivable"),
+                    ("📉 Accounts Payable", "Accounts Payable"),
+                ],
+            ),
+            (
+                "Inventory",
+                [
+                    ("📦 Inventory Management", "Inventory Management"),
+                    ("📤 Stock In/Out", "Inventory Management"),
+                ],
+            ),
+            (
+                "Reports",
+                [
+                    ("📊 Data Analytics", "Data Analytics"),
+                    ("🧾 Financial Reports", "Financial Reports"),
+                ],
+            ),
+            (
+                "System",
+                [
+                    ("🏢 Manage Branches", "branch_management"),
+                    ("📅 System Audit Trail", "System Audit Trail"),
+                    ("⚙️ System Configuration", "System Configuration"),
+                ],
+            ),
         ]
 
-        # Filter menu based on role
-        if user['role'] not in ("Master Admin", "Admin"):
-            menu_options = [opt for opt in menu_options if opt not in ("⚙️ System Configuration", "🏢 Manage Branches")]
-        if user['role'] in ("Bookkeeper", "Branch_Bookkeeper"):
-            menu_options = [opt for opt in menu_options if opt not in ("System Audit Trail")]
+        page_mapping = {label: page for _, options in sidebar_groups for label, page in options}
+        current_display = next((label for label, page in page_mapping.items() if page == current_page), "Select...")
 
-        page_mapping = {
-            "🏠 Dashboard": "Dashboard",
-            "🛒 Point of Sale": "Point of Sale",
-            "Vouchers & Journals": "Vouchers & Journals",
-            "Chart of Accounts": "Chart of Accounts",
-            "📦 Inventory Management": "Inventory Management",
-            "Sales Invoicing": "Sales Invoicing",
-            "Purchase Orders": "Purchase Orders",
-            "Banking & Cash": "Banking & Cash",
-            "Accounts Receivable": "Accounts Receivable",
-            "Accounts Payable": "Accounts Payable",
-            "Taxation (VAT/NHIL)": "Taxation (VAT/NHIL)",
-            "💳 Payroll & Salaries": "Payroll & Salaries",
-            "🏛️ Asset Register": "Asset Register",
-            "📊 Data Analytics": "Data Analytics",
-            "🤖 Gatekeeper Admin": "Gatekeeper Admin",
-            "System Audit Trail": "System Audit Trail",
-            "⚙️ System Configuration": "System Configuration",
-            "🏢 Manage Branches": "branch_management",
-            "🧾 Customers": "Customers",
-            "📄 Create Invoice": "Create Invoice",
-            "💳 Receive Payment (Customer)": "Receive Payment (Customer)",
-            "🏷️ Suppliers": "Suppliers",
-            "📝 Create Bill": "Create Bill",
-            "💸 Supplier Payment": "Supplier Payment",
-            "📔 Customer Ledger": "Customer Ledger",
-            "📔 Supplier Ledger": "Supplier Ledger",
-            "🧾 General Journal": "General Journal",
-            "📚 General Ledger": "General Ledger",
-            "🗂️ Chart of Accounts": "Chart of Accounts",
-            "🧾 Financial Reports": "Financial Reports"
-        }
+        for group_name, options in sidebar_groups:
+            group_key = f"nav_group_{group_name.lower().replace(' ', '_')}"
+            labels = ["Select...", *[label for label, _ in options]]
+            group_value = current_display if current_display in labels else "Select..."
+            st.session_state[group_key] = group_value
+            selected_label = st.sidebar.radio(group_name, labels, index=labels.index(group_value), key=group_key)
+            if selected_label != "Select...":
+                selected_page = page_mapping.get(selected_label, current_page)
+                if selected_page != current_page:
+                    st.session_state.page = selected_page
+                    st.rerun()
 
-    # Get current page display label
-    current_display = None
-    for display, internal in page_mapping.items():
-        if internal == current_page:
-            current_display = display
-            break
-    
-    if current_display is None or current_display not in menu_options:
-        current_display = menu_options[0]
-        current_page = page_mapping.get(current_display, "Dashboard")
-        st.session_state.page = current_page
-
-    selected_display = st.sidebar.radio("Navigation", menu_options, index=menu_options.index(current_display) if current_display in menu_options else 0, key="main_navigation_radio")
-    
     # For regular users, add license expiry check
     if user['role'] != "Demo":
         try:
