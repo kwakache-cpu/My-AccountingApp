@@ -2349,4 +2349,4 @@ else:
         st.session_state.user = None
         st.session_state.company_id = None
         st.session_state.login_attempts = 0
-        st.rerun()
+        st.rerun() 
