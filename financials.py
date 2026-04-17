@@ -14,7 +14,16 @@ from accounting_engine import (
     get_bank_reconciliation,
     post_journal_entry,
 )
-from modules import convert_amount_from_base, format_currency, format_currency_dataframe, get_currency_symbol, get_display_currency, get_exchange_rate, post_transaction, set_period_lock
+from modules import (
+    convert_amount_from_base,
+    format_currency,
+    format_currency_dataframe,
+    get_currency_symbol,
+    get_display_currency,
+    get_exchange_rate,
+    post_transaction,
+    set_period_lock,
+)
 
 
 def _resolve_date(value):
@@ -631,6 +640,246 @@ def show_invoice_manager(company_key, role):
         conn.close()
         st.dataframe(format_currency_dataframe(df), use_container_width=True)
         _csv_button("Payments", df, f"payments_csv_{company_key}")
+
+
+def show_customers_page(company_key, role):
+    st.header("🧾 Customers")
+    with st.form(f"customer_form_{company_key}"):
+        name = st.text_input("Customer Name")
+        email = st.text_input("Email")
+        phone = st.text_input("Phone")
+        if st.form_submit_button("Save Customer") and name:
+            conn = get_connection()
+            conn.execute(
+                "INSERT OR IGNORE INTO customers (company_key, name, email, phone, currency) VALUES (?, ?, ?, ?, 'GHS')",
+                (company_key, name, email, phone),
+            )
+            conn.commit()
+            conn.close()
+            st.rerun()
+
+    conn = get_connection()
+    df = pd.read_sql_query(
+        "SELECT name, email, phone, currency, created_at FROM customers WHERE company_key = ? ORDER BY name",
+        conn,
+        params=(company_key,),
+    )
+    conn.close()
+    st.dataframe(format_currency_dataframe(df), use_container_width=True)
+    _csv_button("Customers", df, f"customers_csv_{company_key}")
+
+
+def show_suppliers_page(company_key, role):
+    st.header("🏷️ Suppliers")
+    with st.form(f"supplier_form_{company_key}"):
+        name = st.text_input("Supplier Name")
+        email = st.text_input("Email", key=f"supplier_email_{company_key}")
+        phone = st.text_input("Phone", key=f"supplier_phone_{company_key}")
+        if st.form_submit_button("Save Supplier") and name:
+            conn = get_connection()
+            conn.execute(
+                "INSERT OR IGNORE INTO suppliers (company_key, name, email, phone, currency) VALUES (?, ?, ?, ?, 'GHS')",
+                (company_key, name, email, phone),
+            )
+            conn.commit()
+            conn.close()
+            st.rerun()
+
+    conn = get_connection()
+    df = pd.read_sql_query(
+        "SELECT name, email, phone, currency, created_at FROM suppliers WHERE company_key = ? ORDER BY name",
+        conn,
+        params=(company_key,),
+    )
+    conn.close()
+    st.dataframe(format_currency_dataframe(df), use_container_width=True)
+    _csv_button("Suppliers", df, f"suppliers_csv_{company_key}")
+
+
+def show_create_invoice_page(company_key, role):
+    st.header("📄 Create Invoice")
+    conn = get_connection()
+    customers = [row[0] for row in conn.execute("SELECT name FROM customers WHERE company_key = ? ORDER BY name", (company_key,)).fetchall()]
+    conn.close()
+    with st.form(f"invoice_form_{company_key}"):
+        customer_name = st.selectbox("Customer", [""] + customers)
+        amount = st.number_input("Amount (GHS)", min_value=0.0, step=0.01)
+        output_vat_rate = st.number_input("Output VAT Rate (%)", min_value=0.0, max_value=100.0, step=0.5, value=0.0, key=f"invoice_vat_rate_{company_key}")
+        status = st.selectbox("Status", ["Draft", "Pending", "Paid"])
+        invoice_date = st.date_input("Invoice Date", value=datetime.now().date(), key=f"invoice_date_{company_key}")
+        description = st.text_input("Description", key=f"invoice_description_{company_key}")
+        if st.form_submit_button("Save Invoice") and customer_name and amount > 0:
+            conn = get_connection()
+            row = conn.execute(
+                "SELECT id FROM customers WHERE company_key = ? AND name = ? LIMIT 1",
+                (company_key, customer_name),
+            ).fetchone()
+            customer_id = int(row["id"]) if row else None
+            output_vat = round(amount * (output_vat_rate or 0.0) / 100.0, 2)
+            try:
+                cursor = conn.execute(
+                    """
+                    INSERT INTO invoices (company_key, customer_id, invoice_number, invoice_date, due_date, status, amount, output_vat, currency, description, created_by)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'GHS', ?, ?)
+                    """,
+                    (company_key, customer_id, f"INV-{datetime.now().strftime('%Y%m%d%H%M%S')}", invoice_date.isoformat(), invoice_date.isoformat(), status, amount, output_vat, description, role),
+                )
+            except sqlite3.IntegrityError as e:
+                conn.close()
+                st.error(f"Unable to create invoice: {e}")
+                st.stop()
+
+            if status != "Draft":
+                journal_lines = [
+                    {"account_id": get_account_id(conn, "Cash" if status == "Paid" else "Accounts Receivable", "Asset"), "debit": amount + output_vat, "credit": 0},
+                    {"account_id": get_account_id(conn, "Sales Revenue", "Income"), "debit": 0, "credit": amount},
+                ]
+                if output_vat > 0:
+                    journal_lines.append({"account_id": get_account_id(conn, "VAT Payable", "Liability"), "debit": 0, "credit": output_vat})
+                post_journal_entry(
+                    company_key=company_key,
+                    date=invoice_date,
+                    description="Sales invoice",
+                    reference=f"INV-{cursor.lastrowid}",
+                    lines=journal_lines,
+                    created_by=role,
+                    branch_id=st.session_state.get("active_branch_id"),
+                    customer_id=customer_id,
+                    source_module="Invoices",
+                    source_table="invoices",
+                    source_type="Invoice",
+                    source_id=int(cursor.lastrowid),
+                    conn=conn,
+                )
+            conn.commit()
+            conn.close()
+            st.rerun()
+
+    conn = get_connection()
+    df = pd.read_sql_query(
+        "SELECT invoice_number, invoice_date, due_date, status, amount, currency, description FROM invoices WHERE company_key = ? ORDER BY invoice_date DESC",
+        conn,
+        params=(company_key,),
+    )
+    conn.close()
+    st.dataframe(format_currency_dataframe(df), use_container_width=True)
+    _csv_button("Invoices", df, f"invoices_csv_{company_key}")
+
+
+def show_receive_payment_page(company_key, role):
+    st.header("💳 Receive Payment")
+    conn = get_connection()
+    customers = [row[0] for row in conn.execute("SELECT name FROM customers WHERE company_key = ? ORDER BY name", (company_key,)).fetchall()]
+    conn.close()
+    with st.form(f"receive_payment_form_{company_key}"):
+        customer_name = st.selectbox("Customer", [""] + customers)
+        amount = st.number_input("Amount (GHS)", min_value=0.0, step=0.01, key=f"receive_payment_amount_{company_key}")
+        payment_method = st.selectbox("Method", ["Cash", "Bank", "Mobile Money"], key=f"receive_payment_method_{company_key}")
+        payment_ref = st.text_input("Reference", key=f"receive_payment_ref_{company_key}")
+        payment_date = st.date_input("Payment Date", value=datetime.now().date(), key=f"receive_payment_date_{company_key}")
+        if st.form_submit_button("Save Receipt") and amount > 0 and customer_name:
+            conn = get_connection()
+            row = conn.execute(
+                "SELECT id FROM customers WHERE company_key = ? AND name = ? LIMIT 1",
+                (company_key, customer_name),
+            ).fetchone()
+            customer_id = int(row["id"]) if row else None
+            conn.execute(
+                "INSERT INTO payments (company_key, payment_date, payment_type, amount, currency, method, reference, created_by) VALUES (?, ?, ?, ?, 'GHS', ?, ?, ?)",
+                (company_key, payment_date.isoformat(), "Customer Receipt", amount, payment_method, payment_ref, role),
+            )
+            payment_id = int(conn.execute("SELECT last_insert_rowid()").fetchone()[0])
+            lines = [
+                {"account_id": get_account_id(conn, "Cash", "Asset"), "debit": amount, "credit": 0},
+                {"account_id": get_account_id(conn, "Accounts Receivable", "Asset"), "debit": 0, "credit": amount},
+            ]
+            post_journal_entry(
+                company_key=company_key,
+                date=payment_date,
+                description=f"Customer receipt - {customer_name}",
+                reference=payment_ref,
+                lines=lines,
+                created_by=role,
+                branch_id=st.session_state.get("active_branch_id"),
+                payment_id=payment_id,
+                source_module="Payments",
+                source_table="payments",
+                source_type="Customer Receipt",
+                source_id=payment_id,
+                customer_id=customer_id,
+                conn=conn,
+            )
+            conn.commit()
+            conn.close()
+            st.rerun()
+
+    conn = get_connection()
+    df = pd.read_sql_query(
+        "SELECT payment_date, payment_type, amount, currency, method, reference, created_by FROM payments WHERE company_key = ? AND payment_type = 'Customer Receipt' ORDER BY payment_date DESC",
+        conn,
+        params=(company_key,),
+    )
+    conn.close()
+    st.dataframe(format_currency_dataframe(df), use_container_width=True)
+    _csv_button("Customer Payments", df, f"customer_payments_csv_{company_key}")
+
+
+def show_supplier_payment_page(company_key, role):
+    st.header("💸 Supplier Payment")
+    conn = get_connection()
+    suppliers = [row[0] for row in conn.execute("SELECT name FROM suppliers WHERE company_key = ? ORDER BY name", (company_key,)).fetchall()]
+    conn.close()
+    with st.form(f"supplier_payment_form_{company_key}"):
+        supplier_name = st.selectbox("Supplier", [""] + suppliers)
+        amount = st.number_input("Amount (GHS)", min_value=0.0, step=0.01, key=f"supplier_payment_amount_{company_key}")
+        payment_method = st.selectbox("Method", ["Cash", "Bank", "Mobile Money"], key=f"supplier_payment_method_{company_key}")
+        payment_ref = st.text_input("Reference", key=f"supplier_payment_ref_{company_key}")
+        payment_date = st.date_input("Payment Date", value=datetime.now().date(), key=f"supplier_payment_date_{company_key}")
+        if st.form_submit_button("Save Payment") and amount > 0 and supplier_name:
+            conn = get_connection()
+            row = conn.execute(
+                "SELECT id FROM suppliers WHERE company_key = ? AND name = ? LIMIT 1",
+                (company_key, supplier_name),
+            ).fetchone()
+            supplier_id = int(row["id"]) if row else None
+            conn.execute(
+                "INSERT INTO payments (company_key, payment_date, payment_type, amount, currency, method, reference, created_by) VALUES (?, ?, ?, ?, 'GHS', ?, ?, ?)",
+                (company_key, payment_date.isoformat(), "Supplier Payment", amount, payment_method, payment_ref, role),
+            )
+            payment_id = int(conn.execute("SELECT last_insert_rowid()").fetchone()[0])
+            lines = [
+                {"account_id": get_account_id(conn, "Accounts Payable", "Liability"), "debit": amount, "credit": 0},
+                {"account_id": get_account_id(conn, "Cash", "Asset"), "debit": 0, "credit": amount},
+            ]
+            post_journal_entry(
+                company_key=company_key,
+                date=payment_date,
+                description=f"Supplier payment - {supplier_name}",
+                reference=payment_ref,
+                lines=lines,
+                created_by=role,
+                branch_id=st.session_state.get("active_branch_id"),
+                payment_id=payment_id,
+                source_module="Payments",
+                source_table="payments",
+                source_type="Supplier Payment",
+                source_id=payment_id,
+                supplier_id=supplier_id,
+                conn=conn,
+            )
+            conn.commit()
+            conn.close()
+            st.rerun()
+
+    conn = get_connection()
+    df = pd.read_sql_query(
+        "SELECT payment_date, payment_type, amount, currency, method, reference, created_by FROM payments WHERE company_key = ? AND payment_type = 'Supplier Payment' ORDER BY payment_date DESC",
+        conn,
+        params=(company_key,),
+    )
+    conn.close()
+    st.dataframe(format_currency_dataframe(df), use_container_width=True)
+    _csv_button("Supplier Payments", df, f"supplier_payments_csv_{company_key}")
 
 
 def show_ledger_viewer(company_key, role):

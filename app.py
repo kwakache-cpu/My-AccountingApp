@@ -58,8 +58,12 @@ from modules import (
     show_vouchers,
 )
 from financials import (
+    show_customers_page,
+    show_create_invoice_page,
+    show_receive_payment_page,
+    show_suppliers_page,
+    show_supplier_payment_page,
     show_financial_reports,
-    show_invoice_manager,
     show_ledger_viewer,
     show_record_transaction,
 )
@@ -1672,83 +1676,71 @@ def _render_primary_sidebar(user, include_settings=True):
 
     current_page = _ensure_valid_page()
 
-    st.sidebar.markdown("### Core")
-    if st.sidebar.button("📊 Dashboard", key="nav_dashboard", use_container_width=True):
-        st.session_state.page = "Dashboard"
-        st.rerun()
-    if st.sidebar.button("🛒 Point of Sale", key="nav_pos", use_container_width=True):
-        st.session_state.page = "Point of Sale"
-        st.rerun()
-    if st.sidebar.button("📦 Inventory Management", key="nav_inventory", use_container_width=True):
-        st.session_state.page = "Inventory Management"
-        st.rerun()
+    current_page = _ensure_valid_page()
 
-    st.sidebar.markdown("### Sales")
-    if st.sidebar.button("🧾 Customers", key="nav_customers", use_container_width=True):
-        st.session_state.page = "Customers"
-        st.rerun()
-    if st.sidebar.button("📄 Create Invoice", key="nav_create_invoice", use_container_width=True):
-        st.session_state.page = "Create Invoice"
-        st.rerun()
-    if st.sidebar.button("💳 Receive Payment (Customer)", key="nav_receive_payment", use_container_width=True):
-        st.session_state.page = "Receive Payment (Customer)"
-        st.rerun()
+    sections = [
+        (
+            "Core",
+            [
+                ("📊 Dashboard", "Dashboard"),
+                ("🛒 Point of Sale", "Point of Sale"),
+                ("📦 Inventory Management", "Inventory Management"),
+            ],
+        ),
+        (
+            "Sales",
+            [
+                ("🧾 Customers", "Customers"),
+                ("📄 Create Invoice", "Create Invoice"),
+                ("💳 Receive Payment", "Receive Payment (Customer)"),
+            ],
+        ),
+        (
+            "Purchases",
+            [
+                ("🏷️ Suppliers", "Suppliers"),
+                ("📝 Create Bill", "Create Bill"),
+                ("💸 Supplier Payment", "Supplier Payment"),
+            ],
+        ),
+        (
+            "Accounting",
+            [
+                ("📔 Customer Ledger", "Customer Ledger"),
+                ("📔 Supplier Ledger", "Supplier Ledger"),
+                ("🧾 General Journal", "General Journal"),
+                ("📚 General Ledger", "General Ledger"),
+                ("🗂️ Chart of Accounts", "Chart of Accounts"),
+            ],
+        ),
+        (
+            "Reports",
+            [
+                ("📊 Data Analytics", "Data Analytics"),
+                ("🧾 Financial Reports", "Financial Reports"),
+            ],
+        ),
+        (
+            "System",
+            [
+                ("📅 System Audit Trail", "System Audit Trail"),
+                ("⚙️ System Configuration", "System Configuration"),
+            ],
+        ),
+    ]
 
-    st.sidebar.markdown("### Purchases")
-    if st.sidebar.button("🏷️ Suppliers", key="nav_suppliers", use_container_width=True):
-        st.session_state.page = "Suppliers"
-        st.rerun()
-    if st.sidebar.button("📝 Create Bill", key="nav_create_bill", use_container_width=True):
-        st.session_state.page = "Create Bill"
-        st.rerun()
-    if st.sidebar.button("💸 Supplier Payment", key="nav_supplier_payment", use_container_width=True):
-        st.session_state.page = "Supplier Payment"
-        st.rerun()
-
-    st.sidebar.markdown("### Accounting")
-    if st.sidebar.button("📔 Customer Ledger", key="nav_customer_ledger", use_container_width=True):
-        st.session_state.page = "Customer Ledger"
-        st.rerun()
-    if st.sidebar.button("📔 Supplier Ledger", key="nav_supplier_ledger", use_container_width=True):
-        st.session_state.page = "Supplier Ledger"
-        st.rerun()
-    if st.sidebar.button("🧾 General Journal", key="nav_general_journal", use_container_width=True):
-        st.session_state.page = "General Journal"
-        st.rerun()
-    if st.sidebar.button("📚 General Ledger", key="nav_general_ledger", use_container_width=True):
-        st.session_state.page = "General Ledger"
-        st.rerun()
-    if st.sidebar.button("🗂️ Chart of Accounts", key="nav_chart_of_accounts", use_container_width=True):
-        st.session_state.page = "Chart of Accounts"
-        st.rerun()
-    if st.sidebar.button("💰 Banking & Cash", key="nav_banking_cash", use_container_width=True):
-        st.session_state.page = "Banking & Cash"
-        st.rerun()
-    if st.sidebar.button("📅 Taxation (VAT/NHIL)", key="nav_taxation", use_container_width=True):
-        st.session_state.page = "Taxation (VAT/NHIL)"
-        st.rerun()
-    if st.sidebar.button("💳 Payroll & Salaries", key="nav_payroll", use_container_width=True):
-        st.session_state.page = "Payroll & Salaries"
-        st.rerun()
-    if st.sidebar.button("🏛️ Asset Register", key="nav_asset_register", use_container_width=True):
-        st.session_state.page = "Asset Register"
-        st.rerun()
-
-    st.sidebar.markdown("### Reports")
-    if st.sidebar.button("📊 Data Analytics", key="nav_data_analytics", use_container_width=True):
-        st.session_state.page = "Data Analytics"
-        st.rerun()
-    if st.sidebar.button("🧾 Financial Reports", key="nav_financial_reports", use_container_width=True):
-        st.session_state.page = "Financial Reports"
-        st.rerun()
-
-    st.sidebar.markdown("### System")
-    if st.sidebar.button("📅 System Audit Trail", key="nav_system_audit_trail", use_container_width=True):
-        st.session_state.page = "System Audit Trail"
-        st.rerun()
-    if include_settings and st.sidebar.button("⚙️ System Configuration", key="nav_system_configuration", use_container_width=True):
-        st.session_state.page = "System Configuration"
-        st.rerun()
+    for section_name, options in sections:
+        labels = [label for label, _ in options]
+        page_lookup = {label: page for label, page in options}
+        selected_index = next((idx for idx, (_label, page) in enumerate(options) if page == current_page), 0)
+        state_key = f"nav_{section_name.lower().replace(' ', '_')}"
+        if state_key not in st.session_state or current_page in page_lookup.values():
+            st.session_state[state_key] = labels[selected_index]
+        selected_label = st.sidebar.radio(section_name, labels, index=selected_index, key=state_key)
+        selected_page = page_lookup[selected_label]
+        if current_page in page_lookup.values() and selected_page != current_page:
+            st.session_state.page = selected_page
+            st.rerun()
 
     st.sidebar.divider()
     _render_currency_sidebar_controls("display_currency_primary")
@@ -1803,15 +1795,15 @@ def _render_primary_page(user):
     elif st.session_state.page == "Accounts Payable":
         show_accounts_payable(user["key"])
     elif st.session_state.page == "Customers":
-        show_invoice_manager(user["key"], user["role"])
+        show_customers_page(user["key"], user["role"])
     elif st.session_state.page == "Suppliers":
-        show_invoice_manager(user["key"], user["role"])
+        show_suppliers_page(user["key"], user["role"])
     elif st.session_state.page == "Create Invoice":
-        show_invoice_manager(user["key"], user["role"])
+        show_create_invoice_page(user["key"], user["role"])
     elif st.session_state.page == "Receive Payment (Customer)":
-        show_invoice_manager(user["key"], user["role"])
+        show_receive_payment_page(user["key"], user["role"])
     elif st.session_state.page == "Supplier Payment":
-        show_invoice_manager(user["key"], user["role"])
+        show_supplier_payment_page(user["key"], user["role"])
     elif st.session_state.page == "Customer Ledger":
         show_aging(user["key"], "Receivable")
     elif st.session_state.page == "Supplier Ledger":
