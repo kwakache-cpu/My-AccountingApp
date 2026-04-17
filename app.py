@@ -427,8 +427,24 @@ PAGE_LABELS = {
     "dashboard": "📊 Dashboard",
     "pos": "🛒 Point of Sale",
     "inventory": "📦 Inventory Management",
+    "customers": "🧾 Customers",
+    "create_invoice": "📄 Create Invoice",
+    "receive_payment_customer": "💳 Receive Payment (Customer)",
+    "suppliers": "🏷️ Suppliers",
+    "create_bill": "📝 Create Bill",
+    "supplier_payment": "💸 Supplier Payment",
+    "customer_ledger": "📔 Customer Ledger",
+    "supplier_ledger": "📔 Supplier Ledger",
+    "journal": "🧾 General Journal",
+    "ledger": "📚 General Ledger",
+    "chart_of_accounts": "🗂️ Chart of Accounts",
+    "banking": "💰 Banking & Cash",
+    "taxation": "📅 Taxation (VAT/NHIL)",
     "payroll": "💳 Payroll & Salaries",
+    "assets": "🏛️ Asset Register",
     "reports": "📊 Data Analytics",
+    "financial_reports": "🧾 Financial Reports",
+    "audit_trail": "📅 System Audit Trail",
     "settings": "⚙️ System Configuration",
     "invoices": "🧾 Sales Invoicing",
 }
@@ -441,6 +457,12 @@ PAGE_ALIASES.update(
         "Inventory & Stock": PAGE_LABELS["inventory"],
         "ðŸ“¦ Inventory Management": PAGE_LABELS["inventory"],
         "📦 Inventory Management": PAGE_LABELS["inventory"],
+        "Accounts Receivable": PAGE_LABELS["customer_ledger"],
+        "Accounts Receivables": PAGE_LABELS["customer_ledger"],
+        "Customer Ledger": PAGE_LABELS["customer_ledger"],
+        "Accounts Payable": PAGE_LABELS["supplier_ledger"],
+        "Accounts Payables": PAGE_LABELS["supplier_ledger"],
+        "Supplier Ledger": PAGE_LABELS["supplier_ledger"],
         "Payroll": PAGE_LABELS["payroll"],
         "Ghana Payroll (SSNIT)": PAGE_LABELS["payroll"],
         "ðŸ’³ Payroll & Salaries": PAGE_LABELS["payroll"],
@@ -1576,19 +1598,23 @@ PRIMARY_NAV_ITEMS = [
     ("📊 Dashboard", "Dashboard"),
     ("🛒 Point of Sale", "Point of Sale"),
     ("📦 Inventory Management", "Inventory Management"),
+    ("🧾 Customers", "Customers"),
+    ("📄 Create Invoice", "Create Invoice"),
+    ("💳 Receive Payment (Customer)", "Receive Payment (Customer)"),
+    ("🏷️ Suppliers", "Suppliers"),
+    ("📝 Create Bill", "Create Bill"),
+    ("💸 Supplier Payment", "Supplier Payment"),
+    ("📔 Customer Ledger", "Customer Ledger"),
+    ("📔 Supplier Ledger", "Supplier Ledger"),
     ("🧾 General Journal", "General Journal"),
     ("📚 General Ledger", "General Ledger"),
     ("🗂️ Chart of Accounts", "Chart of Accounts"),
-    ("� Accounts Receivable", "Accounts Receivable"),
-    ("📉 Accounts Payable", "Accounts Payable"),
-    ("📝 Create Bill", "Create Bill"),
     ("💰 Banking & Cash", "Banking & Cash"),
     ("📅 Taxation (VAT/NHIL)", "Taxation (VAT/NHIL)"),
-    ("📅 Payroll & Salaries", "Payroll & Salaries"),
+    ("💳 Payroll & Salaries", "Payroll & Salaries"),
     ("🏛️ Asset Register", "Asset Register"),
     ("📊 Data Analytics", "Data Analytics"),
     ("🧾 Financial Reports", "Financial Reports"),
-    ("🤖 Gatekeeper Admin", "Gatekeeper Admin"),
     ("📅 System Audit Trail", "System Audit Trail"),
     ("⚙️ System Configuration", "System Configuration"),
 ]
@@ -1644,16 +1670,86 @@ def _render_primary_sidebar(user, include_settings=True):
             st.session_state.page = 'branch_management'
             st.rerun()
 
-    nav_items = PRIMARY_NAV_ITEMS if include_settings else [item for item in PRIMARY_NAV_ITEMS if item[1] != "System Configuration"]
     current_page = _ensure_valid_page()
-    labels = [label for label, _key in nav_items]
-    selected_label = next((label for label, key in nav_items if key == current_page), labels[0])
-    selected_index = labels.index(selected_label) if selected_label in labels else 0
-    chosen_label = st.sidebar.selectbox("Navigation", labels, index=selected_index, key="primary_navigation")
-    chosen_page = dict(nav_items)[chosen_label]
-    if chosen_page != st.session_state.page:
-        st.session_state.page = chosen_page
+
+    st.sidebar.markdown("### Core")
+    if st.sidebar.button("📊 Dashboard", key="nav_dashboard", use_container_width=True):
+        st.session_state.page = "Dashboard"
         st.rerun()
+    if st.sidebar.button("🛒 Point of Sale", key="nav_pos", use_container_width=True):
+        st.session_state.page = "Point of Sale"
+        st.rerun()
+    if st.sidebar.button("📦 Inventory Management", key="nav_inventory", use_container_width=True):
+        st.session_state.page = "Inventory Management"
+        st.rerun()
+
+    st.sidebar.markdown("### Sales")
+    if st.sidebar.button("🧾 Customers", key="nav_customers", use_container_width=True):
+        st.session_state.page = "Customers"
+        st.rerun()
+    if st.sidebar.button("📄 Create Invoice", key="nav_create_invoice", use_container_width=True):
+        st.session_state.page = "Create Invoice"
+        st.rerun()
+    if st.sidebar.button("💳 Receive Payment (Customer)", key="nav_receive_payment", use_container_width=True):
+        st.session_state.page = "Receive Payment (Customer)"
+        st.rerun()
+
+    st.sidebar.markdown("### Purchases")
+    if st.sidebar.button("🏷️ Suppliers", key="nav_suppliers", use_container_width=True):
+        st.session_state.page = "Suppliers"
+        st.rerun()
+    if st.sidebar.button("📝 Create Bill", key="nav_create_bill", use_container_width=True):
+        st.session_state.page = "Create Bill"
+        st.rerun()
+    if st.sidebar.button("💸 Supplier Payment", key="nav_supplier_payment", use_container_width=True):
+        st.session_state.page = "Supplier Payment"
+        st.rerun()
+
+    st.sidebar.markdown("### Accounting")
+    if st.sidebar.button("📔 Customer Ledger", key="nav_customer_ledger", use_container_width=True):
+        st.session_state.page = "Customer Ledger"
+        st.rerun()
+    if st.sidebar.button("📔 Supplier Ledger", key="nav_supplier_ledger", use_container_width=True):
+        st.session_state.page = "Supplier Ledger"
+        st.rerun()
+    if st.sidebar.button("🧾 General Journal", key="nav_general_journal", use_container_width=True):
+        st.session_state.page = "General Journal"
+        st.rerun()
+    if st.sidebar.button("📚 General Ledger", key="nav_general_ledger", use_container_width=True):
+        st.session_state.page = "General Ledger"
+        st.rerun()
+    if st.sidebar.button("🗂️ Chart of Accounts", key="nav_chart_of_accounts", use_container_width=True):
+        st.session_state.page = "Chart of Accounts"
+        st.rerun()
+    if st.sidebar.button("💰 Banking & Cash", key="nav_banking_cash", use_container_width=True):
+        st.session_state.page = "Banking & Cash"
+        st.rerun()
+    if st.sidebar.button("📅 Taxation (VAT/NHIL)", key="nav_taxation", use_container_width=True):
+        st.session_state.page = "Taxation (VAT/NHIL)"
+        st.rerun()
+    if st.sidebar.button("💳 Payroll & Salaries", key="nav_payroll", use_container_width=True):
+        st.session_state.page = "Payroll & Salaries"
+        st.rerun()
+    if st.sidebar.button("🏛️ Asset Register", key="nav_asset_register", use_container_width=True):
+        st.session_state.page = "Asset Register"
+        st.rerun()
+
+    st.sidebar.markdown("### Reports")
+    if st.sidebar.button("📊 Data Analytics", key="nav_data_analytics", use_container_width=True):
+        st.session_state.page = "Data Analytics"
+        st.rerun()
+    if st.sidebar.button("🧾 Financial Reports", key="nav_financial_reports", use_container_width=True):
+        st.session_state.page = "Financial Reports"
+        st.rerun()
+
+    st.sidebar.markdown("### System")
+    if st.sidebar.button("📅 System Audit Trail", key="nav_system_audit_trail", use_container_width=True):
+        st.session_state.page = "System Audit Trail"
+        st.rerun()
+    if include_settings and st.sidebar.button("⚙️ System Configuration", key="nav_system_configuration", use_container_width=True):
+        st.session_state.page = "System Configuration"
+        st.rerun()
+
     st.sidebar.divider()
     _render_currency_sidebar_controls("display_currency_primary")
     render_accounting_assistant_sidebar(st.session_state.page)
@@ -1706,6 +1802,20 @@ def _render_primary_page(user):
         show_accounts_receivable(user["key"])
     elif st.session_state.page == "Accounts Payable":
         show_accounts_payable(user["key"])
+    elif st.session_state.page == "Customers":
+        show_invoice_manager(user["key"], user["role"])
+    elif st.session_state.page == "Suppliers":
+        show_invoice_manager(user["key"], user["role"])
+    elif st.session_state.page == "Create Invoice":
+        show_invoice_manager(user["key"], user["role"])
+    elif st.session_state.page == "Receive Payment (Customer)":
+        show_invoice_manager(user["key"], user["role"])
+    elif st.session_state.page == "Supplier Payment":
+        show_invoice_manager(user["key"], user["role"])
+    elif st.session_state.page == "Customer Ledger":
+        show_aging(user["key"], "Receivable")
+    elif st.session_state.page == "Supplier Ledger":
+        show_aging(user["key"], "Payable")
     elif st.session_state.page == "Create Bill":
         show_create_bill_page(user["key"])
     elif st.session_state.page == "Banking & Cash":
