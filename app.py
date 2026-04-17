@@ -1613,14 +1613,29 @@ PRIMARY_NAV_ITEMS = [
     ("🧾 General Journal", "General Journal"),
     ("📚 General Ledger", "General Ledger"),
     ("🗂️ Chart of Accounts", "Chart of Accounts"),
-    ("💰 Banking & Cash", "Banking & Cash"),
-    ("📅 Taxation (VAT/NHIL)", "Taxation (VAT/NHIL)"),
-    ("💳 Payroll & Salaries", "Payroll & Salaries"),
-    ("🏛️ Asset Register", "Asset Register"),
-    ("📊 Data Analytics", "Data Analytics"),
+    ("� Data Analytics", "Data Analytics"),
     ("🧾 Financial Reports", "Financial Reports"),
     ("📅 System Audit Trail", "System Audit Trail"),
     ("⚙️ System Configuration", "System Configuration"),
+    ("🏢 Manage Branches", "branch_management"),
+    ("🏛️ Asset Register", "Asset Register"),
+    ("💳 Payroll & Salaries", "Payroll & Salaries"),
+    ("Taxation (VAT/NHIL)", "Taxation (VAT/NHIL)"),
+    ("Banking & Cash", "Banking & Cash"),
+    ("Vouchers & Journals", "Vouchers & Journals"),
+    ("Sales Invoicing", "Sales Invoicing"),
+    ("Purchase Orders", "Purchase Orders"),
+    ("Accounts Receivable", "Accounts Receivable"),
+    ("Accounts Payable", "Accounts Payable"),
+    ("Dashboard", "Dashboard"),
+    ("Inventory Management", "Inventory Management"),
+    ("Payroll & Salaries", "Payroll & Salaries"),
+    ("Sales/Purchase", "Sales/Purchase"),
+    ("Banking", "Banking"),
+    ("Taxation", "Taxation"),
+    ("Gatekeeper Admin", "Gatekeeper Admin"),
+    ("Audit Trail", "Audit Trail"),
+    ("🏠 Dashboard", "Dashboard"),
 ]
 
 
@@ -1678,69 +1693,125 @@ def _render_primary_sidebar(user, include_settings=True):
 
     current_page = _ensure_valid_page()
 
-    sections = [
-        (
-            "Core",
-            [
-                ("📊 Dashboard", "Dashboard"),
-                ("🛒 Point of Sale", "Point of Sale"),
-                ("📦 Inventory Management", "Inventory Management"),
-            ],
-        ),
-        (
-            "Sales",
-            [
-                ("🧾 Customers", "Customers"),
-                ("📄 Create Invoice", "Create Invoice"),
-                ("💳 Receive Payment", "Receive Payment (Customer)"),
-            ],
-        ),
-        (
-            "Purchases",
-            [
-                ("🏷️ Suppliers", "Suppliers"),
-                ("📝 Create Bill", "Create Bill"),
-                ("💸 Supplier Payment", "Supplier Payment"),
-            ],
-        ),
-        (
-            "Accounting",
-            [
-                ("📔 Customer Ledger", "Customer Ledger"),
-                ("📔 Supplier Ledger", "Supplier Ledger"),
-                ("🧾 General Journal", "General Journal"),
-                ("📚 General Ledger", "General Ledger"),
-                ("🗂️ Chart of Accounts", "Chart of Accounts"),
-            ],
-        ),
-        (
-            "Reports",
-            [
-                ("📊 Data Analytics", "Data Analytics"),
-                ("🧾 Financial Reports", "Financial Reports"),
-            ],
-        ),
-        (
-            "System",
-            [
-                ("📅 System Audit Trail", "System Audit Trail"),
-                ("⚙️ System Configuration", "System Configuration"),
-            ],
-        ),
-    ]
+    # Single navigation menu with all pages
+    if user['role'] == "Demo":
+        menu_options = [
+            "📊 Dashboard",
+            "📦 Inventory Management", 
+            "💳 Payroll & Salaries",
+            "Sales/Purchase",
+            "📊 Data Analytics",
+            "Banking",
+            "Taxation",
+            "🤖 Gatekeeper Admin",
+            "Audit Trail"
+        ]
+        page_mapping = {
+            "📊 Dashboard": "Dashboard",
+            "📦 Inventory Management": "Inventory Management",
+            "💳 Payroll & Salaries": "Payroll & Salaries",
+            "Sales/Purchase": "Sales/Purchase",
+            "📊 Data Analytics": "Data Analytics",
+            "Banking": "Banking",
+            "Taxation": "Taxation",
+            "🤖 Gatekeeper Admin": "Gatekeeper Admin",
+            "Audit Trail": "Audit Trail"
+        }
+    else:
+        menu_options = [
+            "🏠 Dashboard",
+            "🛒 Point of Sale", 
+            "Vouchers & Journals",
+            "Chart of Accounts",
+            "📦 Inventory Management",
+            "Sales Invoicing",
+            "Purchase Orders",
+            "Banking & Cash",
+            "Accounts Receivable",
+            "Accounts Payable",
+            "Taxation (VAT/NHIL)",
+            "💳 Payroll & Salaries",
+            "🏛️ Asset Register",
+            "📊 Data Analytics",
+            "🤖 Gatekeeper Admin",
+            "System Audit Trail",
+            "⚙️ System Configuration",
+            "🏢 Manage Branches",
+            "🧾 Customers",
+            "📄 Create Invoice",
+            "💳 Receive Payment (Customer)",
+            "🏷️ Suppliers",
+            "📝 Create Bill",
+            "💸 Supplier Payment",
+            "📔 Customer Ledger",
+            "📔 Supplier Ledger", 
+            "🧾 General Journal",
+            "📚 General Ledger",
+            "🗂️ Chart of Accounts",
+            "🧾 Financial Reports"
+        ]
 
-    for section_name, options in sections:
-        labels = [label for label, _ in options]
-        page_lookup = {label: page for label, page in options}
-        selected_index = next((idx for idx, (_label, page) in enumerate(options) if page == current_page), 0)
-        state_key = f"nav_{section_name.lower().replace(' ', '_')}"
-        if state_key not in st.session_state or current_page in page_lookup.values():
-            st.session_state[state_key] = labels[selected_index]
-        selected_label = st.sidebar.radio(section_name, labels, index=selected_index, key=state_key)
-        selected_page = page_lookup[selected_label]
-        if current_page in page_lookup.values() and selected_page != current_page:
-            st.session_state.page = selected_page
-            st.rerun()
+        # Filter menu based on role
+        if user['role'] not in ("Master Admin", "Admin"):
+            menu_options = [opt for opt in menu_options if opt not in ("⚙️ System Configuration", "🏢 Manage Branches")]
+        if user['role'] in ("Bookkeeper", "Branch_Bookkeeper"):
+            menu_options = [opt for opt in menu_options if opt not in ("System Audit Trail")]
+
+        page_mapping = {
+            "🏠 Dashboard": "Dashboard",
+            "🛒 Point of Sale": "Point of Sale",
+            "Vouchers & Journals": "Vouchers & Journals",
+            "Chart of Accounts": "Chart of Accounts",
+            "📦 Inventory Management": "Inventory Management",
+            "Sales Invoicing": "Sales Invoicing",
+            "Purchase Orders": "Purchase Orders",
+            "Banking & Cash": "Banking & Cash",
+            "Accounts Receivable": "Accounts Receivable",
+            "Accounts Payable": "Accounts Payable",
+            "Taxation (VAT/NHIL)": "Taxation (VAT/NHIL)",
+            "💳 Payroll & Salaries": "Payroll & Salaries",
+            "🏛️ Asset Register": "Asset Register",
+            "📊 Data Analytics": "Data Analytics",
+            "🤖 Gatekeeper Admin": "Gatekeeper Admin",
+            "System Audit Trail": "System Audit Trail",
+            "⚙️ System Configuration": "System Configuration",
+            "🏢 Manage Branches": "branch_management",
+            "🧾 Customers": "Customers",
+            "📄 Create Invoice": "Create Invoice",
+            "💳 Receive Payment (Customer)": "Receive Payment (Customer)",
+            "🏷️ Suppliers": "Suppliers",
+            "📝 Create Bill": "Create Bill",
+            "💸 Supplier Payment": "Supplier Payment",
+            "📔 Customer Ledger": "Customer Ledger",
+            "📔 Supplier Ledger": "Supplier Ledger",
+            "🧾 General Journal": "General Journal",
+            "📚 General Ledger": "General Ledger",
+            "🗂️ Chart of Accounts": "Chart of Accounts",
+            "🧾 Financial Reports": "Financial Reports"
+        }
+
+    # Get current page display label
+    current_display = None
+    for display, internal in page_mapping.items():
+        if internal == current_page:
+            current_display = display
+            break
+    
+    if current_display is None or current_display not in menu_options:
+        current_display = menu_options[0]
+        current_page = page_mapping.get(current_display, "Dashboard")
+        st.session_state.page = current_page
+
+    selected_display = st.sidebar.radio("Navigation", menu_options, index=menu_options.index(current_display) if current_display in menu_options else 0, key="main_navigation_radio")
+    
+    # For regular users, add license expiry check
+    if user['role'] != "Demo":
+        try:
+            days_left = check_license_expiry_with_grace(user['key'])
+            if days_left['status'] == 'warning':
+                st.sidebar.warning(f"⚠️ License expires in {days_left['days_left']} days")
+        except:
+            pass
 
     st.sidebar.divider()
     _render_currency_sidebar_controls("display_currency_primary")
@@ -1779,11 +1850,17 @@ def _render_primary_sidebar(user, include_settings=True):
 
 def _render_primary_page(user):
     if st.session_state.page == "Dashboard":
-        show_dashboard_module(user["key"], user["name"], user["role"])
+        if user["role"] == "Demo":
+            show_dashboard_module("DEMO", "Demo Corporation Ltd", "Demo")
+        else:
+            show_dashboard_module(user["key"], user["name"], user["role"])
     elif st.session_state.page == "Point of Sale":
         show_pos(user["key"], user["name"], user["role"])
     elif st.session_state.page == "Inventory Management":
-        show_inventory(user["key"], user["role"])
+        if user["role"] == "Demo":
+            show_inventory("DEMO", "Demo")
+        else:
+            show_inventory(user["key"], user["role"])
     elif st.session_state.page == "General Journal":
         show_journal_entries(user["key"], user["role"])
     elif st.session_state.page == "General Ledger":
@@ -1815,11 +1892,17 @@ def _render_primary_page(user):
     elif st.session_state.page == "Taxation (VAT/NHIL)":
         show_taxation(user["key"])
     elif st.session_state.page == "Payroll & Salaries":
-        show_payroll(user["key"], user["role"])
+        if user["role"] == "Demo":
+            show_payroll("DEMO", "Demo")
+        else:
+            show_payroll(user["key"], user["role"])
     elif st.session_state.page == "Asset Register":
         show_fixed_assets(user["key"], user["role"])
     elif st.session_state.page == "Data Analytics":
-        show_reports(user["key"], st.session_state.get("active_branch_id", "Main"))
+        if user["role"] == "Demo":
+            show_reports("DEMO", None)
+        else:
+            show_reports(user["key"], st.session_state.get("active_branch_id", "Main"))
     elif st.session_state.page == "Financial Reports":
         show_financial_reports(user["key"], user["role"])
     elif st.session_state.page == "Gatekeeper Admin":
@@ -1828,8 +1911,16 @@ def _render_primary_page(user):
         show_audit_trail(user["key"], user["role"], st.session_state.get("active_branch_id"))
     elif st.session_state.page == "System Configuration":
         show_company_setup(user["key"], user["name"], user["role"])
-    elif st.session_state.page == "branch_management":
-        show_branch_management(user["key"], user["role"])
+    elif st.session_state.page == "Vouchers & Journals":
+        show_vouchers(user["key"], user["role"])
+    elif st.session_state.page == "Sales Invoicing":
+        show_sales_purchase(user["key"], user["role"], "Sales")
+    elif st.session_state.page == "Purchase Orders":
+        show_sales_purchase(user["key"], user["role"], "Purchase")
+    elif st.session_state.page == "Accounts Receivable":
+        show_aging(user["key"], "Receivable")
+    elif st.session_state.page == "Accounts Payable":
+        show_aging(user["key"], "Payable")
     else:
         st.session_state.page = "Dashboard"
         st.rerun()
@@ -2252,64 +2343,6 @@ else:
             st.session_state.clear()
             st.rerun()
         st.stop()
-
-        # Demo User Interface
-        # Check demo timeout
-        if 'start_time' in st.session_state:
-            elapsed = (datetime.now() - st.session_state.start_time).total_seconds()
-            if elapsed > 1800:  # 30 minutes
-                st.session_state.clear()
-                st.warning("Demo Session Expired. Please Register to continue.")
-                st.rerun()
-        
-        st.info("Viewing in Demo Mode. Real-time database is disconnected. [🏢 Register New Company](?tab=register)")
-        
-        st.sidebar.markdown(f"""
-        <div style='background-color:#e0f2fe; padding:20px; border-radius:15px; border: 1px solid #0ea5e9;'>
-            <h2 style='margin-bottom:0;'>🚀 {u['name']}</h2>
-            <p style='color:#0c4a6e;'>Role: <b>Demo User</b></p>
-            <p style='color:#0c4a6e; font-size:12px;'>Session: Active</p>
-        </div>
-        """, unsafe_allow_html=True)
-        
-        menu = ["Dashboard", "📦 Inventory Management", "💳 Payroll & Salaries", "Sales/Purchase", "📊 Data Analytics", "Banking", "Taxation", "🤖 Gatekeeper Admin", "Audit Trail"]
-        current_page = normalize_page_label(st.session_state.get("page")) or "Dashboard"
-        current_page = repair_ui_label(current_page)
-        selected_index = menu.index(current_page) if current_page in menu else 0
-        choice = st.sidebar.selectbox("Navigation", menu, index=selected_index)
-        st.session_state.page = choice
-        render_accounting_assistant_sidebar(choice)
-        display_choice_map = {
-            "📊 Dashboard": "ðŸ  Dashboard",
-            "🛒 Point of Sale": "ðŸ›’ Point of Sale",
-            "📦 Inventory Management": "ðŸ“¦ Inventory Management",
-            "💳 Payroll & Salaries": "ðŸ’³ Payroll & Salaries",
-            "📊 Data Analytics": "ðŸ“Š Data Analytics",
-            "⚙️ System Configuration": "âš™ï¸ System Configuration",
-            "🧾 Sales Invoicing": "Sales Invoicing",
-            "🤖 Gatekeeper Admin": "ðŸ¤– Gatekeeper Admin",
-            "📦 Asset Register": "ðŸ›ï¸ Asset Register",
-        }
-        choice = display_choice_map.get(choice, choice)
-        
-        if choice == "Dashboard":
-            show_dashboard("DEMO", "Demo Corporation Ltd", "Demo")
-        elif choice == "📦 Inventory Management":
-            show_inventory("DEMO", "Demo")
-        elif choice == "💳 Payroll & Salaries":
-            show_payroll("DEMO", "Demo")
-        elif choice == "Sales/Purchase":
-            show_sales_purchase("DEMO", "Demo", "Sales")
-        elif choice == "📊 Data Analytics":
-            show_reports("DEMO", None)
-        elif choice == "Banking":
-            show_banking("DEMO", "Demo")
-        elif choice == "Taxation":
-            show_taxation("DEMO")
-        elif choice == "🤖 Gatekeeper Admin":
-            show_ai_assistant("DEMO")
-        elif choice == "Audit Trail":
-            show_audit_trail("DEMO")
                     
     else:
         _render_primary_sidebar(u, include_settings=True)
@@ -2328,94 +2361,6 @@ else:
             st.session_state.login_attempts = 0
             st.rerun()
         st.stop()
-
-        # Regular User Interface
-        st.sidebar.markdown(f"""
-        <div style='background-color:#f0f2f6; padding:20px; border-radius:15px; border: 1px solid #d1d5db;'>
-            <h2 style='margin-bottom:0;'>🏢 {u['name']}</h2>
-            <p style='color:#6b7280;'>Role: <b>{u['role']}</b></p>
-            <p style='color:#6b7280; font-size:12px;'>Session: Active</p>
-        </div>
-        """, unsafe_allow_html=True)
-        
-        # License Expiry Check
-        days_left = check_license_expiry_with_grace(u['key'])
-        if days_left['status'] == 'warning':
-            col1, col2 = st.columns([4, 1])
-            with col1:
-                st.warning(f"⚠️ Your license expires in {days_left['days_left']} days. Please renew to avoid service interruption.")
-            with col2:
-                if st.button("Renew Now", key="renew_license"):
-                    # Trigger renewal payment
-                    reference = f"RENEWAL-{u['key']}"
-                    amount = 1000  # Fixed renewal fee
-                    url = initialize_paystack_payment("", amount, reference)  # No email needed for renewal
-                    if url:
-                        st.link_button("Proceed to Paystack", url)
-                    else:
-                        st.error("Failed to initialize renewal payment.")
-        
-        menu = [
-            "🏠 Dashboard", "🛒 Point of Sale", "Vouchers & Journals", "Chart of Accounts", 
-            "📦 Inventory Management", "Sales Invoicing", "Purchase Orders", 
-            "Banking & Cash", "Accounts Receivable", "Accounts Payable", 
-            "Taxation (VAT/NHIL)", "💳 Payroll & Salaries", "🏛️ Asset Register", 
-            "📊 Data Analytics", "🤖 Gatekeeper Admin", "System Audit Trail"
-        ]
-        menu = [repair_ui_label(item) for item in menu]
-
-        if u['role'] == "Master Admin":
-            menu.insert(1, "⚙️ System Configuration")
-            menu.insert(2, "🏢 Manage Branches")
-        
-        menu = [repair_ui_label(item) for item in menu]
-        if u['role'] in ("Bookkeeper", "Branch_Bookkeeper"):
-            menu = [item for item in menu if item not in ("System Audit Trail", "🤖 Gatekeeper Admin")]
-        current_page = normalize_page_label(st.session_state.get("page")) or "🏠 Dashboard"
-        current_page = repair_ui_label(current_page)
-        selected_index = menu.index(current_page) if current_page in menu else 0
-        choice = st.sidebar.selectbox("Go to Module:", menu, index=selected_index, key="v3_main_nav_dropdown")
-        st.session_state.page = choice
-        choice = repair_ui_label(normalize_page_label(choice))
-        st.session_state.page = choice
-        with st.sidebar.expander("Currency", expanded=False):
-            _render_currency_sidebar_controls("display_currency_toggle")
-        render_accounting_assistant_sidebar(choice)
-        regular_choice_map = {
-            "📊 Dashboard": "ðŸ  Dashboard",
-            "🛒 Point of Sale": "ðŸ›’ Point of Sale",
-            "📦 Inventory Management": "ðŸ“¦ Inventory Management",
-            "💳 Payroll & Salaries": "ðŸ’³ Payroll & Salaries",
-            "📊 Data Analytics": "ðŸ“Š Data Analytics",
-            "⚙️ System Configuration": "âš™ï¸ System Configuration",
-            "🧾 Sales Invoicing": "Sales Invoicing",
-            "🤖 Gatekeeper Admin": "ðŸ¤– Gatekeeper Admin",
-            "📦 Asset Register": "ðŸ›ï¸ Asset Register",
-        }
-        choice = regular_choice_map.get(choice, choice)
-        
-        # Dashboard Module (NEW)
-        if choice == "🏠 Dashboard":
-            show_dashboard(u['key'], u['name'], u['role'])  # FIXED: Correct parameter passing
-        
-        # Comprehensive Mapping Logic
-        elif choice == "⚙️ System Configuration": show_company_setup(u['key'], u['name'], u['role'])
-        elif choice == "🏢 Manage Branches": show_branch_management(u['key'], u['role'])
-        elif choice == "🛒 Point of Sale": show_pos(u['key'], u['name'], u['role'])
-        elif choice == "Vouchers & Journals": show_vouchers(u['key'], u['role'])
-        elif choice == "Chart of Accounts": show_chart_of_accounts(u['key'], u['role'])
-        elif choice == "📦 Inventory Management": show_inventory(u['key'], u['role'])
-        elif choice == "Sales Invoicing": show_sales_purchase(u['key'], u['role'], "Sales")
-        elif choice == "Purchase Orders": show_sales_purchase(u['key'], u['role'], "Purchase")
-        elif choice == "Banking & Cash": show_banking(u['key'], u['role'])
-        elif choice == "Accounts Receivable": show_aging(u['key'], "Receivable")
-        elif choice == "Accounts Payable": show_aging(u['key'], "Payable")
-        elif choice == "Taxation (VAT/NHIL)": show_taxation(u['key'])
-        elif choice == "💳 Payroll & Salaries": show_payroll(u['key'], u['role'])
-        elif choice == "🏛️ Asset Register": show_fixed_assets(u['key'], u['role'])
-        elif choice == "📊 Data Analytics": show_reports(u['key'], st.session_state.get("active_branch_id"))
-        elif choice == "🤖 Gatekeeper Admin": show_ai_assistant(u['key'])
-        elif choice == "System Audit Trail": show_audit_trail(u['key'], u['role'], st.session_state.get("active_branch_id"))
 
     st.sidebar.markdown("---")
     if st.sidebar.button("🔴 Secure Logout", width='stretch', key="v3_final_logout"):
