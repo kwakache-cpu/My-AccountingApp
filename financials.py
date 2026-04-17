@@ -23,6 +23,7 @@ from modules import (
     get_exchange_rate,
     post_transaction,
     set_period_lock,
+    show_journal_entries,
 )
 
 
@@ -917,6 +918,10 @@ def show_ledger_viewer(company_key, role):
             display_df = _convert_money_frame(df)
             st.dataframe(format_currency_dataframe(display_df), use_container_width=True)
             _csv_button(label, display_df, f"{label}_override_{company_key}")
+
+
+def show_record_transaction(company_key, role):
+    show_journal_entries(company_key, role)
 
 
 def show_financial_reports(company_key, role=None):
