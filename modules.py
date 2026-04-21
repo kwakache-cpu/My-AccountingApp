@@ -15,7 +15,7 @@ import requests
 import streamlit as st
 import streamlit.components.v1 as components
 from dateutil.relativedelta import relativedelta
-from groq import Groq
+from openai import OpenAI
 from PIL import Image
 try:
     import cv2
@@ -156,16 +156,14 @@ def _get_active_company_id(expected_company_id=None):
     return active_company_id
 
 
-def _get_groq_client():
-    """Create a Groq client only when the API key is available."""
+def _get_openai_client():
+    """Create an OpenAI client only when the API key is available."""
     if st.session_state.get("ai_active") is False:
         return None
     try:
-        # Use hard-wired API key directly
-        api_key = "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"
-        return Groq(api_key=api_key)
+        return OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
     except Exception as exc:
-        logger.warning(f"Failed to initialize Groq client: {exc}")
+        logger.warning(f"Failed to initialize OpenAI client: {exc}")
         return None
 
 
@@ -533,10 +531,10 @@ def _load_accounting_ai_context(company_key):
 
 
 def accounting_ai_response(module_selection, chat_history):
-    groq_client = _get_groq_client()
+    openai_client = _get_openai_client()
     if st.session_state.get("ai_active") is False:
         return (
-            "The Accounting Assistant is unavailable because the `GROQ_API_KEY` secret is not configured. "
+            "The Accounting Assistant is unavailable because the `OPENAI_API_KEY` secret is not configured. "
             "You can still use the module data and reports normally."
         )
 
@@ -560,12 +558,11 @@ def accounting_ai_response(module_selection, chat_history):
     messages.extend(chat_history[-8:])
 
     try:
-        completion = groq_client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
+        completion = openai_client.chat.completions.create(
+            model="gpt-4o-mini",
             messages=messages,
             temperature=0.3,
             max_tokens=1024,
-            timeout=20.0,
         )
         return completion.choices[0].message.content.strip()
     except Exception as exc:
@@ -5694,10 +5691,10 @@ def show_ai_assistant(client_id):
     with st.chat_message("user"):
         st.markdown(user_question)
 
-    groq_client = _get_groq_client()
+    openai_client = _get_openai_client()
     if st.session_state.get("ai_active") is False:
         fallback_response = (
-            "AI insights are unavailable because the `GROQ_API_KEY` secret is not configured. "
+            "AI insights are unavailable because the `OPENAI_API_KEY` secret is not configured. "
             "Your 30-day data snapshot is still available above for manual review."
         )
         st.session_state[history_key].append({"role": "assistant", "content": fallback_response})
@@ -5719,8 +5716,8 @@ def show_ai_assistant(client_id):
     try:
         with st.chat_message("assistant"):
             with st.spinner("Reviewing your accounting records..."):
-                completion = groq_client.chat.completions.create(
-                    model="llama-3.3-70b-versatile",
+                completion = openai_client.chat.completions.create(
+                    model="gpt-4o-mini",
                     messages=[
                         {
                             "role": "system",
@@ -5730,7 +5727,6 @@ def show_ai_assistant(client_id):
                     ],
                     temperature=0.3,
                     max_tokens=1024,
-                    timeout=20.0,
                 )
                 assistant_reply = completion.choices[0].message.content.strip()
                 st.markdown(assistant_reply)

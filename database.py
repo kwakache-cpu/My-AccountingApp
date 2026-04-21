@@ -89,7 +89,7 @@ def _ensure_local_db_file():
 def repair_database_schema():
     """
     Lightweight startup repair that restores critical columns needed for app boot.
-    Safe to call repeatedly.
+    Safe to call repeatedly and does not remove existing tables or data.
     """
     conn = None
     try:
@@ -108,15 +108,104 @@ def repair_database_schema():
         company_columns = {row[1] for row in cursor.fetchall()}
         if "subscription_expiry" not in company_columns:
             try:
-                cursor.execute("ALTER TABLE companies ADD COLUMN subscription_expiry TEXT")
+                cursor.execute("ALTER TABLE companies ADD COLUMN subscription_expiry TEXT DEFAULT 'Permanent'")
             except sqlite3.Error:
                 pass
+        migration_columns = {
+            "companies": {
+                "contact_email": "TEXT",
+                "barcode_input_source": "TEXT DEFAULT 'Keyboard Entry'",
+                "deployment_status": "TEXT DEFAULT 'Pending'",
+                "phone_number": "TEXT",
+                "physical_address": "TEXT",
+                "industry": "TEXT",
+                "currency": "TEXT DEFAULT 'GHS'",
+                "logo_url": "TEXT",
+                "created_at": "TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
+                "updated_at": "TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
+            },
+            "suppliers": {
+                "address": "TEXT",
+                "category": "TEXT",
+                "currency": "TEXT DEFAULT 'GHS'",
+                "created_at": "TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
+            },
+            "customers": {
+                "customer_id": "TEXT",
+                "current_balance": "REAL DEFAULT 0",
+                "address": "TEXT",
+                "currency": "TEXT DEFAULT 'GHS'",
+            },
+            "journal_entries": {
+                "branch_id": "TEXT",
+                "customer_id": "INTEGER",
+                "supplier_id": "INTEGER",
+                "inventory_item_id": "INTEGER",
+                "payment_id": "INTEGER",
+                "source_module": "TEXT",
+                "source_table": "TEXT",
+                "source_type": "TEXT",
+                "source_id": "INTEGER",
+                "reversed_entry_id": "INTEGER",
+                "is_voided": "INTEGER DEFAULT 0",
+                "voided_at": "TIMESTAMP",
+                "voided_by": "TEXT",
+                "approval_status": "TEXT DEFAULT 'Posted'",
+            },
+            "payments": {
+                "invoice_id": "INTEGER",
+                "bill_id": "INTEGER",
+                "bank_account_id": "INTEGER",
+                "approval_status": "TEXT DEFAULT 'Draft'",
+            },
+            "bills": {
+                "bill_number": "TEXT",
+                "input_vat": "REAL DEFAULT 0",
+                "output_vat": "REAL DEFAULT 0",
+                "approval_status": "TEXT DEFAULT 'Draft'",
+            },
+            "invoices": {
+                "invoice_number": "TEXT",
+                "input_vat": "REAL DEFAULT 0",
+                "output_vat": "REAL DEFAULT 0",
+                "approval_status": "TEXT DEFAULT 'Draft'",
+            },
+            "inventory": {
+                "opening_balance": "REAL DEFAULT 0",
+                "barcode": "TEXT",
+                "inventory_account_id": "INTEGER",
+                "cogs_account_id": "INTEGER",
+            },
+        }
+
+        for table_name, column_defs in migration_columns.items():
+            cursor.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name = ?",
+                (table_name,),
+            )
+            if not cursor.fetchone():
+                continue
+            cursor.execute(f"PRAGMA table_info({table_name})")
+            existing_columns = {row[1] for row in cursor.fetchall()}
+            for column_name, column_def in column_defs.items():
+                if column_name in existing_columns:
+                    continue
+                try:
+                    cursor.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_def}")
+                except sqlite3.Error:
+                    continue
         conn.commit()
     except sqlite3.Error as exc:
         logger.warning("Startup schema repair skipped: %s", exc)
     finally:
         if conn:
             conn.close()
+
+
+def ensure_database_integrity():
+    """Compatibility wrapper for startup safety checks."""
+    repair_database_schema()
+    return check_and_repair_db()
 
 
 def ensure_schema_integrity(conn):

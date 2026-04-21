@@ -1,6 +1,6 @@
 import streamlit as st
 import pandas as pd
-from database import DB_PATH, check_and_repair_db, ensure_schema_integrity, get_connection, get_firebase_runtime_config, repair_database_schema
+from database import DB_PATH, check_and_repair_db, ensure_database_integrity, ensure_schema_integrity, get_connection, get_firebase_runtime_config
 from database import init_db as base_init_db
 from openai import OpenAI
 import json
@@ -77,10 +77,7 @@ GATEKEEPER_SYSTEM_PROMPT = (
 )
 
 # Startup schema safety layer.
-repair_database_schema()
-
-# Self-heal the local database before the rest of the app starts using it.
-check_and_repair_db()
+ensure_database_integrity()
 
 # OpenAI client initialization
 try:
