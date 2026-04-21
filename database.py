@@ -136,7 +136,9 @@ FIREBASE_KEY_PATH = os.path.join(os.path.dirname(__file__), "firebase_key.json")
 FIREBASE_DATABASE_URL = "https://eka-erp-cloud-vault-default-rtdb.firebaseio.com/"
 CURRENT_SCHEMA_VERSION = 2
 ERP_SAFE_STARTUP_MODE = str(os.getenv("ERP_SAFE_STARTUP_MODE", "0")).strip().lower() in {"1", "true", "yes", "on"}
-ERP_PRODUCTION_MODE = str(os.getenv("ERP_PRODUCTION_MODE", "0")).strip().lower() in {"1", "true", "yes", "on"}
+# Default to production-safe startup behavior so a redeploy does not silently create
+# a fresh blank SQLite file. Local development can explicitly set ERP_PRODUCTION_MODE=0.
+ERP_PRODUCTION_MODE = str(os.getenv("ERP_PRODUCTION_MODE", "1")).strip().lower() in {"1", "true", "yes", "on"}
 CRITICAL_VALIDATION_TABLES = (
     "companies",
     "branches",
@@ -1649,8 +1651,9 @@ def startup_database(recovery_callback=None):
     _ensure_local_db_file()
     db_health_before_startup = get_database_health_snapshot(DB_PATH, logger_instance=logger)
     cloud_restore_used = False
+    recovery_attempted = False
     logger.info(
-        "Database startup path selected: base_dir=%s db_dir=%s db_path=%s eka_data_dir=%s db_exists=%s db_valid=%s production_ready=%s company_count=%s production_mode=%s safe_mode=%s advanced_helpers_available=%s db_upgrade_safety=%s erp_migrations=%s cloud_restore_disabled=%s",
+        "Database startup path selected: base_dir=%s db_dir=%s db_path=%s eka_data_dir=%s db_exists=%s db_valid=%s production_ready=%s company_count=%s production_mode=%s safe_mode=%s advanced_helpers_available=%s db_upgrade_safety=%s erp_migrations=%s recovery_attempted=%s recovery_succeeded=%s cloud_restore_disabled=%s",
         BASE_DIR,
         DB_DIR,
         db_health_before_startup["db_path"],
@@ -1664,6 +1667,8 @@ def startup_database(recovery_callback=None):
         _advanced_startup_available(),
         DB_UPGRADE_SAFETY_AVAILABLE,
         ERP_MIGRATIONS_AVAILABLE,
+        recovery_attempted,
+        cloud_restore_used,
         recovery_callback is None,
     )
     if ERP_PRODUCTION_MODE and not db_health_before_startup["production_ready"]:
@@ -1677,15 +1682,17 @@ def startup_database(recovery_callback=None):
             "Production startup detected missing or non-production-ready database. Automatic recovery will be attempted: db_path=%s",
             DB_PATH,
         )
+        recovery_attempted = True
         cloud_restore_used = bool(recovery_callback(force_restore=True))
         db_health_before_startup = get_database_health_snapshot(DB_PATH, logger_instance=logger)
         logger.info(
-            "Database startup recovery result: db_path=%s db_exists=%s db_valid=%s production_ready=%s company_count=%s cloud_restore_used=%s",
+            "Database startup recovery result: db_path=%s db_exists=%s db_valid=%s production_ready=%s company_count=%s recovery_attempted=%s recovery_succeeded=%s",
             db_health_before_startup["db_path"],
             db_health_before_startup["file_exists"],
             db_health_before_startup["structural_valid"],
             db_health_before_startup["production_ready"],
             db_health_before_startup["company_count"],
+            recovery_attempted,
             cloud_restore_used,
         )
         if not db_health_before_startup["production_ready"]:
@@ -1709,10 +1716,11 @@ def startup_database(recovery_callback=None):
             _run_lightweight_integrity_checks(conn)
             conn.commit()
             logger.info(
-                "Database startup completed in fallback mode: db_path=%s db_valid=%s production_ready=%s cloud_restore_used=%s",
+                "Database startup completed in fallback mode: db_path=%s db_valid=%s production_ready=%s recovery_attempted=%s recovery_succeeded=%s",
                 DB_PATH,
                 is_database_valid(DB_PATH, logger_instance=logger),
                 is_database_ready_for_production(DB_PATH, logger_instance=logger),
+                recovery_attempted,
                 cloud_restore_used,
             )
             return True
@@ -1797,10 +1805,11 @@ def startup_database(recovery_callback=None):
             after_counts,
         )
         logger.info(
-            "Database startup completed: db_path=%s db_valid=%s production_ready=%s cloud_restore_used=%s",
+            "Database startup completed: db_path=%s db_valid=%s production_ready=%s recovery_attempted=%s recovery_succeeded=%s",
             DB_PATH,
             is_database_valid(DB_PATH, logger_instance=logger),
             is_database_ready_for_production(DB_PATH, logger_instance=logger),
+            recovery_attempted,
             cloud_restore_used,
         )
         return True

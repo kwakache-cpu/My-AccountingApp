@@ -179,7 +179,8 @@ def _restore_db_from_cloud_vault(force_restore=False):
         logger.warning("Cannot restore: Firebase bucket not available")
         return False
     try:
-        local_db_ready = is_database_ready_for_production(DB_PATH, logger_instance=logger)
+        logger.info("Cloud Vault recovery attempt started: db_path=%s force_restore=%s", DB_PATH, force_restore)
+        local_db_ready = is_database_production_ready(DB_PATH, logger_instance=logger)
         if local_db_ready and not force_restore:
             logger.warning(
                 "Cloud restore refused because the local database at %s is already production-ready.",
@@ -202,7 +203,7 @@ def _restore_db_from_cloud_vault(force_restore=False):
             except OSError:
                 pass
             return False
-        if not is_database_ready_for_production(temp_restore_path, logger_instance=logger):
+        if not is_database_production_ready(temp_restore_path, logger_instance=logger):
             logger.error(
                 "Cloud restore aborted because the downloaded database is structurally valid but not production-ready."
             )
@@ -215,7 +216,7 @@ def _restore_db_from_cloud_vault(force_restore=False):
             os.replace(temp_restore_path, DB_PATH)
         else:
             os.rename(temp_restore_path, DB_PATH)
-        logger.info("Manual recovery restored company data from Cloud Vault to %s", DB_PATH)
+        logger.info("Cloud Vault recovery succeeded and restored company data to %s", DB_PATH)
         return True
     except Exception as exc:
         logger.error(f"Cloud Vault restore failed: {exc}")
