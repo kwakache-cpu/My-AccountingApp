@@ -1,6 +1,6 @@
 import streamlit as st
 import pandas as pd
-from database import DB_PATH, check_and_repair_db, get_connection, get_firebase_runtime_config, startup_database
+from database import DB_PATH, get_connection, get_firebase_runtime_config, startup_database
 from openai import OpenAI
 import json
 import logging
@@ -74,9 +74,6 @@ logger = logging.getLogger(__name__)
 GATEKEEPER_SYSTEM_PROMPT = (
     "You are a professional Chartered Accountant. Provide clear, accurate financial guidance based on the ERP data."
 )
-
-# Startup schema safety layer.
-startup_database()
 
 # OpenAI client initialization
 try:
@@ -255,16 +252,9 @@ def _start_firebase_ghost_sync():
 
 # 1. Boot System
 def init_db():
-    """Boot through the canonical database startup path and then check cloud restore."""
-    startup_database()
+    """Canonical hotfix startup path for the app."""
+    return startup_database()
 
-    if _is_db_empty():
-        logger.info("📥 Local database is empty. Attempting restoration from Cloud Vault...")
-        _restore_db_from_cloud_vault()
-        startup_database()
-
-
-init_db()
 st.set_page_config(
     page_title="E.K.A Cloud ERP v3", 
     layout="wide", 

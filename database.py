@@ -4,14 +4,81 @@ from datetime import datetime
 import os
 import shutil
 
-from db_upgrade_safety import (
-    collect_row_counts,
-    create_timestamped_backup,
-    is_sqlite_file,
-    restore_database_from_backup,
-    validate_row_counts,
-)
-from erp_migrations import run_foundation_migrations
+DB_UPGRADE_SAFETY_AVAILABLE = True
+ERP_MIGRATIONS_AVAILABLE = True
+
+try:
+    from db_upgrade_safety import (
+        collect_row_counts,
+        create_timestamped_backup,
+        is_sqlite_file,
+        restore_database_from_backup,
+        validate_row_counts,
+    )
+except Exception as exc:
+    DB_UPGRADE_SAFETY_AVAILABLE = False
+
+    def collect_row_counts(conn, table_names):
+        counts = {}
+        for table_name in table_names:
+            try:
+                row = conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
+                    (table_name,),
+                ).fetchone()
+                if not row:
+                    counts[table_name] = 0
+                    continue
+                row_count = conn.execute(f"SELECT COUNT(*) FROM {table_name}").fetchone()
+                counts[table_name] = int(row_count[0] or 0) if row_count else 0
+            except sqlite3.Error:
+                counts[table_name] = 0
+        return counts
+
+    def create_timestamped_backup(db_path, logger=None, reason="migration"):
+        if logger:
+            logger.warning(
+                "db_upgrade_safety unavailable; skipping automatic backup creation and using fallback startup mode."
+            )
+        return None
+
+    def is_sqlite_file(path):
+        return bool(path and os.path.exists(path) and os.path.isfile(path))
+
+    def restore_database_from_backup(backup_path, db_path, logger=None):
+        if logger:
+            logger.warning("db_upgrade_safety unavailable; automatic restore is disabled in fallback mode.")
+        return False
+
+    def validate_row_counts(before_counts, after_counts):
+        failures = []
+        for table_name, before_count in (before_counts or {}).items():
+            after_count = int((after_counts or {}).get(table_name, 0))
+            if after_count < int(before_count):
+                failures.append((table_name, int(before_count), after_count))
+        return failures
+
+    logging.getLogger(__name__).warning(
+        "Optional module db_upgrade_safety failed to import; advanced startup protections are disabled. Error: %s",
+        exc,
+    )
+
+try:
+    from erp_migrations import run_foundation_migrations
+except Exception as exc:
+    ERP_MIGRATIONS_AVAILABLE = False
+
+    def run_foundation_migrations(conn, logger=None):
+        if logger:
+            logger.warning(
+                "Optional module erp_migrations failed to import; skipping advanced ERP foundation migrations."
+            )
+        return False
+
+    logging.getLogger(__name__).warning(
+        "Optional module erp_migrations failed to import; startup will continue in compatibility mode. Error: %s",
+        exc,
+    )
 
 # =================================================================
 # 1. SYSTEM LOGGING & CONFIGURATION
@@ -68,6 +135,7 @@ LEGACY_DB_PATH = os.path.abspath(DB_NAME)
 FIREBASE_KEY_PATH = os.path.join(os.path.dirname(__file__), "firebase_key.json")
 FIREBASE_DATABASE_URL = "https://eka-erp-cloud-vault-default-rtdb.firebaseio.com/"
 CURRENT_SCHEMA_VERSION = 2
+ERP_SAFE_STARTUP_MODE = str(os.getenv("ERP_SAFE_STARTUP_MODE", "0")).strip().lower() in {"1", "true", "yes", "on"}
 CRITICAL_VALIDATION_TABLES = (
     "companies",
     "branches",
@@ -879,6 +947,10 @@ def _run_lightweight_integrity_checks(conn):
     _ensure_app_compatibility_tables(conn)
 
 
+def _advanced_startup_available():
+    return DB_UPGRADE_SAFETY_AVAILABLE and ERP_MIGRATIONS_AVAILABLE and not ERP_SAFE_STARTUP_MODE
+
+
 def check_and_repair_db():
     """Compatibility wrapper for the canonical startup safety path."""
     return startup_database()
@@ -1438,6 +1510,13 @@ def startup_database():
     The flow is additive, idempotent, and restores from backup if validation detects data loss.
     """
     _ensure_local_db_file()
+    logger.info(
+        "Database startup path selected: safe_mode=%s advanced_helpers_available=%s db_upgrade_safety=%s erp_migrations=%s",
+        ERP_SAFE_STARTUP_MODE,
+        _advanced_startup_available(),
+        DB_UPGRADE_SAFETY_AVAILABLE,
+        ERP_MIGRATIONS_AVAILABLE,
+    )
     conn = None
     backup_path = None
     before_counts = {}
@@ -1445,6 +1524,15 @@ def startup_database():
     try:
         conn = _open_sqlite_connection()
         _ensure_migration_metadata_tables(conn)
+        if not _advanced_startup_available():
+            logger.warning(
+                "Startup running in fallback mode. Only minimal additive integrity checks will run; advanced migrations are skipped."
+            )
+            conn.execute("BEGIN")
+            _run_lightweight_integrity_checks(conn)
+            conn.commit()
+            return True
+
         current_version = _get_schema_version(conn)
         pending_migrations = [migration for migration in ORDERED_MIGRATIONS if migration[0] > current_version]
         before_counts = _snapshot_critical_row_counts(conn)
@@ -1459,7 +1547,7 @@ def startup_database():
 
         if pending_migrations:
             backup_path = create_timestamped_backup(DB_PATH, logger=logger, reason="pre_migration")
-            if not os.path.exists(backup_path):
+            if not backup_path or not os.path.exists(backup_path):
                 raise RuntimeError("Backup was not created; aborting migration run.")
 
         conn = _open_sqlite_connection()
@@ -1534,12 +1622,9 @@ def startup_database():
                 pass
             conn.close()
             conn = None
-        if backup_path:
-            try:
-                restore_database_from_backup(backup_path, DB_PATH, logger=logger)
-                logger.warning("Database restored from backup after startup failure.")
-            except Exception as restore_exc:
-                logger.critical("Backup restore failed after startup failure: %s", restore_exc)
+        logger.warning(
+            "Automatic database restore is disabled in the hotfix path; existing database file has not been intentionally overwritten."
+        )
         return False
     finally:
         if conn:
