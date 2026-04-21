@@ -3,8 +3,10 @@ import pandas as pd
 from database import (
     DB_PATH,
     create_timestamped_backup,
+    get_database_health_snapshot,
     get_connection,
     get_firebase_runtime_config,
+    is_database_ready_for_production,
     is_database_valid,
     startup_database,
 )
@@ -163,15 +165,22 @@ def _verify_cloud_vault_handshake():
 
 
 def _restore_db_from_cloud_vault(force_restore=False):
-    """Manual recovery helper only. Never used during normal startup."""
+    """
+    Cloud Vault restore helper.
+    Local SQLite continuity is temporary on ephemeral hosting; downloaded files must
+    validate before they can replace the runtime database.
+    """
     bucket = _get_firebase_bucket()
     if bucket is None:
         logger.warning("Cannot restore: Firebase bucket not available")
         return False
     try:
-        local_db_valid = is_database_valid(DB_PATH, logger_instance=logger)
-        if local_db_valid and not force_restore:
-            logger.warning("Manual cloud restore refused because the local database at %s is already valid.", DB_PATH)
+        local_db_ready = is_database_ready_for_production(DB_PATH, logger_instance=logger)
+        if local_db_ready and not force_restore:
+            logger.warning(
+                "Cloud restore refused because the local database at %s is already production-ready.",
+                DB_PATH,
+            )
             return False
         if os.path.exists(DB_PATH):
             backup_path = create_timestamped_backup(DB_PATH, logger=logger, reason="manual_recovery")
@@ -189,6 +198,15 @@ def _restore_db_from_cloud_vault(force_restore=False):
             except OSError:
                 pass
             return False
+        if not is_database_ready_for_production(temp_restore_path, logger_instance=logger):
+            logger.error(
+                "Cloud restore aborted because the downloaded database is structurally valid but not production-ready."
+            )
+            try:
+                os.remove(temp_restore_path)
+            except OSError:
+                pass
+            return False
         if os.path.exists(DB_PATH):
             os.replace(temp_restore_path, DB_PATH)
         else:
@@ -198,6 +216,43 @@ def _restore_db_from_cloud_vault(force_restore=False):
     except Exception as exc:
         logger.error(f"Cloud Vault restore failed: {exc}")
         return False
+
+
+def _ensure_startup_persistence_continuity():
+    """
+    Temporary production continuity layer.
+    If the runtime SQLite file is missing, invalid, or blank for production use after
+    redeploy, recover from Cloud Vault without overwriting a healthy local database.
+    """
+    local_health = get_database_health_snapshot(DB_PATH, logger_instance=logger)
+    cloud_restore_used = False
+    logger.info(
+        "Startup persistence check: db_path=%s db_exists=%s structural_valid=%s production_ready=%s company_count=%s cloud_restore_used=%s",
+        local_health["db_path"],
+        local_health["file_exists"],
+        local_health["structural_valid"],
+        local_health["production_ready"],
+        local_health["company_count"],
+        cloud_restore_used,
+    )
+    if local_health["production_ready"]:
+        return False
+
+    logger.warning(
+        "Local runtime database is not production-ready. Automatic Cloud Vault continuity restore will be attempted."
+    )
+    cloud_restore_used = _restore_db_from_cloud_vault(force_restore=True)
+    post_restore_health = get_database_health_snapshot(DB_PATH, logger_instance=logger)
+    logger.info(
+        "Startup persistence result: db_path=%s db_exists=%s structural_valid=%s production_ready=%s company_count=%s cloud_restore_used=%s",
+        post_restore_health["db_path"],
+        post_restore_health["file_exists"],
+        post_restore_health["structural_valid"],
+        post_restore_health["production_ready"],
+        post_restore_health["company_count"],
+        cloud_restore_used,
+    )
+    return cloud_restore_used
 
 st.set_page_config(
     page_title="E.K.A Cloud ERP v3", 
@@ -1316,12 +1371,16 @@ def check_session_lock():
 def main():
     st.cache_data.clear()
     st.cache_resource.clear()
+    # SQLite continuity on ephemeral hosting is temporary; managed persistent DB remains the target architecture.
+    cloud_restore_used = _ensure_startup_persistence_continuity()
     startup_database()
     logger.info(
-        "App runtime persistence mode: local_db_path=%s db_valid=%s cloud_restore_mode=manual_only runtime_cloud_sync_disabled=%s",
+        "App runtime persistence mode: local_db_path=%s db_valid=%s production_ready=%s cloud_restore_mode=automatic_if_not_ready_plus_manual runtime_cloud_sync_disabled=%s cloud_restore_used=%s",
         DB_PATH,
         is_database_valid(DB_PATH, logger_instance=logger),
+        is_database_ready_for_production(DB_PATH, logger_instance=logger),
         True,
+        cloud_restore_used,
     )
     _verify_cloud_vault_handshake()
     if "base_currency" not in st.session_state:

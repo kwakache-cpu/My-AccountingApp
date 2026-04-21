@@ -158,6 +158,9 @@ DATABASE_REQUIRED_TABLES = (
     "system_settings",
     "schema_version",
 )
+DATABASE_PRODUCTION_REQUIRED_TABLES = DATABASE_REQUIRED_TABLES + (
+    "database_identity",
+)
 
 
 def get_firebase_runtime_config():
@@ -283,6 +286,66 @@ def is_database_valid(db_path=DB_PATH, logger_instance=None):
     finally:
         if conn:
             conn.close()
+
+
+def get_database_company_count(db_path=DB_PATH, logger_instance=None):
+    logger_instance = logger_instance or logger
+    if not db_path or not os.path.exists(db_path):
+        return 0
+    conn = None
+    try:
+        conn = _open_sqlite_connection(path=db_path)
+        if not _table_exists(conn, "companies"):
+            return 0
+        row = conn.execute("SELECT COUNT(*) AS company_count FROM companies").fetchone()
+        return int(row["company_count"] or 0) if row else 0
+    except sqlite3.Error as exc:
+        logger_instance.warning("Database company count check failed for %s: %s", db_path, exc)
+        return 0
+    finally:
+        if conn:
+            conn.close()
+
+
+def is_database_ready_for_production(db_path=DB_PATH, logger_instance=None):
+    logger_instance = logger_instance or logger
+    if not is_database_valid(db_path=db_path, logger_instance=logger_instance):
+        return False
+    conn = None
+    try:
+        conn = _open_sqlite_connection(path=db_path)
+        required_tables = set(DATABASE_PRODUCTION_REQUIRED_TABLES)
+        existing_tables = {
+            row["name"]
+            for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()
+        }
+        if not required_tables.issubset(existing_tables):
+            return False
+        company_count = get_database_company_count(db_path=db_path, logger_instance=logger_instance)
+        if company_count <= 0:
+            return False
+        return True
+    except sqlite3.Error as exc:
+        logger_instance.warning("Database production readiness check failed for %s: %s", db_path, exc)
+        return False
+    finally:
+        if conn:
+            conn.close()
+
+
+def get_database_health_snapshot(db_path=DB_PATH, logger_instance=None):
+    logger_instance = logger_instance or logger
+    file_exists = bool(db_path and os.path.exists(db_path))
+    structural_valid = is_database_valid(db_path=db_path, logger_instance=logger_instance)
+    company_count = get_database_company_count(db_path=db_path, logger_instance=logger_instance)
+    production_ready = is_database_ready_for_production(db_path=db_path, logger_instance=logger_instance)
+    return {
+        "db_path": db_path,
+        "file_exists": file_exists,
+        "structural_valid": structural_valid,
+        "production_ready": production_ready,
+        "company_count": company_count,
+    }
 
 
 def _get_schema_version(conn):
@@ -1576,11 +1639,14 @@ def startup_database():
     The flow is additive, idempotent, and restores from backup if validation detects data loss.
     """
     _ensure_local_db_file()
-    db_valid_before_startup = is_database_valid(DB_PATH, logger_instance=logger)
+    db_health_before_startup = get_database_health_snapshot(DB_PATH, logger_instance=logger)
     logger.info(
-        "Database startup path selected: db_path=%s db_valid=%s safe_mode=%s advanced_helpers_available=%s db_upgrade_safety=%s erp_migrations=%s cloud_restore_disabled=%s",
-        DB_PATH,
-        db_valid_before_startup,
+        "Database startup path selected: db_path=%s db_exists=%s db_valid=%s production_ready=%s company_count=%s safe_mode=%s advanced_helpers_available=%s db_upgrade_safety=%s erp_migrations=%s cloud_restore_disabled=%s",
+        db_health_before_startup["db_path"],
+        db_health_before_startup["file_exists"],
+        db_health_before_startup["structural_valid"],
+        db_health_before_startup["production_ready"],
+        db_health_before_startup["company_count"],
         ERP_SAFE_STARTUP_MODE,
         _advanced_startup_available(),
         DB_UPGRADE_SAFETY_AVAILABLE,
