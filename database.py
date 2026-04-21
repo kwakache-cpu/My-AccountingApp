@@ -448,17 +448,59 @@ def get_database_health_snapshot(db_path=DB_PATH, logger_instance=None):
     }
 
 
+def _build_startup_result(
+    ok,
+    stage,
+    reason,
+    db_path=DB_PATH,
+    file_exists=False,
+    structurally_valid=False,
+    production_ready=False,
+    company_count=0,
+    recovery_attempted=False,
+    recovery_succeeded=False,
+):
+    return {
+        "ok": bool(ok),
+        "stage": str(stage),
+        "reason": str(reason),
+        "db_path": db_path,
+        "file_exists": bool(file_exists),
+        "structurally_valid": bool(structurally_valid),
+        "production_ready": bool(production_ready),
+        "company_count": int(company_count or 0),
+        "recovery_attempted": bool(recovery_attempted),
+        "recovery_succeeded": bool(recovery_succeeded),
+    }
+
+
 def attempt_production_database_recovery(force_restore=True):
     logger.info("Trusted backup recovery invoked: db_path=%s force_restore=%s", DB_PATH, force_restore)
     local_health = get_database_health_snapshot(DB_PATH, logger_instance=logger)
     if local_health["production_ready"] and not force_restore:
         logger.info("Trusted backup recovery skipped because local database is already production-ready: %s", DB_PATH)
-        return False
+        return {
+            "ok": False,
+            "stage": "recovery_skipped",
+            "reason": "local database is already production-ready",
+            "recovery_source_found": None,
+            "temp_download_succeeded": False,
+            "replacement_performed": False,
+            "health": local_health,
+        }
 
     bucket = _get_firebase_recovery_bucket()
     if bucket is None:
         logger.error("Trusted backup recovery unavailable because Firebase bucket is not accessible.")
-        return False
+        return {
+            "ok": False,
+            "stage": "recovery_source",
+            "reason": "trusted recovery source is not accessible",
+            "recovery_source_found": False,
+            "temp_download_succeeded": False,
+            "replacement_performed": False,
+            "health": local_health,
+        }
 
     temp_restore_path = f"{DB_PATH}.recovery_download"
     try:
@@ -467,7 +509,15 @@ def attempt_production_database_recovery(force_restore=True):
         logger.info("Trusted backup presence check: object=%s exists=%s", FIREBASE_OBJECT_NAME, backup_exists)
         if not backup_exists:
             logger.error("Trusted backup recovery failed because the cloud backup object does not exist: %s", FIREBASE_OBJECT_NAME)
-            return False
+            return {
+                "ok": False,
+                "stage": "recovery_source",
+                "reason": "trusted cloud backup object was not found",
+                "recovery_source_found": False,
+                "temp_download_succeeded": False,
+                "replacement_performed": False,
+                "health": local_health,
+            }
 
         blob.download_to_filename(temp_restore_path)
         logger.info("Trusted backup temp download succeeded: %s", temp_restore_path)
@@ -484,19 +534,55 @@ def attempt_production_database_recovery(force_restore=True):
         )
         if not downloaded_health["production_ready"]:
             logger.error("Trusted backup recovery aborted because downloaded database is not production-ready.")
-            return False
+            return {
+                "ok": False,
+                "stage": "recovery_validation",
+                "reason": "cloud backup downloaded but failed production-ready check",
+                "recovery_source_found": True,
+                "temp_download_succeeded": True,
+                "replacement_performed": False,
+                "health": downloaded_health,
+            }
 
+        replacement_performed = False
         if os.path.exists(DB_PATH):
             backup_path = create_timestamped_backup(DB_PATH, logger=logger, reason="trusted_recovery")
             logger.info("Created local backup before trusted recovery replacement: %s", backup_path)
             os.replace(temp_restore_path, DB_PATH)
+            replacement_performed = True
         else:
             os.rename(temp_restore_path, DB_PATH)
+            replacement_performed = True
         logger.info("Trusted backup recovery succeeded and promoted recovered database to %s", DB_PATH)
-        return True
+        final_health = get_database_health_snapshot(DB_PATH, logger_instance=logger)
+        logger.info(
+            "Trusted backup replacement performed: replaced=%s final_db_exists=%s final_db_valid=%s final_production_ready=%s final_company_count=%s",
+            replacement_performed,
+            final_health["file_exists"],
+            final_health["structural_valid"],
+            final_health["production_ready"],
+            final_health["company_count"],
+        )
+        return {
+            "ok": True,
+            "stage": "recovery_complete",
+            "reason": "trusted cloud backup restored successfully",
+            "recovery_source_found": True,
+            "temp_download_succeeded": True,
+            "replacement_performed": replacement_performed,
+            "health": final_health,
+        }
     except Exception as exc:
         logger.error("Trusted backup recovery failed: %s", exc)
-        return False
+        return {
+            "ok": False,
+            "stage": "recovery_exception",
+            "reason": str(exc),
+            "recovery_source_found": True,
+            "temp_download_succeeded": os.path.exists(temp_restore_path),
+            "replacement_performed": False,
+            "health": get_database_health_snapshot(DB_PATH, logger_instance=logger),
+        }
     finally:
         if os.path.exists(temp_restore_path):
             try:
@@ -1795,6 +1881,7 @@ def startup_database():
     Canonical startup path for database bootstrap, backups, migrations, and validation.
     The flow is additive, idempotent, and restores from backup if validation detects data loss.
     """
+    logger.info("Database startup entered: db_path=%s", DB_PATH)
     _ensure_local_db_file()
     preflight_conn = None
     if os.path.exists(DB_PATH) and is_database_valid(DB_PATH, logger_instance=logger):
@@ -1816,6 +1903,8 @@ def startup_database():
     db_health_before_startup = get_database_health_snapshot(DB_PATH, logger_instance=logger)
     cloud_restore_used = False
     recovery_attempted = False
+    failure_reason = "; ".join(db_health_before_startup.get("readiness_failures", [])) or "local database is not production-ready"
+    failure_stage = "startup_validation"
     logger.info(
         "Database startup path selected: base_dir=%s db_dir=%s db_path=%s eka_data_dir=%s db_exists=%s db_valid=%s production_ready=%s company_count=%s readiness_failures=%s production_mode=%s safe_mode=%s advanced_helpers_available=%s db_upgrade_safety=%s erp_migrations=%s recovery_attempted=%s recovery_succeeded=%s cloud_restore_disabled=%s",
         BASE_DIR,
@@ -1842,10 +1931,11 @@ def startup_database():
             DB_PATH,
         )
         recovery_attempted = True
-        cloud_restore_used = bool(attempt_production_database_recovery(force_restore=True))
+        recovery_result = attempt_production_database_recovery(force_restore=True)
+        cloud_restore_used = bool(recovery_result.get("ok"))
         db_health_before_startup = get_database_health_snapshot(DB_PATH, logger_instance=logger)
         logger.info(
-            "Database startup recovery result: db_path=%s db_exists=%s db_valid=%s production_ready=%s company_count=%s readiness_failures=%s recovery_attempted=%s recovery_succeeded=%s",
+            "Database startup recovery result: db_path=%s db_exists=%s db_valid=%s production_ready=%s company_count=%s readiness_failures=%s recovery_attempted=%s recovery_source_found=%s temp_download_succeeded=%s replacement_performed=%s recovery_succeeded=%s",
             db_health_before_startup["db_path"],
             db_health_before_startup["file_exists"],
             db_health_before_startup["structural_valid"],
@@ -1853,14 +1943,34 @@ def startup_database():
             db_health_before_startup["company_count"],
             "; ".join(db_health_before_startup.get("readiness_failures", [])) or "none",
             recovery_attempted,
+            recovery_result.get("recovery_source_found"),
+            recovery_result.get("temp_download_succeeded"),
+            recovery_result.get("replacement_performed"),
             cloud_restore_used,
         )
         if not db_health_before_startup["production_ready"]:
-            logger.error(
-                "Production startup recovery did not produce a production-ready database. Startup will fail safely: db_path=%s",
-                DB_PATH,
+            failure_stage = str(recovery_result.get("stage") or "recovery_validation")
+            failure_reason = str(
+                recovery_result.get("reason")
+                or ("; ".join(db_health_before_startup.get("readiness_failures", [])) or "recovery did not produce a production-ready database")
             )
-            return False
+            logger.error(
+                "Production startup recovery did not produce a production-ready database. Startup will fail safely: db_path=%s final_reason=%s",
+                DB_PATH,
+                failure_reason,
+            )
+            return _build_startup_result(
+                ok=False,
+                stage=failure_stage,
+                reason=failure_reason,
+                db_path=db_health_before_startup["db_path"],
+                file_exists=db_health_before_startup["file_exists"],
+                structurally_valid=db_health_before_startup["structural_valid"],
+                production_ready=db_health_before_startup["production_ready"],
+                company_count=db_health_before_startup["company_count"],
+                recovery_attempted=recovery_attempted,
+                recovery_succeeded=cloud_restore_used,
+            )
     conn = None
     backup_path = None
     before_counts = {}
@@ -1883,7 +1993,19 @@ def startup_database():
                 recovery_attempted,
                 cloud_restore_used,
             )
-            return True
+            final_health = get_database_health_snapshot(DB_PATH, logger_instance=logger)
+            return _build_startup_result(
+                ok=True,
+                stage="fallback_complete",
+                reason="startup completed in fallback mode",
+                db_path=final_health["db_path"],
+                file_exists=final_health["file_exists"],
+                structurally_valid=final_health["structural_valid"],
+                production_ready=final_health["production_ready"],
+                company_count=final_health["company_count"],
+                recovery_attempted=recovery_attempted,
+                recovery_succeeded=cloud_restore_used,
+            )
 
         current_version = _get_schema_version(conn)
         pending_migrations = [migration for migration in ORDERED_MIGRATIONS if migration[0] > current_version]
@@ -1972,9 +2094,23 @@ def startup_database():
             recovery_attempted,
             cloud_restore_used,
         )
-        return True
+        final_health = get_database_health_snapshot(DB_PATH, logger_instance=logger)
+        return _build_startup_result(
+            ok=True,
+            stage="startup_complete",
+            reason="database startup completed successfully",
+            db_path=final_health["db_path"],
+            file_exists=final_health["file_exists"],
+            structurally_valid=final_health["structural_valid"],
+            production_ready=final_health["production_ready"],
+            company_count=final_health["company_count"],
+            recovery_attempted=recovery_attempted,
+            recovery_succeeded=cloud_restore_used,
+        )
     except Exception as exc:
-        logger.error("Canonical database startup failed: %s", exc)
+        failure_stage = "startup_exception"
+        failure_reason = str(exc)
+        logger.error("Canonical database startup failed: stage=%s reason=%s", failure_stage, failure_reason)
         if conn:
             try:
                 conn.rollback()
@@ -1985,7 +2121,31 @@ def startup_database():
         logger.warning(
             "Automatic database restore is disabled in the hotfix path; existing database file has not been intentionally overwritten."
         )
-        return False
+        failed_health = get_database_health_snapshot(DB_PATH, logger_instance=logger)
+        logger.error(
+            "Database startup final failure reason: stage=%s reason=%s db_path=%s db_exists=%s db_valid=%s production_ready=%s company_count=%s recovery_attempted=%s recovery_succeeded=%s",
+            failure_stage,
+            failure_reason,
+            failed_health["db_path"],
+            failed_health["file_exists"],
+            failed_health["structural_valid"],
+            failed_health["production_ready"],
+            failed_health["company_count"],
+            recovery_attempted,
+            cloud_restore_used,
+        )
+        return _build_startup_result(
+            ok=False,
+            stage=failure_stage,
+            reason=failure_reason,
+            db_path=failed_health["db_path"],
+            file_exists=failed_health["file_exists"],
+            structurally_valid=failed_health["structural_valid"],
+            production_ready=failed_health["production_ready"],
+            company_count=failed_health["company_count"],
+            recovery_attempted=recovery_attempted,
+            recovery_succeeded=cloud_restore_used,
+        )
     finally:
         if conn:
             conn.close()

@@ -1329,11 +1329,20 @@ def main():
     st.cache_data.clear()
     st.cache_resource.clear()
     # SQLite continuity on ephemeral hosting is temporary; managed persistent DB remains the target architecture.
-    startup_ok = startup_database()
+    startup_status = startup_database()
+    startup_ok = bool(startup_status.get("ok")) if isinstance(startup_status, dict) else bool(startup_status)
     if not startup_ok:
-        logger.error("Application startup halted because the runtime database is not safe for use.")
+        logger.error(
+            "Application startup halted because the runtime database is not safe for use: stage=%s reason=%s",
+            startup_status.get("stage") if isinstance(startup_status, dict) else "unknown",
+            startup_status.get("reason") if isinstance(startup_status, dict) else "startup_database returned a falsey result",
+        )
         st.error(
-            "Database startup could not recover a production-ready runtime database. "
+            "Database startup could not recover a production-ready runtime database.\n\n"
+            f"Stage: {startup_status.get('stage', 'unknown') if isinstance(startup_status, dict) else 'unknown'}\n"
+            f"Reason: {startup_status.get('reason', 'startup_database returned a falsey result') if isinstance(startup_status, dict) else 'startup_database returned a falsey result'}\n"
+            f"Database Path: {startup_status.get('db_path', DB_PATH) if isinstance(startup_status, dict) else DB_PATH}\n"
+            f"Recovery Attempted: {'Yes' if (startup_status.get('recovery_attempted') if isinstance(startup_status, dict) else False) else 'No'}\n\n"
             "The app stopped safely to protect deployed company data."
         )
         st.stop()
