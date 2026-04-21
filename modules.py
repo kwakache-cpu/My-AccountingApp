@@ -170,13 +170,6 @@ def initialize_paystack_payment(email, amount, reference):
     return None
 
 
-# ==========================================
-# DATABASE HELPERS (modules-level)
-# ==========================================
-DB_NAME = "eka_vault.db"
-DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), DB_NAME)
-
-
 def get_master_price_per_month():
     conn = None
     try:
