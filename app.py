@@ -223,6 +223,11 @@ def _restore_db_from_cloud_vault(force_restore=False):
         return False
 
 
+def attempt_production_database_recovery(force_restore=True):
+    logger.info("Production database recovery wrapper invoked: db_path=%s force_restore=%s", DB_PATH, force_restore)
+    return _restore_db_from_cloud_vault(force_restore=force_restore)
+
+
 st.set_page_config(
     page_title="E.K.A Cloud ERP v3", 
     layout="wide", 
@@ -1355,7 +1360,7 @@ def main():
     st.cache_data.clear()
     st.cache_resource.clear()
     # SQLite continuity on ephemeral hosting is temporary; managed persistent DB remains the target architecture.
-    startup_ok = startup_database(recovery_callback=_restore_db_from_cloud_vault)
+    startup_ok = startup_database(recovery_callback=attempt_production_database_recovery)
     if not startup_ok:
         logger.error("Application startup halted because the runtime database is not safe for use.")
         st.error(

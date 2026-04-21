@@ -313,10 +313,26 @@ def get_database_company_count(db_path=DB_PATH, logger_instance=None):
             conn.close()
 
 
-def is_database_ready_for_production(db_path=DB_PATH, logger_instance=None):
+def get_database_production_readiness_report(db_path=DB_PATH, logger_instance=None):
     logger_instance = logger_instance or logger
-    if not is_database_valid(db_path=db_path, logger_instance=logger_instance):
-        return False
+    report = {
+        "db_path": db_path,
+        "file_exists": bool(db_path and os.path.exists(db_path)),
+        "structural_valid": False,
+        "production_ready": False,
+        "company_count": 0,
+        "failures": [],
+    }
+    if not report["file_exists"]:
+        report["failures"].append("database file is missing")
+        return report
+    if not is_sqlite_file(db_path):
+        report["failures"].append("database file is not a valid SQLite file")
+        return report
+    report["structural_valid"] = is_database_valid(db_path=db_path, logger_instance=logger_instance)
+    if not report["structural_valid"]:
+        report["failures"].append("required structural tables or columns are missing")
+        return report
     conn = None
     try:
         conn = _open_sqlite_connection(path=db_path)
@@ -325,18 +341,26 @@ def is_database_ready_for_production(db_path=DB_PATH, logger_instance=None):
             row["name"]
             for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()
         }
-        if not required_tables.issubset(existing_tables):
-            return False
-        company_count = get_database_company_count(db_path=db_path, logger_instance=logger_instance)
-        if company_count <= 0:
-            return False
-        return True
+        missing_tables = sorted(required_tables.difference(existing_tables))
+        if missing_tables:
+            report["failures"].append(f"missing required production tables: {', '.join(missing_tables)}")
+        report["company_count"] = get_database_company_count(db_path=db_path, logger_instance=logger_instance)
+        if report["company_count"] <= 0:
+            report["failures"].append("companies table has no deployed company rows")
+        report["production_ready"] = not report["failures"]
+        return report
     except sqlite3.Error as exc:
-        logger_instance.warning("Database production readiness check failed for %s: %s", db_path, exc)
-        return False
+        logger_instance.warning("Database production readiness report failed for %s: %s", db_path, exc)
+        report["failures"].append(str(exc))
+        return report
     finally:
         if conn:
             conn.close()
+
+
+def is_database_ready_for_production(db_path=DB_PATH, logger_instance=None):
+    report = get_database_production_readiness_report(db_path=db_path, logger_instance=logger_instance)
+    return bool(report["production_ready"])
 
 
 def is_database_production_ready(db_path=DB_PATH, logger_instance=None):
@@ -344,17 +368,14 @@ def is_database_production_ready(db_path=DB_PATH, logger_instance=None):
 
 
 def get_database_health_snapshot(db_path=DB_PATH, logger_instance=None):
-    logger_instance = logger_instance or logger
-    file_exists = bool(db_path and os.path.exists(db_path))
-    structural_valid = is_database_valid(db_path=db_path, logger_instance=logger_instance)
-    company_count = get_database_company_count(db_path=db_path, logger_instance=logger_instance)
-    production_ready = is_database_ready_for_production(db_path=db_path, logger_instance=logger_instance)
+    report = get_database_production_readiness_report(db_path=db_path, logger_instance=logger_instance)
     return {
         "db_path": db_path,
-        "file_exists": file_exists,
-        "structural_valid": structural_valid,
-        "production_ready": production_ready,
-        "company_count": company_count,
+        "file_exists": report["file_exists"],
+        "structural_valid": report["structural_valid"],
+        "production_ready": report["production_ready"],
+        "company_count": report["company_count"],
+        "readiness_failures": report["failures"],
     }
 
 
@@ -1649,11 +1670,28 @@ def startup_database(recovery_callback=None):
     The flow is additive, idempotent, and restores from backup if validation detects data loss.
     """
     _ensure_local_db_file()
+    preflight_conn = None
+    if os.path.exists(DB_PATH) and is_database_valid(DB_PATH, logger_instance=logger):
+        try:
+            preflight_conn = _open_sqlite_connection()
+            preflight_conn.execute("BEGIN")
+            _run_lightweight_integrity_checks(preflight_conn)
+            preflight_conn.commit()
+        except Exception as exc:
+            if preflight_conn:
+                try:
+                    preflight_conn.rollback()
+                except sqlite3.Error:
+                    pass
+            logger.warning("Preflight integrity preparation failed before production readiness evaluation: %s", exc)
+        finally:
+            if preflight_conn:
+                preflight_conn.close()
     db_health_before_startup = get_database_health_snapshot(DB_PATH, logger_instance=logger)
     cloud_restore_used = False
     recovery_attempted = False
     logger.info(
-        "Database startup path selected: base_dir=%s db_dir=%s db_path=%s eka_data_dir=%s db_exists=%s db_valid=%s production_ready=%s company_count=%s production_mode=%s safe_mode=%s advanced_helpers_available=%s db_upgrade_safety=%s erp_migrations=%s recovery_attempted=%s recovery_succeeded=%s cloud_restore_disabled=%s",
+        "Database startup path selected: base_dir=%s db_dir=%s db_path=%s eka_data_dir=%s db_exists=%s db_valid=%s production_ready=%s company_count=%s readiness_failures=%s production_mode=%s safe_mode=%s advanced_helpers_available=%s db_upgrade_safety=%s erp_migrations=%s recovery_attempted=%s recovery_succeeded=%s cloud_restore_disabled=%s",
         BASE_DIR,
         DB_DIR,
         db_health_before_startup["db_path"],
@@ -1662,6 +1700,7 @@ def startup_database(recovery_callback=None):
         db_health_before_startup["structural_valid"],
         db_health_before_startup["production_ready"],
         db_health_before_startup["company_count"],
+        "; ".join(db_health_before_startup.get("readiness_failures", [])) or "none",
         ERP_PRODUCTION_MODE,
         ERP_SAFE_STARTUP_MODE,
         _advanced_startup_available(),
@@ -1686,12 +1725,13 @@ def startup_database(recovery_callback=None):
         cloud_restore_used = bool(recovery_callback(force_restore=True))
         db_health_before_startup = get_database_health_snapshot(DB_PATH, logger_instance=logger)
         logger.info(
-            "Database startup recovery result: db_path=%s db_exists=%s db_valid=%s production_ready=%s company_count=%s recovery_attempted=%s recovery_succeeded=%s",
+            "Database startup recovery result: db_path=%s db_exists=%s db_valid=%s production_ready=%s company_count=%s readiness_failures=%s recovery_attempted=%s recovery_succeeded=%s",
             db_health_before_startup["db_path"],
             db_health_before_startup["file_exists"],
             db_health_before_startup["structural_valid"],
             db_health_before_startup["production_ready"],
             db_health_before_startup["company_count"],
+            "; ".join(db_health_before_startup.get("readiness_failures", [])) or "none",
             recovery_attempted,
             cloud_restore_used,
         )
