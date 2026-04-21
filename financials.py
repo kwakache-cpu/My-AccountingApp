@@ -4,7 +4,7 @@ import sqlite3
 import pandas as pd
 import streamlit as st
 
-from database import get_connection, init_db
+from database import get_connection
 from accounting_engine import (
     close_fiscal_year,
     generate_cash_flow_statement as engine_generate_cash_flow_statement,
@@ -84,7 +84,6 @@ def _normal_balance(account_type):
 
 
 def _chart_lookup():
-    init_db()
     conn = get_connection()
     try:
         try:

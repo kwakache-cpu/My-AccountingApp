@@ -1351,87 +1351,8 @@ def show_debtors_by_city_report(company_key):
 
 
 def init_db():
-    conn = get_connection()
-    try:
-        cursor = conn.cursor()
-        cursor.execute(
-            """
-            CREATE TABLE IF NOT EXISTS companies (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                company_name TEXT,
-                admin_name TEXT,
-                contact_email TEXT,
-                status TEXT DEFAULT 'Active',
-                subscription_expiry TEXT,
-                created_at TEXT
-            )
-            """
-        )
-        cursor.execute(
-            """
-            CREATE TABLE IF NOT EXISTS sales_invoices (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                customer_name TEXT,
-                amount REAL,
-                status TEXT,
-                date TEXT
-            )
-            """
-        )
-        cursor.execute(
-            """
-            CREATE TABLE IF NOT EXISTS accounts_payable (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                supplier_name TEXT,
-                amount REAL,
-                status TEXT,
-                date TEXT
-            )
-            """
-        )
-        cursor.execute(
-            """
-            CREATE TABLE IF NOT EXISTS chart_of_accounts (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                account_name TEXT,
-                account_type TEXT,
-                balance REAL
-            )
-            """
-        )
-        cursor.execute(
-            """
-            CREATE TABLE IF NOT EXISTS vouchers (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                company_key TEXT,
-                branch_id TEXT,
-                v_type TEXT,
-                ledger TEXT,
-                narration TEXT,
-                amount REAL,
-                ref_no TEXT,
-                reference_no TEXT,
-                credit REAL DEFAULT 0,
-                created_by TEXT,
-                status TEXT DEFAULT 'Active',
-                date TEXT
-            )
-            """
-        )
-        cursor.execute(
-            """
-            CREATE TABLE IF NOT EXISTS system_logs (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                timestamp TEXT,
-                level TEXT,
-                module_name TEXT,
-                message TEXT
-            )
-            """
-        )
-        conn.commit()
-    finally:
-        conn.close()
+    from database import startup_database
+    return startup_database()
 
 
 def log_system_event(level, module_name, message):

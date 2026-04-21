@@ -2,13 +2,8 @@ import streamlit as st
 import pandas as pd
 from database import (
     DB_PATH,
-    create_timestamped_backup,
-    get_database_health_snapshot,
     get_connection,
     get_firebase_runtime_config,
-    is_database_production_ready,
-    is_database_ready_for_production,
-    is_database_valid,
     startup_database,
 )
 from openai import OpenAI
@@ -166,66 +161,6 @@ def _verify_cloud_vault_handshake():
         st.session_state.cloud_vault_status = _get_cloud_vault_status()
     except Exception:
         st.session_state.cloud_vault_status = "🔴 Cloud Vault: Local Mode"
-
-
-def _restore_db_from_cloud_vault(force_restore=False):
-    """
-    Cloud Vault restore helper.
-    Local SQLite continuity is temporary on ephemeral hosting; downloaded files must
-    validate before they can replace the runtime database.
-    """
-    bucket = _get_firebase_bucket()
-    if bucket is None:
-        logger.warning("Cannot restore: Firebase bucket not available")
-        return False
-    try:
-        logger.info("Cloud Vault recovery attempt started: db_path=%s force_restore=%s", DB_PATH, force_restore)
-        local_db_ready = is_database_production_ready(DB_PATH, logger_instance=logger)
-        if local_db_ready and not force_restore:
-            logger.warning(
-                "Cloud restore refused because the local database at %s is already production-ready.",
-                DB_PATH,
-            )
-            return False
-        if os.path.exists(DB_PATH):
-            backup_path = create_timestamped_backup(DB_PATH, logger=logger, reason="manual_recovery")
-            logger.info("Created local backup before manual recovery restore: %s", backup_path)
-        blob = bucket.blob(FIREBASE_OBJECT_NAME)
-        if not blob.exists():
-            logger.warning("Cloud Vault database not found")
-            return False
-        temp_restore_path = f"{DB_PATH}.recovery_download"
-        blob.download_to_filename(temp_restore_path)
-        if not is_database_valid(temp_restore_path, logger_instance=logger):
-            logger.error("Manual cloud restore aborted because the downloaded database is not valid.")
-            try:
-                os.remove(temp_restore_path)
-            except OSError:
-                pass
-            return False
-        if not is_database_production_ready(temp_restore_path, logger_instance=logger):
-            logger.error(
-                "Cloud restore aborted because the downloaded database is structurally valid but not production-ready."
-            )
-            try:
-                os.remove(temp_restore_path)
-            except OSError:
-                pass
-            return False
-        if os.path.exists(DB_PATH):
-            os.replace(temp_restore_path, DB_PATH)
-        else:
-            os.rename(temp_restore_path, DB_PATH)
-        logger.info("Cloud Vault recovery succeeded and restored company data to %s", DB_PATH)
-        return True
-    except Exception as exc:
-        logger.error(f"Cloud Vault restore failed: {exc}")
-        return False
-
-
-def attempt_production_database_recovery(force_restore=True):
-    logger.info("Production database recovery wrapper invoked: db_path=%s force_restore=%s", DB_PATH, force_restore)
-    return _restore_db_from_cloud_vault(force_restore=force_restore)
 
 
 st.set_page_config(
@@ -1360,7 +1295,7 @@ def main():
     st.cache_data.clear()
     st.cache_resource.clear()
     # SQLite continuity on ephemeral hosting is temporary; managed persistent DB remains the target architecture.
-    startup_ok = startup_database(recovery_callback=attempt_production_database_recovery)
+    startup_ok = startup_database()
     if not startup_ok:
         logger.error("Application startup halted because the runtime database is not safe for use.")
         st.error(
@@ -1368,15 +1303,6 @@ def main():
             "The app stopped safely to protect deployed company data."
         )
         st.stop()
-    current_health = get_database_health_snapshot(DB_PATH, logger_instance=logger)
-    logger.info(
-        "App runtime persistence mode: local_db_path=%s db_valid=%s production_ready=%s cloud_restore_mode=automatic_if_not_ready_plus_manual runtime_cloud_sync_disabled=%s cloud_restore_used=%s",
-        DB_PATH,
-        is_database_valid(DB_PATH, logger_instance=logger),
-        is_database_production_ready(DB_PATH, logger_instance=logger),
-        True,
-        current_health["production_ready"] and current_health["company_count"] > 0,
-    )
     _verify_cloud_vault_handshake()
     if "base_currency" not in st.session_state:
         st.session_state.base_currency = "GHS"

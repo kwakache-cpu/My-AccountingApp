@@ -3,6 +3,7 @@ import logging
 from datetime import datetime
 import os
 import shutil
+import json
 
 DB_UPGRADE_SAFETY_AVAILABLE = True
 ERP_MIGRATIONS_AVAILABLE = True
@@ -80,6 +81,15 @@ except Exception as exc:
         exc,
     )
 
+try:
+    import firebase_admin
+    from firebase_admin import credentials, initialize_app, storage
+except Exception:
+    firebase_admin = None
+    credentials = None
+    initialize_app = None
+    storage = None
+
 # =================================================================
 # 1. SYSTEM LOGGING & CONFIGURATION
 # =================================================================
@@ -134,6 +144,7 @@ DB_PATH = os.path.join(DB_DIR, DB_NAME)
 LEGACY_DB_PATH = os.path.abspath(DB_NAME)
 FIREBASE_KEY_PATH = os.path.join(os.path.dirname(__file__), "firebase_key.json")
 FIREBASE_DATABASE_URL = "https://eka-erp-cloud-vault-default-rtdb.firebaseio.com/"
+FIREBASE_OBJECT_NAME = "backups/eka_enterprise_v3.db"
 CURRENT_SCHEMA_VERSION = 2
 ERP_SAFE_STARTUP_MODE = str(os.getenv("ERP_SAFE_STARTUP_MODE", "0")).strip().lower() in {"1", "true", "yes", "on"}
 # Default to production-safe startup behavior so a redeploy does not silently create
@@ -164,6 +175,8 @@ DATABASE_REQUIRED_TABLES = (
 DATABASE_PRODUCTION_REQUIRED_TABLES = DATABASE_REQUIRED_TABLES + (
     "database_identity",
 )
+FIREBASE_RECOVERY_APP = None
+FIREBASE_RECOVERY_BUCKET_NAME = None
 
 
 def get_firebase_runtime_config():
@@ -171,6 +184,58 @@ def get_firebase_runtime_config():
         "databaseURL": FIREBASE_DATABASE_URL,
         "key_path": FIREBASE_KEY_PATH,
     }
+
+
+def _init_firebase_recovery_client():
+    global FIREBASE_RECOVERY_APP, FIREBASE_RECOVERY_BUCKET_NAME
+    if firebase_admin is None or credentials is None or initialize_app is None or storage is None:
+        return None
+    if FIREBASE_RECOVERY_APP is not None:
+        return FIREBASE_RECOVERY_APP
+    try:
+        firebase_config = get_firebase_runtime_config()
+        firebase_key_path = firebase_config["key_path"]
+        if not os.path.exists(firebase_key_path):
+            logger.warning("Firebase recovery key path is missing: %s", firebase_key_path)
+            return None
+        with open(firebase_key_path, "r", encoding="utf-8") as firebase_file:
+            firebase_info = json.load(firebase_file)
+        project_id = str(firebase_info.get("project_id") or "").strip()
+        if not project_id:
+            logger.warning("Firebase recovery client could not determine project_id from %s", firebase_key_path)
+            return None
+        FIREBASE_RECOVERY_BUCKET_NAME = f"{project_id}.appspot.com"
+        firebase_cred = credentials.Certificate(firebase_key_path)
+        FIREBASE_RECOVERY_APP = initialize_app(
+            firebase_cred,
+            {
+                "storageBucket": FIREBASE_RECOVERY_BUCKET_NAME,
+                "databaseURL": firebase_config["databaseURL"],
+            },
+            name="eka-database-recovery",
+        )
+        return FIREBASE_RECOVERY_APP
+    except ValueError:
+        try:
+            FIREBASE_RECOVERY_APP = firebase_admin.get_app("eka-database-recovery")
+            return FIREBASE_RECOVERY_APP
+        except Exception as exc:
+            logger.warning("Firebase recovery client lookup failed: %s", exc)
+            return None
+    except Exception as exc:
+        logger.warning("Firebase recovery client initialization failed: %s", exc)
+        return None
+
+
+def _get_firebase_recovery_bucket():
+    app = _init_firebase_recovery_client()
+    if app is None or storage is None:
+        return None
+    try:
+        return storage.bucket(app=app)
+    except Exception as exc:
+        logger.warning("Firebase recovery bucket unavailable: %s", exc)
+        return None
 
 
 def _ensure_db_directory():
@@ -201,6 +266,10 @@ def _ensure_local_db_file():
 
 
 def _open_sqlite_connection(path=DB_PATH):
+    if os.path.abspath(path) == os.path.abspath(DB_PATH) and ERP_PRODUCTION_MODE and not os.path.exists(path):
+        raise sqlite3.OperationalError(
+            f"Production database file is missing and cannot be recreated outside startup recovery: {path}"
+        )
     conn = sqlite3.connect(path, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON;")
@@ -377,6 +446,63 @@ def get_database_health_snapshot(db_path=DB_PATH, logger_instance=None):
         "company_count": report["company_count"],
         "readiness_failures": report["failures"],
     }
+
+
+def attempt_production_database_recovery(force_restore=True):
+    logger.info("Trusted backup recovery invoked: db_path=%s force_restore=%s", DB_PATH, force_restore)
+    local_health = get_database_health_snapshot(DB_PATH, logger_instance=logger)
+    if local_health["production_ready"] and not force_restore:
+        logger.info("Trusted backup recovery skipped because local database is already production-ready: %s", DB_PATH)
+        return False
+
+    bucket = _get_firebase_recovery_bucket()
+    if bucket is None:
+        logger.error("Trusted backup recovery unavailable because Firebase bucket is not accessible.")
+        return False
+
+    temp_restore_path = f"{DB_PATH}.recovery_download"
+    try:
+        blob = bucket.blob(FIREBASE_OBJECT_NAME)
+        backup_exists = bool(blob.exists())
+        logger.info("Trusted backup presence check: object=%s exists=%s", FIREBASE_OBJECT_NAME, backup_exists)
+        if not backup_exists:
+            logger.error("Trusted backup recovery failed because the cloud backup object does not exist: %s", FIREBASE_OBJECT_NAME)
+            return False
+
+        blob.download_to_filename(temp_restore_path)
+        logger.info("Trusted backup temp download succeeded: %s", temp_restore_path)
+
+        downloaded_health = get_database_health_snapshot(temp_restore_path, logger_instance=logger)
+        logger.info(
+            "Trusted backup validation: temp_path=%s db_exists=%s db_valid=%s production_ready=%s company_count=%s readiness_failures=%s",
+            downloaded_health["db_path"],
+            downloaded_health["file_exists"],
+            downloaded_health["structural_valid"],
+            downloaded_health["production_ready"],
+            downloaded_health["company_count"],
+            "; ".join(downloaded_health.get("readiness_failures", [])) or "none",
+        )
+        if not downloaded_health["production_ready"]:
+            logger.error("Trusted backup recovery aborted because downloaded database is not production-ready.")
+            return False
+
+        if os.path.exists(DB_PATH):
+            backup_path = create_timestamped_backup(DB_PATH, logger=logger, reason="trusted_recovery")
+            logger.info("Created local backup before trusted recovery replacement: %s", backup_path)
+            os.replace(temp_restore_path, DB_PATH)
+        else:
+            os.rename(temp_restore_path, DB_PATH)
+        logger.info("Trusted backup recovery succeeded and promoted recovered database to %s", DB_PATH)
+        return True
+    except Exception as exc:
+        logger.error("Trusted backup recovery failed: %s", exc)
+        return False
+    finally:
+        if os.path.exists(temp_restore_path):
+            try:
+                os.remove(temp_restore_path)
+            except OSError:
+                pass
 
 
 def _get_schema_version(conn):
@@ -1664,7 +1790,7 @@ ORDERED_MIGRATIONS = (
 )
 
 
-def startup_database(recovery_callback=None):
+def startup_database():
     """
     Canonical startup path for database bootstrap, backups, migrations, and validation.
     The flow is additive, idempotent, and restores from backup if validation detects data loss.
@@ -1708,21 +1834,15 @@ def startup_database(recovery_callback=None):
         ERP_MIGRATIONS_AVAILABLE,
         recovery_attempted,
         cloud_restore_used,
-        recovery_callback is None,
+        False,
     )
     if ERP_PRODUCTION_MODE and not db_health_before_startup["production_ready"]:
-        if recovery_callback is None:
-            logger.error(
-                "Production startup refused to proceed with a non-production-ready database and no recovery callback: db_path=%s",
-                DB_PATH,
-            )
-            return False
         logger.warning(
             "Production startup detected missing or non-production-ready database. Automatic recovery will be attempted: db_path=%s",
             DB_PATH,
         )
         recovery_attempted = True
-        cloud_restore_used = bool(recovery_callback(force_restore=True))
+        cloud_restore_used = bool(attempt_production_database_recovery(force_restore=True))
         db_health_before_startup = get_database_health_snapshot(DB_PATH, logger_instance=logger)
         logger.info(
             "Database startup recovery result: db_path=%s db_exists=%s db_valid=%s production_ready=%s company_count=%s readiness_failures=%s recovery_attempted=%s recovery_succeeded=%s",
