@@ -1,6 +1,7 @@
 sqlalchemy==2.0.48
 psycopg2-binary==2.9.11
 streamlit
+openai
 groq
 pandas
 python-dateutil

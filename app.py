@@ -2,7 +2,7 @@ import streamlit as st
 import pandas as pd
 from database import DB_PATH, check_and_repair_db, ensure_schema_integrity, get_connection, get_firebase_runtime_config, repair_database_schema
 from database import init_db as base_init_db
-from groq import Groq
+from openai import OpenAI
 import json
 import logging
 import os
@@ -82,12 +82,12 @@ repair_database_schema()
 # Self-heal the local database before the rest of the app starts using it.
 check_and_repair_db()
 
-# Hard-wired Groq API Key (Direct Connection)
+# OpenAI client initialization
 try:
-    client = Groq(api_key='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')
+    client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
     st.session_state['ai_active'] = True
 except Exception as exc:
-    st.toast(f"Failed to initialize Groq client: {exc}")
+    st.toast(f"Failed to initialize OpenAI client: {exc}")
     st.session_state['ai_active'] = False
     client = None
 FIREBASE_SYNC_STARTED = False
@@ -655,13 +655,13 @@ E.K.A Support Team
     return True
 
 def ask_gatekeeper_ai(user_input):
-    """Send the raw user prompt directly to Groq and return the response text."""
+    """Send the raw user prompt directly to OpenAI and return the response text."""
     if st.session_state.get("ai_active") is False or client is None:
-        return "The app cannot see GROQ_API_KEY in Streamlit Secrets."
+        return "The app cannot see OPENAI_API_KEY in Streamlit Secrets."
 
     try:
         response = client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
+            model="gpt-4o-mini",
             messages=[
                 {
                     "role": "system",
@@ -673,7 +673,7 @@ def ask_gatekeeper_ai(user_input):
         )
         return response.choices[0].message.content
     except Exception as e:
-        logger.error(f"Gatekeeper AI call failed: {e}")
+        logger.error(f"OpenAI Gatekeeper AI call failed: {e}")
         return f"AI Error: {str(e)}"
 
 
