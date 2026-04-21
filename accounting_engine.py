@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 import json
+import logging
 import sqlite3
 
 import pandas as pd
@@ -10,6 +11,7 @@ from database import get_connection
 
 
 LEGACY_TABLES = {"vouchers", "transactions"}
+logger = logging.getLogger(__name__)
 
 
 def _resolve_date(value):
@@ -41,6 +43,47 @@ def _period_locked(conn, company_key, entry_date):
         (company_key, _resolve_date(entry_date)),
     ).fetchone()
     return bool(row)
+
+
+def _system_setting_value(conn, column_name, default=None):
+    try:
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(system_settings)").fetchall()}
+        if column_name not in columns:
+            return default
+        row = conn.execute(f"SELECT {column_name} AS value FROM system_settings WHERE id = 1").fetchone()
+        return row["value"] if row and "value" in row.keys() else default
+    except sqlite3.Error:
+        return default
+
+
+def _legacy_mirror_mode(conn):
+    return str(_system_setting_value(conn, "legacy_mirror_mode", "mirror") or "mirror").strip().lower()
+
+
+def _document_approval_enforced(conn):
+    return bool(int(_system_setting_value(conn, "enforce_document_approval", 0) or 0))
+
+
+def _assert_source_document_postable(conn, source_table, source_id):
+    if not source_table or not source_id or not _document_approval_enforced(conn):
+        return
+    allowed_tables = {"invoices", "bills", "payments"}
+    normalized_table = str(source_table).strip().lower()
+    if normalized_table not in allowed_tables:
+        return
+    columns = {row[1] for row in conn.execute(f"PRAGMA table_info({normalized_table})").fetchall()}
+    if "approval_status" not in columns:
+        return
+    row = conn.execute(
+        f"SELECT approval_status FROM {normalized_table} WHERE id = ? LIMIT 1",
+        (int(source_id),),
+    ).fetchone()
+    status = str(row["approval_status"] or "").strip().title() if row else ""
+    if status not in {"Approved", "Posted", "Active"}:
+        raise ValueError(
+            f"{normalized_table[:-1].title() if normalized_table.endswith('s') else normalized_table.title()} "
+            f"{source_id} cannot post to the journal while approval_status is '{status or 'Draft'}'."
+        )
 
 
 def _coa_name_expression():
@@ -113,6 +156,8 @@ def get_account_id(conn, account_name, account_type=None):
 
 
 def _mirror_legacy_transactions(conn, company_key, entry_date, description, reference, created_by, branch_id, normalized_lines):
+    if _legacy_mirror_mode(conn) not in {"mirror", "dual_write"}:
+        return
     try:
         conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'transactions'").fetchone()
         for line in normalized_lines:
@@ -148,6 +193,8 @@ def _legacy_voucher_insert(
     normalized_lines,
     source_module=None,
 ):
+    if _legacy_mirror_mode(conn) not in {"mirror", "dual_write"}:
+        return
     try:
         revenue = sum(line["credit"] for line in normalized_lines if line["account_type"] == "Income")
         if revenue <= 0:
@@ -202,6 +249,7 @@ def post_journal_entry(
         raise RuntimeError("Database connection unavailable.")
     if _period_locked(conn, company_key, entry_date):
         raise ValueError(f"The accounting period for {entry_date[:7]} is locked.")
+    _assert_source_document_postable(conn, source_table, source_id)
 
     normalized_lines = []
     total_debit = 0.0
@@ -283,6 +331,18 @@ def post_journal_entry(
             ),
         )
         entry_id = int(cursor.lastrowid)
+        document_type = source_type or source_table or source_module or "Journal"
+        conn.execute(
+            """
+            UPDATE journal_entries
+            SET document_number = COALESCE(document_number, reference),
+                document_type = COALESCE(document_type, ?),
+                posted_at = COALESCE(posted_at, CURRENT_TIMESTAMP),
+                posted_by = COALESCE(posted_by, created_by)
+            WHERE id = ?
+            """,
+            (document_type, entry_id),
+        )
         for line in normalized_lines:
             conn.execute(
                 """
@@ -291,6 +351,15 @@ def post_journal_entry(
                 """,
                 (entry_id, line["account_id"], line["debit"], line["credit"]),
             )
+        if source_table and source_id:
+            normalized_source_table = str(source_table).strip().lower()
+            if normalized_source_table in {"invoices", "bills", "payments", "stock_movements"}:
+                source_columns = {row[1] for row in conn.execute(f"PRAGMA table_info({normalized_source_table})").fetchall()}
+                if "posted_entry_id" in source_columns:
+                    conn.execute(
+                        f"UPDATE {normalized_source_table} SET posted_entry_id = ?, last_journal_sync_at = CURRENT_TIMESTAMP WHERE id = ?",
+                        (entry_id, int(source_id)),
+                    )
         _mirror_legacy_transactions(conn, company_key, entry_date, description, reference, created_by, branch_id, normalized_lines)
         if source_module:
             _legacy_voucher_insert(conn, company_key, branch_id, entry_date, description, reference, created_by, normalized_lines, source_module=source_module)
@@ -868,18 +937,33 @@ def get_ar_aging_report(company_key, as_of_date=None):
             balance = get_customer_balance(company_key, int(customer["id"]), as_of_date=report_date.date(), conn=conn)
             if abs(balance) < 0.005:
                 continue
-            tx_rows = conn.execute(
-                """
-                SELECT transaction_date, amount, description
-                FROM customer_transactions
-                WHERE company_key = ? AND customer_id = ? AND transaction_type = 'Debit'
-                ORDER BY date(transaction_date) ASC, id ASC
+            oldest_row = conn.execute(
+                f"""
+                SELECT MIN(date(je.date)) AS oldest_open_date
+                FROM journal_entries je
+                JOIN journal_lines jl ON jl.entry_id = je.id
+                JOIN chart_of_accounts c ON c.id = jl.account_id
+                WHERE je.company_key = ?
+                  AND je.customer_id = ?
+                  AND jl.debit > 0
+                  AND lower({_coa_name_expression()}) LIKE 'accounts receivable%'
+                  AND date(je.date) <= date(?)
                 """,
-                (company_key, int(customer["id"])),
-            ).fetchall()
-            oldest_date = pd.Timestamp(report_date)
-            if tx_rows:
-                oldest_date = min(pd.Timestamp(row["transaction_date"]) for row in tx_rows if row["transaction_date"])
+                (company_key, int(customer["id"]), _resolve_date(report_date.date())),
+            ).fetchone()
+            oldest_date = pd.Timestamp(oldest_row["oldest_open_date"]) if oldest_row and oldest_row["oldest_open_date"] else pd.Timestamp(report_date)
+            if oldest_row is None or oldest_row["oldest_open_date"] is None:
+                tx_rows = conn.execute(
+                    """
+                    SELECT transaction_date
+                    FROM customer_transactions
+                    WHERE company_key = ? AND customer_id = ? AND transaction_type = 'Debit'
+                    ORDER BY date(transaction_date) ASC, id ASC
+                    """,
+                    (company_key, int(customer["id"])),
+                ).fetchall()
+                if tx_rows:
+                    oldest_date = min(pd.Timestamp(row["transaction_date"]) for row in tx_rows if row["transaction_date"])
             days = int((report_date - oldest_date).days) if oldest_date is not None else 0
             rows.append(
                 {

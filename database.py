@@ -4,6 +4,8 @@ from datetime import datetime
 import os
 import shutil
 
+from erp_migrations import run_foundation_migrations
+
 # =================================================================
 # 1. SYSTEM LOGGING & CONFIGURATION
 # =================================================================
@@ -383,6 +385,8 @@ def ensure_schema_integrity(conn):
     cursor.execute(
         "INSERT OR IGNORE INTO system_settings (id, master_price_per_month, base_currency, display_currency, exchange_rate) VALUES (1, 500, 'GHS', 'GHS', 1.0)"
     )
+    # Additive ERP migrations live here so upgrades stay idempotent and non-destructive.
+    run_foundation_migrations(conn, logger=logger)
     cursor.execute(
         """
         CREATE TABLE IF NOT EXISTS journal_entries (
