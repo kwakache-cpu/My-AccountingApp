@@ -17,6 +17,7 @@ import sqlite3
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 import uuid
+from accounting_engine import get_month_sales_total, get_recent_accounting_activity
 
 try:
     import firebase_admin
@@ -1116,12 +1117,7 @@ def show_dashboard(company_key, company_name, role):
                 col1.metric(label=f"Inventory Value ({st.session_state.currency_symbol})", value=format_currency(inv_val))
 
                 current_month = datetime.now().strftime('%Y-%m')
-                month_sales = conn.execute(
-                    """SELECT COALESCE(SUM(credit), 0) FROM vouchers
-                       WHERE company_key = ? AND v_type = 'Sales' AND COALESCE(status, 'Active') != 'Void'
-                       AND date LIKE ?""",
-                    (company_key, f"{current_month}%"),
-                ).fetchone()[0]
+                month_sales = get_month_sales_total(company_key, year_month=current_month, conn=conn)
                 col2.metric(label=f"Month Sales ({st.session_state.currency_symbol})", value=format_currency(month_sales))
 
                 emp_count = conn.execute(
@@ -1157,18 +1153,19 @@ def show_dashboard(company_key, company_name, role):
             try:
                 with col1:
                     st.subheader("Recent Transactions")
-                    recent_data = conn.execute(
-                        """SELECT date, v_type, narration,
-                           CASE WHEN credit > 0 THEN credit ELSE debit END AS amount
-                           FROM vouchers WHERE company_key = ? AND COALESCE(status, 'Active') != 'Void'
-                           ORDER BY date DESC LIMIT 10""",
-                        (company_key,),
-                    ).fetchall()
+                    recent_data = get_recent_accounting_activity(company_key, limit=10, conn=conn)
 
                     if recent_data:
                         recent_txns = pd.DataFrame(
-                            recent_data,
-                            columns=['Date', 'Type', 'Description', 'Amount'],
+                            [
+                                {
+                                    "Date": row.get("date"),
+                                    "Type": row.get("activity_type"),
+                                    "Description": row.get("description"),
+                                    "Amount": row.get("amount", 0.0),
+                                }
+                                for row in recent_data
+                            ]
                         )
                         st.dataframe(recent_txns, width='stretch')
                     else:
@@ -1267,12 +1264,7 @@ def show_dashboard(company_key, company_name, role):
                 "SELECT COALESCE(SUM(qty * cost_price), 0) FROM inventory WHERE company_key = ?",
                 (company_key,),
             ).fetchone()[0]
-            month_sales = conn.execute(
-                """SELECT COALESCE(SUM(credit), 0) FROM vouchers
-                   WHERE company_key = ? AND v_type = 'Sales' AND COALESCE(status, 'Active') != 'Void'
-                   AND date LIKE ?""",
-                (company_key, f"{datetime.now().strftime('%Y-%m')}%"),
-            ).fetchone()[0]
+            month_sales = get_month_sales_total(company_key, year_month=datetime.now().strftime('%Y-%m'), conn=conn)
             emp_count = conn.execute(
                 "SELECT COUNT(DISTINCT emp_name) FROM payroll WHERE company_key = ? AND COALESCE(status, 'Active') != 'Void'",
                 (company_key,),
@@ -1291,24 +1283,13 @@ def show_dashboard(company_key, company_name, role):
             left_col, right_col = st.columns(2)
             with left_col:
                 st.subheader("Recent Transactions")
-                recent_txns = pd.read_sql_query(
-                    """
-                    SELECT date, v_type, narration,
-                           CASE WHEN credit > 0 THEN credit ELSE debit END AS amount
-                    FROM vouchers
-                    WHERE company_key = ? AND COALESCE(status, 'Active') != 'Void'
-                    ORDER BY date DESC
-                    LIMIT 10
-                    """,
-                    conn,
-                    params=(company_key,),
-                )
+                recent_txns = pd.DataFrame(get_recent_accounting_activity(company_key, limit=10, conn=conn))
                 if recent_txns.empty:
                     st.info("No recent transactions found.")
                 else:
                     recent_txns["Amount"] = recent_txns["amount"].map(format_currency)
                     recent_txns = recent_txns.drop(columns=["amount"]).rename(
-                        columns={"date": "Date", "v_type": "Type", "narration": "Description"}
+                        columns={"date": "Date", "activity_type": "Type", "description": "Description"}
                     )
                     st.dataframe(recent_txns, width='stretch')
 

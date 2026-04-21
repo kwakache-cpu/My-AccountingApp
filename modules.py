@@ -45,12 +45,16 @@ from database import (
     log_audit_action as database_log_audit_action,
 )
 from accounting_engine import (
+    compare_legacy_and_journal_totals,
+    get_account_total,
     get_ap_aging_report,
     get_ar_aging_report,
     generate_balance_sheet,
     generate_cash_flow_statement,
     generate_income_statement,
     get_account_id,
+    get_month_sales_total,
+    get_recent_accounting_activity,
     get_customer_balance,
     get_customer_balances,
     get_general_ledger as engine_get_general_ledger,
@@ -59,6 +63,7 @@ from accounting_engine import (
     get_supplier_balance,
     get_supplier_balances,
     get_trial_balance as engine_get_trial_balance,
+    is_legacy_mirroring_enabled,
     post_journal_entry,
 )
 
@@ -70,6 +75,51 @@ def log_audit_action(conn, company_key, user_role, action, module_name, details=
 
 def _hash_security_answer(answer):
     return hashlib.sha256(str(answer or "").strip().lower().encode("utf-8")).hexdigest()
+
+
+def _legacy_write_enabled(conn):
+    try:
+        return is_legacy_mirroring_enabled(conn)
+    except Exception:
+        return False
+
+
+def _create_legacy_voucher_if_enabled(
+    conn,
+    company_key,
+    branch_id,
+    entry_date,
+    v_type,
+    ledger,
+    amount,
+    created_by,
+    narration=None,
+    reference_no=None,
+    payment_method=None,
+    status="Active",
+):
+    if not _legacy_write_enabled(conn):
+        return None
+    cursor = conn.execute(
+        """
+        INSERT INTO vouchers (company_key, branch_id, date, v_type, ledger, credit, reference_no, narration, payment_method, status, created_by)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            company_key,
+            branch_id,
+            entry_date,
+            v_type,
+            ledger,
+            amount,
+            reference_no,
+            narration,
+            payment_method,
+            status,
+            created_by,
+        ),
+    )
+    return int(cursor.lastrowid)
 
 
 def get_company_branches(company_key):
@@ -180,29 +230,20 @@ def _fetch_ai_assistant_records(conn, client_id):
     since_date = (datetime.now() - timedelta(days=30)).date().isoformat()
     records = {"invoices": [], "expenses": [], "payroll": []}
 
-    if _table_exists(conn, "vouchers"):
-        invoice_rows = conn.execute(
-            """
-            SELECT date, narration, reference_no, credit
-            FROM vouchers
-            WHERE company_key = ? AND v_type = 'Sales' AND date >= ? AND COALESCE(status, 'Active') != 'Void'
-            ORDER BY date DESC
-            LIMIT 50
-            """,
-            (client_id, since_date),
-        ).fetchall()
-        expense_rows = conn.execute(
-            """
-            SELECT date, narration, reference_no, debit, credit
-            FROM vouchers
-            WHERE company_key = ? AND v_type = 'Expense' AND date >= ? AND COALESCE(status, 'Active') != 'Void'
-            ORDER BY date DESC
-            LIMIT 50
-            """,
-            (client_id, since_date),
-        ).fetchall()
-        records["invoices"] = [dict(row) for row in invoice_rows]
-        records["expenses"] = [dict(row) for row in expense_rows]
+    try:
+        journal_rows = get_recent_accounting_activity(client_id, limit=50, conn=conn)
+        records["invoices"] = [
+            row for row in journal_rows
+            if str(row.get("date") or "") >= since_date
+            and any(token in str(row.get("activity_type") or "").lower() for token in ("invoice", "sale", "pos"))
+        ]
+        records["expenses"] = [
+            row for row in journal_rows
+            if str(row.get("date") or "") >= since_date
+            and any(token in str(row.get("description") or "").lower() for token in ("expense", "purchase", "bill"))
+        ]
+    except Exception as exc:
+        logger.warning("AI assistant journal activity fallback failed for company %s: %s", client_id, exc)
 
     if _table_exists(conn, "payroll"):
         payroll_rows = conn.execute(
@@ -474,17 +515,8 @@ def _load_accounting_ai_context(company_key):
         transactions = []
         inventory = []
         try:
-            transactions = conn.execute(
-                """
-                SELECT transaction_date, account, description, debit, credit
-                FROM transactions
-                WHERE company_key = ?
-                ORDER BY transaction_date DESC, id DESC
-                LIMIT 8
-                """,
-                (company_key,),
-            ).fetchall()
-        except sqlite3.Error:
+            transactions = get_recent_accounting_activity(company_key, limit=8, conn=conn)
+        except Exception:
             transactions = []
         try:
             inventory = conn.execute(
@@ -2480,21 +2512,30 @@ def show_vouchers_page(conn, demo_on):
         submitted = st.form_submit_button("Post Voucher")
         if submitted and narration and amount > 0:
             try:
-                cursor = conn.execute(
-                    "INSERT INTO vouchers (narration, amount, ref_no, date) VALUES (?, ?, ?, ?)",
-                    (narration, amount, ref_no, voucher_date.isoformat()),
+                company_key = st.session_state.get("company_id") or st.session_state.get("user", {}).get("key")
+                legacy_voucher_id = _create_legacy_voucher_if_enabled(
+                    conn,
+                    company_key,
+                    st.session_state.get("active_branch_id"),
+                    voucher_date.isoformat(),
+                    "Journal",
+                    "Journal",
+                    amount,
+                    st.session_state.get("user", {}).get("role", "System"),
+                    narration=narration,
+                    reference_no=ref_no,
                 )
                 post_journal_entry(
-                    company_key=st.session_state.get("company_id") or st.session_state.get("user", {}).get("key"),
+                    company_key=company_key,
                     date=voucher_date,
                     description=narration,
-                    reference=ref_no or f"VCH-{int(cursor.lastrowid)}",
+                    reference=ref_no or (f"VCH-{legacy_voucher_id}" if legacy_voucher_id else f"JRN-{datetime.now().strftime('%Y%m%d%H%M%S')}"),
                     lines=_voucher_posting_lines(conn, "Journal", amount),
                     created_by=st.session_state.get("user", {}).get("role", "System"),
                     branch_id=st.session_state.get("active_branch_id"),
-                    source_module="Vouchers",
-                    source_table="vouchers",
-                    source_id=int(cursor.lastrowid),
+                    source_module="Vouchers" if legacy_voucher_id else "Journal Voucher",
+                    source_table="vouchers" if legacy_voucher_id else "journal_entries",
+                    source_id=int(legacy_voucher_id) if legacy_voucher_id else None,
                     conn=conn,
                 )
                 conn.commit()
@@ -2505,9 +2546,24 @@ def show_vouchers_page(conn, demo_on):
                 conn.rollback()
                 st.error(f"Voucher posting failed: {exc}")
 
-    rows = conn.execute("SELECT narration, amount, ref_no, date FROM vouchers ORDER BY date DESC, id DESC").fetchall()
+    rows = get_recent_accounting_activity(
+        st.session_state.get("company_id") or st.session_state.get("user", {}).get("key"),
+        branch_id=st.session_state.get("active_branch_id"),
+        limit=50,
+        conn=conn,
+    )
     if rows:
-        df = pd.DataFrame(rows, columns=["Narration", "Amount", "Reference", "Date"])
+        df = pd.DataFrame(
+            [
+                {
+                    "Narration": row.get("description"),
+                    "Amount": row.get("amount", 0.0),
+                    "Reference": row.get("reference"),
+                    "Date": row.get("date"),
+                }
+                for row in rows
+            ]
+        )
         st.dataframe(format_currency_dataframe(df), use_container_width=True)
     else:
         st.caption("No vouchers yet.")
@@ -3007,22 +3063,29 @@ def show_vouchers(company_key, role):
                 else:
                     try:
                         conn = get_connection()
-                        voucher_cursor = conn.execute(
-                            """INSERT INTO vouchers (company_key, branch_id, date, v_type, ledger, credit, reference_no, narration, created_by)
-                               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                            (company_key, branch_id, v_date.isoformat(), v_type, v_type, amount, ref_no, narration, role),
+                        legacy_voucher_id = _create_legacy_voucher_if_enabled(
+                            conn,
+                            company_key,
+                            branch_id,
+                            v_date.isoformat(),
+                            v_type,
+                            v_type,
+                            amount,
+                            role,
+                            narration=narration,
+                            reference_no=ref_no,
                         )
                         post_journal_entry(
                             company_key=company_key,
                             date=v_date,
                             description=narration,
-                            reference=ref_no or f"VCH-{int(voucher_cursor.lastrowid)}",
+                            reference=ref_no or (f"VCH-{legacy_voucher_id}" if legacy_voucher_id else f"JRN-{datetime.now().strftime('%Y%m%d%H%M%S')}"),
                             lines=_voucher_posting_lines(conn, v_type, amount),
                             created_by=role,
                             branch_id=branch_id,
-                            source_module="Vouchers",
-                            source_table="vouchers",
-                            source_id=int(voucher_cursor.lastrowid),
+                            source_module="Vouchers" if legacy_voucher_id else "Journal Voucher",
+                            source_table="vouchers" if legacy_voucher_id else "journal_entries",
+                            source_id=int(legacy_voucher_id) if legacy_voucher_id else None,
                             conn=conn,
                         )
                         conn.commit()
@@ -3042,46 +3105,22 @@ def show_vouchers(company_key, role):
             ]
             df = pd.DataFrame(rows)
         else:
-            data = conn.execute(
-                "SELECT id, date, v_type, narration, credit, reference_no FROM vouchers WHERE company_key = ? ORDER BY date DESC LIMIT 100",
-                (company_key,),
-            ).fetchall()
-            df = pd.DataFrame(data, columns=["ID", "Date", "Type", "Narration", "Amount", "Ref"]) if data else pd.DataFrame()
+            rows = get_recent_accounting_activity(company_key, branch_id=branch_id, limit=100, conn=conn)
+            df = pd.DataFrame(
+                [
+                    {
+                        "Date": row.get("date"),
+                        "Type": row.get("activity_type"),
+                        "Narration": row.get("description"),
+                        "Amount": row.get("amount", 0.0),
+                        "Ref": row.get("reference"),
+                    }
+                    for row in rows
+                ]
+            ) if rows else pd.DataFrame()
         conn.close()
         if not df.empty:
             st.dataframe(format_currency_dataframe(df), use_container_width=True)
-            if role in ("Master Admin", "Bookkeeper", "Branch_Bookkeeper", "Sub-Admin") and "ID" in df.columns:
-                expense_rows = df[df["Type"] == "Expense"]
-                if not expense_rows.empty:
-                    selected_expense_key = f"expense_edit_selected_{company_key}"
-                    for _, expense_list_row in expense_rows.iterrows():
-                        name_col, button_col = st.columns([4, 1])
-                        name_col.caption(
-                            f"{expense_list_row['Narration']} | GH₵ {float(expense_list_row['Amount']):,.2f}"
-                        )
-                        if button_col.button("Edit", key=f"expense_edit_btn_{company_key}_{int(expense_list_row['ID'])}"):
-                            st.session_state[selected_expense_key] = int(expense_list_row["ID"])
-                    expense_edit_id = st.session_state.get(selected_expense_key, int(expense_rows["ID"].iloc[0]))
-                    expense_row = expense_rows.loc[expense_rows["ID"] == expense_edit_id].iloc[0]
-                    with st.form(f"expense_edit_form_{company_key}_{expense_edit_id}", clear_on_submit=True):
-                        edit_narration = st.text_area("Narration", value=str(expense_row["Narration"] or ""))
-                        edit_amount = st.number_input("Amount (GH₵)", min_value=0.0, value=float(expense_row["Amount"] or 0.0))
-                        if st.form_submit_button("Update Expense"):
-                            conn = get_connection()
-                            conn.execute(
-                                """
-                                UPDATE vouchers
-                                SET narration = ?, credit = ?
-                                WHERE id = ? AND company_key = ?
-                                """,
-                                (edit_narration, edit_amount, int(expense_edit_id), company_key),
-                            )
-                            conn.commit()
-                            log_audit_action(conn, company_key, role, "Expense Updated", "Expenses", f"Voucher {int(expense_edit_id)} updated")
-                            conn.close()
-                            st.session_state.pop(selected_expense_key, None)
-                            st.success("Entry Updated")
-                            st.rerun()
         else:
             st.info("No vouchers found.")
     except Exception as e:
@@ -3717,24 +3756,23 @@ def show_pos(company_key, company_name, role):
                 receipt_account, receipt_category = payment_account_map.get(payment_method, ("Cash", "Asset"))
                 narration = ", ".join(f"{item['name']} x{item['qty']}" for item in line_items)
                 branch_id = st.session_state.get("active_branch_id")
-                sale_cursor = conn.execute(
-                    """INSERT INTO vouchers (company_key, branch_id, date, v_type, ledger, credit, payment_method, narration, status, created_by)
-                       VALUES (?, ?, ?, 'Sales', 'Sales Revenue', ?, ?, ?, 'Active', ?)""",
-                    (
-                        company_key,
-                        branch_id,
-                        sale_date.isoformat(),
-                        total,
-                        payment_method,
-                        f"POS Sale: {narration}",
-                        role,
-                    ),
+                legacy_sale_id = _create_legacy_voucher_if_enabled(
+                    conn,
+                    company_key,
+                    branch_id,
+                    sale_date.isoformat(),
+                    "Sales",
+                    "Sales Revenue",
+                    total,
+                    role,
+                    narration=f"POS Sale: {narration}",
+                    payment_method=payment_method,
                 )
                 post_journal_entry(
                     company_key=company_key,
                     date=sale_date,
                     description="POS sale",
-                    reference=f"POS-{int(sale_cursor.lastrowid)}",
+                    reference=f"POS-{legacy_sale_id or datetime.now().strftime('%Y%m%d%H%M%S')}",
                     lines=[
                         {"account_id": get_account_id(conn, receipt_account, receipt_category), "debit": total, "credit": 0},
                         {"account_id": get_account_id(conn, "Sales Revenue", "Income"), "debit": 0, "credit": total},
@@ -3743,8 +3781,8 @@ def show_pos(company_key, company_name, role):
                     branch_id=branch_id,
                     customer_id=selected_credit_customer_id if payment_method == "On Credit" else None,
                     source_module="POS",
-                    source_table="vouchers",
-                    source_id=int(sale_cursor.lastrowid),
+                    source_table="vouchers" if legacy_sale_id else "journal_entries",
+                    source_id=int(legacy_sale_id) if legacy_sale_id else None,
                     conn=conn,
                 )
                 if payment_method == "On Credit":
@@ -3757,7 +3795,7 @@ def show_pos(company_key, company_name, role):
                         f"POS sale on credit: {narration}",
                         role,
                         branch_id=branch_id,
-                        reference=f"POS-{int(sale_cursor.lastrowid)}",
+                        reference=f"POS-{legacy_sale_id or datetime.now().strftime('%Y%m%d%H%M%S')}",
                         transaction_date=sale_date,
                     )
                     _ensure_counterparty(
@@ -3840,48 +3878,24 @@ def show_pos(company_key, company_name, role):
 
         st.subheader("Recent POS Transactions")
         conn = get_connection()
-        sales_rows = conn.execute(
-            """
-            SELECT id, date, narration, credit, COALESCE(status, 'Active') AS status
-            FROM vouchers
-            WHERE company_key = ? AND v_type = 'Sales'
-            ORDER BY date DESC, id DESC
-            LIMIT 20
-            """,
-            (company_key,),
-        ).fetchall()
+        sales_rows = get_recent_accounting_activity(company_key, branch_id=st.session_state.get("active_branch_id"), limit=20, conn=conn)
         conn.close()
         if sales_rows:
-            sales_df = pd.DataFrame(sales_rows, columns=["ID", "Date", "Narration", "Amount", "Status"])
+            sales_df = pd.DataFrame(
+                [
+                    {
+                        "Date": row.get("date"),
+                        "Narration": row.get("description"),
+                        "Amount": row.get("amount", 0.0),
+                        "Status": "Posted",
+                    }
+                    for row in sales_rows
+                    if any(token in str(row.get("activity_type") or "").lower() for token in ("sale", "pos"))
+                ]
+            )
             st.dataframe(format_currency_dataframe(sales_df), use_container_width=True)
             if role in ("Master Admin", "Bookkeeper", "Branch_Bookkeeper", "Sub-Admin"):
-                pos_void_confirm_key = f"pos_void_confirm_{company_key}"
-                for _, sale_row in sales_df.iterrows():
-                    info_col, action_col = st.columns([4, 1])
-                    info_col.caption(
-                        f"{sale_row['Date']} | {sale_row['Narration']} | GH₵ {float(sale_row['Amount']):,.2f} | {sale_row['Status']}"
-                    )
-                    if sale_row["Status"] != "Void" and action_col.button("Void", key=f"pos_void_btn_{company_key}_{int(sale_row['ID'])}"):
-                        st.session_state[pos_void_confirm_key] = int(sale_row["ID"])
-                void_sale_id = st.session_state.get(pos_void_confirm_key)
-                if void_sale_id is not None:
-                    st.warning("Are you sure you want to void this transaction?")
-                    confirm_col, cancel_col = st.columns(2)
-                    if confirm_col.button("Confirm Void", key=f"pos_void_confirm_btn_{company_key}_{void_sale_id}"):
-                        conn = get_connection()
-                        conn.execute(
-                            "UPDATE vouchers SET status = 'Void' WHERE id = ? AND company_key = ?",
-                            (int(void_sale_id), company_key),
-                        )
-                        conn.commit()
-                        log_audit_action(conn, company_key, role, "POS Transaction Voided", "POS", f"Voided voucher ID {int(void_sale_id)}")
-                        conn.close()
-                        _clear_streamlit_state(pos_void_confirm_key)
-                        st.session_state[void_success_key] = True
-                        st.rerun()
-                    if cancel_col.button("Cancel", key=f"pos_void_cancel_btn_{company_key}_{void_sale_id}"):
-                        _clear_streamlit_state(pos_void_confirm_key)
-                        st.rerun()
+                st.caption("Legacy voucher-based POS void is disabled while Phase 2 journal posting is the operational source of truth.")
 
         if st.session_state.get(checkout_complete_key) and st.session_state.get(receipt_html_key):
             _inject_print_styles()
@@ -3933,17 +3947,10 @@ def show_sales_purchase(company_key, role, doc_type="Sales"):
         if submitted and party_name and amount > 0:
             try:
                 conn = get_connection()
-                ledger = "Sales Revenue" if doc_type == "Sales" else "Accounts Payable"
                 tx_reference = f"{doc_type[:3].upper()}-{datetime.now().strftime('%Y%m%d%H%M%S')}"
-                conn.execute(
-                    """INSERT INTO vouchers (company_key, branch_id, date, v_type, ledger, credit, narration, created_by)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-                    (company_key, branch_id, doc_date.isoformat(), doc_type, ledger, amount,
-                     f"{party_name}: {narration}", role),
-                )
                 if doc_type == "Sales":
                     customer_id = _register_customer(conn, company_key, party_name)
-                    conn.execute(
+                    invoice_cursor = conn.execute(
                         """
                         INSERT INTO invoices (company_key, customer_id, invoice_number, invoice_date, due_date, status, amount, currency, description, created_by)
                         VALUES (?, ?, ?, ?, ?, ?, ?, 'GHS', ?, ?)
@@ -3966,11 +3973,12 @@ def show_sales_purchase(company_key, role, doc_type="Sales"):
                             customer_id=customer_id,
                             source_module="Sales Invoicing",
                             source_table="invoices",
+                            source_id=int(invoice_cursor.lastrowid),
                             conn=conn,
                         )
                 else:
                     supplier_id = _get_or_create_party(conn, "suppliers", company_key, party_name)
-                    conn.execute(
+                    bill_cursor = conn.execute(
                         """
                         INSERT INTO bills (company_key, supplier_id, bill_number, bill_date, due_date, status, amount, currency, description, created_by)
                         VALUES (?, ?, ?, ?, ?, ?, ?, 'GHS', ?, ?)
@@ -3994,6 +4002,7 @@ def show_sales_purchase(company_key, role, doc_type="Sales"):
                             supplier_id=supplier_id,
                             source_module="Purchase Orders",
                             source_table="bills",
+                            source_id=int(bill_cursor.lastrowid),
                             conn=conn,
                         )
                 balance_delta = amount if status == "Pending" else 0.0
@@ -4016,10 +4025,16 @@ def show_sales_purchase(company_key, role, doc_type="Sales"):
 
     try:
         conn = get_connection()
-        data = conn.execute(
-            "SELECT date, narration, credit FROM vouchers WHERE company_key = ? AND v_type = ? ORDER BY date DESC LIMIT 50",
-            (company_key, doc_type),
-        ).fetchall()
+        if doc_type == "Sales":
+            data = conn.execute(
+                "SELECT invoice_date AS date, description AS narration, amount AS credit FROM invoices WHERE company_key = ? ORDER BY invoice_date DESC, id DESC LIMIT 50",
+                (company_key,),
+            ).fetchall()
+        else:
+            data = conn.execute(
+                "SELECT bill_date AS date, description AS narration, amount AS credit FROM bills WHERE company_key = ? ORDER BY bill_date DESC, id DESC LIMIT 50",
+                (company_key,),
+            ).fetchall()
         conn.close()
         if data:
             df = pd.DataFrame(data, columns=["Date", "Description", "Amount (GH₵)"])
@@ -4486,10 +4501,8 @@ def show_taxation(company_key):
 
     try:
         conn = get_connection()
-        total_sales = conn.execute(
-            "SELECT COALESCE(SUM(credit), 0) FROM vouchers WHERE company_key = ? AND v_type = 'Sales' AND COALESCE(status, 'Active') != 'Void'",
-            (company_key,),
-        ).fetchone()[0] or 0.0
+        total_sales = get_account_total(company_key, "Sales", balance_side="credit", conn=conn)
+        compare_legacy_and_journal_totals(company_key, logger_instance=logger, conn=conn)
         conn.close()
 
         vat = total_sales * VAT_RATE
@@ -5167,19 +5180,7 @@ def _get_reports_data(conn, company_key):
         """,
         (company_key,),
     ).fetchone()[0] or 0.0
-    cash_on_hand = conn.execute(
-        """
-        SELECT COALESCE(SUM(credit - debit), 0)
-        FROM vouchers
-        WHERE company_key = ?
-          AND COALESCE(status, 'Active') != 'Void'
-          AND (
-                COALESCE(payment_method, '') = 'Cash'
-                OR lower(COALESCE(ledger, '')) LIKE '%cash%'
-              )
-        """,
-        (company_key,),
-    ).fetchone()[0] or 0.0
+    cash_on_hand = get_account_total(company_key, "Cash", balance_side="debit", conn=conn)
     accounts_payable = conn.execute(
         """
         SELECT COALESCE(SUM(jl.credit - jl.debit), 0)
@@ -5191,35 +5192,9 @@ def _get_reports_data(conn, company_key):
         """,
         (company_key,),
     ).fetchone()[0] or 0.0
-    outstanding_loans = conn.execute(
-        """
-        SELECT COALESCE(SUM(credit - debit), 0)
-        FROM vouchers
-        WHERE company_key = ?
-          AND COALESCE(status, 'Active') != 'Void'
-          AND (
-                lower(COALESCE(ledger, '')) LIKE '%loan%'
-                OR lower(COALESCE(narration, '')) LIKE '%loan%'
-              )
-        """,
-        (company_key,),
-    ).fetchone()[0] or 0.0
-    total_revenue = conn.execute(
-        """
-        SELECT COALESCE(SUM(credit), 0)
-        FROM vouchers
-        WHERE company_key = ? AND v_type = 'Sales' AND COALESCE(status, 'Active') != 'Void'
-        """,
-        (company_key,),
-    ).fetchone()[0] or 0.0
-    total_expenses = conn.execute(
-        """
-        SELECT COALESCE(SUM(CASE WHEN debit > 0 THEN debit ELSE credit END), 0)
-        FROM vouchers
-        WHERE company_key = ? AND v_type = 'Expense' AND COALESCE(status, 'Active') != 'Void'
-        """,
-        (company_key,),
-    ).fetchone()[0] or 0.0
+    outstanding_loans = get_account_total(company_key, "Loans Payable", balance_side="credit", conn=conn)
+    total_revenue = get_account_total(company_key, "Sales", balance_side="credit", conn=conn)
+    total_expenses = get_account_total(company_key, "Expense", balance_side="debit", conn=conn)
     payroll_total = conn.execute(
         """
         SELECT COALESCE(SUM(net_salary), 0)
@@ -5236,35 +5211,32 @@ def _get_reports_data(conn, company_key):
         """,
         (company_key,),
     ).fetchone()[0] or 0.0
-    asset_sales = conn.execute(
-        """
-        SELECT COALESCE(SUM(credit), 0)
-        FROM vouchers
-        WHERE company_key = ?
-          AND COALESCE(status, 'Active') != 'Void'
-          AND (
-                lower(COALESCE(ledger, '')) LIKE '%asset%'
-                OR lower(COALESCE(narration, '')) LIKE '%asset sale%'
-              )
-        """,
-        (company_key,),
-    ).fetchone()[0] or 0.0
-    sales_rows = conn.execute(
-        """
-        SELECT date, 'Sales' AS source, narration, ledger, debit, credit
-        FROM vouchers
-        WHERE company_key = ? AND v_type = 'Sales' AND COALESCE(status, 'Active') != 'Void'
-        """,
-        (company_key,),
-    ).fetchall()
-    expense_rows = conn.execute(
-        """
-        SELECT date, 'Expense' AS source, narration, ledger, debit, credit
-        FROM vouchers
-        WHERE company_key = ? AND v_type = 'Expense' AND COALESCE(status, 'Active') != 'Void'
-        """,
-        (company_key,),
-    ).fetchall()
+    asset_sales = get_account_total(company_key, "Fixed Assets", balance_side="credit", conn=conn)
+    journal_activity = get_recent_accounting_activity(company_key, limit=200, conn=conn)
+    sales_rows = [
+        (
+            row.get("date"),
+            "Sales",
+            row.get("description"),
+            row.get("activity_type"),
+            0.0,
+            float(row.get("amount") or 0.0),
+        )
+        for row in journal_activity
+        if any(token in str(row.get("activity_type") or "").lower() for token in ("sale", "invoice", "pos"))
+    ]
+    expense_rows = [
+        (
+            row.get("date"),
+            "Expense",
+            row.get("description"),
+            row.get("activity_type"),
+            float(row.get("amount") or 0.0),
+            0.0,
+        )
+        for row in journal_activity
+        if any(token in str(row.get("description") or "").lower() for token in ("expense", "purchase", "bill"))
+    ]
     payroll_rows = conn.execute(
         """
         SELECT printf('%04d-%02d-01', CAST(year AS INTEGER), CAST(month AS INTEGER)) AS date,
@@ -5528,17 +5500,7 @@ def show_dashboard(company_key, company_name, role):
             "SELECT COALESCE(SUM(qty * cost_price), 0) FROM inventory WHERE company_key = ?",
             (company_key,),
         ).fetchone()[0]
-        month_sales = conn.execute(
-            """
-            SELECT COALESCE(SUM(credit), 0)
-            FROM vouchers
-            WHERE company_key = ?
-              AND v_type = 'Sales'
-              AND COALESCE(status, 'Active') != 'Void'
-              AND date LIKE ?
-            """,
-            (company_key, f"{datetime.now().strftime('%Y-%m')}%"),
-        ).fetchone()[0]
+        month_sales = get_month_sales_total(company_key, year_month=datetime.now().strftime('%Y-%m'), conn=conn)
         emp_count = conn.execute(
             "SELECT COUNT(DISTINCT emp_name) FROM payroll WHERE company_key = ? AND COALESCE(status, 'Active') != 'Void'",
             (company_key,),
@@ -5558,26 +5520,16 @@ def show_dashboard(company_key, company_name, role):
 
         with left_col:
             st.subheader("Recent Transactions")
-            recent_txns = pd.read_sql_query(
-                """
-                SELECT date, v_type, narration,
-                       CASE WHEN credit > 0 THEN credit ELSE debit END AS amount
-                FROM vouchers
-                WHERE company_key = ? AND COALESCE(status, 'Active') != 'Void'
-                ORDER BY date DESC
-                LIMIT 10
-                """,
-                conn,
-                params=(company_key,),
-            )
+            recent_txns = pd.DataFrame(get_recent_accounting_activity(company_key, limit=10, conn=conn))
             if recent_txns.empty:
                 st.info("No recent transactions found.")
             else:
                 recent_txns["Amount"] = recent_txns["amount"].map(format_currency)
-                recent_txns = recent_txns.drop(columns=["amount"]).rename(
-                    columns={"date": "Date", "v_type": "Type", "narration": "Description"}
+                recent_txns = recent_txns.drop(columns=[column for column in ["amount"] if column in recent_txns.columns]).rename(
+                    columns={"date": "Date", "activity_type": "Type", "description": "Description", "reference": "Reference"}
                 )
                 st.dataframe(format_currency_dataframe(recent_txns), use_container_width=True)
+        compare_legacy_and_journal_totals(company_key, logger_instance=logger, conn=conn)
 
         with right_col:
             st.subheader("Low Stock Items")
@@ -5993,14 +5945,8 @@ def show_branch_management(company_key, role):
                         revenue1, expense1, profit1 = _branch_metrics(inc1)
                         revenue2, expense2, profit2 = _branch_metrics(inc2)
 
-                        ar1 = conn.execute(
-                            "SELECT COALESCE(SUM(debit - credit), 0) FROM transactions WHERE company_key = ? AND branch_id = ? AND lower(account) LIKE 'accounts receivable%'",
-                            (company_key, branch1_id),
-                        ).fetchone()[0] or 0.0
-                        ar2 = conn.execute(
-                            "SELECT COALESCE(SUM(debit - credit), 0) FROM transactions WHERE company_key = ? AND branch_id = ? AND lower(account) LIKE 'accounts receivable%'",
-                            (company_key, branch2_id),
-                        ).fetchone()[0] or 0.0
+                        ar1 = get_account_total(company_key, "Accounts Receivable", branch_id=branch1_id, balance_side="debit", conn=conn)
+                        ar2 = get_account_total(company_key, "Accounts Receivable", branch_id=branch2_id, balance_side="debit", conn=conn)
                         inventory_summary = conn.execute(
                             "SELECT COUNT(*) AS item_count, COALESCE(SUM(qty * cost_price), 0) AS inventory_value FROM inventory WHERE company_key = ?",
                             (company_key,),

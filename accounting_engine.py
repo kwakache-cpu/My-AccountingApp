@@ -11,6 +11,7 @@ from database import get_connection
 
 
 LEGACY_TABLES = {"vouchers", "transactions"}
+LEGACY_MIRRORING_ENABLED = False
 logger = logging.getLogger(__name__)
 
 
@@ -57,7 +58,19 @@ def _system_setting_value(conn, column_name, default=None):
 
 
 def _legacy_mirror_mode(conn):
+    if not LEGACY_MIRRORING_ENABLED:
+        return "off"
     return str(_system_setting_value(conn, "legacy_mirror_mode", "mirror") or "mirror").strip().lower()
+
+
+def is_legacy_mirroring_enabled(conn=None):
+    owns_connection = conn is None
+    conn = conn or get_connection()
+    try:
+        return _legacy_mirror_mode(conn) in {"mirror", "dual_write"}
+    finally:
+        if owns_connection and conn:
+            conn.close()
 
 
 def _document_approval_enforced(conn):
@@ -766,6 +779,178 @@ def _journal_dataframe(company_key, start_date=None, end_date=None, branch_id=No
             params.append(int(account_id))
         query += " ORDER BY date(je.date), je.id, jl.id"
         return pd.read_sql_query(query, conn, params=params)
+    finally:
+        if owns_connection and conn:
+            conn.close()
+
+
+def get_account_total(company_key, account_name_like, start_date=None, end_date=None, branch_id=None, balance_side=None, conn=None):
+    owns_connection = conn is None
+    conn = conn or get_connection()
+    try:
+        query = f"""
+            SELECT COALESCE(SUM(jl.debit), 0) AS debit_total, COALESCE(SUM(jl.credit), 0) AS credit_total
+            FROM journal_entries je
+            JOIN journal_lines jl ON jl.entry_id = je.id
+            JOIN chart_of_accounts c ON c.id = jl.account_id
+            WHERE je.company_key = ?
+              AND lower({_coa_name_expression()}) LIKE lower(?)
+        """
+        params = [company_key, f"{str(account_name_like or '').strip()}%"]
+        if start_date:
+            query += " AND date(je.date) >= date(?)"
+            params.append(_resolve_date(start_date))
+        if end_date:
+            query += " AND date(je.date) <= date(?)"
+            params.append(_resolve_date(end_date))
+        if branch_id:
+            query += " AND je.branch_id = ?"
+            params.append(branch_id)
+        row = conn.execute(query, tuple(params)).fetchone()
+        debit_total = round(float(row["debit_total"] or 0.0), 2) if row else 0.0
+        credit_total = round(float(row["credit_total"] or 0.0), 2) if row else 0.0
+        if balance_side == "debit":
+            return round(debit_total - credit_total, 2)
+        if balance_side == "credit":
+            return round(credit_total - debit_total, 2)
+        return {"debit_total": debit_total, "credit_total": credit_total}
+    finally:
+        if owns_connection and conn:
+            conn.close()
+
+
+def get_month_sales_total(company_key, year_month=None, branch_id=None, conn=None):
+    period_value = str(year_month or datetime.now().strftime("%Y-%m")).strip()
+    start_date = f"{period_value}-01"
+    owns_connection = conn is None
+    conn = conn or get_connection()
+    try:
+        query = """
+            SELECT COALESCE(SUM(jl.credit), 0) AS sales_total
+            FROM journal_entries je
+            JOIN journal_lines jl ON jl.entry_id = je.id
+            JOIN chart_of_accounts c ON c.id = jl.account_id
+            WHERE je.company_key = ?
+              AND strftime('%Y-%m', je.date) = ?
+              AND lower(COALESCE(NULLIF(c.name, ''), NULLIF(c.account_name, ''), '')) LIKE 'sales%'
+        """
+        params = [company_key, period_value]
+        if branch_id:
+            query += " AND je.branch_id = ?"
+            params.append(branch_id)
+        row = conn.execute(query, tuple(params)).fetchone()
+        return round(float(row["sales_total"] or 0.0), 2) if row else 0.0
+    finally:
+        if owns_connection and conn:
+            conn.close()
+
+
+def get_recent_accounting_activity(company_key, branch_id=None, limit=10, conn=None):
+    owns_connection = conn is None
+    conn = conn or get_connection()
+    try:
+        query = """
+            SELECT
+                je.date,
+                COALESCE(je.document_type, je.source_type, je.source_table, je.source_module, 'Journal') AS activity_type,
+                je.description,
+                je.reference,
+                COALESCE(SUM(CASE WHEN jl.debit > 0 THEN jl.debit ELSE jl.credit END), 0) AS amount
+            FROM journal_entries je
+            JOIN journal_lines jl ON jl.entry_id = je.id
+            WHERE je.company_key = ?
+              AND COALESCE(je.is_voided, 0) = 0
+            GROUP BY je.id, je.date, activity_type, je.description, je.reference
+            ORDER BY date(je.date) DESC, je.id DESC
+            LIMIT ?
+        """
+        params = [company_key, int(limit)]
+        if branch_id:
+            query = query.replace(
+                "WHERE je.company_key = ?",
+                "WHERE je.company_key = ? AND je.branch_id = ?",
+                1,
+            )
+            params = [company_key, branch_id, int(limit)]
+        return [dict(row) for row in conn.execute(query, tuple(params)).fetchall()]
+    finally:
+        if owns_connection and conn:
+            conn.close()
+
+
+def compare_legacy_and_journal_totals(company_key, branch_id=None, logger_instance=None, conn=None):
+    owns_connection = conn is None
+    conn = conn or get_connection()
+    logger_instance = logger_instance or logger
+    comparisons = []
+    try:
+        current_month = datetime.now().strftime("%Y-%m")
+        journal_sales = get_month_sales_total(company_key, year_month=current_month, branch_id=branch_id, conn=conn)
+        voucher_sales = 0.0
+        try:
+            voucher_query = """
+                SELECT COALESCE(SUM(credit), 0) AS sales_total
+                FROM vouchers
+                WHERE company_key = ?
+                  AND v_type = 'Sales'
+                  AND COALESCE(status, 'Active') != 'Void'
+                  AND date LIKE ?
+            """
+            voucher_params = [company_key, f"{current_month}%"]
+            if branch_id:
+                voucher_query += " AND branch_id = ?"
+                voucher_params.append(branch_id)
+            voucher_row = conn.execute(voucher_query, tuple(voucher_params)).fetchone()
+            voucher_sales = round(float(voucher_row["sales_total"] or 0.0), 2) if voucher_row else 0.0
+        except sqlite3.Error:
+            voucher_sales = 0.0
+        comparisons.append(
+            {
+                "metric": "monthly_sales",
+                "journal_total": journal_sales,
+                "legacy_total": voucher_sales,
+                "difference": round(journal_sales - voucher_sales, 2),
+            }
+        )
+
+        journal_ar = get_account_total(company_key, "Accounts Receivable", branch_id=branch_id, balance_side="debit", conn=conn)
+        legacy_ar = 0.0
+        try:
+            tx_query = """
+                SELECT COALESCE(SUM(debit - credit), 0) AS ar_total
+                FROM transactions
+                WHERE company_key = ?
+                  AND lower(account) LIKE 'accounts receivable%'
+            """
+            tx_params = [company_key]
+            if branch_id:
+                tx_query += " AND branch_id = ?"
+                tx_params.append(branch_id)
+            tx_row = conn.execute(tx_query, tuple(tx_params)).fetchone()
+            legacy_ar = round(float(tx_row["ar_total"] or 0.0), 2) if tx_row else 0.0
+        except sqlite3.Error:
+            legacy_ar = 0.0
+        comparisons.append(
+            {
+                "metric": "accounts_receivable",
+                "journal_total": journal_ar,
+                "legacy_total": legacy_ar,
+                "difference": round(journal_ar - legacy_ar, 2),
+            }
+        )
+
+        for comparison in comparisons:
+            if abs(float(comparison["difference"])) >= 0.01:
+                logger_instance.warning(
+                    "Phase 2 validation mismatch for %s company=%s branch=%s journal=%.2f legacy=%.2f diff=%.2f",
+                    comparison["metric"],
+                    company_key,
+                    branch_id,
+                    comparison["journal_total"],
+                    comparison["legacy_total"],
+                    comparison["difference"],
+                )
+        return comparisons
     finally:
         if owns_connection and conn:
             conn.close()
