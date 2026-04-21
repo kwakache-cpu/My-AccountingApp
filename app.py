@@ -1639,14 +1639,157 @@ PRIMARY_NAV_ITEMS = [
 ]
 
 
+SIDEBAR_NAV_GROUPS = [
+    (
+        "💼 Transactions",
+        [
+            ("📊 Dashboard", "Dashboard"),
+            ("🛒 Point of Sale", "Point of Sale"),
+            ("🧾 Vouchers & Journals", "Vouchers & Journals"),
+            ("🧾 General Journal", "General Journal"),
+            ("💰 Banking & Cash", "Banking & Cash"),
+            ("🏦 Banking", "Banking"),
+            ("📝 Create Invoice", "Create Invoice"),
+            ("🧾 Create Bill", "Create Bill"),
+            ("💳 Receive Payment (Customer)", "Receive Payment (Customer)"),
+            ("💸 Supplier Payment", "Supplier Payment"),
+            ("🧾 Sales Invoicing", "Sales Invoicing"),
+            ("🛍️ Purchase Orders", "Purchase Orders"),
+            ("🔁 Sales/Purchase", "Sales/Purchase"),
+            ("🧮 Payroll & Salaries", "Payroll & Salaries"),
+            ("🧾 Taxation (VAT/NHIL)", "Taxation (VAT/NHIL)"),
+            ("🧾 Taxation", "Taxation"),
+        ],
+    ),
+    (
+        "📑 Ledgers",
+        [
+            ("🗂️ Chart of Accounts", "Chart of Accounts"),
+            ("📚 General Ledger", "General Ledger"),
+            ("📒 Customer Ledger", "Customer Ledger"),
+            ("📕 Supplier Ledger", "Supplier Ledger"),
+            ("📈 Accounts Receivable", "Accounts Receivable"),
+            ("📉 Accounts Payable", "Accounts Payable"),
+            ("🧾 Customers", "Customers"),
+            ("🏷️ Suppliers", "Suppliers"),
+        ],
+    ),
+    (
+        "📦 Inventory",
+        [
+            ("📦 Inventory Management", "Inventory Management"),
+            ("🏛️ Asset Register", "Asset Register"),
+        ],
+    ),
+    (
+        "📊 Reports",
+        [
+            ("📊 Data Analytics", "Data Analytics"),
+            ("🧾 Financial Reports", "Financial Reports"),
+            ("🛡️ Audit Trail", "Audit Trail"),
+            ("🧭 System Audit Trail", "System Audit Trail"),
+        ],
+    ),
+    (
+        "⚙️ System",
+        [
+            ("⚙️ System Configuration", "System Configuration"),
+            ("🏢 Manage Branches", "branch_management"),
+            ("🤖 Gatekeeper Admin", "Gatekeeper Admin"),
+        ],
+    ),
+]
+
+
 def _ensure_valid_page(default_page="Dashboard"):
     valid_pages = {page_key for _label, page_key in PRIMARY_NAV_ITEMS}
-    current_page = st.session_state.get("page", default_page)
+    legacy_page = st.session_state.get("page")
+    active_page = st.session_state.get("active_page")
+    current_page = legacy_page if legacy_page and legacy_page != active_page else active_page or legacy_page or default_page
     if current_page not in valid_pages and current_page != 'branch_management':
         label_to_key = {label: key for label, key in PRIMARY_NAV_ITEMS}
         current_page = label_to_key.get(str(current_page), default_page)
     st.session_state.page = current_page
+    st.session_state.active_page = current_page
     return current_page
+
+
+def _set_active_page(page_name):
+    st.session_state.active_page = page_name
+    st.session_state.page = page_name
+
+
+def _render_sidebar_nav_styles():
+    st.sidebar.markdown(
+        """
+        <style>
+        section[data-testid="stSidebar"] div[data-testid="stButton"] > button {
+            width: 100%;
+            border-radius: 10px;
+            border: 1px solid rgba(184, 134, 11, 0.18);
+            text-align: left;
+            justify-content: flex-start;
+            padding: 0.55rem 0.8rem;
+            margin-bottom: 0.2rem;
+            background: linear-gradient(180deg, #ffffff 0%, #f8fafc 100%);
+        }
+        section[data-testid="stSidebar"] div[data-testid="stButton"] > button[kind="primary"] {
+            background: linear-gradient(135deg, #0f766e 0%, #b45309 100%);
+            color: #ffffff;
+            border: 1px solid rgba(180, 83, 9, 0.55);
+            box-shadow: 0 6px 16px rgba(15, 118, 110, 0.18);
+        }
+        section[data-testid="stSidebar"] div[data-testid="stButton"] > button[kind="secondary"]:hover {
+            border-color: rgba(180, 83, 9, 0.45);
+            color: #92400e;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def _render_sidebar_navigation(user, current_page):
+    allowed_pages = {page_key for _label, page_key in PRIMARY_NAV_ITEMS}
+
+    for group_name, options in SIDEBAR_NAV_GROUPS:
+        visible_options = []
+        for label, page_name in options:
+            if page_name not in allowed_pages and page_name != "branch_management":
+                continue
+            if user["role"] == "Demo" and page_name in {
+                "Create Invoice",
+                "Create Bill",
+                "Receive Payment (Customer)",
+                "Supplier Payment",
+                "General Journal",
+                "General Ledger",
+                "Chart of Accounts",
+                "Customers",
+                "Suppliers",
+                "Financial Reports",
+                "System Configuration",
+                "branch_management",
+            }:
+                continue
+            visible_options.append((label, page_name))
+
+        if not visible_options:
+            continue
+
+        is_group_active = any(page_name == current_page for _, page_name in visible_options)
+        with st.sidebar.expander(group_name, expanded=is_group_active):
+            for label, page_name in visible_options:
+                is_active = page_name == current_page
+                if st.button(
+                    label,
+                    key=f"sidebar_nav_{page_name}",
+                    type="primary" if is_active else "secondary",
+                    use_container_width=True,
+                ):
+                    if not is_active:
+                        _set_active_page(page_name)
+                        st.rerun()
 
 
 def _render_primary_sidebar(user, include_settings=True):
@@ -1684,8 +1827,10 @@ def _render_primary_sidebar(user, include_settings=True):
             st.session_state.active_branch_id = None
 
     current_page = _ensure_valid_page()
+    _render_sidebar_nav_styles()
+    _render_sidebar_navigation(user, current_page)
 
-    if user['role'] == "Demo":
+    if False and user['role'] == "Demo":
         menu_options = [
             "📊 Dashboard",
             "📦 Inventory Management", 
@@ -1716,7 +1861,7 @@ def _render_primary_sidebar(user, include_settings=True):
             st.session_state.page = selected_page
             st.rerun()
 
-    else:
+    elif False:
         sidebar_groups = [
             (
                 "Transactions",
@@ -1819,77 +1964,78 @@ def _render_primary_sidebar(user, include_settings=True):
 
 
 def _render_primary_page(user):
-    if st.session_state.page == "Dashboard":
+    current_page = _ensure_valid_page()
+    if current_page == "Dashboard":
         if user["role"] == "Demo":
             show_dashboard_module("DEMO", "Demo Corporation Ltd", "Demo")
         else:
             show_dashboard_module(user["key"], user["name"], user["role"])
-    elif st.session_state.page == "Point of Sale":
+    elif current_page == "Point of Sale":
         show_pos(user["key"], user["name"], user["role"])
-    elif st.session_state.page == "Inventory Management":
+    elif current_page == "Inventory Management":
         if user["role"] == "Demo":
             show_inventory("DEMO", "Demo")
         else:
             show_inventory(user["key"], user["role"])
-    elif st.session_state.page == "General Journal":
+    elif current_page == "General Journal":
         show_journal_entries(user["key"], user["role"])
-    elif st.session_state.page == "General Ledger":
+    elif current_page == "General Ledger":
         show_ledger_viewer(user["key"], user["role"])
-    elif st.session_state.page == "Chart of Accounts":
+    elif current_page == "Chart of Accounts":
         show_chart_of_accounts(user["key"], user["role"])
-    elif st.session_state.page == "Accounts Receivable":
+    elif current_page == "Accounts Receivable":
         show_accounts_receivable(user["key"])
-    elif st.session_state.page == "Accounts Payable":
+    elif current_page == "Accounts Payable":
         show_accounts_payable(user["key"])
-    elif st.session_state.page == "Customers":
+    elif current_page == "Customers":
         show_customers_page(user["key"], user["role"])
-    elif st.session_state.page == "Suppliers":
+    elif current_page == "Suppliers":
         show_suppliers_page(user["key"], user["role"])
-    elif st.session_state.page == "Create Invoice":
+    elif current_page == "Create Invoice":
         show_create_invoice_page(user["key"], user["role"])
-    elif st.session_state.page == "Receive Payment (Customer)":
+    elif current_page == "Receive Payment (Customer)":
         show_receive_payment_page(user["key"], user["role"])
-    elif st.session_state.page == "Supplier Payment":
+    elif current_page == "Supplier Payment":
         show_supplier_payment_page(user["key"], user["role"])
-    elif st.session_state.page == "Customer Ledger":
+    elif current_page == "Customer Ledger":
         show_aging(user["key"], "Receivable")
-    elif st.session_state.page == "Supplier Ledger":
+    elif current_page == "Supplier Ledger":
         show_aging(user["key"], "Payable")
-    elif st.session_state.page == "Create Bill":
+    elif current_page == "Create Bill":
         show_create_bill_page(user["key"])
-    elif st.session_state.page == "Banking & Cash":
+    elif current_page == "Banking & Cash":
         show_banking(user["key"], user["role"])
-    elif st.session_state.page == "Taxation (VAT/NHIL)":
+    elif current_page == "Taxation (VAT/NHIL)":
         show_taxation(user["key"])
-    elif st.session_state.page == "Payroll & Salaries":
+    elif current_page == "Payroll & Salaries":
         if user["role"] == "Demo":
             show_payroll("DEMO", "Demo")
         else:
             show_payroll(user["key"], user["role"])
-    elif st.session_state.page == "Asset Register":
+    elif current_page == "Asset Register":
         show_fixed_assets(user["key"], user["role"])
-    elif st.session_state.page == "Data Analytics":
+    elif current_page == "Data Analytics":
         show_reports(user["key"], st.session_state.get("active_branch_id"))
-    elif st.session_state.page == "Financial Reports":
+    elif current_page == "Financial Reports":
         show_financial_reports(user["key"], user["role"])
-    elif st.session_state.page == "Gatekeeper Admin":
+    elif current_page == "Gatekeeper Admin":
         show_ai_assistant(user["key"])
-    elif st.session_state.page == "System Audit Trail":
+    elif current_page == "System Audit Trail":
         show_audit_trail(user["key"], user["role"], st.session_state.get("active_branch_id"))
-    elif st.session_state.page == "System Configuration":
+    elif current_page == "System Configuration":
         show_company_setup(user["key"], user["name"], user["role"])
-    elif st.session_state.page == "Vouchers & Journals":
+    elif current_page == "Vouchers & Journals":
         show_vouchers(user["key"], user["role"])
-    elif st.session_state.page == "Sales Invoicing":
+    elif current_page == "Sales Invoicing":
         show_sales_purchase(user["key"], user["role"], "Sales")
-    elif st.session_state.page == "Purchase Orders":
+    elif current_page == "Purchase Orders":
         show_sales_purchase(user["key"], user["role"], "Purchase")
-    elif st.session_state.page == "Accounts Receivable":
+    elif current_page == "Accounts Receivable":
         show_aging(user["key"], "Receivable")
-    elif st.session_state.page == "Accounts Payable":
+    elif current_page == "Accounts Payable":
         show_aging(user["key"], "Payable")
     else:
-        st.session_state.page = "Dashboard"
+        _set_active_page("Dashboard")
         st.rerun()
 
 
