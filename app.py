@@ -80,6 +80,9 @@ from financials import (
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+LOGO_PATH = os.path.join(BASE_DIR, "assets", "eka_logo.png")
+
 GATEKEEPER_SYSTEM_PROMPT = (
     "You are a professional Chartered Accountant. Provide clear, accurate financial guidance based on the ERP data."
 )
@@ -778,9 +781,19 @@ def show_system_status():
         })
         st.dataframe(incidents_df, width='stretch', height=300)
 
+
+def render_login_logo():
+    if os.path.exists(LOGO_PATH):
+        left_col, center_col, right_col = st.columns([1, 2, 1])
+        with center_col:
+            st.image(LOGO_PATH, width=180)
+    else:
+        st.markdown("### EKA ERP")
+
 def login_ui():
     """Secure Multi-Tier Authentication Interface with Enhanced Security."""
-    st.markdown("<h1 style='text-align: center; color: #1E3A8A;'>🛡️ E.K.A ENTERPRISE ERP</h1>", unsafe_allow_html=True)
+    render_login_logo()
+    st.markdown("<h1 style='text-align: center; color: #1E3A8A;'>E.K.A ENTERPRISE ERP</h1>", unsafe_allow_html=True)
     st.markdown("<hr>", unsafe_allow_html=True)
     
     # Check for brute force attempts
