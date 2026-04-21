@@ -4,6 +4,13 @@ from datetime import datetime
 import os
 import shutil
 
+from db_upgrade_safety import (
+    collect_row_counts,
+    create_timestamped_backup,
+    is_sqlite_file,
+    restore_database_from_backup,
+    validate_row_counts,
+)
 from erp_migrations import run_foundation_migrations
 
 # =================================================================
@@ -60,6 +67,21 @@ DB_PATH = os.path.join(DB_DIR, DB_NAME)
 LEGACY_DB_PATH = os.path.abspath(DB_NAME)
 FIREBASE_KEY_PATH = os.path.join(os.path.dirname(__file__), "firebase_key.json")
 FIREBASE_DATABASE_URL = "https://eka-erp-cloud-vault-default-rtdb.firebaseio.com/"
+CURRENT_SCHEMA_VERSION = 2
+CRITICAL_VALIDATION_TABLES = (
+    "companies",
+    "branches",
+    "users",
+    "inventory",
+    "vouchers",
+    "transactions",
+    "journal_entries",
+    "customers",
+    "suppliers",
+    "invoices",
+    "bills",
+    "payments",
+)
 
 
 def get_firebase_runtime_config():
@@ -71,9 +93,14 @@ def get_firebase_runtime_config():
 
 def _ensure_db_directory():
     os.makedirs(DB_DIR, exist_ok=True)
-    if LEGACY_DB_PATH != DB_PATH and os.path.exists(LEGACY_DB_PATH) and not os.path.exists(DB_PATH):
+    if (
+        LEGACY_DB_PATH != DB_PATH
+        and os.path.exists(LEGACY_DB_PATH)
+        and not os.path.exists(DB_PATH)
+        and is_sqlite_file(LEGACY_DB_PATH)
+    ):
         shutil.copy2(LEGACY_DB_PATH, DB_PATH)
-        logger.info("Migrated legacy database to persistent path: %s", DB_PATH)
+        logger.info("Migrated legacy database to persistent path without overwriting existing data: %s", DB_PATH)
 
 
 def _ensure_local_db_file():
@@ -88,6 +115,108 @@ def _ensure_local_db_file():
         logger.info("Created local database file at: %s", DB_PATH)
 
 
+def _open_sqlite_connection(path=DB_PATH):
+    conn = sqlite3.connect(path, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON;")
+    conn.execute("PRAGMA journal_mode = WAL;")
+    return conn
+
+
+def _ensure_migration_metadata_tables(conn):
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS schema_version (
+            version INTEGER PRIMARY KEY,
+            description TEXT NOT NULL,
+            applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS migration_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            version INTEGER,
+            description TEXT,
+            status TEXT NOT NULL,
+            backup_path TEXT,
+            company_count_before INTEGER DEFAULT 0,
+            company_count_after INTEGER DEFAULT 0,
+            row_counts_before TEXT,
+            row_counts_after TEXT,
+            details TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+
+
+def _get_schema_version(conn):
+    _ensure_migration_metadata_tables(conn)
+    row = conn.execute("SELECT COALESCE(MAX(version), 0) AS version FROM schema_version").fetchone()
+    return int(row["version"] or 0) if row else 0
+
+
+def _log_migration_event(
+    conn,
+    version,
+    description,
+    status,
+    backup_path=None,
+    before_counts=None,
+    after_counts=None,
+    details=None,
+):
+    before_counts = before_counts or {}
+    after_counts = after_counts or {}
+    conn.execute(
+        """
+        INSERT INTO migration_logs (
+            version,
+            description,
+            status,
+            backup_path,
+            company_count_before,
+            company_count_after,
+            row_counts_before,
+            row_counts_after,
+            details
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            version,
+            description,
+            status,
+            backup_path,
+            int(before_counts.get("companies", 0)),
+            int(after_counts.get("companies", 0)),
+            str(before_counts),
+            str(after_counts),
+            details,
+        ),
+    )
+
+
+def _record_schema_version(conn, version, description):
+    conn.execute(
+        "INSERT OR IGNORE INTO schema_version (version, description) VALUES (?, ?)",
+        (version, description),
+    )
+
+
+def _snapshot_critical_row_counts(conn):
+    return collect_row_counts(conn, CRITICAL_VALIDATION_TABLES)
+
+
+def _format_count_drop_message(count_failures):
+    return "; ".join(
+        f"{table_name}: before={before_count}, after={after_count}"
+        for table_name, before_count, after_count in count_failures
+    )
+
+
 def repair_database_schema():
     """
     Lightweight startup repair that restores critical columns needed for app boot.
@@ -96,106 +225,8 @@ def repair_database_schema():
     conn = None
     try:
         _ensure_local_db_file()
-        conn = sqlite3.connect(DB_PATH, check_same_thread=False)
-        cursor = conn.cursor()
-        cursor.execute(
-            """
-            CREATE TABLE IF NOT EXISTS companies (
-                key TEXT PRIMARY KEY,
-                name TEXT NOT NULL UNIQUE
-            )
-            """
-        )
-        cursor.execute("PRAGMA table_info(companies)")
-        company_columns = {row[1] for row in cursor.fetchall()}
-        if "subscription_expiry" not in company_columns:
-            try:
-                cursor.execute("ALTER TABLE companies ADD COLUMN subscription_expiry TEXT DEFAULT 'Permanent'")
-            except sqlite3.Error:
-                pass
-        migration_columns = {
-            "companies": {
-                "contact_email": "TEXT",
-                "barcode_input_source": "TEXT DEFAULT 'Keyboard Entry'",
-                "deployment_status": "TEXT DEFAULT 'Pending'",
-                "phone_number": "TEXT",
-                "physical_address": "TEXT",
-                "industry": "TEXT",
-                "currency": "TEXT DEFAULT 'GHS'",
-                "logo_url": "TEXT",
-                "created_at": "TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
-                "updated_at": "TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
-            },
-            "suppliers": {
-                "address": "TEXT",
-                "category": "TEXT",
-                "currency": "TEXT DEFAULT 'GHS'",
-                "created_at": "TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
-            },
-            "customers": {
-                "customer_id": "TEXT",
-                "current_balance": "REAL DEFAULT 0",
-                "address": "TEXT",
-                "currency": "TEXT DEFAULT 'GHS'",
-            },
-            "journal_entries": {
-                "branch_id": "TEXT",
-                "customer_id": "INTEGER",
-                "supplier_id": "INTEGER",
-                "inventory_item_id": "INTEGER",
-                "payment_id": "INTEGER",
-                "source_module": "TEXT",
-                "source_table": "TEXT",
-                "source_type": "TEXT",
-                "source_id": "INTEGER",
-                "reversed_entry_id": "INTEGER",
-                "is_voided": "INTEGER DEFAULT 0",
-                "voided_at": "TIMESTAMP",
-                "voided_by": "TEXT",
-                "approval_status": "TEXT DEFAULT 'Posted'",
-            },
-            "payments": {
-                "invoice_id": "INTEGER",
-                "bill_id": "INTEGER",
-                "bank_account_id": "INTEGER",
-                "approval_status": "TEXT DEFAULT 'Draft'",
-            },
-            "bills": {
-                "bill_number": "TEXT",
-                "input_vat": "REAL DEFAULT 0",
-                "output_vat": "REAL DEFAULT 0",
-                "approval_status": "TEXT DEFAULT 'Draft'",
-            },
-            "invoices": {
-                "invoice_number": "TEXT",
-                "input_vat": "REAL DEFAULT 0",
-                "output_vat": "REAL DEFAULT 0",
-                "approval_status": "TEXT DEFAULT 'Draft'",
-            },
-            "inventory": {
-                "opening_balance": "REAL DEFAULT 0",
-                "barcode": "TEXT",
-                "inventory_account_id": "INTEGER",
-                "cogs_account_id": "INTEGER",
-            },
-        }
-
-        for table_name, column_defs in migration_columns.items():
-            cursor.execute(
-                "SELECT name FROM sqlite_master WHERE type='table' AND name = ?",
-                (table_name,),
-            )
-            if not cursor.fetchone():
-                continue
-            cursor.execute(f"PRAGMA table_info({table_name})")
-            existing_columns = {row[1] for row in cursor.fetchall()}
-            for column_name, column_def in column_defs.items():
-                if column_name in existing_columns:
-                    continue
-                try:
-                    cursor.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_def}")
-                except sqlite3.Error:
-                    continue
+        conn = _open_sqlite_connection()
+        _run_lightweight_integrity_checks(conn)
         conn.commit()
     except sqlite3.Error as exc:
         logger.warning("Startup schema repair skipped: %s", exc)
@@ -206,8 +237,7 @@ def repair_database_schema():
 
 def ensure_database_integrity():
     """Compatibility wrapper for startup safety checks."""
-    repair_database_schema()
-    return check_and_repair_db()
+    return startup_database()
 
 
 def ensure_schema_integrity(conn):
@@ -809,21 +839,49 @@ def ensure_schema_integrity(conn):
     )
 
 
+def _ensure_app_compatibility_tables(conn):
+    """
+    Keep legacy app-facing tables readable during the migration-safe rollout.
+    These tables remain additive only and are not used to destroy or replace data.
+    """
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS accounts_payable (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            vendor TEXT,
+            amount REAL,
+            status TEXT,
+            due_date TEXT
+        )
+        """
+    )
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS purchase_orders (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            item TEXT,
+            quantity INTEGER,
+            cost REAL,
+            status TEXT
+        )
+        """
+    )
+
+
+def _run_lightweight_integrity_checks(conn):
+    """
+    Lightweight startup validation and additive repairs only.
+    This path intentionally avoids any reset-like behavior.
+    """
+    _ensure_migration_metadata_tables(conn)
+    ensure_schema_integrity(conn)
+    _ensure_app_compatibility_tables(conn)
+
+
 def check_and_repair_db():
-    """Open the persistent database and repair critical schema drift."""
-    conn = get_connection()
-    if not conn:
-        return False
-    try:
-        ensure_schema_integrity(conn)
-        conn.commit()
-        return True
-    except sqlite3.Error as exc:
-        logger.error("Schema repair failed: %s", exc)
-        conn.rollback()
-        return False
-    finally:
-        conn.close()
+    """Compatibility wrapper for the canonical startup safety path."""
+    return startup_database()
 
 # =================================================================
 # 2. CORE CONNECTION ENGINE
@@ -836,16 +894,7 @@ def get_connection():
     """
     try:
         _ensure_local_db_file()
-        # check_same_thread=False is essential for Streamlit's architecture
-        conn = sqlite3.connect(DB_PATH, check_same_thread=False)
-        conn.row_factory = sqlite3.Row
-        
-        # Enable Foreign Key Constraints for referential integrity
-        conn.execute("PRAGMA foreign_keys = ON;")
-        # Set Journal Mode to WAL for better concurrency in Cloud environments
-        conn.execute("PRAGMA journal_mode = WAL;")
-        
-        return conn
+        return _open_sqlite_connection()
     except sqlite3.Error as e:
         logger.critical(f"DATABASE CONNECTION FAILURE: {e}")
         return None
@@ -853,16 +902,14 @@ def get_connection():
 # =================================================================
 # 3. DATABASE INITIALIZATION (FULL SCHEMA DEPLOYMENT)
 # =================================================================
-def init_db():
+def _deploy_full_schema(conn):
     """
-    Deploys the complete ERP database architecture.
-    Includes all 8 core tables with full constraints and indexing.
+    Deploy the complete ERP database architecture additively.
+    This function never drops or recreates existing tables.
     """
-    conn = get_connection()
-    if not conn:
-        return
-
     try:
+        if conn is None:
+            raise RuntimeError("Database connection is required for schema deployment.")
         cursor = conn.cursor()
 
         # --- TABLE 1: CORPORATE ENTITIES & LICENSING ---
@@ -1365,13 +1412,146 @@ def init_db():
             "INSERT OR IGNORE INTO system_settings (id, master_price_per_month) VALUES (1, 500)"
         )
 
-        conn.commit()
         logger.info("E.K.A CLOUD DATABASE: Full Architectural Sync Complete.")
     except sqlite3.Error as e:
         logger.error(f"DATABASE INITIALIZATION ERROR: {e}")
-        conn.rollback()
-    finally:
+        raise
+
+
+def _migration_bootstrap_full_schema(conn):
+    _deploy_full_schema(conn)
+
+
+def _migration_finalize_compatibility_schema(conn):
+    _run_lightweight_integrity_checks(conn)
+
+
+ORDERED_MIGRATIONS = (
+    (1, "Bootstrap and synchronize the additive ERP schema.", _migration_bootstrap_full_schema),
+    (2, "Apply startup safety compatibility checks and legacy table guards.", _migration_finalize_compatibility_schema),
+)
+
+
+def startup_database():
+    """
+    Canonical startup path for database bootstrap, backups, migrations, and validation.
+    The flow is additive, idempotent, and restores from backup if validation detects data loss.
+    """
+    _ensure_local_db_file()
+    conn = None
+    backup_path = None
+    before_counts = {}
+    after_counts = {}
+    try:
+        conn = _open_sqlite_connection()
+        _ensure_migration_metadata_tables(conn)
+        current_version = _get_schema_version(conn)
+        pending_migrations = [migration for migration in ORDERED_MIGRATIONS if migration[0] > current_version]
+        before_counts = _snapshot_critical_row_counts(conn)
+        logger.info(
+            "Database startup validation before migrations: company_count=%s row_counts=%s",
+            before_counts.get("companies", 0),
+            before_counts,
+        )
+        conn.commit()
         conn.close()
+        conn = None
+
+        if pending_migrations:
+            backup_path = create_timestamped_backup(DB_PATH, logger=logger, reason="pre_migration")
+            if not os.path.exists(backup_path):
+                raise RuntimeError("Backup was not created; aborting migration run.")
+
+        conn = _open_sqlite_connection()
+        _ensure_migration_metadata_tables(conn)
+        for version, description, migration_fn in pending_migrations:
+            migration_before_counts = _snapshot_critical_row_counts(conn)
+            logger.info("Starting migration v%s: %s", version, description)
+            try:
+                conn.execute("BEGIN")
+                migration_fn(conn)
+                migration_after_counts = _snapshot_critical_row_counts(conn)
+                count_failures = validate_row_counts(migration_before_counts, migration_after_counts)
+                if count_failures:
+                    raise RuntimeError(
+                        f"Migration v{version} reduced protected row counts: {_format_count_drop_message(count_failures)}"
+                    )
+                _record_schema_version(conn, version, description)
+                _log_migration_event(
+                    conn,
+                    version,
+                    description,
+                    "applied",
+                    backup_path=backup_path,
+                    before_counts=migration_before_counts,
+                    after_counts=migration_after_counts,
+                    details="Migration applied successfully.",
+                )
+                conn.commit()
+                logger.info(
+                    "Completed migration v%s: company_count_before=%s company_count_after=%s",
+                    version,
+                    migration_before_counts.get("companies", 0),
+                    migration_after_counts.get("companies", 0),
+                )
+            except Exception as exc:
+                conn.rollback()
+                conn.execute("BEGIN")
+                _log_migration_event(
+                    conn,
+                    version,
+                    description,
+                    "failed",
+                    backup_path=backup_path,
+                    before_counts=migration_before_counts,
+                    after_counts=migration_before_counts,
+                    details=str(exc),
+                )
+                conn.commit()
+                raise
+
+        conn.execute("BEGIN")
+        _run_lightweight_integrity_checks(conn)
+        after_counts = _snapshot_critical_row_counts(conn)
+        count_failures = validate_row_counts(before_counts, after_counts)
+        if count_failures:
+            raise RuntimeError(
+                f"Startup validation detected row-count loss: {_format_count_drop_message(count_failures)}"
+            )
+        conn.commit()
+        logger.info(
+            "Database startup validation after migrations: company_count=%s row_counts=%s",
+            after_counts.get("companies", 0),
+            after_counts,
+        )
+        return True
+    except Exception as exc:
+        logger.error("Canonical database startup failed: %s", exc)
+        if conn:
+            try:
+                conn.rollback()
+            except sqlite3.Error:
+                pass
+            conn.close()
+            conn = None
+        if backup_path:
+            try:
+                restore_database_from_backup(backup_path, DB_PATH, logger=logger)
+                logger.warning("Database restored from backup after startup failure.")
+            except Exception as restore_exc:
+                logger.critical("Backup restore failed after startup failure: %s", restore_exc)
+        return False
+    finally:
+        if conn:
+            conn.close()
+
+
+def init_db():
+    """
+    Public compatibility entry point.
+    Runs the canonical startup flow and never performs reset-style initialization.
+    """
+    return startup_database()
 
 # =================================================================
 # 4. UTILITY FUNCTIONS

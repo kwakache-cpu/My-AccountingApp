@@ -1,7 +1,6 @@
 import streamlit as st
 import pandas as pd
-from database import DB_PATH, check_and_repair_db, ensure_database_integrity, ensure_schema_integrity, get_connection, get_firebase_runtime_config
-from database import init_db as base_init_db
+from database import DB_PATH, check_and_repair_db, get_connection, get_firebase_runtime_config, startup_database
 from openai import OpenAI
 import json
 import logging
@@ -77,7 +76,7 @@ GATEKEEPER_SYSTEM_PROMPT = (
 )
 
 # Startup schema safety layer.
-ensure_database_integrity()
+startup_database()
 
 # OpenAI client initialization
 try:
@@ -256,73 +255,13 @@ def _start_firebase_ghost_sync():
 
 # 1. Boot System
 def init_db():
-    """Force the requested tables in app.py before the app starts."""
-    check_and_repair_db()
-    base_init_db()
-    check_and_repair_db()
-    
-    # CRITICAL: If local database is empty, restore from Cloud Vault
+    """Boot through the canonical database startup path and then check cloud restore."""
+    startup_database()
+
     if _is_db_empty():
         logger.info("📥 Local database is empty. Attempting restoration from Cloud Vault...")
         _restore_db_from_cloud_vault()
-        check_and_repair_db()
-
-    conn = None
-    try:
-        conn = get_connection()
-        if not conn:
-            return
-
-        cursor = conn.cursor()
-        ensure_schema_integrity(conn)
-        cursor.execute(
-            "CREATE TABLE IF NOT EXISTS companies (key TEXT PRIMARY KEY, name TEXT, tin TEXT, status TEXT DEFAULT 'Active', subscription_expiry TEXT, deployment_status TEXT DEFAULT 'Pending', contact_email TEXT)"
-        )
-        cursor.execute(
-            "CREATE TABLE IF NOT EXISTS pending_approvals (id INTEGER PRIMARY KEY, company_key TEXT, amount REAL, status TEXT, request_date TEXT)"
-        )
-        cursor.execute(
-            "CREATE TABLE IF NOT EXISTS inventory (id INTEGER PRIMARY KEY, company_key TEXT, item_name TEXT, quantity INTEGER, price REAL)"
-        )
-        cursor.execute(
-            "CREATE TABLE IF NOT EXISTS accounts_payable (id INTEGER PRIMARY KEY, vendor TEXT, amount REAL, status TEXT, due_date TEXT)"
-        )
-        cursor.execute(
-            "CREATE TABLE IF NOT EXISTS chart_of_accounts (id INTEGER PRIMARY KEY, account_code TEXT, account_name TEXT, account_type TEXT)"
-        )
-        cursor.execute(
-            "CREATE TABLE IF NOT EXISTS purchase_orders (id INTEGER PRIMARY KEY, item TEXT, quantity INTEGER, cost REAL, status TEXT)"
-        )
-        cursor.execute("PRAGMA table_info(companies)")
-        company_columns = {row[1] for row in cursor.fetchall()}
-        if company_columns:
-            if "tin" not in company_columns:
-                cursor.execute("ALTER TABLE companies ADD COLUMN tin TEXT")
-            if "status" not in company_columns:
-                cursor.execute("ALTER TABLE companies ADD COLUMN status TEXT DEFAULT 'Active'")
-            if "subscription_expiry" not in company_columns:
-                cursor.execute("ALTER TABLE companies ADD COLUMN subscription_expiry TEXT")
-            if "deployment_status" not in company_columns:
-                cursor.execute("ALTER TABLE companies ADD COLUMN deployment_status TEXT DEFAULT 'Pending'")
-            if "contact_email" not in company_columns:
-                cursor.execute("ALTER TABLE companies ADD COLUMN contact_email TEXT")
-        chart_count = cursor.execute("SELECT COUNT(*) FROM chart_of_accounts").fetchone()[0]
-        if chart_count == 0:
-            cursor.executemany(
-                "INSERT INTO chart_of_accounts (account_code, account_name, account_type) VALUES (?, ?, ?)",
-                [
-                    ("2000", "Accounts Payable", "Liability"),
-                    ("4000", "Sales Revenue", "Income"),
-                ],
-            )
-        conn.commit()
-    except sqlite3.Error as init_error:
-        logger.error(f"Forced table creation failed: {init_error}")
-        if conn:
-            conn.rollback()
-    finally:
-        if conn:
-            conn.close()
+        startup_database()
 
 
 init_db()
@@ -1424,105 +1363,8 @@ def show_dashboard(company_key, company_name, role):
 
 # Startup self-healing database patch
 def run_startup_db_patch():
-    """Repair older local databases automatically on app startup."""
-    check_and_repair_db()
-    conn = None
-    try:
-        conn = get_connection()
-        if not conn:
-            return
-
-        cursor = conn.cursor()
-        ensure_schema_integrity(conn)
-
-        cursor.execute("PRAGMA table_info(companies)")
-        company_columns = {row[1] for row in cursor.fetchall()}
-        if company_columns:
-            if "tin" not in company_columns:
-                cursor.execute("ALTER TABLE companies ADD COLUMN tin TEXT")
-            if "status" not in company_columns:
-                cursor.execute("ALTER TABLE companies ADD COLUMN status TEXT DEFAULT 'Active'")
-            if "subscription_expiry" not in company_columns:
-                cursor.execute("ALTER TABLE companies ADD COLUMN subscription_expiry TEXT")
-            if "deployment_status" not in company_columns:
-                cursor.execute("ALTER TABLE companies ADD COLUMN deployment_status TEXT DEFAULT 'Pending'")
-            if "number_of_branches" not in company_columns:
-                cursor.execute("ALTER TABLE companies ADD COLUMN number_of_branches INTEGER DEFAULT 1")
-            if "branch_price_per_month" not in company_columns:
-                cursor.execute("ALTER TABLE companies ADD COLUMN branch_price_per_month REAL DEFAULT 0.0")
-            if "contact_email" not in company_columns:
-                cursor.execute("ALTER TABLE companies ADD COLUMN contact_email TEXT")
-            cursor.execute(
-                "UPDATE companies SET status = 'Active' WHERE status IS NULL OR TRIM(status) = ''"
-            )
-
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS pending_approvals (
-                id INTEGER PRIMARY KEY,
-                company_key TEXT,
-                amount REAL,
-                status TEXT,
-                request_date TEXT
-            )
-        """)
-
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS inventory (
-                id INTEGER PRIMARY KEY,
-                company_key TEXT,
-                item_name TEXT,
-                quantity INTEGER,
-                price REAL
-            )
-        """)
-
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS accounts_payable (
-                id INTEGER PRIMARY KEY,
-                vendor TEXT,
-                amount REAL,
-                status TEXT,
-                due_date TEXT
-            )
-        """)
-
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS chart_of_accounts (
-                id INTEGER PRIMARY KEY,
-                account_code TEXT,
-                account_name TEXT,
-                account_type TEXT
-            )
-        """)
-
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS purchase_orders (
-                id INTEGER PRIMARY KEY,
-                item TEXT,
-                quantity INTEGER,
-                cost REAL,
-                status TEXT
-            )
-        """)
-
-        chart_count = cursor.execute("SELECT COUNT(*) FROM chart_of_accounts").fetchone()[0]
-        if chart_count == 0:
-            cursor.executemany(
-                "INSERT INTO chart_of_accounts (account_code, account_name, account_type) VALUES (?, ?, ?)",
-                [
-                    ("2000", "Accounts Payable", "Liability"),
-                    ("4000", "Sales Revenue", "Income"),
-                ],
-            )
-
-        conn.commit()
-    except sqlite3.Error as patch_error:
-        logger.error(f"Startup DB patch failed: {patch_error}")
-        if conn:
-            conn.rollback()
-    finally:
-        if conn:
-            conn.close()
+    """Compatibility wrapper for older callers; startup now uses the canonical path."""
+    startup_database()
 
 
 def check_session_lock():
