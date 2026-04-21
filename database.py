@@ -86,6 +86,39 @@ def _ensure_local_db_file():
         logger.info("Created local database file at: %s", DB_PATH)
 
 
+def repair_database_schema():
+    """
+    Lightweight startup repair that restores critical columns needed for app boot.
+    Safe to call repeatedly.
+    """
+    conn = None
+    try:
+        _ensure_local_db_file()
+        conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS companies (
+                key TEXT PRIMARY KEY,
+                name TEXT NOT NULL UNIQUE
+            )
+            """
+        )
+        cursor.execute("PRAGMA table_info(companies)")
+        company_columns = {row[1] for row in cursor.fetchall()}
+        if "subscription_expiry" not in company_columns:
+            try:
+                cursor.execute("ALTER TABLE companies ADD COLUMN subscription_expiry TEXT")
+            except sqlite3.Error:
+                pass
+        conn.commit()
+    except sqlite3.Error as exc:
+        logger.warning("Startup schema repair skipped: %s", exc)
+    finally:
+        if conn:
+            conn.close()
+
+
 def ensure_schema_integrity(conn):
     """Protect critical columns during upgrades to avoid missing-column crashes."""
     cursor = conn.cursor()

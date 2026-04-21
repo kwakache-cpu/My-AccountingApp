@@ -1,6 +1,6 @@
 import streamlit as st
 import pandas as pd
-from database import DB_PATH, check_and_repair_db, ensure_schema_integrity, get_connection, get_firebase_runtime_config
+from database import DB_PATH, check_and_repair_db, ensure_schema_integrity, get_connection, get_firebase_runtime_config, repair_database_schema
 from database import init_db as base_init_db
 from groq import Groq
 import json
@@ -75,6 +75,9 @@ logger = logging.getLogger(__name__)
 GATEKEEPER_SYSTEM_PROMPT = (
     "You are a professional Chartered Accountant. Provide clear, accurate financial guidance based on the ERP data."
 )
+
+# Startup schema safety layer.
+repair_database_schema()
 
 # Self-heal the local database before the rest of the app starts using it.
 check_and_repair_db()
@@ -658,7 +661,7 @@ def ask_gatekeeper_ai(user_input):
 
     try:
         response = client.chat.completions.create(
-            model="llama3-70b-8192",
+            model="llama-3.3-70b-versatile",
             messages=[
                 {
                     "role": "system",
