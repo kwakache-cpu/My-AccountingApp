@@ -1,12 +1,17 @@
 import streamlit as st
 import pandas as pd
-from database import DB_PATH, get_connection, get_firebase_runtime_config, startup_database
+from database import (
+    DB_PATH,
+    create_timestamped_backup,
+    get_connection,
+    get_firebase_runtime_config,
+    is_database_valid,
+    startup_database,
+)
 from openai import OpenAI
 import json
 import logging
 import os
-import threading
-import time
 from datetime import date, datetime, timedelta
 import hashlib
 import random
@@ -84,8 +89,6 @@ except Exception as exc:
     st.toast(f"Failed to initialize OpenAI client: {exc}")
     st.session_state['ai_active'] = False
     client = None
-FIREBASE_SYNC_STARTED = False
-FIREBASE_SYNC_LOCK = threading.Lock()
 FIREBASE_APP = None
 FIREBASE_BUCKET_NAME = None
 FIREBASE_OBJECT_NAME = "backups/eka_enterprise_v3.db"
@@ -159,102 +162,42 @@ def _verify_cloud_vault_handshake():
         st.session_state.cloud_vault_status = "🔴 Cloud Vault: Local Mode"
 
 
-def _is_db_empty():
-    """Check if local database has no companies (is empty)."""
-    try:
-        conn = get_connection()
-        if not conn:
-            return True
-        cursor = conn.cursor()
-        cursor.execute("SELECT COUNT(*) FROM companies")
-        count = cursor.fetchone()[0]
-        conn.close()
-        return count == 0
-    except Exception:
-        return True
-
-
-def _restore_db_from_cloud_vault():
-    """Pull database from Firebase Cloud Vault if local is empty."""
+def _restore_db_from_cloud_vault(force_restore=False):
+    """Manual recovery helper only. Never used during normal startup."""
     bucket = _get_firebase_bucket()
     if bucket is None:
         logger.warning("Cannot restore: Firebase bucket not available")
         return False
     try:
+        local_db_valid = is_database_valid(DB_PATH, logger_instance=logger)
+        if local_db_valid and not force_restore:
+            logger.warning("Manual cloud restore refused because the local database at %s is already valid.", DB_PATH)
+            return False
+        if os.path.exists(DB_PATH):
+            backup_path = create_timestamped_backup(DB_PATH, logger=logger, reason="manual_recovery")
+            logger.info("Created local backup before manual recovery restore: %s", backup_path)
         blob = bucket.blob(FIREBASE_OBJECT_NAME)
         if not blob.exists():
             logger.warning("Cloud Vault database not found")
             return False
-        blob.download_to_filename(DB_PATH)
-        logger.info("✅ Company data restored from Cloud Vault")
+        temp_restore_path = f"{DB_PATH}.recovery_download"
+        blob.download_to_filename(temp_restore_path)
+        if not is_database_valid(temp_restore_path, logger_instance=logger):
+            logger.error("Manual cloud restore aborted because the downloaded database is not valid.")
+            try:
+                os.remove(temp_restore_path)
+            except OSError:
+                pass
+            return False
+        if os.path.exists(DB_PATH):
+            os.replace(temp_restore_path, DB_PATH)
+        else:
+            os.rename(temp_restore_path, DB_PATH)
+        logger.info("Manual recovery restored company data from Cloud Vault to %s", DB_PATH)
         return True
     except Exception as exc:
         logger.error(f"Cloud Vault restore failed: {exc}")
         return False
-
-
-def _sync_cloud_db_down_if_newer():
-    bucket = _get_firebase_bucket()
-    if bucket is None:
-        return
-    try:
-        blob = bucket.blob(FIREBASE_OBJECT_NAME)
-        if not blob.exists():
-            return
-        blob.reload()
-        remote_updated = blob.updated.timestamp() if blob.updated else 0.0
-        local_updated = os.path.getmtime(DB_PATH) if os.path.exists(DB_PATH) else 0.0
-        if remote_updated > local_updated:
-            blob.download_to_filename(DB_PATH)
-    except Exception:
-        return
-
-
-def _upload_local_db_to_cloud():
-    bucket = _get_firebase_bucket()
-    if bucket is None or not os.path.exists(DB_PATH):
-        return
-    
-    # CRITICAL SAFETY: Prevent uploading blank database to cloud vault
-    if _is_db_empty():
-        logger.warning("🛡️ BLOCKED: Refused to upload blank database to Cloud Vault. Cloud Vault is the source of truth.")
-        return
-    
-    try:
-        blob = bucket.blob(FIREBASE_OBJECT_NAME)
-        blob.upload_from_filename(DB_PATH)
-        logger.info("✅ Database synced to Cloud Vault")
-    except Exception:
-        logger.error("Failed to upload database to Cloud Vault")
-        return
-
-
-def _firebase_ghost_sync_worker():
-    while True:
-        try:
-            _upload_local_db_to_cloud()
-        except Exception:
-            pass
-        time.sleep(7200)
-
-
-def _start_firebase_ghost_sync():
-    global FIREBASE_SYNC_STARTED
-    with FIREBASE_SYNC_LOCK:
-        if FIREBASE_SYNC_STARTED:
-            return
-        FIREBASE_SYNC_STARTED = True
-        sync_thread = threading.Thread(
-            target=_firebase_ghost_sync_worker,
-            name="eka-firebase-ghost-sync",
-            daemon=True,
-        )
-        sync_thread.start()
-
-# 1. Boot System
-def init_db():
-    """Canonical hotfix startup path for the app."""
-    return startup_database()
 
 st.set_page_config(
     page_title="E.K.A Cloud ERP v3", 
@@ -1331,13 +1274,6 @@ def show_dashboard(company_key, company_name, role):
     except Exception as e:
         st.error(f"Dashboard Error: {e}")
 
-
-# Startup self-healing database patch
-def run_startup_db_patch():
-    """Compatibility wrapper for older callers; startup now uses the canonical path."""
-    startup_database()
-
-
 def check_session_lock():
     """Check if current session is still valid, revoke if another device logged in."""
     if not st.session_state.get('auth') or not st.session_state.get('user'):
@@ -1380,9 +1316,13 @@ def check_session_lock():
 def main():
     st.cache_data.clear()
     st.cache_resource.clear()
-    _sync_cloud_db_down_if_newer()
-    run_startup_db_patch()
-    _start_firebase_ghost_sync()
+    startup_database()
+    logger.info(
+        "App runtime persistence mode: local_db_path=%s db_valid=%s cloud_restore_mode=manual_only runtime_cloud_sync_disabled=%s",
+        DB_PATH,
+        is_database_valid(DB_PATH, logger_instance=logger),
+        True,
+    )
     _verify_cloud_vault_handshake()
     if "base_currency" not in st.session_state:
         st.session_state.base_currency = "GHS"

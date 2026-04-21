@@ -150,6 +150,14 @@ CRITICAL_VALIDATION_TABLES = (
     "bills",
     "payments",
 )
+DATABASE_REQUIRED_TABLES = (
+    "companies",
+    "journal_entries",
+    "journal_lines",
+    "chart_of_accounts",
+    "system_settings",
+    "schema_version",
+)
 
 
 def get_firebase_runtime_config():
@@ -218,6 +226,63 @@ def _ensure_migration_metadata_tables(conn):
         )
         """
     )
+
+
+def _ensure_database_identity_table(conn):
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS database_identity (
+            instance_id TEXT PRIMARY KEY,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            last_verified_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO database_identity (instance_id)
+        SELECT ?
+        WHERE NOT EXISTS (SELECT 1 FROM database_identity)
+        """,
+        (f"{os.path.basename(DB_PATH)}::{int(datetime.now().timestamp())}",),
+    )
+    conn.execute("UPDATE database_identity SET last_verified_at = CURRENT_TIMESTAMP")
+
+
+def _table_exists(conn, table_name):
+    row = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
+        (table_name,),
+    ).fetchone()
+    return bool(row)
+
+
+def is_database_valid(db_path=DB_PATH, logger_instance=None):
+    logger_instance = logger_instance or logger
+    if not db_path or not os.path.exists(db_path):
+        return False
+    if not is_sqlite_file(db_path):
+        return False
+    conn = None
+    try:
+        conn = _open_sqlite_connection(path=db_path)
+        required_tables = set(DATABASE_REQUIRED_TABLES)
+        existing_tables = {
+            row["name"]
+            for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()
+        }
+        if not required_tables.issubset(existing_tables):
+            return False
+        company_columns = {row[1] for row in conn.execute("PRAGMA table_info(companies)").fetchall()}
+        if "key" not in company_columns or "name" not in company_columns:
+            return False
+        return True
+    except sqlite3.Error as exc:
+        logger_instance.warning("Database validity check failed for %s: %s", db_path, exc)
+        return False
+    finally:
+        if conn:
+            conn.close()
 
 
 def _get_schema_version(conn):
@@ -943,6 +1008,7 @@ def _run_lightweight_integrity_checks(conn):
     This path intentionally avoids any reset-like behavior.
     """
     _ensure_migration_metadata_tables(conn)
+    _ensure_database_identity_table(conn)
     ensure_schema_integrity(conn)
     _ensure_app_compatibility_tables(conn)
 
@@ -1510,12 +1576,16 @@ def startup_database():
     The flow is additive, idempotent, and restores from backup if validation detects data loss.
     """
     _ensure_local_db_file()
+    db_valid_before_startup = is_database_valid(DB_PATH, logger_instance=logger)
     logger.info(
-        "Database startup path selected: safe_mode=%s advanced_helpers_available=%s db_upgrade_safety=%s erp_migrations=%s",
+        "Database startup path selected: db_path=%s db_valid=%s safe_mode=%s advanced_helpers_available=%s db_upgrade_safety=%s erp_migrations=%s cloud_restore_disabled=%s",
+        DB_PATH,
+        db_valid_before_startup,
         ERP_SAFE_STARTUP_MODE,
         _advanced_startup_available(),
         DB_UPGRADE_SAFETY_AVAILABLE,
         ERP_MIGRATIONS_AVAILABLE,
+        True,
     )
     conn = None
     backup_path = None
@@ -1531,6 +1601,7 @@ def startup_database():
             conn.execute("BEGIN")
             _run_lightweight_integrity_checks(conn)
             conn.commit()
+            logger.info("Database startup completed in fallback mode: db_path=%s db_valid=%s", DB_PATH, is_database_valid(DB_PATH, logger_instance=logger))
             return True
 
         current_version = _get_schema_version(conn)
@@ -1612,6 +1683,7 @@ def startup_database():
             after_counts.get("companies", 0),
             after_counts,
         )
+        logger.info("Database startup completed: db_path=%s db_valid=%s", DB_PATH, is_database_valid(DB_PATH, logger_instance=logger))
         return True
     except Exception as exc:
         logger.error("Canonical database startup failed: %s", exc)
