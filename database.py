@@ -5,6 +5,11 @@ import os
 import shutil
 import json
 
+try:
+    import streamlit as st
+except Exception:
+    st = None
+
 DB_UPGRADE_SAFETY_AVAILABLE = True
 ERP_MIGRATIONS_AVAILABLE = True
 
@@ -186,31 +191,113 @@ def get_firebase_runtime_config():
     }
 
 
+def _read_runtime_secret(secret_name, default=None):
+    env_value = os.getenv(secret_name)
+    if env_value not in (None, ""):
+        return env_value
+    if st is None:
+        return default
+    try:
+        if secret_name in st.secrets:
+            return st.secrets[secret_name]
+    except Exception:
+        return default
+    return default
+
+
+def get_recovery_source_diagnostics():
+    firebase_config = get_firebase_runtime_config()
+    firebase_key_path = str(firebase_config.get("key_path") or "").strip()
+    firebase_key_exists = bool(firebase_key_path) and os.path.exists(firebase_key_path)
+    database_url = str(
+        _read_runtime_secret("FIREBASE_DATABASE_URL", firebase_config.get("databaseURL") or "")
+    ).strip()
+    bucket_override = str(_read_runtime_secret("FIREBASE_STORAGE_BUCKET", "") or "").strip()
+    object_name = str(_read_runtime_secret("FIREBASE_DB_BACKUP_OBJECT", FIREBASE_OBJECT_NAME) or FIREBASE_OBJECT_NAME).strip()
+    inline_json = _read_runtime_secret("FIREBASE_SERVICE_ACCOUNT_JSON", None)
+    inline_dict = _read_runtime_secret("FIREBASE_SERVICE_ACCOUNT", None)
+
+    credentials_source = "missing"
+    service_account_info = None
+    credential_error = None
+
+    if inline_json not in (None, ""):
+        try:
+            service_account_info = json.loads(str(inline_json))
+            credentials_source = "streamlit_or_env_json"
+        except Exception as exc:
+            credential_error = f"inline service account json is invalid: {exc}"
+    elif isinstance(inline_dict, dict) and inline_dict:
+        service_account_info = dict(inline_dict)
+        credentials_source = "streamlit_or_env_mapping"
+    elif firebase_key_exists:
+        try:
+            with open(firebase_key_path, "r", encoding="utf-8") as firebase_file:
+                service_account_info = json.load(firebase_file)
+            credentials_source = "local_file"
+        except Exception as exc:
+            credential_error = f"firebase key file could not be read: {exc}"
+    elif firebase_key_path:
+        credential_error = "firebase key file path is configured but the file does not exist"
+    else:
+        credential_error = "no firebase service account source is configured"
+
+    project_id = str((service_account_info or {}).get("project_id") or "").strip()
+    bucket_name = bucket_override or (f"{project_id}.appspot.com" if project_id else "")
+
+    diagnostics = {
+        "backend": "firebase_storage",
+        "credentials_loaded": bool(service_account_info),
+        "credentials_source": credentials_source,
+        "credential_error": credential_error,
+        "firebase_key_path": firebase_key_path,
+        "firebase_key_exists": firebase_key_exists,
+        "database_url_configured": bool(database_url),
+        "bucket_name": bucket_name,
+        "object_name": object_name,
+        "project_id_present": bool(project_id),
+        "service_account_info": service_account_info,
+        "database_url": database_url,
+    }
+    return diagnostics
+
+
 def _init_firebase_recovery_client():
     global FIREBASE_RECOVERY_APP, FIREBASE_RECOVERY_BUCKET_NAME
     if firebase_admin is None or credentials is None or initialize_app is None or storage is None:
+        logger.warning("Firebase recovery backend is unavailable because firebase_admin dependencies are not installed.")
         return None
     if FIREBASE_RECOVERY_APP is not None:
         return FIREBASE_RECOVERY_APP
     try:
-        firebase_config = get_firebase_runtime_config()
-        firebase_key_path = firebase_config["key_path"]
-        if not os.path.exists(firebase_key_path):
-            logger.warning("Firebase recovery key path is missing: %s", firebase_key_path)
+        diagnostics = get_recovery_source_diagnostics()
+        logger.info(
+            "Recovery source configuration: backend=%s credentials_loaded=%s credentials_source=%s firebase_key_exists=%s database_url_configured=%s bucket=%s object=%s project_id_present=%s",
+            diagnostics["backend"],
+            diagnostics["credentials_loaded"],
+            diagnostics["credentials_source"],
+            diagnostics["firebase_key_exists"],
+            diagnostics["database_url_configured"],
+            diagnostics["bucket_name"] or "missing",
+            diagnostics["object_name"] or "missing",
+            diagnostics["project_id_present"],
+        )
+        if not diagnostics["credentials_loaded"]:
+            logger.warning("Firebase recovery credentials are unavailable: %s", diagnostics["credential_error"])
             return None
-        with open(firebase_key_path, "r", encoding="utf-8") as firebase_file:
-            firebase_info = json.load(firebase_file)
-        project_id = str(firebase_info.get("project_id") or "").strip()
-        if not project_id:
-            logger.warning("Firebase recovery client could not determine project_id from %s", firebase_key_path)
+        if not diagnostics["bucket_name"]:
+            logger.warning("Firebase recovery client could not determine a storage bucket name.")
             return None
-        FIREBASE_RECOVERY_BUCKET_NAME = f"{project_id}.appspot.com"
-        firebase_cred = credentials.Certificate(firebase_key_path)
+        if not diagnostics["database_url"]:
+            logger.warning("Firebase recovery client is missing a database URL configuration.")
+            return None
+        FIREBASE_RECOVERY_BUCKET_NAME = diagnostics["bucket_name"]
+        firebase_cred = credentials.Certificate(diagnostics["service_account_info"])
         FIREBASE_RECOVERY_APP = initialize_app(
             firebase_cred,
             {
                 "storageBucket": FIREBASE_RECOVERY_BUCKET_NAME,
-                "databaseURL": firebase_config["databaseURL"],
+                "databaseURL": diagnostics["database_url"],
             },
             name="eka-database-recovery",
         )
@@ -477,12 +564,26 @@ def _build_startup_result(
 def attempt_production_database_recovery(force_restore=True):
     logger.info("Trusted backup recovery invoked: db_path=%s force_restore=%s", DB_PATH, force_restore)
     local_health = get_database_health_snapshot(DB_PATH, logger_instance=logger)
+    diagnostics = get_recovery_source_diagnostics()
+    logger.info(
+        "Trusted recovery source diagnostics: backend=%s credentials_loaded=%s credentials_source=%s firebase_key_exists=%s database_url_configured=%s bucket=%s object=%s",
+        diagnostics["backend"],
+        diagnostics["credentials_loaded"],
+        diagnostics["credentials_source"],
+        diagnostics["firebase_key_exists"],
+        diagnostics["database_url_configured"],
+        diagnostics["bucket_name"] or "missing",
+        diagnostics["object_name"] or "missing",
+    )
     if local_health["production_ready"] and not force_restore:
         logger.info("Trusted backup recovery skipped because local database is already production-ready: %s", DB_PATH)
         return {
             "ok": False,
             "stage": "recovery_skipped",
             "reason": "local database is already production-ready",
+            "backend": diagnostics["backend"],
+            "bucket_name": diagnostics["bucket_name"],
+            "object_name": diagnostics["object_name"],
             "recovery_source_found": None,
             "temp_download_succeeded": False,
             "replacement_performed": False,
@@ -491,11 +592,15 @@ def attempt_production_database_recovery(force_restore=True):
 
     bucket = _get_firebase_recovery_bucket()
     if bucket is None:
-        logger.error("Trusted backup recovery unavailable because Firebase bucket is not accessible.")
+        access_reason = diagnostics["credential_error"] or "firebase bucket is not accessible"
+        logger.error("Trusted backup recovery unavailable because Firebase bucket is not accessible: %s", access_reason)
         return {
             "ok": False,
             "stage": "recovery_source",
-            "reason": "trusted recovery source is not accessible",
+            "reason": access_reason,
+            "backend": diagnostics["backend"],
+            "bucket_name": diagnostics["bucket_name"],
+            "object_name": diagnostics["object_name"],
             "recovery_source_found": False,
             "temp_download_succeeded": False,
             "replacement_performed": False,
@@ -504,23 +609,84 @@ def attempt_production_database_recovery(force_restore=True):
 
     temp_restore_path = f"{DB_PATH}.recovery_download"
     try:
-        blob = bucket.blob(FIREBASE_OBJECT_NAME)
-        backup_exists = bool(blob.exists())
-        logger.info("Trusted backup presence check: object=%s exists=%s", FIREBASE_OBJECT_NAME, backup_exists)
+        blob = bucket.blob(diagnostics["object_name"])
+        try:
+            backup_exists = bool(blob.exists())
+        except Exception as exc:
+            logger.error(
+                "Trusted backup presence check failed: backend=%s bucket=%s object=%s error=%s",
+                diagnostics["backend"],
+                diagnostics["bucket_name"],
+                diagnostics["object_name"],
+                exc,
+            )
+            return {
+                "ok": False,
+                "stage": "recovery_source",
+                "reason": f"network or storage permission failure while checking backup object: {exc}",
+                "backend": diagnostics["backend"],
+                "bucket_name": diagnostics["bucket_name"],
+                "object_name": diagnostics["object_name"],
+                "recovery_source_found": False,
+                "temp_download_succeeded": False,
+                "replacement_performed": False,
+                "health": local_health,
+            }
+        logger.info(
+            "Trusted backup presence check: backend=%s bucket=%s object=%s exists=%s",
+            diagnostics["backend"],
+            diagnostics["bucket_name"],
+            diagnostics["object_name"],
+            backup_exists,
+        )
         if not backup_exists:
-            logger.error("Trusted backup recovery failed because the cloud backup object does not exist: %s", FIREBASE_OBJECT_NAME)
+            logger.error(
+                "Trusted backup recovery failed because the cloud backup object does not exist: bucket=%s object=%s",
+                diagnostics["bucket_name"],
+                diagnostics["object_name"],
+            )
             return {
                 "ok": False,
                 "stage": "recovery_source",
                 "reason": "trusted cloud backup object was not found",
+                "backend": diagnostics["backend"],
+                "bucket_name": diagnostics["bucket_name"],
+                "object_name": diagnostics["object_name"],
                 "recovery_source_found": False,
                 "temp_download_succeeded": False,
                 "replacement_performed": False,
                 "health": local_health,
             }
 
-        blob.download_to_filename(temp_restore_path)
-        logger.info("Trusted backup temp download succeeded: %s", temp_restore_path)
+        try:
+            blob.download_to_filename(temp_restore_path)
+        except Exception as exc:
+            logger.error(
+                "Trusted backup temp download failed: backend=%s bucket=%s object=%s error=%s",
+                diagnostics["backend"],
+                diagnostics["bucket_name"],
+                diagnostics["object_name"],
+                exc,
+            )
+            return {
+                "ok": False,
+                "stage": "recovery_download",
+                "reason": f"backup object exists but download failed: {exc}",
+                "backend": diagnostics["backend"],
+                "bucket_name": diagnostics["bucket_name"],
+                "object_name": diagnostics["object_name"],
+                "recovery_source_found": True,
+                "temp_download_succeeded": False,
+                "replacement_performed": False,
+                "health": local_health,
+            }
+        logger.info(
+            "Trusted backup temp download succeeded: backend=%s bucket=%s object=%s temp_path=%s",
+            diagnostics["backend"],
+            diagnostics["bucket_name"],
+            diagnostics["object_name"],
+            temp_restore_path,
+        )
 
         downloaded_health = get_database_health_snapshot(temp_restore_path, logger_instance=logger)
         logger.info(
@@ -538,6 +704,9 @@ def attempt_production_database_recovery(force_restore=True):
                 "ok": False,
                 "stage": "recovery_validation",
                 "reason": "cloud backup downloaded but failed production-ready check",
+                "backend": diagnostics["backend"],
+                "bucket_name": diagnostics["bucket_name"],
+                "object_name": diagnostics["object_name"],
                 "recovery_source_found": True,
                 "temp_download_succeeded": True,
                 "replacement_performed": False,
@@ -567,6 +736,9 @@ def attempt_production_database_recovery(force_restore=True):
             "ok": True,
             "stage": "recovery_complete",
             "reason": "trusted cloud backup restored successfully",
+            "backend": diagnostics["backend"],
+            "bucket_name": diagnostics["bucket_name"],
+            "object_name": diagnostics["object_name"],
             "recovery_source_found": True,
             "temp_download_succeeded": True,
             "replacement_performed": replacement_performed,
@@ -578,6 +750,9 @@ def attempt_production_database_recovery(force_restore=True):
             "ok": False,
             "stage": "recovery_exception",
             "reason": str(exc),
+            "backend": diagnostics["backend"],
+            "bucket_name": diagnostics["bucket_name"],
+            "object_name": diagnostics["object_name"],
             "recovery_source_found": True,
             "temp_download_succeeded": os.path.exists(temp_restore_path),
             "replacement_performed": False,

@@ -4,6 +4,7 @@ import importlib.util
 from database import (
     DB_PATH,
     get_connection,
+    get_recovery_source_diagnostics,
     get_firebase_runtime_config,
     startup_database,
 )
@@ -136,22 +137,23 @@ def _init_firebase_storage_client():
     if FIREBASE_APP is not None:
         return FIREBASE_APP
     try:
-        firebase_config = get_firebase_runtime_config()
-        firebase_key_path = firebase_config["key_path"]
-        if not os.path.exists(firebase_key_path):
+        diagnostics = get_recovery_source_diagnostics()
+        if not diagnostics.get("credentials_loaded"):
+            logger.warning("Cloud Vault UI client could not load credentials: %s", diagnostics.get("credential_error"))
             return None
-        with open(firebase_key_path, "r", encoding="utf-8") as firebase_file:
-            firebase_info = json.load(firebase_file)
-        project_id = str(firebase_info.get("project_id") or "").strip()
-        if not project_id:
+        if not diagnostics.get("bucket_name"):
+            logger.warning("Cloud Vault UI client could not determine a storage bucket name.")
             return None
-        FIREBASE_BUCKET_NAME = f"{project_id}.appspot.com"
-        firebase_cred = credentials.Certificate(firebase_key_path)
+        if not diagnostics.get("database_url"):
+            logger.warning("Cloud Vault UI client is missing a database URL configuration.")
+            return None
+        FIREBASE_BUCKET_NAME = diagnostics["bucket_name"]
+        firebase_cred = credentials.Certificate(diagnostics["service_account_info"])
         FIREBASE_APP = initialize_app(
             firebase_cred,
             {
                 "storageBucket": FIREBASE_BUCKET_NAME,
-                "databaseURL": firebase_config["databaseURL"],
+                "databaseURL": diagnostics["database_url"],
             },
             name="eka-silent-sync",
         )
@@ -160,9 +162,11 @@ def _init_firebase_storage_client():
         try:
             FIREBASE_APP = firebase_admin.get_app("eka-silent-sync")
             return FIREBASE_APP
-        except Exception:
+        except Exception as exc:
+            logger.warning("Cloud Vault UI client lookup failed: %s", exc)
             return None
-    except Exception:
+    except Exception as exc:
+        logger.warning("Cloud Vault UI client initialization failed: %s", exc)
         return None
 
 
@@ -178,16 +182,30 @@ def _get_firebase_bucket():
 
 def _get_cloud_vault_status():
     try:
+        diagnostics = get_recovery_source_diagnostics()
+        logger.info(
+            "Cloud Vault status check: backend=%s credentials_loaded=%s credentials_source=%s firebase_key_exists=%s bucket=%s object=%s",
+            diagnostics.get("backend"),
+            diagnostics.get("credentials_loaded"),
+            diagnostics.get("credentials_source"),
+            diagnostics.get("firebase_key_exists"),
+            diagnostics.get("bucket_name") or "missing",
+            diagnostics.get("object_name") or "missing",
+        )
+        if not diagnostics.get("credentials_loaded"):
+            return "🔴 Cloud Vault: Credentials Missing"
         bucket = _get_firebase_bucket()
         if bucket is None:
             return "🔴 Cloud Vault: Local Mode"
         try:
-            list(bucket.list_blobs(max_results=1))
+            list(bucket.list_blobs(prefix=diagnostics.get("object_name") or FIREBASE_OBJECT_NAME, max_results=1))
             return "🟢 Cloud Vault: Connected"
-        except Exception:
-            return "🔴 Cloud Vault: Local Mode"
-    except Exception:
-        return "🔴 Cloud Vault: Local Mode"
+        except Exception as exc:
+            logger.warning("Cloud Vault connectivity check failed: %s", exc)
+            return "🔴 Cloud Vault: Source Unreachable"
+    except Exception as exc:
+        logger.warning("Cloud Vault status check failed: %s", exc)
+        return "🔴 Cloud Vault: Source Unreachable"
 
 
 def _verify_cloud_vault_handshake():
