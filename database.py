@@ -74,11 +74,35 @@ def _ensure_db_directory():
         logger.info("Migrated legacy database to persistent path: %s", DB_PATH)
 
 
+def _ensure_local_db_file():
+    """
+    Ensure the local database file exists without overwriting an existing file.
+    SQLite will create the file on first connect if it is missing.
+    """
+    _ensure_db_directory()
+    if not os.path.exists(DB_PATH):
+        conn = sqlite3.connect(DB_PATH)
+        conn.close()
+        logger.info("Created local database file at: %s", DB_PATH)
+
+
 def ensure_schema_integrity(conn):
     """Protect critical columns during upgrades to avoid missing-column crashes."""
     cursor = conn.cursor()
     critical_columns = {
-        "companies": {"contact_email": "TEXT", "barcode_input_source": "TEXT DEFAULT 'Keyboard Entry'"},
+        "companies": {
+            "contact_email": "TEXT",
+            "barcode_input_source": "TEXT DEFAULT 'Keyboard Entry'",
+            "subscription_expiry": "TEXT",
+            "deployment_status": "TEXT DEFAULT 'Pending'",
+            "phone_number": "TEXT",
+            "physical_address": "TEXT",
+            "industry": "TEXT",
+            "currency": "TEXT DEFAULT 'GHS'",
+            "logo_url": "TEXT",
+            "created_at": "TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
+            "updated_at": "TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
+        },
         "audit_logs": {"details": "TEXT", "branch_id": "TEXT"},
         "customers": {"customer_id": "TEXT", "current_balance": "REAL DEFAULT 0"},
         "customer_transactions": {"branch_id": "TEXT", "reference": "TEXT", "created_by": "TEXT", "transaction_date": "TEXT"},
@@ -112,6 +136,7 @@ def ensure_schema_integrity(conn):
         "recurring_transactions": {"company_key": "TEXT", "branch_id": "TEXT", "description": "TEXT", "frequency": "TEXT", "next_run_date": "TEXT", "last_run_at": "TIMESTAMP", "is_active": "INTEGER DEFAULT 1", "created_by": "TEXT", "created_at": "TIMESTAMP DEFAULT CURRENT_TIMESTAMP", "source_module": "TEXT", "source_table": "TEXT", "source_id": "INTEGER", "recurrence_payload": "TEXT"},
         "branches": {"contact_number": "TEXT", "branch_manager": "TEXT", "branch_access_key": "TEXT"},
         "fixed_assets": {"opening_book_value": "REAL DEFAULT 0"},
+        "suppliers": {"address": "TEXT", "category": "TEXT", "currency": "TEXT DEFAULT 'GHS'", "created_at": "TIMESTAMP DEFAULT CURRENT_TIMESTAMP"},
     }
 
     for table_name, columns in critical_columns.items():
@@ -684,7 +709,7 @@ def get_connection():
     settings for data integrity.
     """
     try:
-        _ensure_db_directory()
+        _ensure_local_db_file()
         # check_same_thread=False is essential for Streamlit's architecture
         conn = sqlite3.connect(DB_PATH, check_same_thread=False)
         conn.row_factory = sqlite3.Row

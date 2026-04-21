@@ -76,6 +76,9 @@ GATEKEEPER_SYSTEM_PROMPT = (
     "You are a professional Chartered Accountant. Provide clear, accurate financial guidance based on the ERP data."
 )
 
+# Self-heal the local database before the rest of the app starts using it.
+check_and_repair_db()
+
 # Hard-wired Groq API Key (Direct Connection)
 try:
     client = Groq(api_key='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')
