@@ -77,9 +77,8 @@ GATEKEEPER_SYSTEM_PROMPT = (
 )
 
 # Hard-wired Groq API Key (Direct Connection)
-api_key = "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"
 try:
-    client = Groq(api_key=api_key)
+    client = Groq(api_key='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')
     st.session_state['ai_active'] = True
 except Exception as exc:
     st.toast(f"Failed to initialize Groq client: {exc}")
@@ -656,7 +655,7 @@ def ask_gatekeeper_ai(user_input):
 
     try:
         response = client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
+            model="llama3-70b-8192",
             messages=[
                 {
                     "role": "system",

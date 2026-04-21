@@ -4336,12 +4336,22 @@ def show_aging(company_key, aging_type="Receivable"):
                         supplier_name = st.text_input("Supplier Name")
                         supplier_phone = st.text_input("Phone")
                         supplier_email = st.text_input("Email")
+                        supplier_address = st.text_area("Address")
+                        supplier_category = st.text_input("Category")
                         register_submitted = st.form_submit_button("Save Supplier")
                     if register_submitted:
                         if not supplier_name.strip():
                             st.warning("Enter a supplier name.")
                         else:
-                            supplier_row_id = _register_supplier(conn, company_key, supplier_name, supplier_phone, supplier_email)
+                            supplier_row_id = _register_supplier(
+                                conn,
+                                company_key,
+                                supplier_name,
+                                supplier_phone,
+                                supplier_email,
+                                supplier_address,
+                                supplier_category,
+                            )
                             conn.commit()
                             log_audit_action(
                                 conn,
@@ -5737,19 +5747,20 @@ def show_ai_assistant(client_id):
 # ==========================================
 # SUPPLIER MANAGEMENT FUNCTIONS
 # ==========================================
-def _register_supplier(name, phone, company_key):
-    """Insert a new supplier into the suppliers table."""
-    conn = get_connection()
-    try:
-        cursor = conn.execute(
-            "INSERT INTO suppliers (name, phone, email, company_key) VALUES (?, ?, '', ?)",
-            (name.strip(), phone.strip() if phone else "", company_key),
-        )
-        supplier_id = cursor.lastrowid
-        conn.commit()
-        return supplier_id
-    finally:
-        conn.close()
+def _register_supplier(conn, company_key, name, phone, email, address, category):
+    """Insert a new supplier into the suppliers table using the active connection."""
+    cursor = conn.execute(
+        "INSERT INTO suppliers (company_key, name, phone, email, address, category) VALUES (?, ?, ?, ?, ?, ?)",
+        (
+            company_key,
+            name.strip(),
+            phone.strip() if phone else "",
+            email.strip() if email else "",
+            address.strip() if address else "",
+            category.strip() if category else "",
+        ),
+    )
+    return cursor.lastrowid
 
 
 def _record_supplier_ledger_transaction(conn, company_key, supplier_id, transaction_type, amount, description, role, reference=None, transaction_date=None, post_to_gl=True):

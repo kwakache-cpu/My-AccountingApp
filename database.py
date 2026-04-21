@@ -404,12 +404,28 @@ def ensure_schema_integrity(conn):
             email TEXT,
             phone TEXT,
             address TEXT,
+            category TEXT,
             currency TEXT DEFAULT 'GHS',
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             UNIQUE(company_key, name)
         )
         """
     )
+    cursor.execute("PRAGMA table_info(suppliers)")
+    supplier_columns = {row[1] for row in cursor.fetchall()}
+    supplier_column_defs = {
+        "company_key": "TEXT",
+        "name": "TEXT",
+        "email": "TEXT",
+        "phone": "TEXT",
+        "address": "TEXT",
+        "category": "TEXT",
+        "currency": "TEXT DEFAULT 'GHS'",
+        "created_at": "TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
+    }
+    for column_name, column_def in supplier_column_defs.items():
+        if column_name not in supplier_columns:
+            cursor.execute(f"ALTER TABLE suppliers ADD COLUMN {column_name} {column_def}")
     cursor.execute(
         """
         CREATE TABLE IF NOT EXISTS invoices (
