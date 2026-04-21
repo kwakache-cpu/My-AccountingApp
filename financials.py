@@ -1,5 +1,9 @@
 from datetime import datetime
+import importlib.util
+import logging
+import os
 import sqlite3
+import sys
 
 import pandas as pd
 import streamlit as st
@@ -14,17 +18,51 @@ from accounting_engine import (
     get_bank_reconciliation,
     post_journal_entry,
 )
-from modules import (
-    convert_amount_from_base,
-    format_currency,
-    format_currency_dataframe,
-    get_currency_symbol,
-    get_display_currency,
-    get_exchange_rate,
-    post_transaction,
-    set_period_lock,
-    show_journal_entries,
-)
+logger = logging.getLogger(__name__)
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+
+def _load_local_modules_module():
+    try:
+        import modules as loaded_modules
+
+        logger.info(
+            "Financials imported modules via standard registry lookup: module=%s file=%s",
+            getattr(loaded_modules, "__name__", "modules"),
+            getattr(loaded_modules, "__file__", "unknown"),
+        )
+        return loaded_modules
+    except KeyError as exc:
+        modules_path = os.path.join(BASE_DIR, "modules.py")
+        logger.warning(
+            "Financials encountered missing 'modules' registry entry; loading local modules.py explicitly: path=%s error=%s",
+            modules_path,
+            exc,
+        )
+        spec = importlib.util.spec_from_file_location("modules", modules_path)
+        if spec is None or spec.loader is None:
+            raise RuntimeError(f"Could not build import spec for local modules.py at {modules_path}") from exc
+        loaded_modules = importlib.util.module_from_spec(spec)
+        sys.modules["modules"] = loaded_modules
+        spec.loader.exec_module(loaded_modules)
+        logger.info(
+            "Financials recovered modules import from local file: module=%s file=%s",
+            getattr(loaded_modules, "__name__", "modules"),
+            getattr(loaded_modules, "__file__", modules_path),
+        )
+        return loaded_modules
+
+
+eka_modules = _load_local_modules_module()
+convert_amount_from_base = eka_modules.convert_amount_from_base
+format_currency = eka_modules.format_currency
+format_currency_dataframe = eka_modules.format_currency_dataframe
+get_currency_symbol = eka_modules.get_currency_symbol
+get_display_currency = eka_modules.get_display_currency
+get_exchange_rate = eka_modules.get_exchange_rate
+post_transaction = eka_modules.post_transaction
+set_period_lock = eka_modules.set_period_lock
+show_journal_entries = eka_modules.show_journal_entries
 
 
 def _resolve_date(value):

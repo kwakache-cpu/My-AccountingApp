@@ -1,5 +1,6 @@
 import streamlit as st
 import pandas as pd
+import importlib.util
 from database import (
     DB_PATH,
     get_connection,
@@ -10,6 +11,7 @@ from openai import OpenAI
 import json
 import logging
 import os
+import sys
 from datetime import date, datetime, timedelta
 import hashlib
 import random
@@ -30,36 +32,6 @@ except Exception:
     credentials = None
     initialize_app = None
     storage = None
-from modules import (
-    BOG_DISPLAY_RATES,
-    accounting_ai_response,
-    format_currency,
-    get_exchange_rate,
-    initialize_paystack_payment,
-    log_audit_action,
-    render_accounting_assistant_sidebar,
-    show_accounts_payable,
-    show_accounts_receivable,
-    show_create_bill_page,
-    show_dashboard as show_dashboard_module,
-    show_aging,
-    show_ai_assistant,
-    show_audit_trail,
-    show_banking,
-    show_branch_management,
-    show_chart_of_accounts,
-    show_company_setup,
-    show_fixed_assets,
-    show_inventory,
-    show_journal_entries,
-    show_onboarding_payment,
-    show_payroll,
-    show_pos,
-    show_reports,
-    show_sales_purchase,
-    show_taxation,
-    show_vouchers,
-)
 from financials import (
     show_customers_page,
     show_create_invoice_page,
@@ -77,6 +49,68 @@ logger = logging.getLogger(__name__)
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 LOGO_PATH = os.path.join(BASE_DIR, "assets", "eka_logo.png")
+
+
+def _load_local_modules_module():
+    try:
+        import modules as loaded_modules
+
+        logger.info(
+            "Modules import initialized via standard registry lookup: module=%s file=%s",
+            getattr(loaded_modules, "__name__", "modules"),
+            getattr(loaded_modules, "__file__", "unknown"),
+        )
+        return loaded_modules
+    except KeyError as exc:
+        modules_path = os.path.join(BASE_DIR, "modules.py")
+        logger.warning(
+            "Modules registry entry was missing during import: expected_key='modules' modules_path=%s error=%s",
+            modules_path,
+            exc,
+        )
+        spec = importlib.util.spec_from_file_location("modules", modules_path)
+        if spec is None or spec.loader is None:
+            raise RuntimeError(f"Could not build import spec for local modules.py at {modules_path}") from exc
+        loaded_modules = importlib.util.module_from_spec(spec)
+        sys.modules["modules"] = loaded_modules
+        spec.loader.exec_module(loaded_modules)
+        logger.info(
+            "Modules import recovered by explicitly loading local modules.py: module=%s file=%s",
+            getattr(loaded_modules, "__name__", "modules"),
+            getattr(loaded_modules, "__file__", modules_path),
+        )
+        return loaded_modules
+
+
+eka_modules = _load_local_modules_module()
+BOG_DISPLAY_RATES = eka_modules.BOG_DISPLAY_RATES
+accounting_ai_response = eka_modules.accounting_ai_response
+format_currency = eka_modules.format_currency
+get_exchange_rate = eka_modules.get_exchange_rate
+initialize_paystack_payment = eka_modules.initialize_paystack_payment
+log_audit_action = eka_modules.log_audit_action
+render_accounting_assistant_sidebar = eka_modules.render_accounting_assistant_sidebar
+show_accounts_payable = eka_modules.show_accounts_payable
+show_accounts_receivable = eka_modules.show_accounts_receivable
+show_create_bill_page = eka_modules.show_create_bill_page
+show_dashboard_module = eka_modules.show_dashboard
+show_aging = eka_modules.show_aging
+show_ai_assistant = eka_modules.show_ai_assistant
+show_audit_trail = eka_modules.show_audit_trail
+show_banking = eka_modules.show_banking
+show_branch_management = eka_modules.show_branch_management
+show_chart_of_accounts = eka_modules.show_chart_of_accounts
+show_company_setup = eka_modules.show_company_setup
+show_fixed_assets = eka_modules.show_fixed_assets
+show_inventory = eka_modules.show_inventory
+show_journal_entries = eka_modules.show_journal_entries
+show_onboarding_payment = eka_modules.show_onboarding_payment
+show_payroll = eka_modules.show_payroll
+show_pos = eka_modules.show_pos
+show_reports = eka_modules.show_reports
+show_sales_purchase = eka_modules.show_sales_purchase
+show_taxation = eka_modules.show_taxation
+show_vouchers = eka_modules.show_vouchers
 
 GATEKEEPER_SYSTEM_PROMPT = (
     "You are a professional Chartered Accountant. Provide clear, accurate financial guidance based on the ERP data."
