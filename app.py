@@ -784,16 +784,20 @@ def show_system_status():
 
 def render_login_logo():
     if os.path.exists(LOGO_PATH):
-        left_col, center_col, right_col = st.columns([1, 2, 1])
-        with center_col:
+        logo_col, text_col = st.columns([1, 3])
+        with logo_col:
             st.image(LOGO_PATH, width=180)
+        with text_col:
+            st.markdown(
+                "<h1 style='color: #1E3A8A; margin-top: 28px;'>E.K.A ENTERPRISE ERP</h1>",
+                unsafe_allow_html=True,
+            )
     else:
-        st.markdown("### EKA ERP")
+        st.markdown("<h1 style='text-align: center; color: #1E3A8A;'>E.K.A ENTERPRISE ERP</h1>", unsafe_allow_html=True)
 
 def login_ui():
     """Secure Multi-Tier Authentication Interface with Enhanced Security."""
     render_login_logo()
-    st.markdown("<h1 style='text-align: center; color: #1E3A8A;'>E.K.A ENTERPRISE ERP</h1>", unsafe_allow_html=True)
     st.markdown("<hr>", unsafe_allow_html=True)
     
     # Check for brute force attempts
