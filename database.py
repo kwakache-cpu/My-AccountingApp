@@ -208,6 +208,7 @@ def _read_runtime_secret(secret_name, default=None):
 
 def get_firebase_service_account_info():
     firebase_key_path = str(FIREBASE_KEY_PATH or "").strip()
+    source_attempt_order = "structured Streamlit secrets -> local firebase_key.json -> legacy FIREBASE_SERVICE_ACCOUNT_JSON"
     invalid_secret_reason = (
         "invalid JSON in FIREBASE_SERVICE_ACCOUNT_JSON; likely cause: unescaped newline or control character in private_key"
     )
@@ -262,31 +263,6 @@ def get_firebase_service_account_info():
     if not database_url_exists_in_streamlit:
         logger.warning("FIREBASE_DATABASE_URL not found in st.secrets")
 
-    if inline_json not in (None, ""):
-        try:
-            service_account_info = json.loads(str(inline_json))
-            logger.info("Firebase secret diagnostics: json.loads succeeded")
-            logger.info("Firebase credentials loaded from JSON secret fallback")
-            return {
-                "ok": True,
-                "source": "json_secret_fallback",
-                "service_account_info": service_account_info,
-                "key_path": firebase_key_path,
-            }
-        except Exception as exc:
-            logger.warning(
-                "Firebase secret diagnostics: json.loads failed exception_type=%s message=%s",
-                type(exc).__name__,
-                str(exc),
-            )
-            logger.warning("Firebase credentials missing: %s", invalid_secret_reason)
-            return {
-                "ok": False,
-                "source": "json_secret_fallback",
-                "reason": f"{invalid_secret_reason}. Parser detail: {exc}",
-                "key_path": firebase_key_path,
-            }
-
     if not streamlit_available:
         logger.warning("Firebase credentials missing because streamlit import is unavailable")
     elif not secrets_accessible:
@@ -322,17 +298,51 @@ def get_firebase_service_account_info():
             firebase_key_path,
         )
 
+    if inline_json not in (None, ""):
+        try:
+            service_account_info = json.loads(str(inline_json))
+            logger.info("Firebase secret diagnostics: json.loads succeeded")
+            logger.info("Firebase credentials loaded from legacy JSON fallback")
+            return {
+                "ok": True,
+                "source": "json_secret_fallback",
+                "service_account_info": service_account_info,
+                "key_path": firebase_key_path,
+            }
+        except Exception as exc:
+            logger.warning(
+                "Firebase secret diagnostics: json.loads failed exception_type=%s message=%s",
+                type(exc).__name__,
+                str(exc),
+            )
+            logger.warning("Firebase credentials missing: %s", invalid_secret_reason)
+            return {
+                "ok": False,
+                "source": "json_secret_fallback",
+                "reason": (
+                    f"Legacy JSON fallback failed after {source_attempt_order}. "
+                    f"{invalid_secret_reason}. Parser detail: {exc}"
+                ),
+                "key_path": firebase_key_path,
+            }
+
     if not streamlit_available:
-        failure_reason = "Firebase credentials unavailable: streamlit import failed and firebase_key.json is missing"
+        failure_reason = (
+            f"Firebase credentials unavailable after {source_attempt_order}: "
+            "streamlit import failed and firebase_key.json is missing"
+        )
     elif not secrets_accessible:
-        failure_reason = "Firebase credentials unavailable: st.secrets unavailable at runtime and firebase_key.json is missing"
+        failure_reason = (
+            f"Firebase credentials unavailable after {source_attempt_order}: "
+            "st.secrets unavailable at runtime and firebase_key.json is missing"
+        )
     elif not structured_secret_exists_in_streamlit and not secret_exists_in_streamlit:
         failure_reason = (
-            "Firebase credentials unavailable: both FIREBASE_SERVICE_ACCOUNT and FIREBASE_SERVICE_ACCOUNT_JSON "
-            "are missing from st.secrets and firebase_key.json is missing"
+            f"Firebase credentials unavailable after {source_attempt_order}: both FIREBASE_SERVICE_ACCOUNT "
+            "and FIREBASE_SERVICE_ACCOUNT_JSON are missing from st.secrets and firebase_key.json is missing"
         )
     else:
-        failure_reason = "Firebase credentials not found in file or secrets"
+        failure_reason = f"Firebase credentials not found after {source_attempt_order}"
 
     logger.warning("Firebase credentials missing")
     return {
