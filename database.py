@@ -103,6 +103,7 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+logger.info("database module loaded successfully")
 
 IFRS_CHART_OF_ACCOUNTS = [
     ("Assets", "Asset", None),
