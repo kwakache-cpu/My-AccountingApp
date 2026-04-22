@@ -3,9 +3,9 @@ import pandas as pd
 import importlib.util
 from database import (
     DB_PATH,
+    get_firebase_service_account_info,
     get_connection,
     get_recovery_source_diagnostics,
-    get_firebase_runtime_config,
     startup_database,
 )
 from openai import OpenAI
@@ -138,6 +138,10 @@ def _init_firebase_storage_client():
         return FIREBASE_APP
     try:
         diagnostics = get_recovery_source_diagnostics()
+        credentials_result = get_firebase_service_account_info()
+        if not credentials_result.get("ok"):
+            logger.warning("Cloud Vault UI client could not load credentials: %s", credentials_result.get("reason"))
+            return None
         if not diagnostics.get("credentials_loaded"):
             logger.warning("Cloud Vault UI client could not load credentials: %s", diagnostics.get("credential_error"))
             return None
@@ -148,7 +152,7 @@ def _init_firebase_storage_client():
             logger.warning("Cloud Vault UI client is missing a database URL configuration.")
             return None
         FIREBASE_BUCKET_NAME = diagnostics["bucket_name"]
-        firebase_cred = credentials.Certificate(diagnostics["service_account_info"])
+        firebase_cred = credentials.Certificate(credentials_result["service_account_info"])
         FIREBASE_APP = initialize_app(
             firebase_cred,
             {

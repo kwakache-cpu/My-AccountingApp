@@ -186,7 +186,7 @@ FIREBASE_RECOVERY_BUCKET_NAME = None
 
 def get_firebase_runtime_config():
     return {
-        "databaseURL": FIREBASE_DATABASE_URL,
+        "databaseURL": str(_read_runtime_secret("FIREBASE_DATABASE_URL", FIREBASE_DATABASE_URL) or "").strip(),
         "key_path": FIREBASE_KEY_PATH,
     }
 
@@ -205,6 +205,58 @@ def _read_runtime_secret(secret_name, default=None):
     return default
 
 
+def get_firebase_service_account_info():
+    firebase_key_path = str(FIREBASE_KEY_PATH or "").strip()
+    inline_json = _read_runtime_secret("FIREBASE_SERVICE_ACCOUNT_JSON", None)
+
+    if inline_json not in (None, ""):
+        try:
+            service_account_info = json.loads(str(inline_json))
+            logger.info("Firebase credentials loaded from secrets")
+            return {
+                "ok": True,
+                "source": "secrets",
+                "service_account_info": service_account_info,
+                "key_path": firebase_key_path,
+            }
+        except Exception as exc:
+            logger.warning("Firebase credentials missing: FIREBASE_SERVICE_ACCOUNT_JSON could not be parsed")
+            return {
+                "ok": False,
+                "source": "secrets",
+                "reason": f"Firebase credentials from secrets are invalid: {exc}",
+                "key_path": firebase_key_path,
+            }
+
+    if firebase_key_path and os.path.exists(firebase_key_path):
+        try:
+            with open(firebase_key_path, "r", encoding="utf-8") as firebase_file:
+                service_account_info = json.load(firebase_file)
+            logger.info("Firebase credentials loaded from file")
+            return {
+                "ok": True,
+                "source": "file",
+                "service_account_info": service_account_info,
+                "key_path": firebase_key_path,
+            }
+        except Exception as exc:
+            logger.warning("Firebase credentials missing: local firebase_key.json could not be read")
+            return {
+                "ok": False,
+                "source": "file",
+                "reason": f"Firebase credentials from file are invalid: {exc}",
+                "key_path": firebase_key_path,
+            }
+
+    logger.warning("Firebase credentials missing")
+    return {
+        "ok": False,
+        "source": "missing",
+        "reason": "Firebase credentials not found in file or secrets",
+        "key_path": firebase_key_path,
+    }
+
+
 def get_recovery_source_diagnostics():
     firebase_config = get_firebase_runtime_config()
     firebase_key_path = str(firebase_config.get("key_path") or "").strip()
@@ -214,33 +266,10 @@ def get_recovery_source_diagnostics():
     ).strip()
     bucket_override = str(_read_runtime_secret("FIREBASE_STORAGE_BUCKET", "") or "").strip()
     object_name = str(_read_runtime_secret("FIREBASE_DB_BACKUP_OBJECT", FIREBASE_OBJECT_NAME) or FIREBASE_OBJECT_NAME).strip()
-    inline_json = _read_runtime_secret("FIREBASE_SERVICE_ACCOUNT_JSON", None)
-    inline_dict = _read_runtime_secret("FIREBASE_SERVICE_ACCOUNT", None)
-
-    credentials_source = "missing"
-    service_account_info = None
-    credential_error = None
-
-    if inline_json not in (None, ""):
-        try:
-            service_account_info = json.loads(str(inline_json))
-            credentials_source = "streamlit_or_env_json"
-        except Exception as exc:
-            credential_error = f"inline service account json is invalid: {exc}"
-    elif isinstance(inline_dict, dict) and inline_dict:
-        service_account_info = dict(inline_dict)
-        credentials_source = "streamlit_or_env_mapping"
-    elif firebase_key_exists:
-        try:
-            with open(firebase_key_path, "r", encoding="utf-8") as firebase_file:
-                service_account_info = json.load(firebase_file)
-            credentials_source = "local_file"
-        except Exception as exc:
-            credential_error = f"firebase key file could not be read: {exc}"
-    elif firebase_key_path:
-        credential_error = "firebase key file path is configured but the file does not exist"
-    else:
-        credential_error = "no firebase service account source is configured"
+    credentials_result = get_firebase_service_account_info()
+    service_account_info = credentials_result.get("service_account_info")
+    credentials_source = credentials_result.get("source", "missing")
+    credential_error = None if credentials_result.get("ok") else credentials_result.get("reason")
 
     project_id = str((service_account_info or {}).get("project_id") or "").strip()
     bucket_name = bucket_override or (f"{project_id}.appspot.com" if project_id else "")
@@ -271,6 +300,7 @@ def _init_firebase_recovery_client():
         return FIREBASE_RECOVERY_APP
     try:
         diagnostics = get_recovery_source_diagnostics()
+        credentials_result = get_firebase_service_account_info()
         logger.info(
             "Recovery source configuration: backend=%s credentials_loaded=%s credentials_source=%s firebase_key_exists=%s database_url_configured=%s bucket=%s object=%s project_id_present=%s",
             diagnostics["backend"],
@@ -282,8 +312,8 @@ def _init_firebase_recovery_client():
             diagnostics["object_name"] or "missing",
             diagnostics["project_id_present"],
         )
-        if not diagnostics["credentials_loaded"]:
-            logger.warning("Firebase recovery credentials are unavailable: %s", diagnostics["credential_error"])
+        if not credentials_result.get("ok"):
+            logger.warning("Firebase recovery credentials are unavailable: %s", credentials_result.get("reason"))
             return None
         if not diagnostics["bucket_name"]:
             logger.warning("Firebase recovery client could not determine a storage bucket name.")
@@ -292,7 +322,7 @@ def _init_firebase_recovery_client():
             logger.warning("Firebase recovery client is missing a database URL configuration.")
             return None
         FIREBASE_RECOVERY_BUCKET_NAME = diagnostics["bucket_name"]
-        firebase_cred = credentials.Certificate(diagnostics["service_account_info"])
+        firebase_cred = credentials.Certificate(credentials_result["service_account_info"])
         FIREBASE_RECOVERY_APP = initialize_app(
             firebase_cred,
             {

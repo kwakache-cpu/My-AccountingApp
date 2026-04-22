@@ -40,8 +40,9 @@ logger = logging.getLogger(__name__)
 
 # Import shared utilities from database
 from database import (
+    get_firebase_service_account_info,
     get_connection,
-    get_firebase_runtime_config,
+    get_recovery_source_diagnostics,
     log_audit_action as database_log_audit_action,
 )
 from accounting_engine import (
@@ -311,20 +312,22 @@ def _init_modules_firebase_app():
     if FIREBASE_MODULE_APP is not None:
         return FIREBASE_MODULE_APP
     try:
-        firebase_config = get_firebase_runtime_config()
-        firebase_key_path = firebase_config["key_path"]
-        if not os.path.exists(firebase_key_path):
+        credentials_result = get_firebase_service_account_info()
+        diagnostics = get_recovery_source_diagnostics()
+        if not credentials_result.get("ok"):
+            logger.warning("Modules Firebase client could not load credentials: %s", credentials_result.get("reason"))
             return None
-        with open(firebase_key_path, "r", encoding="utf-8") as firebase_file:
-            firebase_info = json.load(firebase_file)
-        project_id = str(firebase_info.get("project_id") or "").strip()
-        if not project_id:
+        if not diagnostics.get("bucket_name"):
+            logger.warning("Modules Firebase client could not determine a storage bucket name.")
+            return None
+        if not diagnostics.get("database_url"):
+            logger.warning("Modules Firebase client is missing a database URL configuration.")
             return None
         FIREBASE_MODULE_APP = firebase_admin.initialize_app(
-            credentials.Certificate(firebase_key_path),
+            credentials.Certificate(credentials_result["service_account_info"]),
             {
-                "databaseURL": firebase_config["databaseURL"],
-                "storageBucket": f"{project_id}.appspot.com",
+                "databaseURL": diagnostics["database_url"],
+                "storageBucket": diagnostics["bucket_name"],
             },
             name="eka-modules-sync",
         )
