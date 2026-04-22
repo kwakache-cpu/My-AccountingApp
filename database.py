@@ -208,10 +208,26 @@ def _read_runtime_secret(secret_name, default=None):
 def get_firebase_service_account_info():
     firebase_key_path = str(FIREBASE_KEY_PATH or "").strip()
     inline_json = _read_runtime_secret("FIREBASE_SERVICE_ACCOUNT_JSON", None)
+    invalid_secret_reason = (
+        "invalid JSON in FIREBASE_SERVICE_ACCOUNT_JSON; likely cause: unescaped newline or control character in private_key"
+    )
+    secret_exists_in_streamlit = False
+    if st is not None:
+        try:
+            secret_exists_in_streamlit = "FIREBASE_SERVICE_ACCOUNT_JSON" in st.secrets
+        except Exception:
+            secret_exists_in_streamlit = False
+    inline_json_length = len(str(inline_json)) if inline_json not in (None, "") else 0
+    logger.info(
+        "Firebase secret diagnostics: secret_exists_in_streamlit=%s provided_length=%s",
+        secret_exists_in_streamlit,
+        inline_json_length,
+    )
 
     if inline_json not in (None, ""):
         try:
             service_account_info = json.loads(str(inline_json))
+            logger.info("Firebase secret diagnostics: json.loads succeeded")
             logger.info("Firebase credentials loaded from secrets")
             return {
                 "ok": True,
@@ -220,11 +236,16 @@ def get_firebase_service_account_info():
                 "key_path": firebase_key_path,
             }
         except Exception as exc:
-            logger.warning("Firebase credentials missing: FIREBASE_SERVICE_ACCOUNT_JSON could not be parsed")
+            logger.warning(
+                "Firebase secret diagnostics: json.loads failed exception_type=%s message=%s",
+                type(exc).__name__,
+                str(exc),
+            )
+            logger.warning("Firebase credentials missing: %s", invalid_secret_reason)
             return {
                 "ok": False,
                 "source": "secrets",
-                "reason": f"Firebase credentials from secrets are invalid: {exc}",
+                "reason": f"{invalid_secret_reason}. Parser detail: {exc}",
                 "key_path": firebase_key_path,
             }
 

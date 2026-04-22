@@ -13,6 +13,9 @@ except ImportError:
     def get_firebase_service_account_info():
         firebase_key_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "firebase_key.json")
         inline_json = os.getenv("FIREBASE_SERVICE_ACCOUNT_JSON")
+        invalid_secret_reason = (
+            "invalid JSON in FIREBASE_SERVICE_ACCOUNT_JSON; likely cause: unescaped newline or control character in private_key"
+        )
         if inline_json in (None, ""):
             try:
                 inline_json = st.secrets.get("FIREBASE_SERVICE_ACCOUNT_JSON")
@@ -33,7 +36,7 @@ except ImportError:
                 return {
                     "ok": False,
                     "source": "secrets",
-                    "reason": f"Firebase credentials from secrets are invalid: {exc}",
+                    "reason": f"{invalid_secret_reason}. Parser detail: {exc}",
                     "key_path": firebase_key_path,
                 }
 
