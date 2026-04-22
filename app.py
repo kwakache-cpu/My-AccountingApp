@@ -3,11 +3,66 @@ import pandas as pd
 import importlib.util
 from database import (
     DB_PATH,
-    get_firebase_service_account_info,
     get_connection,
     get_recovery_source_diagnostics,
     startup_database,
 )
+try:
+    from database import get_firebase_service_account_info
+except ImportError:
+    def get_firebase_service_account_info():
+        firebase_key_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "firebase_key.json")
+        inline_json = os.getenv("FIREBASE_SERVICE_ACCOUNT_JSON")
+        if inline_json in (None, ""):
+            try:
+                inline_json = st.secrets.get("FIREBASE_SERVICE_ACCOUNT_JSON")
+            except Exception:
+                inline_json = None
+
+        if inline_json not in (None, ""):
+            try:
+                service_account_info = json.loads(str(inline_json))
+                logger.info("Firebase credentials loaded from secrets")
+                return {
+                    "ok": True,
+                    "source": "secrets",
+                    "service_account_info": service_account_info,
+                    "key_path": firebase_key_path,
+                }
+            except Exception as exc:
+                return {
+                    "ok": False,
+                    "source": "secrets",
+                    "reason": f"Firebase credentials from secrets are invalid: {exc}",
+                    "key_path": firebase_key_path,
+                }
+
+        if os.path.exists(firebase_key_path):
+            try:
+                with open(firebase_key_path, "r", encoding="utf-8") as firebase_file:
+                    service_account_info = json.load(firebase_file)
+                logger.info("Firebase credentials loaded from file")
+                return {
+                    "ok": True,
+                    "source": "file",
+                    "service_account_info": service_account_info,
+                    "key_path": firebase_key_path,
+                }
+            except Exception as exc:
+                return {
+                    "ok": False,
+                    "source": "file",
+                    "reason": f"Firebase credentials from file are invalid: {exc}",
+                    "key_path": firebase_key_path,
+                }
+
+        logger.warning("Firebase credentials missing")
+        return {
+            "ok": False,
+            "source": "missing",
+            "reason": "Firebase credentials not found in file or secrets",
+            "key_path": firebase_key_path,
+        }
 from openai import OpenAI
 import json
 import logging
