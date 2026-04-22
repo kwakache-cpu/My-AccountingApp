@@ -27,6 +27,50 @@ def _normal_balance(account_type):
 
 
 VALID_ACCOUNT_TYPES = {"Asset", "Liability", "Equity", "Income", "Expense"}
+VALID_DOCUMENT_CONTROL_STATUSES = {"Draft", "Submitted", "Approved", "Posted", "Cancelled", "Voided", "Active"}
+
+
+def normalize_document_status(value, default="Draft"):
+    normalized = str(value or "").strip().title()
+    return normalized if normalized in VALID_DOCUMENT_CONTROL_STATUSES else str(default)
+
+
+def _is_posting_status(value):
+    return normalize_document_status(value, default="Draft") == "Posted"
+
+
+def _source_document_columns(conn, table_name):
+    return {row[1] for row in conn.execute(f"PRAGMA table_info({table_name})").fetchall()}
+
+
+def _sync_source_document_posting(conn, source_table, source_id, entry_id, posting_user=None):
+    if not source_table or not source_id:
+        return
+    normalized_source_table = str(source_table).strip().lower()
+    if normalized_source_table not in {"invoices", "bills", "payments", "stock_movements", "vouchers"}:
+        return
+    source_columns = _source_document_columns(conn, normalized_source_table)
+    update_parts = []
+    params = []
+    if "posted_entry_id" in source_columns:
+        update_parts.append("posted_entry_id = ?")
+        params.append(int(entry_id))
+    if "last_journal_sync_at" in source_columns:
+        update_parts.append("last_journal_sync_at = CURRENT_TIMESTAMP")
+    if "approval_status" in source_columns:
+        update_parts.append("approval_status = 'Posted'")
+    if "approved_at" in source_columns:
+        update_parts.append("approved_at = COALESCE(approved_at, CURRENT_TIMESTAMP)")
+    if posting_user and "approved_by" in source_columns:
+        update_parts.append("approved_by = COALESCE(approved_by, ?)")
+        params.append(str(posting_user))
+    if not update_parts:
+        return
+    params.append(int(source_id))
+    conn.execute(
+        f"UPDATE {normalized_source_table} SET {', '.join(update_parts)} WHERE id = ?",
+        tuple(params),
+    )
 
 
 def _period_locked(conn, company_key, entry_date):
@@ -80,18 +124,19 @@ def _document_approval_enforced(conn):
 def _assert_source_document_postable(conn, source_table, source_id):
     if not source_table or not source_id or not _document_approval_enforced(conn):
         return
-    allowed_tables = {"invoices", "bills", "payments"}
+    allowed_tables = {"invoices", "bills", "payments", "vouchers", "stock_movements"}
     normalized_table = str(source_table).strip().lower()
     if normalized_table not in allowed_tables:
         return
-    columns = {row[1] for row in conn.execute(f"PRAGMA table_info({normalized_table})").fetchall()}
-    if "approval_status" not in columns:
+    columns = _source_document_columns(conn, normalized_table)
+    if "approval_status" not in columns and "status" not in columns:
         return
+    approval_expr = "approval_status" if "approval_status" in columns else "status"
     row = conn.execute(
-        f"SELECT approval_status FROM {normalized_table} WHERE id = ? LIMIT 1",
+        f"SELECT {approval_expr} AS approval_status FROM {normalized_table} WHERE id = ? LIMIT 1",
         (int(source_id),),
     ).fetchone()
-    status = str(row["approval_status"] or "").strip().title() if row else ""
+    status = normalize_document_status(row["approval_status"] if row else "", default="Draft")
     if status not in {"Approved", "Posted", "Active"}:
         raise ValueError(
             f"{normalized_table[:-1].title() if normalized_table.endswith('s') else normalized_table.title()} "
@@ -214,8 +259,8 @@ def _legacy_voucher_insert(
             return
         conn.execute(
             """
-            INSERT INTO vouchers (company_key, branch_id, date, v_type, ledger, credit, reference_no, narration, status, created_by)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'Active', ?)
+            INSERT INTO vouchers (company_key, branch_id, date, v_type, ledger, credit, reference_no, narration, status, approval_status, created_by)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'Posted', 'Posted', ?)
             """,
             (
                 company_key,
@@ -264,10 +309,13 @@ def post_journal_entry(
         raise ValueError(f"The accounting period for {entry_date[:7]} is locked.")
     _assert_source_document_postable(conn, source_table, source_id)
 
+    normalized_approval_status = normalize_document_status(approval_status, default="Posted")
     normalized_lines = []
     total_debit = 0.0
     total_credit = 0.0
     for line in lines:
+        if "account_id" not in line:
+            raise ValueError("Every journal line requires an explicit account selection.")
         account_id = int(line.get("account_id") or 0)
         debit = round(float(line.get("debit") or 0.0), 2)
         credit = round(float(line.get("credit") or 0.0), 2)
@@ -276,7 +324,7 @@ def post_journal_entry(
         if debit < 0 or credit < 0:
             raise ValueError("Debit and credit amounts cannot be negative.")
         if debit == 0 and credit == 0:
-            continue
+            raise ValueError("Each journal line must contain a positive debit or credit amount.")
         if debit > 0 and credit > 0:
             raise ValueError("A journal line cannot contain both debit and credit values.")
         account_row = conn.execute(
@@ -321,9 +369,9 @@ def post_journal_entry(
                 company_key, date, description, reference, created_by, branch_id,
                 customer_id, supplier_id, inventory_item_id, payment_id,
                 source_module, source_table, source_type, source_id,
-                approval_status
+                source_document_type, source_document_id, approval_status
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 company_key,
@@ -340,7 +388,9 @@ def post_journal_entry(
                 source_table,
                 source_type,
                 source_id,
-                approval_status,
+                source_type or source_table or source_module,
+                source_id,
+                normalized_approval_status,
             ),
         )
         entry_id = int(cursor.lastrowid)
@@ -350,11 +400,13 @@ def post_journal_entry(
             UPDATE journal_entries
             SET document_number = COALESCE(document_number, reference),
                 document_type = COALESCE(document_type, ?),
+                source_document_type = COALESCE(source_document_type, ?),
+                source_document_id = COALESCE(source_document_id, ?),
                 posted_at = COALESCE(posted_at, CURRENT_TIMESTAMP),
                 posted_by = COALESCE(posted_by, created_by)
             WHERE id = ?
             """,
-            (document_type, entry_id),
+            (document_type, document_type, source_id, entry_id),
         )
         for line in normalized_lines:
             conn.execute(
@@ -365,14 +417,13 @@ def post_journal_entry(
                 (entry_id, line["account_id"], line["debit"], line["credit"]),
             )
         if source_table and source_id:
-            normalized_source_table = str(source_table).strip().lower()
-            if normalized_source_table in {"invoices", "bills", "payments", "stock_movements"}:
-                source_columns = {row[1] for row in conn.execute(f"PRAGMA table_info({normalized_source_table})").fetchall()}
-                if "posted_entry_id" in source_columns:
-                    conn.execute(
-                        f"UPDATE {normalized_source_table} SET posted_entry_id = ?, last_journal_sync_at = CURRENT_TIMESTAMP WHERE id = ?",
-                        (entry_id, int(source_id)),
-                    )
+            _sync_source_document_posting(
+                conn,
+                source_table=source_table,
+                source_id=source_id,
+                entry_id=entry_id,
+                posting_user=created_by,
+            )
         _mirror_legacy_transactions(conn, company_key, entry_date, description, reference, created_by, branch_id, normalized_lines)
         if source_module:
             _legacy_voucher_insert(conn, company_key, branch_id, entry_date, description, reference, created_by, normalized_lines, source_module=source_module)
@@ -756,6 +807,8 @@ def _journal_base_query():
         JOIN journal_lines jl ON jl.entry_id = je.id
         JOIN chart_of_accounts c ON c.id = jl.account_id
         WHERE je.company_key = ?
+          AND COALESCE(je.is_voided, 0) = 0
+          AND COALESCE(je.approval_status, 'Posted') = 'Posted'
     """
 
 
@@ -795,6 +848,8 @@ def get_account_total(company_key, account_name_like, start_date=None, end_date=
             JOIN chart_of_accounts c ON c.id = jl.account_id
             WHERE je.company_key = ?
               AND lower({_coa_name_expression()}) LIKE lower(?)
+              AND COALESCE(je.is_voided, 0) = 0
+              AND COALESCE(je.approval_status, 'Posted') = 'Posted'
         """
         params = [company_key, f"{str(account_name_like or '').strip()}%"]
         if start_date:
@@ -833,6 +888,8 @@ def get_month_sales_total(company_key, year_month=None, branch_id=None, conn=Non
             WHERE je.company_key = ?
               AND strftime('%Y-%m', je.date) = ?
               AND lower(COALESCE(NULLIF(c.name, ''), NULLIF(c.account_name, ''), '')) LIKE 'sales%'
+              AND COALESCE(je.is_voided, 0) = 0
+              AND COALESCE(je.approval_status, 'Posted') = 'Posted'
         """
         params = [company_key, period_value]
         if branch_id:
@@ -860,6 +917,7 @@ def get_recent_accounting_activity(company_key, branch_id=None, limit=10, conn=N
             JOIN journal_lines jl ON jl.entry_id = je.id
             WHERE je.company_key = ?
               AND COALESCE(je.is_voided, 0) = 0
+              AND COALESCE(je.approval_status, 'Posted') = 'Posted'
             GROUP BY je.id, je.date, activity_type, je.description, je.reference
             ORDER BY date(je.date) DESC, je.id DESC
             LIMIT ?

@@ -828,10 +828,13 @@ def show_journal_entries(company_key, role):
                    COALESCE(c.code, c.account_code, '') AS "Account Code",
                    COALESCE(c.name, c.account_name) AS "Account",
                    je.description AS "Description",
+                   COALESCE(je.approval_status, 'Posted') AS "Posting State",
                    jl.debit AS "Debit",
                    jl.credit AS "Credit",
                    je.reference AS "Reference",
                    je.created_by AS "Created By",
+                   je.posted_by AS "Posted By",
+                   je.posted_at AS "Posted At",
                    je.created_at AS "Created At"
             FROM journal_entries je
             JOIN journal_lines jl ON jl.entry_id = je.id
@@ -862,6 +865,7 @@ def show_journal_entries(company_key, role):
             conn.close()
 
     st.subheader("Journal Entries")
+    st.warning("Posted journal entries cannot be edited directly. Use reversal or void workflows to correct accounting records.")
     if transactions_df.empty:
         st.info("No journal entries have been posted yet.")
     else:
@@ -2282,6 +2286,7 @@ def show_create_bill_page(company_key):
             supplier_name = st.selectbox("Supplier", supplier_options)
             bill_date = st.date_input("Bill Date", value=datetime.now().date())
             bill_category = st.selectbox("Bill Posting", ["Expense", "Inventory"])
+            posting_state = st.selectbox("Posting State", ["Draft", "Submitted", "Approved", "Posted", "Cancelled"], index=1)
             description = st.text_input("Description")
 
             submitted = st.form_submit_button("Submit")
@@ -2310,8 +2315,8 @@ def show_create_bill_page(company_key):
 
                 cursor = conn.execute(
                     """
-                    INSERT INTO bills (company_key, supplier_id, bill_number, bill_date, due_date, status, amount, currency, description, created_by)
-                    VALUES (?, ?, ?, ?, ?, 'Pending', ?, 'GHS', ?, ?)
+                    INSERT INTO bills (company_key, supplier_id, bill_number, bill_date, due_date, status, approval_status, amount, currency, description, created_by)
+                    VALUES (?, ?, ?, ?, ?, 'Pending', ?, ?, 'GHS', ?, ?)
                     """,
                     (
                         company_key,
@@ -2319,6 +2324,7 @@ def show_create_bill_page(company_key):
                         bill_number,
                         bill_date.isoformat(),
                         bill_date.isoformat(),
+                        posting_state,
                         total_amount,
                         description.strip() or f"{bill_category} bill",
                         role,
@@ -2337,37 +2343,41 @@ def show_create_bill_page(company_key):
                         (bill_id, item["item_name"].strip(), item["quantity"], item["unit_price"], line_total),
                     )
 
-                # Post journal entry
-                post_journal_entry(
-                    company_key=company_key,
-                    date=bill_date,
-                    description=description.strip() or f"{bill_category} bill for {supplier_name}",
-                    reference=bill_number,
-                    lines=[
-                        {
-                            "account_id": get_account_id(conn, posting_account_name, posting_account_type),
-                            "debit": total_amount,
-                            "credit": 0,
-                        },
-                        {
-                            "account_id": get_account_id(conn, "Accounts Payable", "Liability"),
-                            "debit": 0,
-                            "credit": total_amount,
-                        },
-                    ],
-                    created_by=role,
-                    branch_id=branch_id,
-                    supplier_id=supplier_id,
-                    source_module="Create Bill",
-                    source_table="bills",
-                    source_type="Bill",
-                    source_id=bill_id,
-                    conn=conn,
-                )
+                if posting_state == "Posted":
+                    post_journal_entry(
+                        company_key=company_key,
+                        date=bill_date,
+                        description=description.strip() or f"{bill_category} bill for {supplier_name}",
+                        reference=bill_number,
+                        lines=[
+                            {
+                                "account_id": get_account_id(conn, posting_account_name, posting_account_type),
+                                "debit": total_amount,
+                                "credit": 0,
+                            },
+                            {
+                                "account_id": get_account_id(conn, "Accounts Payable", "Liability"),
+                                "debit": 0,
+                                "credit": total_amount,
+                            },
+                        ],
+                        created_by=role,
+                        branch_id=branch_id,
+                        supplier_id=supplier_id,
+                        source_module="Create Bill",
+                        source_table="bills",
+                        source_type="Bill",
+                        source_id=bill_id,
+                        approval_status="Posted",
+                        conn=conn,
+                    )
 
                 conn.commit()
                 log_system_event("INFO", "Create Bill", f"Created bill {bill_number} for {supplier_name}")
-                st.success(f"Bill created successfully with ID {bill_id}.")
+                if posting_state == "Posted":
+                    st.success(f"Bill created and posted successfully with ID {bill_id}.")
+                else:
+                    st.success(f"Bill created with ID {bill_id}. Accounting impact will begin when Posting State becomes Posted.")
                 # Reset items
                 st.session_state.bill_items = [{"item_name": "", "quantity": 1.0, "unit_price": 0.0}]
                 st.rerun()

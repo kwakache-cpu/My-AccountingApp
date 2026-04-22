@@ -519,6 +519,7 @@ def show_invoice_manager(company_key, role):
             amount = st.number_input("Amount (GHS)", min_value=0.0, step=0.01)
             output_vat_rate = st.number_input("Output VAT Rate (%)", min_value=0.0, max_value=100.0, step=0.5, value=0.0, key=f"invoice_vat_rate_{company_key}")
             status = st.selectbox("Status", ["Draft", "Pending", "Paid"])
+            posting_state = st.selectbox("Posting State", ["Draft", "Submitted", "Approved", "Posted", "Cancelled"], index=0, key=f"invoice_posting_state_{company_key}")
             invoice_date = st.date_input("Invoice Date", value=datetime.now().date(), key=f"invoice_date_{company_key}")
             description = st.text_input("Description", key=f"invoice_description_{company_key}")
             if st.form_submit_button("Save Invoice") and customer_name and amount > 0:
@@ -528,17 +529,17 @@ def show_invoice_manager(company_key, role):
                 try:
                     cursor = conn.execute(
                         """
-                        INSERT INTO invoices (company_key, customer_id, invoice_number, invoice_date, due_date, status, amount, output_vat, currency, description, created_by)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'GHS', ?, ?)
+                        INSERT INTO invoices (company_key, customer_id, invoice_number, invoice_date, due_date, status, approval_status, amount, output_vat, currency, description, created_by)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'GHS', ?, ?)
                         """,
-                        (company_key, customer_id, f"INV-{datetime.now().strftime('%Y%m%d%H%M%S')}", invoice_date.isoformat(), invoice_date.isoformat(), status, amount, output_vat, description, role),
+                        (company_key, customer_id, f"INV-{datetime.now().strftime('%Y%m%d%H%M%S')}", invoice_date.isoformat(), invoice_date.isoformat(), status, posting_state, amount, output_vat, description, role),
                     )
                 except sqlite3.IntegrityError as e:
                     conn.close()
                     st.error(f"Unable to create invoice: {e}")
                     st.stop()
 
-                if status != "Draft":
+                if posting_state == "Posted":
                     journal_lines = [
                         {"account_id": get_account_id(conn, "Cash" if status == "Paid" else "Accounts Receivable", "Asset"), "debit": amount + output_vat, "credit": 0},
                         {"account_id": get_account_id(conn, "Sales Revenue", "Income"), "debit": 0, "credit": amount},
@@ -558,13 +559,16 @@ def show_invoice_manager(company_key, role):
                         source_table="invoices",
                         source_type="Invoice",
                         source_id=int(cursor.lastrowid),
+                        approval_status="Posted",
                         conn=conn,
                     )
+                elif posting_state != "Cancelled":
+                    st.warning("Invoice saved without accounting impact. Change Posting State to Posted when it is approved for the ledger.")
                 conn.commit()
                 conn.close()
                 st.rerun()
         conn = get_connection()
-        df = pd.read_sql_query("SELECT invoice_number, invoice_date, due_date, status, amount, currency, description FROM invoices WHERE company_key = ? ORDER BY invoice_date DESC", conn, params=(company_key,))
+        df = pd.read_sql_query("SELECT invoice_number, invoice_date, due_date, status, approval_status, amount, currency, description FROM invoices WHERE company_key = ? ORDER BY invoice_date DESC", conn, params=(company_key,))
         conn.close()
         st.dataframe(format_currency_dataframe(df), use_container_width=True)
         _csv_button("Invoices", df, f"invoices_csv_{company_key}")
@@ -578,6 +582,7 @@ def show_invoice_manager(company_key, role):
             amount = st.number_input("Amount (GHS)", min_value=0.0, step=0.01, key=f"bill_amount_{company_key}")
             input_vat_rate = st.number_input("Input VAT Rate (%)", min_value=0.0, max_value=100.0, step=0.5, value=0.0, key=f"bill_vat_rate_{company_key}")
             status = st.selectbox("Status", ["Draft", "Pending", "Received"], key=f"bill_status_{company_key}")
+            posting_state = st.selectbox("Posting State", ["Draft", "Submitted", "Approved", "Posted", "Cancelled"], index=1, key=f"bill_posting_state_{company_key}")
             bill_date = st.date_input("Bill Date", value=datetime.now().date(), key=f"bill_date_{company_key}")
             description = st.text_input("Description", key=f"bill_description_{company_key}")
             if st.form_submit_button("Save Bill") and supplier_name and amount > 0:
@@ -587,17 +592,17 @@ def show_invoice_manager(company_key, role):
                 try:
                     cursor = conn.execute(
                         """
-                        INSERT INTO bills (company_key, supplier_id, bill_number, bill_date, due_date, status, amount, input_vat, currency, description, created_by)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'GHS', ?, ?)
+                        INSERT INTO bills (company_key, supplier_id, bill_number, bill_date, due_date, status, approval_status, amount, input_vat, currency, description, created_by)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'GHS', ?, ?)
                         """,
-                        (company_key, supplier_id, f"BILL-{datetime.now().strftime('%Y%m%d%H%M%S')}", bill_date.isoformat(), bill_date.isoformat(), status, amount, input_vat, description, role),
+                        (company_key, supplier_id, f"BILL-{datetime.now().strftime('%Y%m%d%H%M%S')}", bill_date.isoformat(), bill_date.isoformat(), status, posting_state, amount, input_vat, description, role),
                     )
                 except sqlite3.IntegrityError as e:
                     conn.close()
                     st.error(f"Unable to create bill: {e}")
                     st.stop()
 
-                if status != "Draft":
+                if posting_state == "Posted":
                     due_amount = amount + input_vat
                     credit_account = "Cash" if status == "Received" else "Accounts Payable"
                     credit_type = "Asset" if credit_account == "Cash" else "Liability"
@@ -620,13 +625,16 @@ def show_invoice_manager(company_key, role):
                         source_table="bills",
                         source_type="Bill",
                         source_id=int(cursor.lastrowid),
+                        approval_status="Posted",
                         conn=conn,
                     )
+                elif posting_state != "Cancelled":
+                    st.warning("Bill saved without accounting impact. Change Posting State to Posted when it is approved for the ledger.")
                 conn.commit()
                 conn.close()
                 st.rerun()
         conn = get_connection()
-        df = pd.read_sql_query("SELECT bill_number, bill_date, due_date, status, amount, currency, description FROM bills WHERE company_key = ? ORDER BY bill_date DESC", conn, params=(company_key,))
+        df = pd.read_sql_query("SELECT bill_number, bill_date, due_date, status, approval_status, amount, currency, description FROM bills WHERE company_key = ? ORDER BY bill_date DESC", conn, params=(company_key,))
         conn.close()
         st.dataframe(format_currency_dataframe(df), use_container_width=True)
         _csv_button("Bills", df, f"bills_csv_{company_key}")
@@ -636,45 +644,50 @@ def show_invoice_manager(company_key, role):
             payment_type = st.selectbox("Payment Type", ["Customer Receipt", "Supplier Payment"])
             amount = st.number_input("Amount (GHS)", min_value=0.0, step=0.01, key=f"payment_amount_{company_key}")
             payment_method = st.selectbox("Method", ["Cash", "Bank", "Mobile Money"])
+            posting_state = st.selectbox("Posting State", ["Draft", "Submitted", "Approved", "Posted", "Cancelled"], index=3, key=f"payment_posting_state_{company_key}")
             payment_ref = st.text_input("Reference")
             payment_date = st.date_input("Payment Date", value=datetime.now().date())
             if st.form_submit_button("Save Payment") and amount > 0:
                 conn = get_connection()
                 conn.execute(
-                    "INSERT INTO payments (company_key, payment_date, payment_type, amount, currency, method, reference, created_by) VALUES (?, ?, ?, ?, 'GHS', ?, ?, ?)",
-                    (company_key, payment_date.isoformat(), payment_type, amount, payment_method, payment_ref, role),
+                    "INSERT INTO payments (company_key, payment_date, payment_type, status, amount, currency, method, reference, approval_status, created_by) VALUES (?, ?, ?, ?, ?, 'GHS', ?, ?, ?, ?)",
+                    (company_key, payment_date.isoformat(), payment_type, posting_state, amount, payment_method, payment_ref, posting_state, role),
                 )
                 payment_id = int(conn.execute("SELECT last_insert_rowid()").fetchone()[0])
-                lines = (
-                    [
-                        {"account_id": get_account_id(conn, "Cash", "Asset"), "debit": amount, "credit": 0},
-                        {"account_id": get_account_id(conn, "Accounts Receivable", "Asset"), "debit": 0, "credit": amount},
-                    ]
-                    if payment_type == "Customer Receipt"
-                    else [
-                        {"account_id": get_account_id(conn, "Accounts Payable", "Liability"), "debit": amount, "credit": 0},
-                        {"account_id": get_account_id(conn, "Cash", "Asset"), "debit": 0, "credit": amount},
-                    ]
-                )
-                post_journal_entry(
-                    company_key=company_key,
-                    date=payment_date,
-                    description="Payment entry",
-                    reference=payment_ref,
-                    lines=lines,
-                    created_by=role,
-                    branch_id=st.session_state.get("active_branch_id"),
-                    payment_id=payment_id,
-                    source_module="Payments",
-                    source_table="payments",
-                    source_id=payment_id,
-                    conn=conn,
-                )
+                if posting_state == "Posted":
+                    lines = (
+                        [
+                            {"account_id": get_account_id(conn, "Cash", "Asset"), "debit": amount, "credit": 0},
+                            {"account_id": get_account_id(conn, "Accounts Receivable", "Asset"), "debit": 0, "credit": amount},
+                        ]
+                        if payment_type == "Customer Receipt"
+                        else [
+                            {"account_id": get_account_id(conn, "Accounts Payable", "Liability"), "debit": amount, "credit": 0},
+                            {"account_id": get_account_id(conn, "Cash", "Asset"), "debit": 0, "credit": amount},
+                        ]
+                    )
+                    post_journal_entry(
+                        company_key=company_key,
+                        date=payment_date,
+                        description="Payment entry",
+                        reference=payment_ref,
+                        lines=lines,
+                        created_by=role,
+                        branch_id=st.session_state.get("active_branch_id"),
+                        payment_id=payment_id,
+                        source_module="Payments",
+                        source_table="payments",
+                        source_id=payment_id,
+                        approval_status="Posted",
+                        conn=conn,
+                    )
+                else:
+                    st.warning("Payment saved without accounting impact. Move Posting State to Posted when it is approved.")
                 conn.commit()
                 conn.close()
                 st.rerun()
         conn = get_connection()
-        df = pd.read_sql_query("SELECT payment_date, payment_type, amount, currency, method, reference, created_by FROM payments WHERE company_key = ? ORDER BY payment_date DESC", conn, params=(company_key,))
+        df = pd.read_sql_query("SELECT payment_date, payment_type, status, approval_status, amount, currency, method, reference, created_by FROM payments WHERE company_key = ? ORDER BY payment_date DESC", conn, params=(company_key,))
         conn.close()
         st.dataframe(format_currency_dataframe(df), use_container_width=True)
         _csv_button("Payments", df, f"payments_csv_{company_key}")
@@ -744,6 +757,7 @@ def show_create_invoice_page(company_key, role):
         amount = st.number_input("Amount (GHS)", min_value=0.0, step=0.01)
         output_vat_rate = st.number_input("Output VAT Rate (%)", min_value=0.0, max_value=100.0, step=0.5, value=0.0, key=f"invoice_vat_rate_{company_key}")
         status = st.selectbox("Status", ["Draft", "Pending", "Paid"])
+        posting_state = st.selectbox("Posting State", ["Draft", "Submitted", "Approved", "Posted", "Cancelled"], index=0)
         invoice_date = st.date_input("Invoice Date", value=datetime.now().date(), key=f"invoice_date_{company_key}")
         description = st.text_input("Description", key=f"invoice_description_{company_key}")
         if st.form_submit_button("Save Invoice") and customer_name and amount > 0:
@@ -757,17 +771,29 @@ def show_create_invoice_page(company_key, role):
             try:
                 cursor = conn.execute(
                     """
-                    INSERT INTO invoices (company_key, customer_id, invoice_number, invoice_date, due_date, status, amount, output_vat, currency, description, created_by)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'GHS', ?, ?)
+                    INSERT INTO invoices (company_key, customer_id, invoice_number, invoice_date, due_date, status, approval_status, amount, output_vat, currency, description, created_by)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'GHS', ?, ?)
                     """,
-                    (company_key, customer_id, f"INV-{datetime.now().strftime('%Y%m%d%H%M%S')}", invoice_date.isoformat(), invoice_date.isoformat(), status, amount, output_vat, description, role),
+                    (
+                        company_key,
+                        customer_id,
+                        f"INV-{datetime.now().strftime('%Y%m%d%H%M%S')}",
+                        invoice_date.isoformat(),
+                        invoice_date.isoformat(),
+                        status,
+                        posting_state,
+                        amount,
+                        output_vat,
+                        description,
+                        role,
+                    ),
                 )
             except sqlite3.IntegrityError as e:
                 conn.close()
                 st.error(f"Unable to create invoice: {e}")
                 st.stop()
 
-            if status != "Draft":
+            if posting_state == "Posted":
                 journal_lines = [
                     {"account_id": get_account_id(conn, "Cash" if status == "Paid" else "Accounts Receivable", "Asset"), "debit": amount + output_vat, "credit": 0},
                     {"account_id": get_account_id(conn, "Sales Revenue", "Income"), "debit": 0, "credit": amount},
@@ -787,15 +813,18 @@ def show_create_invoice_page(company_key, role):
                     source_table="invoices",
                     source_type="Invoice",
                     source_id=int(cursor.lastrowid),
+                    approval_status="Posted",
                     conn=conn,
                 )
+            elif posting_state != "Cancelled":
+                st.warning("Invoice saved without accounting impact. Change Posting State to Posted when it is approved for the ledger.")
             conn.commit()
             conn.close()
             st.rerun()
 
     conn = get_connection()
     df = pd.read_sql_query(
-        "SELECT invoice_number, invoice_date, due_date, status, amount, currency, description FROM invoices WHERE company_key = ? ORDER BY invoice_date DESC",
+        "SELECT invoice_number, invoice_date, due_date, status, approval_status, amount, currency, description FROM invoices WHERE company_key = ? ORDER BY invoice_date DESC",
         conn,
         params=(company_key,),
     )
@@ -813,6 +842,7 @@ def show_receive_payment_page(company_key, role):
         customer_name = st.selectbox("Customer", [""] + customers)
         amount = st.number_input("Amount (GHS)", min_value=0.0, step=0.01, key=f"receive_payment_amount_{company_key}")
         payment_method = st.selectbox("Method", ["Cash", "Bank", "Mobile Money"], key=f"receive_payment_method_{company_key}")
+        posting_state = st.selectbox("Posting State", ["Draft", "Submitted", "Approved", "Posted", "Cancelled"], index=3, key=f"receive_payment_posting_state_{company_key}")
         payment_ref = st.text_input("Reference", key=f"receive_payment_ref_{company_key}")
         payment_date = st.date_input("Payment Date", value=datetime.now().date(), key=f"receive_payment_date_{company_key}")
         if st.form_submit_button("Save Receipt") and amount > 0 and customer_name:
@@ -823,37 +853,41 @@ def show_receive_payment_page(company_key, role):
             ).fetchone()
             customer_id = int(row["id"]) if row else None
             conn.execute(
-                "INSERT INTO payments (company_key, payment_date, payment_type, amount, currency, method, reference, created_by) VALUES (?, ?, ?, ?, 'GHS', ?, ?, ?)",
-                (company_key, payment_date.isoformat(), "Customer Receipt", amount, payment_method, payment_ref, role),
+                "INSERT INTO payments (company_key, payment_date, payment_type, status, amount, currency, method, reference, approval_status, created_by) VALUES (?, ?, ?, ?, ?, 'GHS', ?, ?, ?, ?)",
+                (company_key, payment_date.isoformat(), "Customer Receipt", posting_state, amount, payment_method, payment_ref, posting_state, role),
             )
             payment_id = int(conn.execute("SELECT last_insert_rowid()").fetchone()[0])
-            lines = [
-                {"account_id": get_account_id(conn, "Cash", "Asset"), "debit": amount, "credit": 0},
-                {"account_id": get_account_id(conn, "Accounts Receivable", "Asset"), "debit": 0, "credit": amount},
-            ]
-            post_journal_entry(
-                company_key=company_key,
-                date=payment_date,
-                description=f"Customer receipt - {customer_name}",
-                reference=payment_ref,
-                lines=lines,
-                created_by=role,
-                branch_id=st.session_state.get("active_branch_id"),
-                payment_id=payment_id,
-                source_module="Payments",
-                source_table="payments",
-                source_type="Customer Receipt",
-                source_id=payment_id,
-                customer_id=customer_id,
-                conn=conn,
-            )
+            if posting_state == "Posted":
+                lines = [
+                    {"account_id": get_account_id(conn, "Cash", "Asset"), "debit": amount, "credit": 0},
+                    {"account_id": get_account_id(conn, "Accounts Receivable", "Asset"), "debit": 0, "credit": amount},
+                ]
+                post_journal_entry(
+                    company_key=company_key,
+                    date=payment_date,
+                    description=f"Customer receipt - {customer_name}",
+                    reference=payment_ref,
+                    lines=lines,
+                    created_by=role,
+                    branch_id=st.session_state.get("active_branch_id"),
+                    payment_id=payment_id,
+                    source_module="Payments",
+                    source_table="payments",
+                    source_type="Customer Receipt",
+                    source_id=payment_id,
+                    customer_id=customer_id,
+                    approval_status="Posted",
+                    conn=conn,
+                )
+            else:
+                st.warning("Receipt saved without accounting impact. Move Posting State to Posted when it is approved.")
             conn.commit()
             conn.close()
             st.rerun()
 
     conn = get_connection()
     df = pd.read_sql_query(
-        "SELECT payment_date, payment_type, amount, currency, method, reference, created_by FROM payments WHERE company_key = ? AND payment_type = 'Customer Receipt' ORDER BY payment_date DESC",
+        "SELECT payment_date, payment_type, status, approval_status, amount, currency, method, reference, created_by FROM payments WHERE company_key = ? AND payment_type = 'Customer Receipt' ORDER BY payment_date DESC",
         conn,
         params=(company_key,),
     )
@@ -871,6 +905,7 @@ def show_supplier_payment_page(company_key, role):
         supplier_name = st.selectbox("Supplier", [""] + suppliers)
         amount = st.number_input("Amount (GHS)", min_value=0.0, step=0.01, key=f"supplier_payment_amount_{company_key}")
         payment_method = st.selectbox("Method", ["Cash", "Bank", "Mobile Money"], key=f"supplier_payment_method_{company_key}")
+        posting_state = st.selectbox("Posting State", ["Draft", "Submitted", "Approved", "Posted", "Cancelled"], index=3, key=f"supplier_payment_posting_state_{company_key}")
         payment_ref = st.text_input("Reference", key=f"supplier_payment_ref_{company_key}")
         payment_date = st.date_input("Payment Date", value=datetime.now().date(), key=f"supplier_payment_date_{company_key}")
         if st.form_submit_button("Save Payment") and amount > 0 and supplier_name:
@@ -881,37 +916,41 @@ def show_supplier_payment_page(company_key, role):
             ).fetchone()
             supplier_id = int(row["id"]) if row else None
             conn.execute(
-                "INSERT INTO payments (company_key, payment_date, payment_type, amount, currency, method, reference, created_by) VALUES (?, ?, ?, ?, 'GHS', ?, ?, ?)",
-                (company_key, payment_date.isoformat(), "Supplier Payment", amount, payment_method, payment_ref, role),
+                "INSERT INTO payments (company_key, payment_date, payment_type, status, amount, currency, method, reference, approval_status, created_by) VALUES (?, ?, ?, ?, ?, 'GHS', ?, ?, ?, ?)",
+                (company_key, payment_date.isoformat(), "Supplier Payment", posting_state, amount, payment_method, payment_ref, posting_state, role),
             )
             payment_id = int(conn.execute("SELECT last_insert_rowid()").fetchone()[0])
-            lines = [
-                {"account_id": get_account_id(conn, "Accounts Payable", "Liability"), "debit": amount, "credit": 0},
-                {"account_id": get_account_id(conn, "Cash", "Asset"), "debit": 0, "credit": amount},
-            ]
-            post_journal_entry(
-                company_key=company_key,
-                date=payment_date,
-                description=f"Supplier payment - {supplier_name}",
-                reference=payment_ref,
-                lines=lines,
-                created_by=role,
-                branch_id=st.session_state.get("active_branch_id"),
-                payment_id=payment_id,
-                source_module="Payments",
-                source_table="payments",
-                source_type="Supplier Payment",
-                source_id=payment_id,
-                supplier_id=supplier_id,
-                conn=conn,
-            )
+            if posting_state == "Posted":
+                lines = [
+                    {"account_id": get_account_id(conn, "Accounts Payable", "Liability"), "debit": amount, "credit": 0},
+                    {"account_id": get_account_id(conn, "Cash", "Asset"), "debit": 0, "credit": amount},
+                ]
+                post_journal_entry(
+                    company_key=company_key,
+                    date=payment_date,
+                    description=f"Supplier payment - {supplier_name}",
+                    reference=payment_ref,
+                    lines=lines,
+                    created_by=role,
+                    branch_id=st.session_state.get("active_branch_id"),
+                    payment_id=payment_id,
+                    source_module="Payments",
+                    source_table="payments",
+                    source_type="Supplier Payment",
+                    source_id=payment_id,
+                    supplier_id=supplier_id,
+                    approval_status="Posted",
+                    conn=conn,
+                )
+            else:
+                st.warning("Supplier payment saved without accounting impact. Move Posting State to Posted when it is approved.")
             conn.commit()
             conn.close()
             st.rerun()
 
     conn = get_connection()
     df = pd.read_sql_query(
-        "SELECT payment_date, payment_type, amount, currency, method, reference, created_by FROM payments WHERE company_key = ? AND payment_type = 'Supplier Payment' ORDER BY payment_date DESC",
+        "SELECT payment_date, payment_type, status, approval_status, amount, currency, method, reference, created_by FROM payments WHERE company_key = ? AND payment_type = 'Supplier Payment' ORDER BY payment_date DESC",
         conn,
         params=(company_key,),
     )
