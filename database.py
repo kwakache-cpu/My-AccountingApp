@@ -397,7 +397,7 @@ def _ensure_local_db_file():
     """
     _ensure_db_directory()
     if not os.path.exists(DB_PATH) and not ERP_PRODUCTION_MODE:
-        conn = sqlite3.connect(DB_PATH)
+        conn = sqlite3.connect(DB_PATH, timeout=20, check_same_thread=False)
         conn.close()
         logger.info("Created local database file at: %s", DB_PATH)
     elif not os.path.exists(DB_PATH):
@@ -409,11 +409,52 @@ def _open_sqlite_connection(path=DB_PATH):
         raise sqlite3.OperationalError(
             f"Production database file is missing and cannot be recreated outside startup recovery: {path}"
         )
-    conn = sqlite3.connect(path, check_same_thread=False)
+    conn = sqlite3.connect(path, timeout=20, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON;")
     conn.execute("PRAGMA journal_mode = WAL;")
     return conn
+
+
+def ensure_schema():
+    """
+    Additive schema safety guard for existing deployments.
+    Never drops tables or deletes rows; only adds missing columns if needed.
+    """
+    if not os.path.exists(DB_PATH):
+        logger.warning("Schema safety skipped because the database file does not exist yet: %s", DB_PATH)
+        return False
+
+    conn = None
+    try:
+        conn = _open_sqlite_connection()
+        conn.execute(
+            "ALTER TABLE companies ADD COLUMN IF NOT EXISTS subscription_expiry TEXT DEFAULT 'Permanent'"
+        )
+        conn.commit()
+        logger.info("Schema safety ensured for companies.subscription_expiry on %s", DB_PATH)
+        return True
+    except sqlite3.OperationalError as exc:
+        if "near \"EXISTS\"" in str(exc):
+            existing_columns = {
+                row["name"]
+                for row in conn.execute("PRAGMA table_info(companies)").fetchall()
+            } if conn else set()
+            if "subscription_expiry" not in existing_columns and conn is not None:
+                conn.execute(
+                    "ALTER TABLE companies ADD COLUMN subscription_expiry TEXT DEFAULT 'Permanent'"
+                )
+                conn.commit()
+                logger.info(
+                    "Schema safety ensured for companies.subscription_expiry using compatibility fallback on %s",
+                    DB_PATH,
+                )
+                return True
+        logger.warning("Schema safety check failed: %s", exc)
+        return False
+    finally:
+        if conn:
+            conn.close()
 
 
 def _ensure_migration_metadata_tables(conn):

@@ -3,6 +3,7 @@ import pandas as pd
 import importlib.util
 from database import (
     DB_PATH,
+    ensure_schema,
     get_connection,
     get_recovery_source_diagnostics,
     startup_database,
@@ -1370,6 +1371,7 @@ def main():
     st.cache_data.clear()
     st.cache_resource.clear()
     # SQLite continuity on ephemeral hosting is temporary; managed persistent DB remains the target architecture.
+    ensure_schema()
     startup_status = startup_database()
     startup_ok = bool(startup_status.get("ok")) if isinstance(startup_status, dict) else bool(startup_status)
     if not startup_ok:
