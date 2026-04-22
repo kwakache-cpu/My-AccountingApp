@@ -662,6 +662,7 @@ def _run_post_commit_persistence_hook(conn):
 def get_persistence_diagnostics():
     local_health = get_database_health_snapshot(DB_PATH, logger_instance=logger)
     recovery_diagnostics = get_recovery_source_diagnostics()
+    cloud_backup = get_cloud_backup_diagnostics(logger_instance=logger)
     return {
         "canonical_db_path": DB_PATH,
         "local_db_valid": local_health["structural_valid"],
@@ -674,7 +675,238 @@ def get_persistence_diagnostics():
         "history_object_path": LAST_BACKUP_STATUS.get("history_object"),
         "restore_source_used_at_startup": LAST_RESTORE_SOURCE,
         "bucket_name": recovery_diagnostics.get("bucket_name"),
+        "cloud_backup_company_count": cloud_backup.get("company_count"),
+        "cloud_backup_last_modified": cloud_backup.get("last_modified"),
+        "cloud_backup_newer_than_local": cloud_backup.get("newer_than_local"),
+        "cloud_backup_reason": cloud_backup.get("reason"),
     }
+
+
+def get_cloud_backup_diagnostics(logger_instance=None):
+    logger_instance = logger_instance or logger
+    diagnostics = get_recovery_source_diagnostics()
+    latest_object = diagnostics.get("object_name") or FIREBASE_OBJECT_NAME
+    result = {
+        "ok": False,
+        "bucket_name": diagnostics.get("bucket_name"),
+        "object_name": latest_object,
+        "last_modified": None,
+        "company_count": None,
+        "newer_than_local": None,
+        "reason": diagnostics.get("credential_error") or "cloud backup diagnostics not available",
+    }
+
+    bucket = _get_firebase_recovery_bucket()
+    if bucket is None:
+        logger_instance.warning("Cloud backup diagnostics unavailable: bucket is not accessible")
+        return result
+
+    blob = bucket.blob(latest_object)
+    try:
+        backup_exists = bool(blob.exists())
+    except Exception as exc:
+        result["reason"] = f"cloud backup presence check failed: {exc}"
+        logger_instance.warning(
+            "Cloud backup diagnostics failed while checking object existence: bucket=%s object=%s error=%s",
+            diagnostics.get("bucket_name"),
+            latest_object,
+            exc,
+        )
+        return result
+
+    if not backup_exists:
+        result["reason"] = f"trusted cloud backup object was not found: bucket={diagnostics.get('bucket_name')} object={latest_object}"
+        logger_instance.info(
+            "Cloud backup diagnostics: latest object missing bucket=%s object=%s",
+            diagnostics.get("bucket_name"),
+            latest_object,
+        )
+        return result
+
+    try:
+        blob.reload()
+    except Exception:
+        pass
+    blob_updated = getattr(blob, "updated", None)
+    if blob_updated is not None:
+        result["last_modified"] = blob_updated.isoformat() if hasattr(blob_updated, "isoformat") else str(blob_updated)
+
+    temp_download_path = None
+    try:
+        temp_fd, temp_download_path = tempfile.mkstemp(
+            prefix="eka_cloud_backup_diag_",
+            suffix=".db",
+            dir=DB_DIR,
+        )
+        os.close(temp_fd)
+        blob.download_to_filename(temp_download_path)
+        downloaded_health = get_database_health_snapshot(temp_download_path, logger_instance=logger_instance)
+        result["company_count"] = downloaded_health.get("company_count")
+        if os.path.exists(DB_PATH):
+            try:
+                local_mtime = datetime.utcfromtimestamp(os.path.getmtime(DB_PATH))
+                if blob_updated is not None:
+                    newer_than_local = blob_updated.replace(tzinfo=None) > local_mtime
+                    result["newer_than_local"] = bool(newer_than_local)
+            except Exception:
+                result["newer_than_local"] = None
+        result["ok"] = True
+        result["reason"] = "cloud backup diagnostics collected successfully"
+        logger_instance.info(
+            "Cloud backup diagnostics collected: bucket=%s object=%s last_modified=%s company_count=%s newer_than_local=%s",
+            diagnostics.get("bucket_name"),
+            latest_object,
+            result["last_modified"] or "unknown",
+            result["company_count"],
+            result["newer_than_local"],
+        )
+        return result
+    except Exception as exc:
+        result["reason"] = f"cloud backup diagnostics download failed: {exc}"
+        logger_instance.warning(
+            "Cloud backup diagnostics failed while downloading latest object: bucket=%s object=%s error=%s",
+            diagnostics.get("bucket_name"),
+            latest_object,
+            exc,
+        )
+        return result
+    finally:
+        if temp_download_path and os.path.exists(temp_download_path):
+            try:
+                os.remove(temp_download_path)
+            except OSError:
+                pass
+
+
+def run_persistence_self_test(logger_instance=None):
+    logger_instance = logger_instance or logger
+    local_health = get_database_health_snapshot(DB_PATH, logger_instance=logger_instance)
+    cloud_backup = get_cloud_backup_diagnostics(logger_instance=logger_instance)
+    mismatch = (
+        cloud_backup.get("company_count") is not None
+        and int(local_health.get("company_count") or 0) != int(cloud_backup.get("company_count") or 0)
+    )
+    result = {
+        "ok": bool(cloud_backup.get("ok")),
+        "local_company_count": int(local_health.get("company_count") or 0),
+        "cloud_backup_company_count": cloud_backup.get("company_count"),
+        "latest_backup_object_path": cloud_backup.get("object_name"),
+        "last_backup_time": cloud_backup.get("last_modified"),
+        "mismatch": mismatch,
+        "reason": cloud_backup.get("reason"),
+    }
+    logger_instance.info(
+        "Persistence self-test: local_company_count=%s cloud_backup_company_count=%s mismatch=%s latest_backup_object=%s last_backup_time=%s reason=%s",
+        result["local_company_count"],
+        result["cloud_backup_company_count"],
+        result["mismatch"],
+        result["latest_backup_object_path"],
+        result["last_backup_time"] or "unknown",
+        result["reason"],
+    )
+    return result
+
+
+def force_backup_after_company_creation(company_name, company_key=None, logger_instance=None):
+    logger_instance = logger_instance or logger
+    post_commit_health = get_database_health_snapshot(DB_PATH, logger_instance=logger_instance)
+    company_count = int(post_commit_health.get("company_count") or 0)
+    logger_instance.info(
+        "Company creation committed: company_key=%s company_name=%s canonical_db_path=%s company_count=%s",
+        company_key or "unknown",
+        company_name,
+        DB_PATH,
+        company_count,
+    )
+    if company_count <= 0:
+        reason = "forced backup blocked because canonical database still has company_count=0 after company creation commit"
+        logger_instance.warning("Company creation backup blocked: %s", reason)
+        return {"ok": False, "reason": reason, "company_count": company_count}
+
+    logger_instance.info(
+        "Company creation backup upload starting: company_key=%s company_name=%s latest_object=%s",
+        company_key or "unknown",
+        company_name,
+        FIREBASE_OBJECT_NAME,
+    )
+    backup_result = backup_runtime_database_to_cloud(
+        force=True,
+        trigger_tables=["companies"],
+        logger_instance=logger_instance,
+    )
+    if backup_result.get("ok"):
+        logger_instance.info(
+            "Company creation backup upload succeeded: company_key=%s company_name=%s latest_object_updated=%s history_snapshot_created=%s",
+            company_key or "unknown",
+            company_name,
+            backup_result.get("latest_object"),
+            backup_result.get("history_object"),
+        )
+    else:
+        logger_instance.warning(
+            "Company creation backup upload failed: company_key=%s company_name=%s reason=%s",
+            company_key or "unknown",
+            company_name,
+            backup_result.get("reason"),
+        )
+    return {
+        "ok": bool(backup_result.get("ok")),
+        "reason": backup_result.get("reason"),
+        "company_count": company_count,
+        "latest_object": backup_result.get("latest_object"),
+        "history_object": backup_result.get("history_object"),
+    }
+
+
+def create_company_record(
+    conn,
+    company_key,
+    company_name,
+    subscription_expiry,
+    status="Active",
+    deployment_status="Live",
+    number_of_branches=1,
+    max_branches=1,
+    branch_price_per_month=0.0,
+    contact_email=None,
+    plan_type="Basic",
+):
+    if conn is None:
+        raise RuntimeError("Database connection is required to create a company record.")
+    normalized_key = str(company_key or "").strip()
+    normalized_name = str(company_name or "").strip()
+    if not normalized_key or not normalized_name:
+        raise ValueError("company_key and company_name are required")
+    conn.execute(
+        """
+        INSERT INTO companies (
+            key,
+            name,
+            subscription_expiry,
+            status,
+            deployment_status,
+            plan_type,
+            number_of_branches,
+            max_branches,
+            branch_price_per_month,
+            contact_email
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            normalized_key,
+            normalized_name,
+            str(subscription_expiry),
+            str(status or "Active"),
+            str(deployment_status or "Live"),
+            str(plan_type or "Basic"),
+            int(number_of_branches or 1),
+            int(max_branches or 1),
+            float(branch_price_per_month or 0.0),
+            str(contact_email or "").strip() or None,
+        ),
+    )
+    return normalized_key
 
 
 def _ensure_db_directory():
@@ -1104,6 +1336,32 @@ def attempt_production_database_recovery(force_restore=True):
             }
 
         try:
+            blob.reload()
+        except Exception:
+            pass
+        blob_updated = getattr(blob, "updated", None)
+        local_db_mtime = None
+        if os.path.exists(DB_PATH):
+            try:
+                local_db_mtime = datetime.utcfromtimestamp(os.path.getmtime(DB_PATH))
+            except Exception:
+                local_db_mtime = None
+        cloud_backup_newer_than_local = None
+        if blob_updated is not None and local_db_mtime is not None:
+            try:
+                cloud_backup_newer_than_local = blob_updated.replace(tzinfo=None) > local_db_mtime
+            except Exception:
+                cloud_backup_newer_than_local = None
+        logger.info(
+            "Trusted backup recency check: bucket=%s object=%s backup_last_modified=%s local_db_last_modified=%s cloud_backup_newer_than_local=%s",
+            diagnostics["bucket_name"],
+            diagnostics["object_name"],
+            blob_updated.isoformat() if hasattr(blob_updated, "isoformat") else str(blob_updated or "unknown"),
+            local_db_mtime.isoformat() if hasattr(local_db_mtime, "isoformat") else str(local_db_mtime or "unknown"),
+            cloud_backup_newer_than_local,
+        )
+
+        try:
             blob.download_to_filename(temp_restore_path)
         except Exception as exc:
             logger.error(
@@ -1135,7 +1393,7 @@ def attempt_production_database_recovery(force_restore=True):
 
         downloaded_health = get_database_health_snapshot(temp_restore_path, logger_instance=logger)
         logger.info(
-            "Trusted backup validation: temp_path=%s db_exists=%s sqlite_open_success=%s db_valid=%s production_ready=%s required_tables_exist=%s missing_tables=%s companies_table_exists=%s company_count=%s database_identity_exists=%s schema_version_exists=%s readiness_failures=%s",
+            "Trusted backup validation: temp_path=%s db_exists=%s sqlite_open_success=%s db_valid=%s production_ready=%s required_tables_exist=%s missing_tables=%s companies_table_exists=%s company_count=%s database_identity_exists=%s schema_version_exists=%s backup_last_modified=%s cloud_backup_newer_than_local=%s readiness_failures=%s",
             downloaded_health["db_path"],
             downloaded_health["file_exists"],
             downloaded_health["sqlite_open_success"],
@@ -1147,6 +1405,8 @@ def attempt_production_database_recovery(force_restore=True):
             downloaded_health["company_count"],
             downloaded_health["database_identity_exists"],
             downloaded_health["schema_version_exists"],
+            blob_updated.isoformat() if hasattr(blob_updated, "isoformat") else str(blob_updated or "unknown"),
+            cloud_backup_newer_than_local,
             "; ".join(downloaded_health.get("readiness_failures", [])) or "none",
         )
         if not downloaded_health["production_ready"]:

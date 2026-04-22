@@ -3,11 +3,14 @@ import pandas as pd
 import importlib.util
 from database import (
     DB_PATH,
+    create_company_record,
     ensure_schema,
+    force_backup_after_company_creation,
     get_firebase_service_account_info,
     get_connection,
     get_persistence_diagnostics,
     get_recovery_source_diagnostics,
+    run_persistence_self_test,
     startup_database,
 )
 from openai import OpenAI
@@ -1953,6 +1956,36 @@ else:
                             bucket=persistence_diag["bucket_name"] or "missing",
                         )
                     )
+                    st.caption(
+                        "Cloud Backup Count: {cloud_count} | Cloud Last Modified: {cloud_modified} | Cloud Newer Than Local: {cloud_newer}".format(
+                            cloud_count=persistence_diag["cloud_backup_company_count"]
+                            if persistence_diag["cloud_backup_company_count"] is not None
+                            else "unknown",
+                            cloud_modified=persistence_diag["cloud_backup_last_modified"] or "unknown",
+                            cloud_newer="Yes"
+                            if persistence_diag["cloud_backup_newer_than_local"] is True
+                            else "No"
+                            if persistence_diag["cloud_backup_newer_than_local"] is False
+                            else "unknown",
+                        )
+                    )
+                    self_test = run_persistence_self_test()
+                    if self_test["mismatch"]:
+                        st.warning(
+                            "Persistence self-test mismatch: local_company_count={local_count} cloud_backup_company_count={cloud_count}".format(
+                                local_count=self_test["local_company_count"],
+                                cloud_count=self_test["cloud_backup_company_count"],
+                            )
+                        )
+                    else:
+                        st.caption(
+                            "Persistence self-test: local_company_count={local_count} cloud_backup_company_count={cloud_count}".format(
+                                local_count=self_test["local_company_count"],
+                                cloud_count=self_test["cloud_backup_company_count"]
+                                if self_test["cloud_backup_company_count"] is not None
+                                else "unknown",
+                            )
+                        )
                 except Exception as persistence_diag_error:
                     logger.warning(f"Persistence diagnostics unavailable: {persistence_diag_error}")
 
@@ -2039,25 +2072,37 @@ else:
                         if company_name and manual_key:
                             new_expiry = datetime.now() + relativedelta(months=+int(duration_months))
                             try:
-                                conn.execute(
-                                    """INSERT INTO companies
-                                       (key, name, subscription_expiry, status, deployment_status, number_of_branches, max_branches, branch_price_per_month)
-                                       VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-                                    (
-                                        manual_key,
-                                        company_name,
-                                        new_expiry.isoformat(),
-                                        "Active",
-                                        "Live",
-                                        int(number_of_branches),
-                                        int(max_branches),
-                                        float(price_per_branch),
-                                    ),
+                                created_company_key = create_company_record(
+                                    conn=conn,
+                                    company_key=manual_key,
+                                    company_name=company_name,
+                                    subscription_expiry=new_expiry.isoformat(),
+                                    status="Active",
+                                    deployment_status="Live",
+                                    number_of_branches=int(number_of_branches),
+                                    max_branches=int(max_branches),
+                                    branch_price_per_month=float(price_per_branch),
+                                    plan_type=plan_type,
                                 )
                                 conn.commit()
-                                st.success(f"License deployed for {company_name} until {new_expiry.date()}")
+                                backup_result = force_backup_after_company_creation(
+                                    company_name=company_name,
+                                    company_key=created_company_key,
+                                    logger_instance=logger,
+                                )
                                 log_audit_action(conn, 'SYSTEM', 'Dev', f'Manual license deployment for {company_name}', 'System Admin')
+                                if backup_result.get("ok"):
+                                    st.success(
+                                        f"License deployed for {company_name} until {new_expiry.date()}. "
+                                        "Persistence backup completed."
+                                    )
+                                else:
+                                    st.warning(
+                                        f"License deployed for {company_name} until {new_expiry.date()}, "
+                                        f"but post-create backup needs attention: {backup_result.get('reason')}"
+                                    )
                             except Exception as e:
+                                conn.rollback()
                                 st.error(f"Failed to deploy license: {e}")
                         else:
                             st.error("Company Name and System License Key are required.")

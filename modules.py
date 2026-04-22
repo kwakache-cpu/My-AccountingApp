@@ -40,6 +40,8 @@ logger = logging.getLogger(__name__)
 
 # Import shared utilities from database
 from database import (
+    create_company_record,
+    force_backup_after_company_creation,
     get_firebase_service_account_info,
     get_connection,
     get_recovery_source_diagnostics,
@@ -1985,38 +1987,51 @@ def show_company_registration_module():
             expiry_date = datetime.now() + relativedelta(months=+int(duration_months))
             conn = get_connection()
             try:
-                conn.execute(
-                    """
-                    INSERT INTO companies (company_name, admin_name, contact_email, status, subscription_expiry, created_at)
-                    VALUES (?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        company_name,
-                        admin_name,
-                        contact_email,
-                        "Active",
-                        expiry_date.date().isoformat(),
-                        datetime.now().date().isoformat(),
-                    ),
+                company_key = (
+                    f"EKA-REG-"
+                    f"{''.join(random.choices(string.ascii_uppercase, k=4))}-"
+                    f"{''.join(random.choices(string.digits, k=4))}"
+                )
+                create_company_record(
+                    conn=conn,
+                    company_key=company_key,
+                    company_name=company_name,
+                    subscription_expiry=expiry_date.date().isoformat(),
+                    status="Active",
+                    deployment_status="Live",
+                    contact_email=contact_email,
                 )
                 conn.commit()
-                st.success(f"{company_name} registered successfully.")
+                backup_result = force_backup_after_company_creation(
+                    company_name=company_name,
+                    company_key=company_key,
+                    logger_instance=logger,
+                )
+                if backup_result.get("ok"):
+                    st.success(f"{company_name} registered successfully.")
+                else:
+                    st.warning(
+                        f"{company_name} registered, but post-create backup needs attention: {backup_result.get('reason')}"
+                    )
                 log_system_event("INFO", "New Company Registration", f"Registered company: {company_name}")
                 st.rerun()
+            except Exception:
+                conn.rollback()
+                raise
             finally:
                 conn.close()
 
     conn = get_connection()
     try:
         rows = conn.execute(
-            "SELECT company_name, admin_name, contact_email, status, subscription_expiry FROM companies ORDER BY id DESC"
+            "SELECT name, contact_email, status, subscription_expiry FROM companies ORDER BY created_at DESC"
         ).fetchall()
     finally:
         conn.close()
 
     if rows:
         st.dataframe(
-            format_currency_dataframe(pd.DataFrame(rows, columns=["Company Name", "Admin Contact", "Contact Email", "Status", "Subscription Expiry"])),
+            format_currency_dataframe(pd.DataFrame(rows, columns=["Company Name", "Contact Email", "Status", "Subscription Expiry"])),
             use_container_width=True,
         )
     else:
