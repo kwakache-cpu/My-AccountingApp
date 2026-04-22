@@ -208,22 +208,45 @@ def _read_runtime_secret(secret_name, default=None):
 
 def get_firebase_service_account_info():
     firebase_key_path = str(FIREBASE_KEY_PATH or "").strip()
-    inline_json = _read_runtime_secret("FIREBASE_SERVICE_ACCOUNT_JSON", None)
     invalid_secret_reason = (
         "invalid JSON in FIREBASE_SERVICE_ACCOUNT_JSON; likely cause: unescaped newline or control character in private_key"
     )
+    streamlit_available = st is not None
+    secrets_accessible = False
+    streamlit_secret_keys = []
     secret_exists_in_streamlit = False
-    if st is not None:
+    database_url_exists_in_streamlit = False
+    streamlit_failure_reason = None
+
+    if streamlit_available:
+        logger.info("Firebase secret diagnostics: streamlit import succeeded")
         try:
+            streamlit_secret_keys = sorted(str(key) for key in st.secrets.keys())
+            secrets_accessible = True
             secret_exists_in_streamlit = "FIREBASE_SERVICE_ACCOUNT_JSON" in st.secrets
-        except Exception:
-            secret_exists_in_streamlit = False
+            database_url_exists_in_streamlit = "FIREBASE_DATABASE_URL" in st.secrets
+        except Exception as exc:
+            streamlit_failure_reason = f"st.secrets unavailable at runtime: {type(exc).__name__}: {exc}"
+            logger.warning("st.secrets unavailable at runtime")
+    else:
+        streamlit_failure_reason = "streamlit import failed"
+        logger.warning("streamlit import unavailable at runtime")
+
+    inline_json = _read_runtime_secret("FIREBASE_SERVICE_ACCOUNT_JSON", None)
     inline_json_length = len(str(inline_json)) if inline_json not in (None, "") else 0
     logger.info(
-        "Firebase secret diagnostics: secret_exists_in_streamlit=%s provided_length=%s",
+        "Firebase secret diagnostics: streamlit_available=%s secrets_accessible=%s secret_keys=%s FIREBASE_SERVICE_ACCOUNT_JSON_exists=%s FIREBASE_DATABASE_URL_exists=%s provided_length=%s",
+        streamlit_available,
+        secrets_accessible,
+        streamlit_secret_keys,
         secret_exists_in_streamlit,
+        database_url_exists_in_streamlit,
         inline_json_length,
     )
+    if not secret_exists_in_streamlit:
+        logger.warning("FIREBASE_SERVICE_ACCOUNT_JSON not found in st.secrets")
+    if not database_url_exists_in_streamlit:
+        logger.warning("FIREBASE_DATABASE_URL not found in st.secrets")
 
     if inline_json not in (None, ""):
         try:
@@ -250,6 +273,13 @@ def get_firebase_service_account_info():
                 "key_path": firebase_key_path,
             }
 
+    if not streamlit_available:
+        logger.warning("Firebase credentials missing because streamlit import is unavailable")
+    elif not secrets_accessible:
+        logger.warning("Firebase credentials missing because st.secrets is unavailable at runtime")
+    elif not secret_exists_in_streamlit:
+        logger.warning("Firebase credentials missing because FIREBASE_SERVICE_ACCOUNT_JSON is absent from st.secrets")
+
     if firebase_key_path and os.path.exists(firebase_key_path):
         try:
             with open(firebase_key_path, "r", encoding="utf-8") as firebase_file:
@@ -270,11 +300,26 @@ def get_firebase_service_account_info():
                 "key_path": firebase_key_path,
             }
 
+    if not os.path.exists(firebase_key_path):
+        logger.warning(
+            "Firebase credentials missing because firebase_key.json is not present locally at path=%s",
+            firebase_key_path,
+        )
+
+    if not streamlit_available:
+        failure_reason = "Firebase credentials unavailable: streamlit import failed and firebase_key.json is missing"
+    elif not secrets_accessible:
+        failure_reason = "Firebase credentials unavailable: st.secrets unavailable at runtime and firebase_key.json is missing"
+    elif not secret_exists_in_streamlit:
+        failure_reason = "Firebase credentials unavailable: FIREBASE_SERVICE_ACCOUNT_JSON missing from st.secrets and firebase_key.json is missing"
+    else:
+        failure_reason = "Firebase credentials not found in file or secrets"
+
     logger.warning("Firebase credentials missing")
     return {
         "ok": False,
         "source": "missing",
-        "reason": "Firebase credentials not found in file or secrets",
+        "reason": failure_reason,
         "key_path": firebase_key_path,
     }
 
