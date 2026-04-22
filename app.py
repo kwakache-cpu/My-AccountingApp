@@ -4,6 +4,7 @@ import importlib.util
 from database import (
     DB_PATH,
     ensure_schema,
+    get_firebase_service_account_info,
     get_connection,
     get_persistence_diagnostics,
     get_recovery_source_diagnostics,
@@ -132,23 +133,32 @@ FIREBASE_OBJECT_NAME = "backups/eka_enterprise_v3.db"
 
 
 def _get_app_firebase_service_account_info():
-    try:
-        service_account_json = st.secrets["firebase"]["service_account"]
-        service_account_info = json.loads(service_account_json)
-        logger.info("Firebase credentials loaded from Streamlit secrets")
+    credentials_result = get_firebase_service_account_info()
+    if credentials_result.get("ok"):
         return {
             "ok": True,
-            "source": "streamlit_secrets",
-            "service_account_info": service_account_info,
+            "source": credentials_result.get("source", "unknown"),
+            "service_account_info": credentials_result.get("service_account_info"),
         }
-    except Exception as exc:
-        logger.warning("Firebase Secret Formatting Error. Please check Streamlit Cloud Secrets. Details: %s", exc)
-        st.error("Firebase Secret Formatting Error. Please check Streamlit Cloud Secrets.")
-        return {
-            "ok": False,
-            "source": "streamlit_secrets",
-            "reason": "Firebase Secret Formatting Error. Please check Streamlit Cloud Secrets.",
-        }
+    logger.warning(
+        "Firebase credentials unavailable for app storage client: source=%s reason=%s",
+        credentials_result.get("source", "unknown"),
+        credentials_result.get("reason", "unknown"),
+    )
+    st.warning(
+        credentials_result.get(
+            "reason",
+            "Firebase credentials are unavailable. Please check Streamlit Cloud Secrets.",
+        )
+    )
+    return {
+        "ok": False,
+        "source": credentials_result.get("source", "unknown"),
+        "reason": credentials_result.get(
+            "reason",
+            "Firebase credentials are unavailable. Please check Streamlit Cloud Secrets.",
+        ),
+    }
 
 
 def _init_firebase_storage_client():
