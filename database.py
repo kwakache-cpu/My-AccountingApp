@@ -776,6 +776,13 @@ def attempt_production_database_recovery(force_restore=True):
 
     temp_restore_path = f"{DB_PATH}.recovery_download"
     try:
+        logger.info(
+            "Trusted backup bucket access confirmed: backend=%s bucket=%s object=%s bucket_accessible=%s",
+            diagnostics["backend"],
+            diagnostics["bucket_name"] or getattr(bucket, "name", "") or "missing",
+            diagnostics["object_name"] or "missing",
+            True,
+        )
         blob = bucket.blob(diagnostics["object_name"])
         try:
             backup_exists = bool(blob.exists())
@@ -815,7 +822,11 @@ def attempt_production_database_recovery(force_restore=True):
             return {
                 "ok": False,
                 "stage": "recovery_source",
-                "reason": "trusted cloud backup object was not found",
+                "reason": (
+                    f"trusted cloud backup object was not found: "
+                    f"bucket={diagnostics['bucket_name'] or getattr(bucket, 'name', '') or 'missing'} "
+                    f"object={diagnostics['object_name'] or 'missing'}"
+                ),
                 "backend": diagnostics["backend"],
                 "bucket_name": diagnostics["bucket_name"],
                 "object_name": diagnostics["object_name"],
