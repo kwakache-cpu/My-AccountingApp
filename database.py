@@ -869,7 +869,6 @@ def create_company_record(
     max_branches=1,
     branch_price_per_month=0.0,
     contact_email=None,
-    plan_type="Basic",
 ):
     if conn is None:
         raise RuntimeError("Database connection is required to create a company record.")
@@ -885,13 +884,12 @@ def create_company_record(
             subscription_expiry,
             status,
             deployment_status,
-            plan_type,
             number_of_branches,
             max_branches,
             branch_price_per_month,
             contact_email
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             normalized_key,
@@ -899,7 +897,6 @@ def create_company_record(
             str(subscription_expiry),
             str(status or "Active"),
             str(deployment_status or "Live"),
-            str(plan_type or "Basic"),
             int(number_of_branches or 1),
             int(max_branches or 1),
             float(branch_price_per_month or 0.0),
@@ -2297,13 +2294,12 @@ def _deploy_full_schema(conn):
                 staff_key TEXT,
                 recovery_answer TEXT,
                 tin TEXT,
-                subscription_expiry TEXT,
-                status TEXT DEFAULT 'Active',
-                deployment_status TEXT DEFAULT 'Pending',
-                plan_type TEXT DEFAULT 'Basic',
-                number_of_branches INTEGER DEFAULT 1,
-                max_branches INTEGER DEFAULT 1,
-                branch_price_per_month REAL DEFAULT 0.0,
+            subscription_expiry TEXT,
+            status TEXT DEFAULT 'Active',
+            deployment_status TEXT DEFAULT 'Pending',
+            number_of_branches INTEGER DEFAULT 1,
+            max_branches INTEGER DEFAULT 1,
+            branch_price_per_month REAL DEFAULT 0.0,
                 contact_email TEXT,
                 phone_number TEXT,
                 physical_address TEXT,

@@ -3147,7 +3147,7 @@ def show_company_setup(company_key, company_name, role):
             with col1:
                 st.text_input("Company Name", value=company_data["name"], disabled=True)
                 st.text_input("License Key", value=company_data["key"], disabled=True)
-                st.text_input("Plan Type", value=company_data.get("plan_type", "Basic"), disabled=True)
+                st.text_input("ERP Access", value="Full ERP Access", disabled=True)
             with col2:
                 expiry_value = company_data.get("subscription_expiry") or company_data.get("subscription_end_date") or "N/A"
                 st.text_input("Subscription Expiry", value=str(expiry_value), disabled=True)
@@ -3168,10 +3168,6 @@ def show_company_setup(company_key, company_name, role):
                             "Edit Contact Email",
                             value=str(company_data.get("contact_email") or company_data.get("admin_email") or ""),
                         )
-                        updated_plan_type = st.text_input(
-                            "Edit Plan Type",
-                            value=str(company_data.get("plan_type") or "Basic"),
-                        )
                         updated_barcode_input_source = st.selectbox(
                             "Default Barcode Input Mode",
                             ["Keyboard Entry", "Camera Scanner", "Physical Scanner"],
@@ -3185,10 +3181,10 @@ def show_company_setup(company_key, company_name, role):
                             conn.execute(
                                 """
                                 UPDATE companies
-                                SET contact_email = ?, plan_type = ?, barcode_input_source = ?, updated_at = CURRENT_TIMESTAMP
+                                SET contact_email = ?, barcode_input_source = ?, updated_at = CURRENT_TIMESTAMP
                                 WHERE key = ?
                                 """,
-                                (updated_contact_email, updated_plan_type, updated_barcode_input_source, company_key),
+                                (updated_contact_email, updated_barcode_input_source, company_key),
                             )
                             conn.commit()
                             log_audit_action(
@@ -3197,7 +3193,7 @@ def show_company_setup(company_key, company_name, role):
                                 role,
                                 "Client Settings Updated",
                                 "Company Setup",
-                                f"contact_email={updated_contact_email}, plan_type={updated_plan_type}",
+                                f"contact_email={updated_contact_email}, full_erp_access=enabled",
                             )
                             st.session_state.pop(edit_settings_key, None)
                             st.success("Entry Updated")

@@ -2045,7 +2045,6 @@ else:
                     st.session_state.manual_key_input = ""
                 with st.form("manual_deploy"):
                     company_name = st.text_input("Company Name")
-                    plan_type = st.selectbox("Plan Type", ["Basic", "Premium", "Enterprise"])
                     number_of_branches = st.number_input("Number of Branches", min_value=1, value=1, step=1)
                     max_branches = st.number_input("Max Branches Allowed", min_value=1, value=5, step=1, help="Developer control: maximum branches this client can create")
                     price_per_branch = st.number_input("Price per Branch (GHS)", min_value=0.0, value=0.0, step=10.0)
@@ -2082,7 +2081,6 @@ else:
                                     number_of_branches=int(number_of_branches),
                                     max_branches=int(max_branches),
                                     branch_price_per_month=float(price_per_branch),
-                                    plan_type=plan_type,
                                 )
                                 conn.commit()
                                 backup_result = force_backup_after_company_creation(
