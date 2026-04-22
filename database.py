@@ -641,9 +641,15 @@ def get_database_production_readiness_report(db_path=DB_PATH, logger_instance=No
     report = {
         "db_path": db_path,
         "file_exists": bool(db_path and os.path.exists(db_path)),
+        "sqlite_open_success": False,
         "structural_valid": False,
         "production_ready": False,
         "company_count": 0,
+        "required_tables_exist": False,
+        "missing_tables": [],
+        "companies_table_exists": False,
+        "database_identity_exists": False,
+        "schema_version_exists": False,
         "failures": [],
     }
     if not report["file_exists"]:
@@ -659,12 +665,18 @@ def get_database_production_readiness_report(db_path=DB_PATH, logger_instance=No
     conn = None
     try:
         conn = _open_sqlite_connection(path=db_path)
+        report["sqlite_open_success"] = True
         required_tables = set(DATABASE_PRODUCTION_REQUIRED_TABLES)
         existing_tables = {
             row["name"]
             for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()
         }
+        report["companies_table_exists"] = "companies" in existing_tables
+        report["database_identity_exists"] = "database_identity" in existing_tables
+        report["schema_version_exists"] = "schema_version" in existing_tables
         missing_tables = sorted(required_tables.difference(existing_tables))
+        report["missing_tables"] = missing_tables
+        report["required_tables_exist"] = not missing_tables
         if missing_tables:
             report["failures"].append(f"missing required production tables: {', '.join(missing_tables)}")
         report["company_count"] = get_database_company_count(db_path=db_path, logger_instance=logger_instance)
@@ -695,9 +707,15 @@ def get_database_health_snapshot(db_path=DB_PATH, logger_instance=None):
     return {
         "db_path": db_path,
         "file_exists": report["file_exists"],
+        "sqlite_open_success": report["sqlite_open_success"],
         "structural_valid": report["structural_valid"],
         "production_ready": report["production_ready"],
         "company_count": report["company_count"],
+        "required_tables_exist": report["required_tables_exist"],
+        "missing_tables": report["missing_tables"],
+        "companies_table_exists": report["companies_table_exists"],
+        "database_identity_exists": report["database_identity_exists"],
+        "schema_version_exists": report["schema_version_exists"],
         "readiness_failures": report["failures"],
     }
 
@@ -868,20 +886,30 @@ def attempt_production_database_recovery(force_restore=True):
 
         downloaded_health = get_database_health_snapshot(temp_restore_path, logger_instance=logger)
         logger.info(
-            "Trusted backup validation: temp_path=%s db_exists=%s db_valid=%s production_ready=%s company_count=%s readiness_failures=%s",
+            "Trusted backup validation: temp_path=%s db_exists=%s sqlite_open_success=%s db_valid=%s production_ready=%s required_tables_exist=%s missing_tables=%s companies_table_exists=%s company_count=%s database_identity_exists=%s schema_version_exists=%s readiness_failures=%s",
             downloaded_health["db_path"],
             downloaded_health["file_exists"],
+            downloaded_health["sqlite_open_success"],
             downloaded_health["structural_valid"],
             downloaded_health["production_ready"],
+            downloaded_health["required_tables_exist"],
+            ", ".join(downloaded_health.get("missing_tables", [])) or "none",
+            downloaded_health["companies_table_exists"],
             downloaded_health["company_count"],
+            downloaded_health["database_identity_exists"],
+            downloaded_health["schema_version_exists"],
             "; ".join(downloaded_health.get("readiness_failures", [])) or "none",
         )
         if not downloaded_health["production_ready"]:
-            logger.error("Trusted backup recovery aborted because downloaded database is not production-ready.")
+            failure_details = "; ".join(downloaded_health.get("readiness_failures", [])) or "unknown readiness failure"
+            logger.error(
+                "Trusted backup recovery aborted because downloaded database is not production-ready: %s",
+                failure_details,
+            )
             return {
                 "ok": False,
                 "stage": "recovery_validation",
-                "reason": "cloud backup downloaded but failed production-ready check",
+                "reason": f"downloaded DB failed production-ready check: {failure_details}; company_count={downloaded_health['company_count']}",
                 "backend": diagnostics["backend"],
                 "bucket_name": diagnostics["bucket_name"],
                 "object_name": diagnostics["object_name"],
