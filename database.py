@@ -950,6 +950,22 @@ def get_database_health_snapshot(db_path=DB_PATH, logger_instance=None):
     }
 
 
+def _is_bootstrap_candidate(health_snapshot):
+    health_snapshot = health_snapshot or {}
+    return all(
+        [
+            bool(health_snapshot.get("file_exists")),
+            bool(health_snapshot.get("sqlite_open_success")),
+            bool(health_snapshot.get("structural_valid")),
+            bool(health_snapshot.get("required_tables_exist")),
+            bool(health_snapshot.get("companies_table_exists")),
+            bool(health_snapshot.get("database_identity_exists")),
+            bool(health_snapshot.get("schema_version_exists")),
+            int(health_snapshot.get("company_count") or 0) == 0,
+        ]
+    )
+
+
 def _build_startup_result(
     ok,
     stage,
@@ -961,6 +977,7 @@ def _build_startup_result(
     company_count=0,
     recovery_attempted=False,
     recovery_succeeded=False,
+    bootstrap_needed=False,
 ):
     return {
         "ok": bool(ok),
@@ -973,6 +990,7 @@ def _build_startup_result(
         "company_count": int(company_count or 0),
         "recovery_attempted": bool(recovery_attempted),
         "recovery_succeeded": bool(recovery_succeeded),
+        "bootstrap_needed": bool(bootstrap_needed),
     }
 
 
@@ -2540,6 +2558,27 @@ def startup_database():
         cloud_restore_used,
         False,
     )
+    if _is_bootstrap_candidate(db_health_before_startup):
+        logger.info(
+            "Database startup entering bootstrap mode: db_path=%s company_count=%s production_ready=%s recovery_attempted=%s",
+            db_health_before_startup["db_path"],
+            db_health_before_startup["company_count"],
+            db_health_before_startup["production_ready"],
+            recovery_attempted,
+        )
+        return _build_startup_result(
+            ok=True,
+            stage="bootstrap_mode",
+            reason="no company has been created yet; bootstrap mode is enabled",
+            db_path=db_health_before_startup["db_path"],
+            file_exists=db_health_before_startup["file_exists"],
+            structurally_valid=db_health_before_startup["structural_valid"],
+            production_ready=db_health_before_startup["production_ready"],
+            company_count=db_health_before_startup["company_count"],
+            recovery_attempted=recovery_attempted,
+            recovery_succeeded=cloud_restore_used,
+            bootstrap_needed=True,
+        )
     if ERP_PRODUCTION_MODE and not db_health_before_startup["production_ready"]:
         logger.warning(
             "Production startup detected missing or non-production-ready database. Automatic recovery will be attempted: db_path=%s",
@@ -2563,6 +2602,25 @@ def startup_database():
             recovery_result.get("replacement_performed"),
             cloud_restore_used,
         )
+        if _is_bootstrap_candidate(db_health_before_startup):
+            logger.info(
+                "Database startup entered bootstrap mode after recovery evaluation: db_path=%s company_count=%s",
+                db_health_before_startup["db_path"],
+                db_health_before_startup["company_count"],
+            )
+            return _build_startup_result(
+                ok=True,
+                stage="bootstrap_mode",
+                reason="no company has been created yet; bootstrap mode is enabled",
+                db_path=db_health_before_startup["db_path"],
+                file_exists=db_health_before_startup["file_exists"],
+                structurally_valid=db_health_before_startup["structural_valid"],
+                production_ready=db_health_before_startup["production_ready"],
+                company_count=db_health_before_startup["company_count"],
+                recovery_attempted=recovery_attempted,
+                recovery_succeeded=cloud_restore_used,
+                bootstrap_needed=True,
+            )
         if not db_health_before_startup["production_ready"]:
             failure_stage = str(recovery_result.get("stage") or "recovery_validation")
             failure_reason = str(

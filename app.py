@@ -1374,6 +1374,8 @@ def main():
     # SQLite continuity on ephemeral hosting is temporary; managed persistent DB remains the target architecture.
     ensure_schema()
     startup_status = startup_database()
+    bootstrap_needed = bool(startup_status.get("bootstrap_needed")) if isinstance(startup_status, dict) else False
+    st.session_state["bootstrap_needed"] = bootstrap_needed
     startup_ok = bool(startup_status.get("ok")) if isinstance(startup_status, dict) else bool(startup_status)
     if not startup_ok:
         logger.error(
@@ -1390,6 +1392,8 @@ def main():
             "The app stopped safely to protect deployed company data."
         )
         st.stop()
+    if bootstrap_needed:
+        st.info("No company has been created yet. Complete initial company setup to activate this ERP.")
     _verify_cloud_vault_handshake()
     if "base_currency" not in st.session_state:
         st.session_state.base_currency = "GHS"
