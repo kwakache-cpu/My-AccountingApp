@@ -5,6 +5,7 @@ from database import (
     DB_PATH,
     ensure_schema,
     get_connection,
+    get_persistence_diagnostics,
     get_recovery_source_diagnostics,
     startup_database,
 )
@@ -1916,6 +1917,30 @@ else:
                 st.markdown("---")
                 st.subheader("System Health")
                 st.caption(st.session_state.get("cloud_vault_status", "🔴 Cloud Vault: Local Mode"))
+                try:
+                    persistence_diag = get_persistence_diagnostics()
+                    st.caption(
+                        "Canonical DB: {path} | Local Valid: {valid} | Company Count: {count}".format(
+                            path=persistence_diag["canonical_db_path"],
+                            valid="Yes" if persistence_diag["local_db_valid"] else "No",
+                            count=persistence_diag["company_count"],
+                        )
+                    )
+                    st.caption(
+                        "Backup Status: {status} | Last Backup: {timestamp} | Cloud Object: {cloud_object}".format(
+                            status=persistence_diag["latest_backup_upload_status"],
+                            timestamp=persistence_diag["last_backup_timestamp"] or "never",
+                            cloud_object=persistence_diag["cloud_object_path"] or "missing",
+                        )
+                    )
+                    st.caption(
+                        "Restore Source: {restore_source} | Bucket: {bucket}".format(
+                            restore_source=persistence_diag["restore_source_used_at_startup"],
+                            bucket=persistence_diag["bucket_name"] or "missing",
+                        )
+                    )
+                except Exception as persistence_diag_error:
+                    logger.warning(f"Persistence diagnostics unavailable: {persistence_diag_error}")
 
                 st.markdown("---")
                 st.subheader("Master Price Setting")

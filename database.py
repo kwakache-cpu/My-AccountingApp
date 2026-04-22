@@ -4,6 +4,9 @@ from datetime import datetime
 import os
 import shutil
 import json
+import re
+import tempfile
+import time
 
 try:
     import streamlit as st
@@ -183,6 +186,35 @@ DATABASE_PRODUCTION_REQUIRED_TABLES = DATABASE_REQUIRED_TABLES + (
 )
 FIREBASE_RECOVERY_APP = None
 FIREBASE_RECOVERY_BUCKET_NAME = None
+BACKUP_HISTORY_PREFIX = "backups/history"
+BACKUP_TRIGGER_TABLES = {
+    "companies",
+    "branches",
+    "users",
+    "customers",
+    "suppliers",
+    "invoices",
+    "bills",
+    "payments",
+    "journal_entries",
+    "journal_lines",
+    "inventory",
+    "stock_movements",
+    "transactions",
+    "vouchers",
+}
+BACKUP_DEBOUNCE_SECONDS = max(int(os.getenv("EKA_BACKUP_DEBOUNCE_SECONDS", "20") or 20), 0)
+LAST_BACKUP_STATUS = {
+    "status": "not_started",
+    "timestamp": None,
+    "reason": "no backup attempted yet",
+    "latest_object": FIREBASE_OBJECT_NAME,
+    "history_object": None,
+    "trigger_tables": [],
+}
+LAST_BACKUP_SIGNATURE = None
+LAST_BACKUP_AT = 0.0
+LAST_RESTORE_SOURCE = "local_runtime_database"
 
 
 def get_firebase_runtime_config():
@@ -451,6 +483,200 @@ def _get_firebase_recovery_bucket():
         return None
 
 
+def _build_history_backup_object_name(timestamp=None):
+    timestamp = timestamp or datetime.utcnow()
+    return f"{BACKUP_HISTORY_PREFIX}/eka_enterprise_v3_{timestamp.strftime('%Y%m%d_%H%M%S')}.db"
+
+
+def _update_backup_status(status, reason, latest_object=FIREBASE_OBJECT_NAME, history_object=None, trigger_tables=None):
+    LAST_BACKUP_STATUS.update(
+        {
+            "status": str(status),
+            "timestamp": datetime.utcnow().isoformat(timespec="seconds"),
+            "reason": str(reason),
+            "latest_object": latest_object,
+            "history_object": history_object,
+            "trigger_tables": sorted(str(table) for table in (trigger_tables or [])),
+        }
+    )
+
+
+def _extract_mutated_table_name(sql_text):
+    normalized = str(sql_text or "").strip()
+    if not normalized:
+        return None
+    match = re.match(
+        r"^(?:INSERT\s+INTO|UPDATE|DELETE\s+FROM|REPLACE\s+INTO)\s+[`\"\[]?([A-Za-z_][A-Za-z0-9_]*)",
+        normalized,
+        flags=re.IGNORECASE,
+    )
+    return str(match.group(1)).lower() if match else None
+
+
+class ManagedSQLiteConnection(sqlite3.Connection):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._managed_db_path = None
+        self._mutated_tables = set()
+        self._persistence_hooks_enabled = True
+        try:
+            self.set_trace_callback(self._track_mutations)
+        except Exception:
+            pass
+
+    def _track_mutations(self, sql_text):
+        if not getattr(self, "_persistence_hooks_enabled", False):
+            return
+        table_name = _extract_mutated_table_name(sql_text)
+        if table_name and table_name in BACKUP_TRIGGER_TABLES:
+            self._mutated_tables.add(table_name)
+
+    def commit(self):
+        super().commit()
+        _run_post_commit_persistence_hook(self)
+
+    def rollback(self):
+        super().rollback()
+        self._mutated_tables.clear()
+
+
+def _create_runtime_snapshot_file(source_db_path=DB_PATH):
+    _ensure_db_directory()
+    snapshot_fd, snapshot_path = tempfile.mkstemp(
+        prefix="eka_runtime_snapshot_",
+        suffix=".db",
+        dir=DB_DIR,
+    )
+    os.close(snapshot_fd)
+    source_conn = None
+    snapshot_conn = None
+    try:
+        source_conn = sqlite3.connect(source_db_path, timeout=20, check_same_thread=False)
+        snapshot_conn = sqlite3.connect(snapshot_path, timeout=20, check_same_thread=False)
+        source_conn.backup(snapshot_conn)
+        return snapshot_path
+    finally:
+        if snapshot_conn:
+            snapshot_conn.close()
+        if source_conn:
+            source_conn.close()
+
+
+def backup_runtime_database_to_cloud(force=False, trigger_tables=None, logger_instance=None):
+    global LAST_BACKUP_SIGNATURE, LAST_BACKUP_AT
+    logger_instance = logger_instance or logger
+    diagnostics = get_recovery_source_diagnostics()
+    latest_object = diagnostics.get("object_name") or FIREBASE_OBJECT_NAME
+    history_object = _build_history_backup_object_name()
+    trigger_tables = sorted(str(table) for table in (trigger_tables or []))
+
+    if not os.path.exists(DB_PATH):
+        reason = f"canonical runtime database is missing: {DB_PATH}"
+        logger_instance.warning("Cloud backup skipped: %s", reason)
+        _update_backup_status("skipped", reason, latest_object=latest_object, history_object=None, trigger_tables=trigger_tables)
+        return {"ok": False, "reason": reason, "latest_object": latest_object, "history_object": None}
+
+    local_health = get_database_health_snapshot(DB_PATH, logger_instance=logger_instance)
+    logger_instance.info(
+        "Cloud backup preflight: db_path=%s db_exists=%s sqlite_open_success=%s db_valid=%s production_ready=%s company_count=%s missing_tables=%s trigger_tables=%s",
+        local_health["db_path"],
+        local_health["file_exists"],
+        local_health.get("sqlite_open_success"),
+        local_health["structural_valid"],
+        local_health["production_ready"],
+        local_health["company_count"],
+        ", ".join(local_health.get("missing_tables", [])) or "none",
+        ", ".join(trigger_tables) or "none",
+    )
+    if not local_health["production_ready"]:
+        reason = "; ".join(local_health.get("readiness_failures", [])) or "canonical runtime database is not production-ready"
+        logger_instance.warning("Cloud backup skipped because canonical database is not production-ready: %s", reason)
+        _update_backup_status("skipped", reason, latest_object=latest_object, history_object=None, trigger_tables=trigger_tables)
+        return {"ok": False, "reason": reason, "latest_object": latest_object, "history_object": None}
+
+    signature = (
+        os.path.getsize(DB_PATH),
+        int(os.path.getmtime(DB_PATH)),
+        local_health["company_count"],
+    )
+    now = time.time()
+    if not force and signature == LAST_BACKUP_SIGNATURE and (now - LAST_BACKUP_AT) < BACKUP_DEBOUNCE_SECONDS:
+        reason = f"backup debounced for unchanged canonical database within {BACKUP_DEBOUNCE_SECONDS}s"
+        logger_instance.info("Cloud backup skipped: %s", reason)
+        _update_backup_status("debounced", reason, latest_object=latest_object, history_object=None, trigger_tables=trigger_tables)
+        return {"ok": True, "reason": reason, "latest_object": latest_object, "history_object": None}
+
+    bucket = _get_firebase_recovery_bucket()
+    if bucket is None:
+        reason = diagnostics.get("credential_error") or "firebase backup bucket is not accessible"
+        logger_instance.warning("Cloud backup skipped because Firebase bucket is unavailable: %s", reason)
+        _update_backup_status("failed", reason, latest_object=latest_object, history_object=None, trigger_tables=trigger_tables)
+        return {"ok": False, "reason": reason, "latest_object": latest_object, "history_object": None}
+
+    snapshot_path = None
+    try:
+        snapshot_path = _create_runtime_snapshot_file(DB_PATH)
+        snapshot_health = get_database_health_snapshot(snapshot_path, logger_instance=logger_instance)
+        if not snapshot_health["production_ready"]:
+            reason = "; ".join(snapshot_health.get("readiness_failures", [])) or "snapshot database is not production-ready"
+            logger_instance.warning("Cloud backup skipped because snapshot validation failed: %s", reason)
+            _update_backup_status("failed", reason, latest_object=latest_object, history_object=None, trigger_tables=trigger_tables)
+            return {"ok": False, "reason": reason, "latest_object": latest_object, "history_object": None}
+
+        bucket.blob(latest_object).upload_from_filename(snapshot_path)
+        bucket.blob(history_object).upload_from_filename(snapshot_path)
+        LAST_BACKUP_SIGNATURE = signature
+        LAST_BACKUP_AT = now
+        reason = f"uploaded canonical database backup to bucket={diagnostics.get('bucket_name')} latest={latest_object} history={history_object}"
+        logger_instance.info("Cloud backup succeeded: %s", reason)
+        _update_backup_status("uploaded", reason, latest_object=latest_object, history_object=history_object, trigger_tables=trigger_tables)
+        return {"ok": True, "reason": reason, "latest_object": latest_object, "history_object": history_object}
+    except Exception as exc:
+        reason = f"cloud backup upload failed: {exc}"
+        logger_instance.warning("Cloud backup failed: %s", reason)
+        _update_backup_status("failed", reason, latest_object=latest_object, history_object=None, trigger_tables=trigger_tables)
+        return {"ok": False, "reason": reason, "latest_object": latest_object, "history_object": None}
+    finally:
+        if snapshot_path and os.path.exists(snapshot_path):
+            try:
+                os.remove(snapshot_path)
+            except OSError:
+                pass
+
+
+def _run_post_commit_persistence_hook(conn):
+    try:
+        if conn is None or not getattr(conn, "_persistence_hooks_enabled", False):
+            return
+        managed_db_path = os.path.abspath(getattr(conn, "_managed_db_path", "") or "")
+        canonical_db_path = os.path.abspath(DB_PATH)
+        mutated_tables = set(getattr(conn, "_mutated_tables", set()))
+        conn._mutated_tables.clear()
+        if managed_db_path != canonical_db_path or not mutated_tables:
+            return
+        backup_runtime_database_to_cloud(trigger_tables=sorted(mutated_tables), logger_instance=logger)
+    except Exception as exc:
+        logger.warning("Post-commit persistence hook failed: %s", exc)
+
+
+def get_persistence_diagnostics():
+    local_health = get_database_health_snapshot(DB_PATH, logger_instance=logger)
+    recovery_diagnostics = get_recovery_source_diagnostics()
+    return {
+        "canonical_db_path": DB_PATH,
+        "local_db_valid": local_health["structural_valid"],
+        "production_ready": local_health["production_ready"],
+        "company_count": local_health["company_count"],
+        "latest_backup_upload_status": LAST_BACKUP_STATUS.get("status"),
+        "last_backup_timestamp": LAST_BACKUP_STATUS.get("timestamp"),
+        "last_backup_reason": LAST_BACKUP_STATUS.get("reason"),
+        "cloud_object_path": LAST_BACKUP_STATUS.get("latest_object") or recovery_diagnostics.get("object_name"),
+        "history_object_path": LAST_BACKUP_STATUS.get("history_object"),
+        "restore_source_used_at_startup": LAST_RESTORE_SOURCE,
+        "bucket_name": recovery_diagnostics.get("bucket_name"),
+    }
+
+
 def _ensure_db_directory():
     os.makedirs(DB_DIR, exist_ok=True)
     if (
@@ -478,13 +704,17 @@ def _ensure_local_db_file():
         logger.warning("Production mode detected missing database file; blank database creation is blocked at startup: %s", DB_PATH)
 
 
-def _open_sqlite_connection(path=DB_PATH):
+def _open_sqlite_connection(path=DB_PATH, enable_persistence_hooks=False):
     if os.path.abspath(path) == os.path.abspath(DB_PATH) and ERP_PRODUCTION_MODE and not os.path.exists(path):
         raise sqlite3.OperationalError(
             f"Production database file is missing and cannot be recreated outside startup recovery: {path}"
         )
-    conn = sqlite3.connect(path, timeout=20, check_same_thread=False)
+    connection_factory = ManagedSQLiteConnection if enable_persistence_hooks else sqlite3.Connection
+    conn = sqlite3.connect(path, timeout=20, check_same_thread=False, factory=connection_factory)
     conn.row_factory = sqlite3.Row
+    if isinstance(conn, ManagedSQLiteConnection):
+        conn._managed_db_path = path
+        conn._persistence_hooks_enabled = bool(enable_persistence_hooks)
     conn.execute("PRAGMA foreign_keys = ON;")
     conn.execute("PRAGMA journal_mode = WAL;")
     return conn
@@ -747,6 +977,7 @@ def _build_startup_result(
 
 
 def attempt_production_database_recovery(force_restore=True):
+    global LAST_RESTORE_SOURCE
     logger.info("Trusted backup recovery invoked: db_path=%s force_restore=%s", DB_PATH, force_restore)
     local_health = get_database_health_snapshot(DB_PATH, logger_instance=logger)
     diagnostics = get_recovery_source_diagnostics()
@@ -929,6 +1160,7 @@ def attempt_production_database_recovery(force_restore=True):
             os.rename(temp_restore_path, DB_PATH)
             replacement_performed = True
         logger.info("Trusted backup recovery succeeded and promoted recovered database to %s", DB_PATH)
+        LAST_RESTORE_SOURCE = f"cloud_restore:{diagnostics['bucket_name']}::{diagnostics['object_name']}"
         final_health = get_database_health_snapshot(DB_PATH, logger_instance=logger)
         logger.info(
             "Trusted backup replacement performed: replaced=%s final_db_exists=%s final_db_valid=%s final_production_ready=%s final_company_count=%s",
@@ -1719,7 +1951,7 @@ def get_connection():
     """
     try:
         _ensure_local_db_file()
-        return _open_sqlite_connection()
+        return _open_sqlite_connection(enable_persistence_hooks=True)
     except sqlite3.Error as e:
         logger.critical(f"DATABASE CONNECTION FAILURE: {e}")
         return None
@@ -2262,6 +2494,8 @@ def startup_database():
     Canonical startup path for database bootstrap, backups, migrations, and validation.
     The flow is additive, idempotent, and restores from backup if validation detects data loss.
     """
+    global LAST_RESTORE_SOURCE
+    LAST_RESTORE_SOURCE = "local_runtime_database"
     logger.info("Database startup entered: db_path=%s", DB_PATH)
     _ensure_local_db_file()
     preflight_conn = None
