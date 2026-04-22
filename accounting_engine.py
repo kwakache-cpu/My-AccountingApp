@@ -28,6 +28,17 @@ def _normal_balance(account_type):
 
 VALID_ACCOUNT_TYPES = {"Asset", "Liability", "Equity", "Income", "Expense"}
 VALID_DOCUMENT_CONTROL_STATUSES = {"Draft", "Submitted", "Approved", "Posted", "Cancelled", "Voided", "Active"}
+CONTROL_ACCOUNT_NAMES = {"Accounts Receivable", "Accounts Payable", "Inventory"}
+HEADER_ACCOUNT_NAMES = {
+    "Assets",
+    "Current Assets",
+    "Non-Current Assets",
+    "Liabilities",
+    "Current Liabilities",
+    "Equity",
+    "Income",
+    "Expenses",
+}
 
 
 def normalize_document_status(value, default="Draft"):
@@ -152,12 +163,318 @@ def _coa_type_expression():
     return "COALESCE(NULLIF(type, ''), NULLIF(account_type, ''), NULLIF(category, ''), 'Asset')"
 
 
+def _coa_code_expression():
+    return "COALESCE(NULLIF(account_code, ''), NULLIF(code, ''), '')"
+
+
+def _inventory_value_query(conn, company_key, branch_id=None):
+    inventory_columns = {row[1] for row in conn.execute("PRAGMA table_info(inventory)").fetchall()}
+    query = """
+        SELECT COALESCE(SUM(COALESCE(qty, 0) * COALESCE(cost_price, 0)), 0) AS inventory_value
+        FROM inventory
+        WHERE company_key = ?
+    """
+    params = [company_key]
+    if branch_id and "branch_id" in inventory_columns:
+        query += " AND branch_id = ?"
+        params.append(branch_id)
+    return query, tuple(params)
+
+
+def _safe_doc_status(row, columns):
+    if "approval_status" in columns:
+        return normalize_document_status(row["approval_status"], default="Draft")
+    if "status" in columns:
+        return normalize_document_status(row["status"], default="Draft")
+    return "Draft"
+
+
+def _chart_account_structure(conn):
+    return [dict(row) for row in conn.execute(
+        f"""
+        SELECT
+            id,
+            {_coa_code_expression()} AS account_code,
+            {_coa_name_expression()} AS account_name,
+            {_coa_type_expression()} AS account_type,
+            parent_id,
+            COALESCE(posting_allowed, 1) AS posting_allowed,
+            COALESCE(control_account, 0) AS control_account,
+            COALESCE(allow_manual_posting, 1) AS allow_manual_posting,
+            COALESCE(is_active, 1) AS is_active
+        FROM chart_of_accounts
+        ORDER BY {_coa_code_expression()}, {_coa_name_expression()}
+        """
+    ).fetchall()]
+
+
+def get_chart_of_accounts_diagnostics(conn=None):
+    owns_connection = conn is None
+    conn = conn or get_connection()
+    try:
+        rows = _chart_account_structure(conn)
+        duplicate_codes = []
+        invalid_types = []
+        header_posting_allowed = []
+        control_accounts_manual = []
+        seen_codes = {}
+        parent_ids = {int(row["parent_id"]) for row in rows if row.get("parent_id") not in (None, "")}
+        for row in rows:
+            account_name = str(row.get("account_name") or "").strip()
+            account_code = str(row.get("account_code") or "").strip()
+            account_type = str(row.get("account_type") or "").strip().title()
+            posting_allowed = bool(int(row.get("posting_allowed") or 0))
+            control_account = bool(int(row.get("control_account") or 0))
+            allow_manual_posting = bool(int(row.get("allow_manual_posting") or 0))
+            if account_code:
+                owner = seen_codes.get(account_code.lower())
+                if owner and owner != account_name:
+                    duplicate_codes.append({"account_code": account_code, "accounts": [owner, account_name]})
+                else:
+                    seen_codes[account_code.lower()] = account_name
+            if account_type not in VALID_ACCOUNT_TYPES:
+                invalid_types.append({"account_name": account_name, "account_type": account_type})
+            if int(row["id"]) in parent_ids and posting_allowed:
+                header_posting_allowed.append(account_name)
+            if control_account and allow_manual_posting:
+                control_accounts_manual.append(account_name)
+        warnings = []
+        if duplicate_codes:
+            warnings.append(f"duplicate account codes detected: {len(duplicate_codes)}")
+        if invalid_types:
+            warnings.append(f"invalid account types detected: {len(invalid_types)}")
+        if header_posting_allowed:
+            warnings.append(f"header accounts still allow posting: {len(header_posting_allowed)}")
+        if control_accounts_manual:
+            warnings.append(f"control accounts still allow manual posting: {len(control_accounts_manual)}")
+        return {
+            "total_accounts": len(rows),
+            "duplicate_account_codes": duplicate_codes,
+            "invalid_account_types": invalid_types,
+            "header_accounts_allowing_posting": header_posting_allowed,
+            "control_accounts_allowing_manual_posting": control_accounts_manual,
+            "warnings": warnings,
+        }
+    finally:
+        if owns_connection and conn:
+            conn.close()
+
+
+def _resolve_source_document_mismatches(conn, company_key, branch_id=None):
+    mismatches = []
+    allowed_tables = ("invoices", "bills", "payments", "stock_movements", "vouchers")
+    for table_name in allowed_tables:
+        table_exists = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name = ?",
+            (table_name,),
+        ).fetchone()
+        if not table_exists:
+            continue
+        columns = _source_document_columns(conn, table_name)
+        if "id" not in columns:
+            continue
+        query = f"SELECT * FROM {table_name} WHERE company_key = ?"
+        params = [company_key]
+        if branch_id and "branch_id" in columns:
+            query += " AND branch_id = ?"
+            params.append(branch_id)
+        rows = conn.execute(query, tuple(params)).fetchall()
+        for row in rows:
+            status = _safe_doc_status(row, columns)
+            row_id = int(row["id"])
+            posted_entry_id = int(row["posted_entry_id"]) if "posted_entry_id" in columns and row["posted_entry_id"] not in (None, "") else None
+            journal_ref = conn.execute(
+                """
+                SELECT id
+                FROM journal_entries
+                WHERE company_key = ?
+                  AND COALESCE(is_voided, 0) = 0
+                  AND COALESCE(approval_status, 'Posted') = 'Posted'
+                  AND lower(COALESCE(source_table, '')) = lower(?)
+                  AND source_id = ?
+                  {branch_clause}
+                LIMIT 1
+                """.format(branch_clause="AND branch_id = ?" if branch_id else ""),
+                tuple([company_key, table_name, row_id] + ([branch_id] if branch_id else [])),
+            ).fetchone()
+            has_gl_impact = bool(posted_entry_id or journal_ref)
+            if status == "Posted" and not has_gl_impact:
+                mismatches.append(
+                    {
+                        "table": table_name,
+                        "source_id": row_id,
+                        "issue": "posted source document is missing GL impact",
+                    }
+                )
+            if status != "Posted" and has_gl_impact:
+                mismatches.append(
+                    {
+                        "table": table_name,
+                        "source_id": row_id,
+                        "issue": f"source document status is {status} but GL impact exists",
+                    }
+                )
+    return mismatches
+
+
+def get_finance_integrity_diagnostics(company_key, as_of_date=None, branch_id=None, conn=None):
+    owns_connection = conn is None
+    conn = conn or get_connection()
+    try:
+        ar_subledger_total = round(
+            sum(float(row.get("balance") or 0.0) for row in get_customer_balances(company_key, as_of_date=as_of_date, conn=conn)),
+            2,
+        )
+        ar_control_balance = round(
+            float(
+                get_account_total(
+                    company_key,
+                    "Accounts Receivable",
+                    end_date=as_of_date,
+                    branch_id=branch_id,
+                    balance_side="debit",
+                    conn=conn,
+                )
+            ),
+            2,
+        )
+        ap_subledger_total = round(
+            sum(float(row.get("balance") or 0.0) for row in get_supplier_balances(company_key, as_of_date=as_of_date, conn=conn)),
+            2,
+        )
+        ap_control_balance = round(
+            float(
+                get_account_total(
+                    company_key,
+                    "Accounts Payable",
+                    end_date=as_of_date,
+                    branch_id=branch_id,
+                    balance_side="credit",
+                    conn=conn,
+                )
+            ),
+            2,
+        )
+        inventory_query, inventory_params = _inventory_value_query(conn, company_key, branch_id=branch_id)
+        inventory_row = conn.execute(inventory_query, inventory_params).fetchone()
+        inventory_subledger_total = round(float(inventory_row["inventory_value"] or 0.0), 2) if inventory_row else 0.0
+        inventory_gl_balance = round(
+            float(
+                get_account_total(
+                    company_key,
+                    "Inventory",
+                    end_date=as_of_date,
+                    branch_id=branch_id,
+                    balance_side="debit",
+                    conn=conn,
+                )
+            ),
+            2,
+        )
+        unbalanced_journal_rows = conn.execute(
+            """
+            SELECT je.id
+            FROM journal_entries je
+            JOIN journal_lines jl ON jl.entry_id = je.id
+            WHERE je.company_key = ?
+              AND COALESCE(je.is_voided, 0) = 0
+              {branch_clause}
+            GROUP BY je.id
+            HAVING ABS(COALESCE(SUM(jl.debit), 0) - COALESCE(SUM(jl.credit), 0)) >= 0.01
+            """.format(branch_clause="AND je.branch_id = ?" if branch_id else ""),
+            tuple([company_key] + ([branch_id] if branch_id else [])),
+        ).fetchall()
+        orphaned_journal_refs = []
+        source_rows = conn.execute(
+            """
+            SELECT id, source_table, source_id, reference
+            FROM journal_entries
+            WHERE company_key = ?
+              AND source_table IS NOT NULL
+              AND TRIM(COALESCE(source_table, '')) != ''
+              AND source_id IS NOT NULL
+              AND COALESCE(is_voided, 0) = 0
+              {branch_clause}
+            """.format(branch_clause="AND branch_id = ?" if branch_id else ""),
+            tuple([company_key] + ([branch_id] if branch_id else [])),
+        ).fetchall()
+        for row in source_rows:
+            source_table = str(row["source_table"] or "").strip().lower()
+            source_id = int(row["source_id"])
+            exists = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name = ?",
+                (source_table,),
+            ).fetchone()
+            if not exists:
+                orphaned_journal_refs.append(
+                    {"entry_id": int(row["id"]), "source_table": source_table, "source_id": source_id, "reason": "source table missing"}
+                )
+                continue
+            source_match = conn.execute(
+                f"SELECT id FROM {source_table} WHERE id = ? LIMIT 1",
+                (source_id,),
+            ).fetchone()
+            if not source_match:
+                orphaned_journal_refs.append(
+                    {"entry_id": int(row["id"]), "source_table": source_table, "source_id": source_id, "reason": "source document missing"}
+                )
+
+        source_document_mismatches = _resolve_source_document_mismatches(conn, company_key, branch_id=branch_id)
+        coa_diagnostics = get_chart_of_accounts_diagnostics(conn=conn)
+        return {
+            "accounts_receivable": {
+                "subledger_total": ar_subledger_total,
+                "control_account_balance": ar_control_balance,
+                "difference": round(ar_subledger_total - ar_control_balance, 2),
+                "reconciled": abs(ar_subledger_total - ar_control_balance) < 0.01,
+            },
+            "accounts_payable": {
+                "subledger_total": ap_subledger_total,
+                "control_account_balance": ap_control_balance,
+                "difference": round(ap_subledger_total - ap_control_balance, 2),
+                "reconciled": abs(ap_subledger_total - ap_control_balance) < 0.01,
+            },
+            "inventory": {
+                "subledger_total": inventory_subledger_total,
+                "control_account_balance": inventory_gl_balance,
+                "difference": round(inventory_subledger_total - inventory_gl_balance, 2),
+                "reconciled": abs(inventory_subledger_total - inventory_gl_balance) < 0.01,
+            },
+            "unbalanced_journal_count": len(unbalanced_journal_rows),
+            "orphaned_journal_reference_count": len(orphaned_journal_refs),
+            "orphaned_journal_references": orphaned_journal_refs,
+            "source_documents_missing_gl_count": len(source_document_mismatches),
+            "source_document_mismatches": source_document_mismatches,
+            "chart_of_accounts": coa_diagnostics,
+        }
+    finally:
+        if owns_connection and conn:
+            conn.close()
+
+
 def get_or_create_account(conn, account_name, account_type, parent_id=None, account_code=None):
     account_name = str(account_name or "").strip()
     account_type = str(account_type or "").strip().title()
     account_code = str(account_code or "").strip()
     if not account_name or not account_type:
         raise ValueError("Account name and type are required.")
+    if account_type not in VALID_ACCOUNT_TYPES:
+        raise ValueError(f"Invalid account type '{account_type}'.")
+
+    if account_code:
+        code_owner = conn.execute(
+            f"""
+            SELECT id, {_coa_name_expression()} AS account_name
+            FROM chart_of_accounts
+            WHERE lower({_coa_code_expression()}) = lower(?)
+            LIMIT 1
+            """,
+            (account_code,),
+        ).fetchone()
+        if code_owner and str(code_owner["account_name"]).strip().lower() != account_name.lower():
+            raise ValueError(
+                f"Account code '{account_code}' is already assigned to {code_owner['account_name']}."
+            )
 
     row = conn.execute(
         f"""
@@ -179,19 +496,52 @@ def get_or_create_account(conn, account_name, account_type, parent_id=None, acco
                 category = COALESCE(NULLIF(category, ''), ?),
                 code = COALESCE(NULLIF(code, ''), NULLIF(?, ''), code),
                 account_code = COALESCE(NULLIF(account_code, ''), NULLIF(?, ''), account_code),
-                parent_id = COALESCE(parent_id, ?)
+                parent_id = COALESCE(parent_id, ?),
+                posting_allowed = COALESCE(posting_allowed, ?),
+                control_account = COALESCE(control_account, ?),
+                allow_manual_posting = COALESCE(allow_manual_posting, ?),
+                is_active = COALESCE(is_active, 1)
             WHERE id = ?
             """,
-            (account_name, account_name, account_type, account_type, account_type, account_code, account_code, parent_id, int(row["id"])),
+            (
+                account_name,
+                account_name,
+                account_type,
+                account_type,
+                account_type,
+                account_code,
+                account_code,
+                parent_id,
+                0 if account_name in HEADER_ACCOUNT_NAMES else 1,
+                1 if account_name in CONTROL_ACCOUNT_NAMES else 0,
+                0 if account_name in CONTROL_ACCOUNT_NAMES else 1,
+                int(row["id"]),
+            ),
         )
         return int(row["id"])
 
     cursor = conn.execute(
         """
-        INSERT INTO chart_of_accounts (name, type, parent_id, code, category, account_code, account_name, account_type)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO chart_of_accounts (
+            name, type, parent_id, code, category, account_code, account_name, account_type,
+            posting_allowed, control_account, allow_manual_posting, is_active
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        (account_name, account_type, parent_id, account_code or None, account_type, account_code or None, account_name, account_type),
+        (
+            account_name,
+            account_type,
+            parent_id,
+            account_code or None,
+            account_type,
+            account_code or None,
+            account_name,
+            account_type,
+            0 if account_name in HEADER_ACCOUNT_NAMES else 1,
+            1 if account_name in CONTROL_ACCOUNT_NAMES else 0,
+            0 if account_name in CONTROL_ACCOUNT_NAMES else 1,
+            1,
+        ),
     )
     return int(cursor.lastrowid)
 
@@ -295,6 +645,7 @@ def post_journal_entry(
     source_type=None,
     source_id=None,
     approval_status="Posted",
+    manual_entry=False,
     conn=None,
 ):
     if not lines:
@@ -331,7 +682,11 @@ def post_journal_entry(
             f"""
             SELECT id,
                    {_coa_name_expression()} AS account_name,
-                   {_coa_type_expression()} AS account_type
+                   {_coa_type_expression()} AS account_type,
+                   COALESCE(posting_allowed, 1) AS posting_allowed,
+                   COALESCE(control_account, 0) AS control_account,
+                   COALESCE(allow_manual_posting, 1) AS allow_manual_posting,
+                   COALESCE(is_active, 1) AS is_active
             FROM chart_of_accounts
             WHERE id = ?
             LIMIT 1
@@ -343,6 +698,14 @@ def post_journal_entry(
         account_type = str(account_row["account_type"]).strip().title()
         if account_type not in VALID_ACCOUNT_TYPES:
             raise ValueError(f"Account ID {account_id} has invalid type '{account_type}'.")
+        if not bool(int(account_row["is_active"] or 0)):
+            raise ValueError(f"Account '{account_row['account_name']}' is inactive and cannot accept postings.")
+        if not bool(int(account_row["posting_allowed"] or 0)):
+            raise ValueError(f"Account '{account_row['account_name']}' is a header/non-posting account.")
+        if manual_entry and bool(int(account_row["control_account"] or 0)) and not bool(int(account_row["allow_manual_posting"] or 0)):
+            raise ValueError(
+                f"Manual posting to control account '{account_row['account_name']}' is blocked. Use the source document workflow instead."
+            )
         normalized_lines.append(
             {
                 "account_id": account_id,
@@ -1468,7 +1831,7 @@ def get_customer_balance(company_key, customer_id, as_of_date=None, conn=None):
             conn.close()
 
 
-def get_customer_balances(company_key, conn=None):
+def get_customer_balances(company_key, as_of_date=None, conn=None):
     owns_connection = conn is None
     conn = conn or get_connection()
     try:
@@ -1488,7 +1851,7 @@ def get_customer_balances(company_key, conn=None):
                 "name": row["name"],
                 "phone": row["phone"],
                 "email": row["email"],
-                "balance": get_customer_balance(company_key, int(row["id"]), conn=conn),
+                "balance": get_customer_balance(company_key, int(row["id"]), as_of_date=as_of_date, conn=conn),
             }
             for row in rows
         ]

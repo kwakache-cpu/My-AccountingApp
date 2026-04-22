@@ -52,6 +52,7 @@ from accounting_engine import (
     get_account_total,
     get_ap_aging_report,
     get_ar_aging_report,
+    get_chart_of_accounts_diagnostics,
     generate_balance_sheet,
     generate_cash_flow_statement,
     generate_income_statement,
@@ -729,11 +730,12 @@ def post_transaction(description, lines, company_key=None, reference=None, creat
             reference=reference,
             lines=normalized_lines,
             created_by=created_by,
-            branch_id=branch_id,
-            source_module="Operational Posting",
-            source_table="journal_entries",
-            conn=conn,
-        )
+                branch_id=branch_id,
+                source_module="Operational Posting",
+                source_table="journal_entries",
+                manual_entry=True,
+                conn=conn,
+            )
         if owns_connection:
             conn.commit()
         return entry_id
@@ -3076,24 +3078,46 @@ def show_chart_of_accounts(company_key, role):
     st.header("🗂️ Chart of Accounts")
     try:
         conn = get_connection()
+        coa_diagnostics = get_chart_of_accounts_diagnostics(conn=conn)
         rows = conn.execute(
             """
             SELECT
                 COALESCE(account_code, '') AS account_code,
                 COALESCE(name, account_name) AS account_name,
-                COALESCE(category, account_type) AS account_type
+                COALESCE(category, account_type) AS account_type,
+                COALESCE(posting_allowed, 1) AS posting_allowed,
+                COALESCE(control_account, 0) AS control_account,
+                COALESCE(allow_manual_posting, 1) AS allow_manual_posting,
+                COALESCE(is_active, 1) AS is_active
             FROM chart_of_accounts
             ORDER BY COALESCE(account_code, ''), COALESCE(name, account_name)
             """
         ).fetchall()
-        conn.close()
         if rows:
-            df = pd.DataFrame(rows, columns=["Account Code", "Account Name", "Account Type"])
+            df = pd.DataFrame(
+                rows,
+                columns=[
+                    "Account Code",
+                    "Account Name",
+                    "Account Type",
+                    "Posting Allowed",
+                    "Control Account",
+                    "Manual Posting Allowed",
+                    "Active",
+                ],
+            )
             st.dataframe(format_currency_dataframe(df), use_container_width=True)
         else:
             st.info("No chart of accounts entries found.")
+        if coa_diagnostics.get("warnings"):
+            st.warning("Account structure warnings: " + "; ".join(coa_diagnostics["warnings"]))
+        else:
+            st.success("Account structure checks passed.")
     except Exception as e:
         st.error(f"Error loading chart of accounts: {e}")
+    finally:
+        if 'conn' in locals() and conn:
+            conn.close()
 
     if role not in ("Staff", "Demo"):
         with st.form("add_coa_form"):
@@ -3104,13 +3128,7 @@ def show_chart_of_accounts(company_key, role):
                 if acc_name:
                     try:
                         conn = get_connection()
-                        conn.execute(
-                            """
-                            INSERT INTO chart_of_accounts (account_code, account_name, account_type, name, category)
-                            VALUES (?, ?, ?, ?, ?)
-                            """,
-                            (acc_code, acc_name, acc_type, acc_name, _normalize_account_category(acc_type)),
-                        )
+                        engine_get_or_create_account(conn, acc_name, _normalize_account_category(acc_type), account_code=acc_code)
                         conn.commit()
                         conn.close()
                         st.success("Account added.")

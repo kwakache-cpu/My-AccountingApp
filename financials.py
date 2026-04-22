@@ -16,6 +16,7 @@ from accounting_engine import (
     get_ap_aging_report,
     get_ar_aging_report,
     get_bank_reconciliation,
+    get_finance_integrity_diagnostics,
     post_journal_entry,
 )
 logger = logging.getLogger(__name__)
@@ -462,6 +463,7 @@ def show_record_transaction(company_key, role):
                     branch_id=st.session_state.get("active_branch_id"),
                     source_module="Manual Journal",
                     source_table="journal_entries",
+                    manual_entry=True,
                     conn=conn,
                 )
                 conn.commit()
@@ -1525,12 +1527,59 @@ def show_financial_reports(company_key, role=None):
     total_equity = _safe_number(balance_sheet_df.loc[balance_sheet_df["Category"] == "Equity", "Amount (GHS)"]) if not balance_sheet_df.empty else 0.0
     net_profit = _safe_number(income_statement_df.loc[income_statement_df["Account"] == "Net Profit", "Amount (GHS)"]) if not income_statement_df.empty else 0.0
     balanced = abs(total_debits - total_credits) < 0.01
+    integrity = get_finance_integrity_diagnostics(
+        company_key,
+        as_of_date=end_date,
+        branch_id=st.session_state.get("active_branch_id"),
+    )
 
     col1, col2, col3 = st.columns(3)
     col1.metric("Trial Balance", "Balanced" if balanced else "Out of Balance")
     col2.metric("Profit for the Period", format_currency(_report_convert(net_profit)))
     col3.metric("Balance Sheet", "Balanced" if abs(total_assets - (total_liabilities + total_equity)) < 0.01 else "Needs Review")
     st.caption(f"Debit/Credit Validation: {'Balanced' if balanced else 'Needs review'}")
+    with st.expander("Finance Integrity", expanded=False):
+        i1, i2, i3 = st.columns(3)
+        i1.metric(
+            "A/R Reconciliation",
+            "Matched" if integrity["accounts_receivable"]["reconciled"] else "Mismatch",
+            format_currency(integrity["accounts_receivable"]["difference"]),
+        )
+        i2.metric(
+            "A/P Reconciliation",
+            "Matched" if integrity["accounts_payable"]["reconciled"] else "Mismatch",
+            format_currency(integrity["accounts_payable"]["difference"]),
+        )
+        i3.metric(
+            "Inventory Reconciliation",
+            "Matched" if integrity["inventory"]["reconciled"] else "Mismatch",
+            format_currency(integrity["inventory"]["difference"]),
+        )
+        j1, j2, j3 = st.columns(3)
+        j1.metric("Unbalanced Journals", str(int(integrity["unbalanced_journal_count"])))
+        j2.metric("Orphaned Journal Refs", str(int(integrity["orphaned_journal_reference_count"])))
+        j3.metric("Missing GL Impact", str(int(integrity["source_documents_missing_gl_count"])))
+        st.caption(
+            "A/R subledger {ar_sub} vs control {ar_gl} | A/P subledger {ap_sub} vs control {ap_gl} | Inventory subledger {inv_sub} vs control {inv_gl}".format(
+                ar_sub=format_currency(integrity["accounts_receivable"]["subledger_total"]),
+                ar_gl=format_currency(integrity["accounts_receivable"]["control_account_balance"]),
+                ap_sub=format_currency(integrity["accounts_payable"]["subledger_total"]),
+                ap_gl=format_currency(integrity["accounts_payable"]["control_account_balance"]),
+                inv_sub=format_currency(integrity["inventory"]["subledger_total"]),
+                inv_gl=format_currency(integrity["inventory"]["control_account_balance"]),
+            )
+        )
+        if integrity["orphaned_journal_references"]:
+            st.markdown("Orphaned source-document journal references")
+            st.dataframe(pd.DataFrame(integrity["orphaned_journal_references"]), use_container_width=True)
+        if integrity["source_document_mismatches"]:
+            st.markdown("Source documents with missing or unexpected GL impact")
+            st.dataframe(pd.DataFrame(integrity["source_document_mismatches"]), use_container_width=True)
+        account_warnings = integrity["chart_of_accounts"].get("warnings", [])
+        if account_warnings:
+            st.warning("Account structure warnings: " + "; ".join(account_warnings))
+        else:
+            st.success("Account structure warnings: none")
 
     tabs = st.tabs(
         [

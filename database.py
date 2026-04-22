@@ -1676,6 +1676,10 @@ def ensure_schema_integrity(conn):
         "account_code": "TEXT",
         "account_name": "TEXT",
         "account_type": "TEXT",
+        "posting_allowed": "INTEGER DEFAULT 1",
+        "control_account": "INTEGER DEFAULT 0",
+        "allow_manual_posting": "INTEGER DEFAULT 1",
+        "is_active": "INTEGER DEFAULT 1",
     }.items():
         if column_name not in coa_columns:
             cursor.execute(f"ALTER TABLE chart_of_accounts ADD COLUMN {column_name} {column_def}")
@@ -1687,7 +1691,11 @@ def ensure_schema_integrity(conn):
             type = COALESCE(NULLIF(type, ''), NULLIF(account_type, ''), NULLIF(category, ''), 'Asset'),
             category = COALESCE(NULLIF(category, ''), NULLIF(type, ''), account_type),
             account_name = COALESCE(NULLIF(account_name, ''), name),
-            account_type = COALESCE(NULLIF(account_type, ''), NULLIF(type, ''), category)
+            account_type = COALESCE(NULLIF(account_type, ''), NULLIF(type, ''), category),
+            posting_allowed = COALESCE(posting_allowed, 1),
+            control_account = COALESCE(control_account, 0),
+            allow_manual_posting = COALESCE(allow_manual_posting, 1),
+            is_active = COALESCE(is_active, 1)
         """
     )
     existing_accounts = {
@@ -1723,6 +1731,75 @@ def ensure_schema_integrity(conn):
             "UPDATE chart_of_accounts SET parent_id = ? WHERE lower(name) = lower(?)",
             (parent_id, account_name),
         )
+    cursor.execute(
+        """
+        UPDATE chart_of_accounts
+        SET account_code = COALESCE(NULLIF(account_code, ''), NULLIF(code, '')),
+            code = COALESCE(NULLIF(code, ''), NULLIF(account_code, ''))
+        """
+    )
+    header_account_names = sorted(
+        {
+            str(parent_name).strip()
+            for _account_name, _account_type, parent_name in IFRS_CHART_OF_ACCOUNTS
+            if parent_name
+        }
+    )
+    for header_name in header_account_names:
+        cursor.execute(
+            """
+            UPDATE chart_of_accounts
+            SET posting_allowed = 0
+            WHERE lower(COALESCE(NULLIF(name, ''), NULLIF(account_name, ''), '')) = lower(?)
+            """,
+            (header_name,),
+        )
+    for control_name in ("Accounts Receivable", "Accounts Payable", "Inventory"):
+        cursor.execute(
+            """
+            UPDATE chart_of_accounts
+            SET control_account = 1,
+                allow_manual_posting = 0,
+                posting_allowed = 1,
+                is_active = COALESCE(is_active, 1)
+            WHERE lower(COALESCE(NULLIF(name, ''), NULLIF(account_name, ''), '')) = lower(?)
+            """,
+            (control_name,),
+        )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_chart_of_accounts_parent_id ON chart_of_accounts(parent_id)"
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_chart_of_accounts_active ON chart_of_accounts(is_active)"
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_chart_of_accounts_control_account ON chart_of_accounts(control_account)"
+    )
+    try:
+        duplicate_code_rows = cursor.execute(
+            """
+            SELECT account_code
+            FROM chart_of_accounts
+            WHERE TRIM(COALESCE(account_code, '')) != ''
+            GROUP BY account_code
+            HAVING COUNT(*) > 1
+            """
+        ).fetchall()
+        if duplicate_code_rows:
+            logger.warning(
+                "Chart of accounts unique code hardening skipped because duplicate account codes already exist: %s",
+                ", ".join(str(row[0]) for row in duplicate_code_rows),
+            )
+        else:
+            cursor.execute(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_chart_of_accounts_account_code_unique
+                ON chart_of_accounts(account_code)
+                WHERE account_code IS NOT NULL AND TRIM(account_code) != ''
+                """
+            )
+    except sqlite3.Error as exc:
+        logger.warning("Chart of accounts unique code hardening could not be applied safely: %s", exc)
 
     cursor.execute(
         """
