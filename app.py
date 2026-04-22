@@ -7,65 +7,6 @@ from database import (
     get_recovery_source_diagnostics,
     startup_database,
 )
-try:
-    from database import get_firebase_service_account_info
-except ImportError:
-    def get_firebase_service_account_info():
-        firebase_key_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "firebase_key.json")
-        inline_json = os.getenv("FIREBASE_SERVICE_ACCOUNT_JSON")
-        invalid_secret_reason = (
-            "invalid JSON in FIREBASE_SERVICE_ACCOUNT_JSON; likely cause: unescaped newline or control character in private_key"
-        )
-        if inline_json in (None, ""):
-            try:
-                inline_json = st.secrets.get("FIREBASE_SERVICE_ACCOUNT_JSON")
-            except Exception:
-                inline_json = None
-
-        if inline_json not in (None, ""):
-            try:
-                service_account_info = json.loads(str(inline_json))
-                logger.info("Firebase credentials loaded from secrets")
-                return {
-                    "ok": True,
-                    "source": "secrets",
-                    "service_account_info": service_account_info,
-                    "key_path": firebase_key_path,
-                }
-            except Exception as exc:
-                return {
-                    "ok": False,
-                    "source": "secrets",
-                    "reason": f"{invalid_secret_reason}. Parser detail: {exc}",
-                    "key_path": firebase_key_path,
-                }
-
-        if os.path.exists(firebase_key_path):
-            try:
-                with open(firebase_key_path, "r", encoding="utf-8") as firebase_file:
-                    service_account_info = json.load(firebase_file)
-                logger.info("Firebase credentials loaded from file")
-                return {
-                    "ok": True,
-                    "source": "file",
-                    "service_account_info": service_account_info,
-                    "key_path": firebase_key_path,
-                }
-            except Exception as exc:
-                return {
-                    "ok": False,
-                    "source": "file",
-                    "reason": f"Firebase credentials from file are invalid: {exc}",
-                    "key_path": firebase_key_path,
-                }
-
-        logger.warning("Firebase credentials missing")
-        return {
-            "ok": False,
-            "source": "missing",
-            "reason": "Firebase credentials not found in file or secrets",
-            "key_path": firebase_key_path,
-        }
 from openai import OpenAI
 import json
 import logging
@@ -188,6 +129,26 @@ FIREBASE_BUCKET_NAME = None
 FIREBASE_OBJECT_NAME = "backups/eka_enterprise_v3.db"
 
 
+def _get_app_firebase_service_account_info():
+    try:
+        service_account_json = st.secrets["firebase"]["service_account"]
+        service_account_info = json.loads(service_account_json)
+        logger.info("Firebase credentials loaded from Streamlit secrets")
+        return {
+            "ok": True,
+            "source": "streamlit_secrets",
+            "service_account_info": service_account_info,
+        }
+    except Exception as exc:
+        logger.warning("Firebase Secret Formatting Error. Please check Streamlit Cloud Secrets. Details: %s", exc)
+        st.error("Firebase Secret Formatting Error. Please check Streamlit Cloud Secrets.")
+        return {
+            "ok": False,
+            "source": "streamlit_secrets",
+            "reason": "Firebase Secret Formatting Error. Please check Streamlit Cloud Secrets.",
+        }
+
+
 def _init_firebase_storage_client():
     global FIREBASE_APP, FIREBASE_BUCKET_NAME
     if firebase_admin is None or credentials is None or initialize_app is None or storage is None:
@@ -196,7 +157,7 @@ def _init_firebase_storage_client():
         return FIREBASE_APP
     try:
         diagnostics = get_recovery_source_diagnostics()
-        credentials_result = get_firebase_service_account_info()
+        credentials_result = _get_app_firebase_service_account_info()
         if not credentials_result.get("ok"):
             logger.warning("Cloud Vault UI client could not load credentials: %s", credentials_result.get("reason"))
             return None
