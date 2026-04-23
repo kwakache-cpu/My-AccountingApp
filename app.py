@@ -30,7 +30,12 @@ import sqlite3
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 import uuid
-from accounting_engine import get_journal_dominance_diagnostics, get_month_sales_total, get_recent_accounting_activity
+from accounting_engine import (
+    get_document_workflow_diagnostics,
+    get_journal_dominance_diagnostics,
+    get_month_sales_total,
+    get_recent_accounting_activity,
+)
 
 try:
     import firebase_admin
@@ -2189,6 +2194,34 @@ else:
                                 st.success("Accounting core dominance check passed.")
                             with st.expander("Compatibility Tables: History Only", expanded=False):
                                 st.dataframe(pd.DataFrame(journal_diag["compatibility_tables"]), use_container_width=True)
+                            workflow_diag = get_document_workflow_diagnostics(
+                                selected_health_company,
+                                branch_id=st.session_state.get("active_branch_id"),
+                                conn=conn,
+                            )
+                            st.caption("Controlled Document Workflow")
+                            wd1, wd2, wd3 = st.columns(3)
+                            wd1.metric("Workflow Integrity", "Healthy" if workflow_diag.get("ok") else "Needs Review")
+                            wd2.metric("Duplicate Postings", int(workflow_diag.get("duplicate_posting_count") or 0))
+                            wd3.metric("State/GL Mismatches", len(workflow_diag.get("source_document_mismatches") or []))
+                            st.caption(
+                                "Controlled tables: {tables} | Statuses: {statuses}".format(
+                                    tables=", ".join(workflow_diag.get("controlled_source_tables") or []),
+                                    statuses=", ".join(workflow_diag.get("controlled_statuses") or []),
+                                )
+                            )
+                            if workflow_diag.get("warnings"):
+                                st.warning("Workflow warnings: " + " ".join(workflow_diag["warnings"]))
+                            else:
+                                st.success("Document workflow enforcement check passed.")
+                            with st.expander("Document Counts by Posting State", expanded=False):
+                                st.dataframe(pd.DataFrame(workflow_diag["document_counts"]), use_container_width=True)
+                            if workflow_diag.get("source_document_mismatches"):
+                                with st.expander("Posting-State / GL Mismatches", expanded=False):
+                                    st.dataframe(pd.DataFrame(workflow_diag["source_document_mismatches"]), use_container_width=True)
+                            if workflow_diag.get("duplicate_postings"):
+                                with st.expander("Duplicate Posted Journal Impact", expanded=False):
+                                    st.dataframe(pd.DataFrame(workflow_diag["duplicate_postings"]), use_container_width=True)
                     st.markdown("---")
                     st.caption("Admin Backup Export")
                     export_state_key = "admin_backup_export_payload"

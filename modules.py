@@ -34,6 +34,7 @@ except Exception:
 
 pos_success_key = "pos_transaction_success"
 scanner_active = True
+DOCUMENT_WORKFLOW_STATUSES = ["Draft", "Submitted", "Approved", "Posted", "Cancelled", "Voided"]
 
 # Setup Logger
 logger = logging.getLogger(__name__)
@@ -100,14 +101,14 @@ def _create_legacy_voucher_if_enabled(
     narration=None,
     reference_no=None,
     payment_method=None,
-    status="Active",
+    status="Posted",
 ):
     if not _legacy_write_enabled(conn):
         return None
     cursor = conn.execute(
         """
-        INSERT INTO vouchers (company_key, branch_id, date, v_type, ledger, credit, reference_no, narration, payment_method, status, created_by)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO vouchers (company_key, branch_id, date, v_type, ledger, credit, reference_no, narration, payment_method, status, approval_status, created_by)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Posted', ?)
         """,
         (
             company_key,
@@ -2324,6 +2325,7 @@ def show_accounts_payable_page(conn, demo_on):
         bill_category = st.selectbox("Bill Posting", ["Expense", "Inventory"])
         amount = st.number_input("Amount (GH₵)", min_value=0.0, value=0.0)
         status = st.selectbox("Bill Status", ["Pending", "Received"])
+        posting_state = st.selectbox("Posting State", DOCUMENT_WORKFLOW_STATUSES, index=3)
         description = st.text_input("Description")
         payable_date = st.date_input("Bill Date", value=datetime.now().date())
         submitted = st.form_submit_button("Create Bill")
@@ -2334,8 +2336,8 @@ def show_accounts_payable_page(conn, demo_on):
             posting_account_type = "Asset" if bill_category == "Inventory" else "Expense"
             cursor = conn.execute(
                 """
-                INSERT INTO bills (company_key, supplier_id, bill_number, bill_date, due_date, status, amount, currency, description, created_by)
-                VALUES (?, ?, ?, ?, ?, ?, ?, 'GHS', ?, ?)
+                INSERT INTO bills (company_key, supplier_id, bill_number, bill_date, due_date, status, approval_status, amount, currency, description, created_by)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'GHS', ?, ?)
                 """,
                 (
                     company_key,
@@ -2344,40 +2346,47 @@ def show_accounts_payable_page(conn, demo_on):
                     payable_date.isoformat(),
                     payable_date.isoformat(),
                     status,
+                    posting_state,
                     amount,
                     description.strip() or f"{bill_category} bill",
                     role,
                 ),
             )
             bill_id = int(cursor.lastrowid)
-            post_journal_entry(
-                company_key=company_key,
-                date=payable_date,
-                description=description.strip() or f"{bill_category} bill for {supplier_name.strip()}",
-                reference=bill_number,
-                lines=[
-                    {
-                        "account_id": get_account_id(conn, posting_account_name, posting_account_type),
-                        "debit": float(amount),
-                        "credit": 0,
-                    },
-                    {
-                        "account_id": get_account_id(conn, "Accounts Payable", "Liability"),
-                        "debit": 0,
-                        "credit": float(amount),
-                    },
-                ],
-                created_by=role,
-                branch_id=branch_id,
-                supplier_id=supplier_id,
-                source_module="Accounts Payable",
-                source_table="bills",
-                source_id=bill_id,
-                conn=conn,
-            )
+            if posting_state == "Posted":
+                post_journal_entry(
+                    company_key=company_key,
+                    date=payable_date,
+                    description=description.strip() or f"{bill_category} bill for {supplier_name.strip()}",
+                    reference=bill_number,
+                    lines=[
+                        {
+                            "account_id": get_account_id(conn, posting_account_name, posting_account_type),
+                            "debit": float(amount),
+                            "credit": 0,
+                        },
+                        {
+                            "account_id": get_account_id(conn, "Accounts Payable", "Liability"),
+                            "debit": 0,
+                            "credit": float(amount),
+                        },
+                    ],
+                    created_by=role,
+                    branch_id=branch_id,
+                    supplier_id=supplier_id,
+                    source_module="Accounts Payable",
+                    source_table="bills",
+                    source_type="Bill",
+                    source_id=bill_id,
+                    approval_status="Posted",
+                    conn=conn,
+                )
             conn.commit()
             log_system_event("INFO", "Accounts Payable", f"Created bill {bill_number} for {supplier_name}")
-            st.success("Bill created and posted to the journal.")
+            if posting_state == "Posted":
+                st.success("Bill created and posted to the journal.")
+            else:
+                st.success("Bill created without ledger impact. Move Posting State to Posted when it is approved.")
             st.rerun()
 
     rows = conn.execute(
@@ -2453,7 +2462,7 @@ def show_create_bill_page(company_key):
             supplier_name = st.selectbox("Supplier", supplier_options)
             bill_date = st.date_input("Bill Date", value=datetime.now().date())
             bill_category = st.selectbox("Bill Posting", ["Expense", "Inventory"])
-            posting_state = st.selectbox("Posting State", ["Draft", "Submitted", "Approved", "Posted", "Cancelled"], index=1)
+            posting_state = st.selectbox("Posting State", DOCUMENT_WORKFLOW_STATUSES, index=1)
             description = st.text_input("Description")
 
             submitted = st.form_submit_button("Submit")
@@ -2958,6 +2967,32 @@ def show_inventory(company_key, role):
                                     (new_qty, selected_item_id, company_key),
                                 )
                                 movement_value = round(float(selected_item["cost_price"] or 0.0) * movement_qty, 2)
+                                movement_status = "Posted" if movement_value > 0 else "Approved"
+                                movement_cursor = conn.execute(
+                                    """
+                                    INSERT INTO stock_movements (
+                                        company_key, branch_id, inventory_item_id, item_name,
+                                        movement_type, quantity, reason, previous_qty, new_qty,
+                                        status, approval_status, created_by
+                                    )
+                                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                    """,
+                                    (
+                                        company_key,
+                                        branch_id,
+                                        selected_item_id,
+                                        selected_item["item_name"],
+                                        movement_type,
+                                        movement_qty,
+                                        reason,
+                                        current_qty,
+                                        new_qty,
+                                        movement_status,
+                                        movement_status,
+                                        role,
+                                    ),
+                                )
+                                movement_id = int(movement_cursor.lastrowid)
                                 if movement_value > 0:
                                     inventory_account_id = int(selected_item["inventory_account_id"] or get_account_id(conn, "Inventory", "Asset"))
                                     cogs_account_id = int(selected_item["cogs_account_id"] or get_account_id(conn, "Cost of Goods Sold", "Expense"))
@@ -2987,29 +3022,11 @@ def show_inventory(company_key, role):
                                         inventory_item_id=selected_item_id,
                                         source_module="Inventory",
                                         source_table="stock_movements",
+                                        source_type="Stock Movement",
+                                        source_id=movement_id,
+                                        approval_status="Posted",
                                         conn=conn,
                                     )
-                                conn.execute(
-                                    """
-                                    INSERT INTO stock_movements (
-                                        company_key, branch_id, inventory_item_id, item_name,
-                                        movement_type, quantity, reason, previous_qty, new_qty, created_by
-                                    )
-                                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                                    """,
-                                    (
-                                        company_key,
-                                        branch_id,
-                                        selected_item_id,
-                                        selected_item["item_name"],
-                                        movement_type,
-                                        movement_qty,
-                                        reason,
-                                        current_qty,
-                                        new_qty,
-                                        role,
-                                    ),
-                                )
                                 conn.commit()
                                 log_audit_action(
                                     conn,
@@ -4046,6 +4063,7 @@ def show_sales_purchase(company_key, role, doc_type="Sales"):
             amount = st.number_input("Amount (GH₵)", min_value=0.0, step=0.01)
         with col2:
             status = st.selectbox("Status", ["Paid", "Pending", "Draft"] if doc_type == "Sales" else ["Received", "Pending", "Cancelled"])
+            posting_state = st.selectbox("Posting State", DOCUMENT_WORKFLOW_STATUSES, index=3)
             doc_date = st.date_input("Date", datetime.now().date())
         city_region = st.text_input("City / Region")
         narration = st.text_input("Description / Reference")
@@ -4059,13 +4077,13 @@ def show_sales_purchase(company_key, role, doc_type="Sales"):
                     customer_id = _register_customer(conn, company_key, party_name)
                     invoice_cursor = conn.execute(
                         """
-                        INSERT INTO invoices (company_key, customer_id, invoice_number, invoice_date, due_date, status, amount, currency, description, created_by)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, 'GHS', ?, ?)
+                        INSERT INTO invoices (company_key, customer_id, invoice_number, invoice_date, due_date, status, approval_status, amount, currency, description, created_by)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'GHS', ?, ?)
                         """,
-                        (company_key, customer_id, tx_reference, doc_date.isoformat(), doc_date.isoformat(), status, amount, narration, role),
+                        (company_key, customer_id, tx_reference, doc_date.isoformat(), doc_date.isoformat(), status, posting_state, amount, narration, role),
                     )
                     debit_account = "Cash" if status == "Paid" else "Accounts Receivable"
-                    if status != "Draft":
+                    if posting_state == "Posted":
                         post_journal_entry(
                             company_key=company_key,
                             date=doc_date,
@@ -4080,21 +4098,23 @@ def show_sales_purchase(company_key, role, doc_type="Sales"):
                             customer_id=customer_id,
                             source_module="Sales Invoicing",
                             source_table="invoices",
+                            source_type="Invoice",
                             source_id=int(invoice_cursor.lastrowid),
+                            approval_status="Posted",
                             conn=conn,
                         )
                 else:
                     supplier_id = _get_or_create_party(conn, "suppliers", company_key, party_name)
                     bill_cursor = conn.execute(
                         """
-                        INSERT INTO bills (company_key, supplier_id, bill_number, bill_date, due_date, status, amount, currency, description, created_by)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, 'GHS', ?, ?)
+                        INSERT INTO bills (company_key, supplier_id, bill_number, bill_date, due_date, status, approval_status, amount, currency, description, created_by)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'GHS', ?, ?)
                         """,
-                        (company_key, supplier_id, tx_reference, doc_date.isoformat(), doc_date.isoformat(), status, amount, narration, role),
+                        (company_key, supplier_id, tx_reference, doc_date.isoformat(), doc_date.isoformat(), status, posting_state, amount, narration, role),
                     )
                     credit_account = "Cash" if status == "Received" else "Accounts Payable"
                     credit_category = "Asset" if credit_account == "Cash" else "Liability"
-                    if status != "Cancelled":
+                    if posting_state == "Posted":
                         post_journal_entry(
                             company_key=company_key,
                             date=doc_date,
@@ -4109,7 +4129,9 @@ def show_sales_purchase(company_key, role, doc_type="Sales"):
                             supplier_id=supplier_id,
                             source_module="Purchase Orders",
                             source_table="bills",
+                            source_type="Bill",
                             source_id=int(bill_cursor.lastrowid),
+                            approval_status="Posted",
                             conn=conn,
                         )
                 balance_delta = amount if status == "Pending" else 0.0
@@ -4125,7 +4147,10 @@ def show_sales_purchase(company_key, role, doc_type="Sales"):
                 conn.commit()
                 log_audit_action(conn, company_key, role, f"{doc_type} Recorded", doc_type, f"{party_name} - GH₵{amount:.2f}", branch_id=branch_id)
                 conn.close()
-                st.success(f"{doc_type} saved successfully!")
+                if posting_state == "Posted":
+                    st.success(f"{doc_type} saved and posted successfully!")
+                else:
+                    st.success(f"{doc_type} saved without ledger impact. Move Posting State to Posted when it is approved.")
                 st.rerun()
             except Exception as e:
                 st.error(f"Error saving {doc_type}: {e}")
@@ -4226,8 +4251,8 @@ def show_banking(company_key, role):
                     cash_account = "Cash" if payment_method == "Cash" else ("Bank" if payment_method == "Bank" else "Mobile Money")
                     payment_cursor = conn.execute(
                         """
-                        INSERT INTO payments (company_key, payment_date, payment_type, customer_id, supplier_id, amount, currency, method, reference, created_by)
-                        VALUES (?, ?, ?, ?, ?, ?, 'GHS', ?, ?, ?)
+                        INSERT INTO payments (company_key, payment_date, payment_type, customer_id, supplier_id, amount, currency, method, reference, status, approval_status, created_by)
+                        VALUES (?, ?, ?, ?, ?, ?, 'GHS', ?, ?, 'Posted', 'Posted', ?)
                         """,
                         (
                             company_key,

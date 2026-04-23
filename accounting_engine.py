@@ -28,6 +28,7 @@ def _normal_balance(account_type):
 
 VALID_ACCOUNT_TYPES = {"Asset", "Liability", "Equity", "Income", "Expense"}
 VALID_DOCUMENT_CONTROL_STATUSES = {"Draft", "Submitted", "Approved", "Posted", "Cancelled", "Voided", "Active"}
+CONTROLLED_SOURCE_TABLES = {"invoices", "bills", "payments", "stock_movements", "vouchers"}
 CONTROL_ACCOUNT_NAMES = {"Accounts Receivable", "Accounts Payable", "Inventory"}
 HEADER_ACCOUNT_NAMES = {
     "Assets",
@@ -58,7 +59,7 @@ def _sync_source_document_posting(conn, source_table, source_id, entry_id, posti
     if not source_table or not source_id:
         return
     normalized_source_table = str(source_table).strip().lower()
-    if normalized_source_table not in {"invoices", "bills", "payments", "stock_movements", "vouchers"}:
+    if normalized_source_table not in CONTROLLED_SOURCE_TABLES:
         return
     source_columns = _source_document_columns(conn, normalized_source_table)
     update_parts = []
@@ -128,16 +129,11 @@ def is_legacy_mirroring_enabled(conn=None):
             conn.close()
 
 
-def _document_approval_enforced(conn):
-    return bool(int(_system_setting_value(conn, "enforce_document_approval", 0) or 0))
-
-
 def _assert_source_document_postable(conn, source_table, source_id):
-    if not source_table or not source_id or not _document_approval_enforced(conn):
+    if not source_table or not source_id:
         return
-    allowed_tables = {"invoices", "bills", "payments", "vouchers", "stock_movements"}
     normalized_table = str(source_table).strip().lower()
-    if normalized_table not in allowed_tables:
+    if normalized_table not in CONTROLLED_SOURCE_TABLES:
         return
     columns = _source_document_columns(conn, normalized_table)
     if "approval_status" not in columns and "status" not in columns:
@@ -148,10 +144,39 @@ def _assert_source_document_postable(conn, source_table, source_id):
         (int(source_id),),
     ).fetchone()
     status = normalize_document_status(row["approval_status"] if row else "", default="Draft")
-    if status not in {"Approved", "Posted", "Active"}:
+    if status != "Posted":
         raise ValueError(
             f"{normalized_table[:-1].title() if normalized_table.endswith('s') else normalized_table.title()} "
-            f"{source_id} cannot post to the journal while approval_status is '{status or 'Draft'}'."
+            f"{source_id} cannot post to the journal while approval_status is '{status or 'Draft'}'. "
+            "Only documents with Posting State 'Posted' can create ledger impact."
+        )
+
+
+def _assert_no_duplicate_source_posting(conn, company_key, source_table, source_id, branch_id=None):
+    if not source_table or not source_id:
+        return
+    normalized_table = str(source_table).strip().lower()
+    if normalized_table not in CONTROLLED_SOURCE_TABLES:
+        return
+    query = """
+        SELECT id
+        FROM journal_entries
+        WHERE company_key = ?
+          AND lower(COALESCE(source_table, '')) = lower(?)
+          AND source_id = ?
+          AND COALESCE(is_voided, 0) = 0
+          AND COALESCE(approval_status, 'Posted') = 'Posted'
+    """
+    params = [company_key, normalized_table, int(source_id)]
+    if branch_id:
+        query += " AND branch_id = ?"
+        params.append(branch_id)
+    query += " LIMIT 1"
+    existing = conn.execute(query, tuple(params)).fetchone()
+    if existing:
+        raise ValueError(
+            f"{normalized_table[:-1].title() if normalized_table.endswith('s') else normalized_table.title()} "
+            f"{source_id} is already posted as journal entry {existing['id']}. Use a reversal, void, or controlled correction workflow."
         )
 
 
@@ -262,8 +287,7 @@ def get_chart_of_accounts_diagnostics(conn=None):
 
 def _resolve_source_document_mismatches(conn, company_key, branch_id=None):
     mismatches = []
-    allowed_tables = ("invoices", "bills", "payments", "stock_movements", "vouchers")
-    for table_name in allowed_tables:
+    for table_name in sorted(CONTROLLED_SOURCE_TABLES):
         table_exists = conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name = ?",
             (table_name,),
@@ -315,6 +339,37 @@ def _resolve_source_document_mismatches(conn, company_key, branch_id=None):
                     }
                 )
     return mismatches
+
+
+def _source_document_duplicate_postings(conn, company_key, branch_id=None):
+    branch_clause = "AND branch_id = ?" if branch_id else ""
+    rows = conn.execute(
+        """
+        SELECT lower(COALESCE(source_table, '')) AS source_table,
+               source_id,
+               COUNT(*) AS journal_count,
+               GROUP_CONCAT(id) AS journal_ids
+        FROM journal_entries
+        WHERE company_key = ?
+          AND COALESCE(is_voided, 0) = 0
+          AND COALESCE(approval_status, 'Posted') = 'Posted'
+          AND source_id IS NOT NULL
+          AND lower(COALESCE(source_table, '')) IN ('invoices', 'bills', 'payments', 'stock_movements', 'vouchers')
+          {branch_clause}
+        GROUP BY lower(COALESCE(source_table, '')), source_id
+        HAVING COUNT(*) > 1
+        """.format(branch_clause=branch_clause),
+        tuple([company_key] + ([branch_id] if branch_id else [])),
+    ).fetchall()
+    return [
+        {
+            "source_table": row["source_table"],
+            "source_id": int(row["source_id"]),
+            "journal_count": int(row["journal_count"] or 0),
+            "journal_ids": str(row["journal_ids"] or ""),
+        }
+        for row in rows
+    ]
 
 
 def get_finance_integrity_diagnostics(company_key, as_of_date=None, branch_id=None, conn=None):
@@ -538,6 +593,66 @@ def get_journal_dominance_diagnostics(company_key, as_of_date=None, branch_id=No
             conn.close()
 
 
+def get_document_workflow_diagnostics(company_key, branch_id=None, conn=None):
+    """Summarize controlled document state and journal-link consistency."""
+    owns_connection = conn is None
+    conn = conn or get_connection()
+    try:
+        document_counts = []
+        for table_name in sorted(CONTROLLED_SOURCE_TABLES | {"journal_entries"}):
+            table_exists = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name = ?",
+                (table_name,),
+            ).fetchone()
+            if not table_exists:
+                document_counts.append({"document_type": table_name, "status": "missing_table", "count": 0})
+                continue
+            columns = _source_document_columns(conn, table_name)
+            if "company_key" not in columns:
+                continue
+            status_expr = "approval_status" if "approval_status" in columns else ("status" if "status" in columns else "'Posted'")
+            query = f"""
+                SELECT COALESCE(NULLIF({status_expr}, ''), 'Draft') AS raw_status,
+                       COUNT(*) AS row_count
+                FROM {table_name}
+                WHERE company_key = ?
+            """
+            params = [company_key]
+            if branch_id and "branch_id" in columns:
+                query += " AND branch_id = ?"
+                params.append(branch_id)
+            query += f" GROUP BY COALESCE(NULLIF({status_expr}, ''), 'Draft')"
+            for row in conn.execute(query, tuple(params)).fetchall():
+                document_counts.append(
+                    {
+                        "document_type": table_name,
+                        "status": normalize_document_status(row["raw_status"], default="Draft"),
+                        "count": int(row["row_count"] or 0),
+                    }
+                )
+
+        source_mismatches = _resolve_source_document_mismatches(conn, company_key, branch_id=branch_id)
+        duplicate_postings = _source_document_duplicate_postings(conn, company_key, branch_id=branch_id)
+        warnings = []
+        if source_mismatches:
+            warnings.append(f"{len(source_mismatches)} document(s) have posting-state / GL-impact mismatches.")
+        if duplicate_postings:
+            warnings.append(f"{len(duplicate_postings)} document(s) have duplicate posted journal impact.")
+        return {
+            "controlled_statuses": sorted(VALID_DOCUMENT_CONTROL_STATUSES - {"Active"}),
+            "controlled_source_tables": sorted(CONTROLLED_SOURCE_TABLES),
+            "document_counts": document_counts,
+            "source_document_mismatches": source_mismatches,
+            "duplicate_postings": duplicate_postings,
+            "duplicate_posting_count": len(duplicate_postings),
+            "warnings": warnings,
+            "ok": not warnings,
+        }
+    finally:
+        if owns_connection and conn:
+            conn.close()
+
+
 def get_or_create_account(conn, account_name, account_type, parent_id=None, account_code=None):
     account_name = str(account_name or "").strip()
     account_type = str(account_type or "").strip().title()
@@ -745,6 +860,7 @@ def post_journal_entry(
     if _period_locked(conn, company_key, entry_date):
         raise ValueError(f"The accounting period for {entry_date[:7]} is locked.")
     _assert_source_document_postable(conn, source_table, source_id)
+    _assert_no_duplicate_source_posting(conn, company_key, source_table, source_id, branch_id=branch_id)
 
     normalized_approval_status = normalize_document_status(approval_status, default="Posted")
     normalized_lines = []

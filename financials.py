@@ -21,6 +21,7 @@ from accounting_engine import (
 )
 logger = logging.getLogger(__name__)
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DOCUMENT_WORKFLOW_STATUSES = ["Draft", "Submitted", "Approved", "Posted", "Cancelled", "Voided"]
 
 
 def _load_local_modules_module():
@@ -523,7 +524,7 @@ def show_invoice_manager(company_key, role):
             amount = st.number_input("Amount (GHS)", min_value=0.0, step=0.01)
             output_vat_rate = st.number_input("Output VAT Rate (%)", min_value=0.0, max_value=100.0, step=0.5, value=0.0, key=f"invoice_vat_rate_{company_key}")
             status = st.selectbox("Status", ["Draft", "Pending", "Paid"])
-            posting_state = st.selectbox("Posting State", ["Draft", "Submitted", "Approved", "Posted", "Cancelled"], index=0, key=f"invoice_posting_state_{company_key}")
+            posting_state = st.selectbox("Posting State", DOCUMENT_WORKFLOW_STATUSES, index=0, key=f"invoice_posting_state_{company_key}")
             invoice_date = st.date_input("Invoice Date", value=datetime.now().date(), key=f"invoice_date_{company_key}")
             description = st.text_input("Description", key=f"invoice_description_{company_key}")
             if st.form_submit_button("Save Invoice") and customer_name and amount > 0:
@@ -586,7 +587,7 @@ def show_invoice_manager(company_key, role):
             amount = st.number_input("Amount (GHS)", min_value=0.0, step=0.01, key=f"bill_amount_{company_key}")
             input_vat_rate = st.number_input("Input VAT Rate (%)", min_value=0.0, max_value=100.0, step=0.5, value=0.0, key=f"bill_vat_rate_{company_key}")
             status = st.selectbox("Status", ["Draft", "Pending", "Received"], key=f"bill_status_{company_key}")
-            posting_state = st.selectbox("Posting State", ["Draft", "Submitted", "Approved", "Posted", "Cancelled"], index=1, key=f"bill_posting_state_{company_key}")
+            posting_state = st.selectbox("Posting State", DOCUMENT_WORKFLOW_STATUSES, index=1, key=f"bill_posting_state_{company_key}")
             bill_date = st.date_input("Bill Date", value=datetime.now().date(), key=f"bill_date_{company_key}")
             description = st.text_input("Description", key=f"bill_description_{company_key}")
             if st.form_submit_button("Save Bill") and supplier_name and amount > 0:
@@ -648,7 +649,7 @@ def show_invoice_manager(company_key, role):
             payment_type = st.selectbox("Payment Type", ["Customer Receipt", "Supplier Payment"])
             amount = st.number_input("Amount (GHS)", min_value=0.0, step=0.01, key=f"payment_amount_{company_key}")
             payment_method = st.selectbox("Method", ["Cash", "Bank", "Mobile Money"])
-            posting_state = st.selectbox("Posting State", ["Draft", "Submitted", "Approved", "Posted", "Cancelled"], index=3, key=f"payment_posting_state_{company_key}")
+            posting_state = st.selectbox("Posting State", DOCUMENT_WORKFLOW_STATUSES, index=3, key=f"payment_posting_state_{company_key}")
             payment_ref = st.text_input("Reference")
             payment_date = st.date_input("Payment Date", value=datetime.now().date())
             if st.form_submit_button("Save Payment") and amount > 0:
@@ -761,7 +762,7 @@ def show_create_invoice_page(company_key, role):
         amount = st.number_input("Amount (GHS)", min_value=0.0, step=0.01)
         output_vat_rate = st.number_input("Output VAT Rate (%)", min_value=0.0, max_value=100.0, step=0.5, value=0.0, key=f"invoice_vat_rate_{company_key}")
         status = st.selectbox("Status", ["Draft", "Pending", "Paid"])
-        posting_state = st.selectbox("Posting State", ["Draft", "Submitted", "Approved", "Posted", "Cancelled"], index=0)
+        posting_state = st.selectbox("Posting State", DOCUMENT_WORKFLOW_STATUSES, index=0)
         invoice_date = st.date_input("Invoice Date", value=datetime.now().date(), key=f"invoice_date_{company_key}")
         description = st.text_input("Description", key=f"invoice_description_{company_key}")
         if st.form_submit_button("Save Invoice") and customer_name and amount > 0:
@@ -846,7 +847,7 @@ def show_receive_payment_page(company_key, role):
         customer_name = st.selectbox("Customer", [""] + customers)
         amount = st.number_input("Amount (GHS)", min_value=0.0, step=0.01, key=f"receive_payment_amount_{company_key}")
         payment_method = st.selectbox("Method", ["Cash", "Bank", "Mobile Money"], key=f"receive_payment_method_{company_key}")
-        posting_state = st.selectbox("Posting State", ["Draft", "Submitted", "Approved", "Posted", "Cancelled"], index=3, key=f"receive_payment_posting_state_{company_key}")
+        posting_state = st.selectbox("Posting State", DOCUMENT_WORKFLOW_STATUSES, index=3, key=f"receive_payment_posting_state_{company_key}")
         payment_ref = st.text_input("Reference", key=f"receive_payment_ref_{company_key}")
         payment_date = st.date_input("Payment Date", value=datetime.now().date(), key=f"receive_payment_date_{company_key}")
         if st.form_submit_button("Save Receipt") and amount > 0 and customer_name:
@@ -909,7 +910,7 @@ def show_supplier_payment_page(company_key, role):
         supplier_name = st.selectbox("Supplier", [""] + suppliers)
         amount = st.number_input("Amount (GHS)", min_value=0.0, step=0.01, key=f"supplier_payment_amount_{company_key}")
         payment_method = st.selectbox("Method", ["Cash", "Bank", "Mobile Money"], key=f"supplier_payment_method_{company_key}")
-        posting_state = st.selectbox("Posting State", ["Draft", "Submitted", "Approved", "Posted", "Cancelled"], index=3, key=f"supplier_payment_posting_state_{company_key}")
+        posting_state = st.selectbox("Posting State", DOCUMENT_WORKFLOW_STATUSES, index=3, key=f"supplier_payment_posting_state_{company_key}")
         payment_ref = st.text_input("Reference", key=f"supplier_payment_ref_{company_key}")
         payment_date = st.date_input("Payment Date", value=datetime.now().date(), key=f"supplier_payment_date_{company_key}")
         if st.form_submit_button("Save Payment") and amount > 0 and supplier_name:
