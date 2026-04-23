@@ -2199,6 +2199,18 @@ def ensure_schema_integrity(conn):
         "suppliers": {"address": "TEXT", "category": "TEXT", "currency": "TEXT DEFAULT 'GHS'", "created_at": "TIMESTAMP DEFAULT CURRENT_TIMESTAMP"},
     }
 
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS system_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp TEXT,
+            level TEXT,
+            module_name TEXT,
+            message TEXT
+        )
+        """
+    )
+
     for table_name, columns in critical_columns.items():
         cursor.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name = ?",
