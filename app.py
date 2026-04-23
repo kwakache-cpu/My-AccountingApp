@@ -94,6 +94,7 @@ BOG_DISPLAY_RATES = eka_modules.BOG_DISPLAY_RATES
 accounting_ai_response = eka_modules.accounting_ai_response
 format_currency = eka_modules.format_currency
 get_exchange_rate = eka_modules.get_exchange_rate
+get_openai_client_status = eka_modules.get_openai_client_status
 get_openai_client_from_secrets = eka_modules.get_openai_client_from_secrets
 initialize_paystack_payment = eka_modules.initialize_paystack_payment
 log_audit_action = eka_modules.log_audit_action
@@ -129,36 +130,18 @@ client = get_openai_client_from_secrets()
 
 
 def test_openai_assistant_health():
-    try:
-        api_key = st.secrets.get("OPENAI_API_KEY")
-    except Exception as exc:
+    openai_status = get_openai_client_status()
+    test_client = openai_status["client"]
+    if test_client is None:
         return {
             "success": False,
-            "key_present": False,
+            "key_present": bool(openai_status.get("key_present")),
             "client_initialized": False,
             "response": "",
-            "error": f"OPENAI_API_KEY not configured: {type(exc).__name__}",
-        }
-
-    if not api_key:
-        return {
-            "success": False,
-            "key_present": False,
-            "client_initialized": False,
-            "response": "",
-            "error": "OPENAI_API_KEY not configured",
+            "error": openai_status.get("message") or "OpenAI client could not initialize",
         }
 
     try:
-        test_client = get_openai_client_from_secrets()
-        if test_client is None:
-            return {
-                "success": False,
-                "key_present": True,
-                "client_initialized": False,
-                "response": "",
-                "error": "OpenAI client could not initialize",
-            }
         completion = test_client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[
@@ -181,7 +164,7 @@ def test_openai_assistant_health():
         return {
             "success": False,
             "key_present": True,
-            "client_initialized": client is not None,
+            "client_initialized": bool(openai_status.get("client_initialized")),
             "response": "",
             "error": f"{type(exc).__name__}: {exc}",
         }
@@ -637,9 +620,10 @@ E.K.A Support Team
 
 def ask_gatekeeper_ai(user_input):
     """Send the raw user prompt directly to OpenAI and return the response text."""
-    openai_client = get_openai_client_from_secrets()
+    openai_status = get_openai_client_status()
+    openai_client = openai_status["client"]
     if openai_client is None:
-        return "AI assistant is not configured yet."
+        return openai_status.get("message") or "AI assistant is not configured yet."
 
     try:
         response = openai_client.chat.completions.create(
@@ -656,7 +640,7 @@ def ask_gatekeeper_ai(user_input):
         return response.choices[0].message.content
     except Exception as e:
         logger.error(f"OpenAI Gatekeeper AI call failed: {e}")
-        return f"AI Error: {str(e)}"
+        return "AI assistant request failed. Please try again."
 
 
 def render_gatekeeper_ai_chat(menu_selection):
