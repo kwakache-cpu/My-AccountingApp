@@ -208,9 +208,15 @@ def _get_openai_client():
     if st.session_state.get("ai_active") is False:
         return None
     try:
-        return OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
+        api_key = st.secrets.get("OPENAI_API_KEY")
+        if not api_key:
+            st.session_state["ai_active"] = False
+            logger.info("OPENAI_API_KEY is not configured; AI assistant disabled.")
+            return None
+        return OpenAI(api_key=api_key)
     except Exception as exc:
-        logger.warning(f"Failed to initialize OpenAI client: {exc}")
+        logger.warning("OpenAI client initialization failed; AI assistant disabled: %s", exc)
+        st.session_state["ai_active"] = False
         return None
 
 
@@ -563,11 +569,8 @@ def _load_accounting_ai_context(company_key):
 
 def accounting_ai_response(module_selection, chat_history):
     openai_client = _get_openai_client()
-    if st.session_state.get("ai_active") is False:
-        return (
-            "The Accounting Assistant is unavailable because the `OPENAI_API_KEY` secret is not configured. "
-            "You can still use the module data and reports normally."
-        )
+    if st.session_state.get("ai_active") is False or openai_client is None:
+        return "AI assistant is not configured yet. You can still use the module data and reports normally."
 
     company_key = (
         st.session_state.get("company_id")
@@ -597,9 +600,8 @@ def accounting_ai_response(module_selection, chat_history):
         )
         return completion.choices[0].message.content.strip()
     except Exception as exc:
-        logger.error(f"Accounting assistant request failed: {exc}")
-        st.error(str(exc))
-        return str(exc)
+        logger.error("Accounting assistant request failed: %s", exc)
+        return "AI assistant is temporarily unavailable."
 
 
 def render_accounting_assistant_sidebar(module_selection):
@@ -5600,9 +5602,9 @@ def show_ai_assistant(client_id):
         st.markdown(user_question)
 
     openai_client = _get_openai_client()
-    if st.session_state.get("ai_active") is False:
+    if st.session_state.get("ai_active") is False or openai_client is None:
         fallback_response = (
-            "AI insights are unavailable because the `OPENAI_API_KEY` secret is not configured. "
+            "AI assistant is not configured yet. "
             "Your 30-day data snapshot is still available above for manual review."
         )
         st.session_state[history_key].append({"role": "assistant", "content": fallback_response})
@@ -5640,9 +5642,8 @@ def show_ai_assistant(client_id):
                 st.markdown(assistant_reply)
         st.session_state[history_key].append({"role": "assistant", "content": assistant_reply})
     except Exception as exc:
-        logger.error(f"AI assistant request failed: {exc}")
-        st.error(str(exc))
-        failure_message = str(exc)
+        logger.error("AI assistant request failed: %s", exc)
+        failure_message = "AI assistant is temporarily unavailable."
         st.session_state[history_key].append({"role": "assistant", "content": failure_message})
         with st.chat_message("assistant"):
             st.markdown(failure_message)

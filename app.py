@@ -123,14 +123,28 @@ GATEKEEPER_SYSTEM_PROMPT = (
     "You are a professional Chartered Accountant. Provide clear, accurate financial guidance based on the ERP data."
 )
 
-# OpenAI client initialization
-try:
-    client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
-    st.session_state['ai_active'] = True
-except Exception as exc:
-    st.toast(f"Failed to initialize OpenAI client: {exc}")
-    st.session_state['ai_active'] = False
-    client = None
+
+def _initialize_openai_client_quietly():
+    try:
+        api_key = st.secrets.get("OPENAI_API_KEY")
+    except Exception as exc:
+        logger.info("OpenAI secret lookup unavailable; AI assistant disabled: %s", exc)
+        st.session_state["ai_active"] = False
+        return None
+    if not api_key:
+        logger.info("OPENAI_API_KEY is not configured; AI assistant disabled.")
+        st.session_state["ai_active"] = False
+        return None
+    try:
+        st.session_state["ai_active"] = True
+        return OpenAI(api_key=api_key)
+    except Exception as exc:
+        logger.warning("OpenAI client initialization failed; AI assistant disabled: %s", exc)
+        st.session_state["ai_active"] = False
+        return None
+
+
+client = _initialize_openai_client_quietly()
 FIREBASE_APP = None
 FIREBASE_BUCKET_NAME = None
 FIREBASE_OBJECT_NAME = "backups/eka_enterprise_v3.db"
@@ -582,7 +596,7 @@ E.K.A Support Team
 def ask_gatekeeper_ai(user_input):
     """Send the raw user prompt directly to OpenAI and return the response text."""
     if st.session_state.get("ai_active") is False or client is None:
-        return "The app cannot see OPENAI_API_KEY in Streamlit Secrets."
+        return "AI assistant is not configured yet."
 
     try:
         response = client.chat.completions.create(
