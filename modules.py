@@ -4855,7 +4855,7 @@ def show_payroll(company_key, role):
 # ==========================================
 # FIXED ASSET REGISTER
 # ==========================================
-def show_fixed_assets(company_key, role):
+def _show_legacy_fixed_assets(company_key, role):
     st.header("🏛️ Asset Register")
     delete_success_key = f"asset_delete_success_{company_key}"
     if st.session_state.get(delete_success_key):
@@ -5381,7 +5381,7 @@ def _get_reports_data(conn, company_key):
         "ledger_rows": [dict(row) for row in (sales_rows + expense_rows + payroll_rows)],
     }
 
-def show_reports(company_key, branch_id=None):
+def _show_legacy_analytics_reports(company_key, branch_id=None):
     st.header("📊 Data Analytics")
     branch_id = branch_id if branch_id is not None else st.session_state.get("active_branch_id")
     branch_clause = " AND je.branch_id = ?" if branch_id else ""
@@ -5569,24 +5569,13 @@ def show_reports(company_key, branch_id=None):
         )
 
 
-def show_reports(company_key):
-    """Route report navigation to the IFRS financial reporting suite."""
-    from financials import show_financial_reports, show_ledger_viewer, show_record_transaction
-
-    tabs = st.tabs(["📊 Financial Statements", "📚 Ledger", "🧾 Record Transaction"])
-    with tabs[0]:
-        show_financial_reports(company_key)
-    with tabs[1]:
-        show_ledger_viewer(company_key, st.session_state.get("user", {}).get("role"))
-    with tabs[2]:
-        show_record_transaction(company_key, st.session_state.get("user", {}).get("role", "System"))
-
-
 # Final UI-safe reports override.
-def show_reports(company_key):
+def show_reports(company_key, branch_id=None):
     """Route report navigation to the IFRS financial reporting suite."""
     from financials import show_financial_reports, show_ledger_viewer, show_record_transaction
 
+    if branch_id is not None:
+        st.session_state.active_branch_id = branch_id
     tabs = st.tabs(["📊 Financial Statements", "📚 Ledger", "🧾 Record Transaction"])
     with tabs[0]:
         show_financial_reports(company_key)

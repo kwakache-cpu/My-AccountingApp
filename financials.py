@@ -179,7 +179,7 @@ def _account_label(account_code, account_name):
     return f"{code} - {name}" if code else name
 
 
-def _convert_money_frame(dataframe):
+def _convert_money_frame_legacy(dataframe):
     if dataframe.empty:
         return dataframe
     df = dataframe.copy()
@@ -292,7 +292,7 @@ def get_general_ledger(company_key, start_date=None, end_date=None, account_name
     return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(columns=["Date", "Account Code", "Account", "Description", "Reference", "Debit (GHS)", "Credit (GHS)", "Running Balance (GHS)"])
 
 
-def get_trial_balance(company_key, start_date=None, end_date=None, account_name=None):
+def _get_trial_balance_legacy(company_key, start_date=None, end_date=None, account_name=None):
     df = _journal_df(company_key, start_date, end_date, account_name)
     if df.empty:
         return pd.DataFrame(columns=["Account Code", "Account", "Type", "Debit (GHS)", "Credit (GHS)", "Balance (GHS)", "Balanced"])
@@ -316,7 +316,7 @@ def get_trial_balance(company_key, start_date=None, end_date=None, account_name=
     return grouped.sort_values(["Account Code", "Account"], na_position="last").reset_index(drop=True)
 
 
-def get_income_statement(company_key, start_date=None, end_date=None, account_name=None):
+def _get_income_statement_legacy(company_key, start_date=None, end_date=None, account_name=None):
     tb = get_trial_balance(company_key, start_date, end_date, account_name)
     rows = []
     income_total = 0.0
@@ -335,7 +335,7 @@ def get_income_statement(company_key, start_date=None, end_date=None, account_na
     return pd.DataFrame(rows)
 
 
-def get_balance_sheet(company_key, start_date=None, end_date=None, account_name=None):
+def _get_balance_sheet_legacy(company_key, start_date=None, end_date=None, account_name=None):
     tb = get_trial_balance(company_key, start_date, end_date, account_name)
     rows = []
     for _, row in tb.iterrows():
@@ -348,7 +348,7 @@ def get_balance_sheet(company_key, start_date=None, end_date=None, account_name=
     return pd.DataFrame(rows)
 
 
-def get_cash_flow_statement(company_key, start_date=None, end_date=None, account_name=None):
+def _get_cash_flow_statement_legacy(company_key, start_date=None, end_date=None, account_name=None):
     rows = engine_generate_cash_flow_statement(company_key, start_date, end_date)
     if not rows:
         return pd.DataFrame(columns=["Section", "Line Item", "Amount (GHS)"])
@@ -364,7 +364,7 @@ def get_cash_flow_statement(company_key, start_date=None, end_date=None, account
     )
 
 
-def get_changes_in_equity(company_key, start_date=None, end_date=None, account_name=None):
+def _get_changes_in_equity_legacy(company_key, start_date=None, end_date=None, account_name=None):
     bs_df = get_balance_sheet(company_key, start_date, end_date, account_name)
     income_df = get_income_statement(company_key, start_date, end_date, account_name)
     opening_equity = float(bs_df.loc[bs_df["Account"] == "Opening Balance Equity", "Amount (GHS)"].sum()) if not bs_df.empty else 0.0
@@ -412,7 +412,7 @@ def get_depreciation_schedule(company_key):
         conn.close()
 
 
-def show_record_transaction(company_key, role):
+def _show_manual_record_transaction_legacy(company_key, role):
     st.header("🧾 Record Transaction")
     accounts = _chart_lookup()
     account_map = accounts if isinstance(accounts, dict) else {}
@@ -961,7 +961,7 @@ def show_supplier_payment_page(company_key, role):
     _csv_button("Supplier Payments", df, f"supplier_payments_csv_{company_key}")
 
 
-def show_ledger_viewer(company_key, role):
+def _show_legacy_ledger_viewer(company_key, role):
     st.header("📚 Ledger Viewer")
     branch_id = st.session_state.get("active_branch_id")
     start_date, end_date, account_name = _filter_controls(f"ledger_{company_key}")
@@ -1002,7 +1002,7 @@ def show_record_transaction(company_key, role):
     show_journal_entries(company_key, role)
 
 
-def show_financial_reports(company_key, role=None):
+def _show_legacy_financial_reports_v1(company_key, role=None):
     st.header("📊 Financial Reports")
     start_date, end_date, account_name = _filter_controls(f"financial_override_{company_key}")
     trial_balance_df = get_trial_balance(company_key, start_date, end_date, account_name)
@@ -1040,7 +1040,7 @@ def show_financial_reports(company_key, role=None):
             _csv_button(label, display_df, f"{label}_override_{company_key}")
 
 
-def show_financial_reports(company_key, role=None):
+def _show_legacy_financial_reports_v2(company_key, role=None):
     st.header("📊 Financial Reports")
     start_date, end_date, account_name = _filter_controls(f"financial_{company_key}")
     trial_balance_df = get_trial_balance(company_key, start_date, end_date, account_name)
@@ -1075,7 +1075,7 @@ def show_financial_reports(company_key, role=None):
             _csv_button(label, df, f"{label}_{company_key}")
 
 
-def show_financial_reports(company_key, role=None):
+def _show_legacy_financial_reports_v3(company_key, role=None):
     st.header("📊 Financial Reports")
     start_date, end_date, account_name = _filter_controls(f"financial_final_{company_key}")
     trial_balance_df = get_trial_balance(company_key, start_date, end_date, account_name)
@@ -1124,7 +1124,7 @@ def show_financial_reports(company_key, role=None):
             _csv_button(label, display_df, f"{label}_final_{company_key}")
 
 
-def show_reports(company_key, role=None):
+def _show_legacy_reports_wrapper(company_key, role=None):
     """Financial reports sidebar entry point."""
     show_financial_reports(company_key, role)
 

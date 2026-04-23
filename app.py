@@ -357,7 +357,7 @@ PAGE_ALIASES = {
 }
 
 
-def normalize_page_label(page_name):
+def _normalize_page_label_legacy(page_name):
     canonical = PAGE_ALIASES.get(page_name, page_name)
     legacy_labels = {
         PAGE_LABELS["dashboard"]: "ðŸ  Dashboard",
@@ -446,7 +446,7 @@ PAGE_LABELS = {
     "invoices": "🧾 Sales Invoicing",
 }
 
-PAGE_ALIASES.update(
+PAGE_ALIASES = dict(
     {
         "POS (Point of Sale)": PAGE_LABELS["pos"],
         "ðŸ›’ Point of Sale": PAGE_LABELS["pos"],
@@ -1127,7 +1127,7 @@ def login_ui():
     st.toggle('🚀 Try Demo Mode', key='demo_toggle')
 
 # Dashboard Module (NEW FUNCTION)
-def show_dashboard(company_key, company_name, role):
+def _show_legacy_dashboard(company_key, company_name, role):
     """Enhanced company dashboard with key metrics and insights."""
     try:
         st.header(f"Business Dashboard: {company_name}")
@@ -1304,7 +1304,7 @@ def show_dashboard(company_key, company_name, role):
     except Exception as e:
         st.error(f"Dashboard Error: {e}")
 
-def show_dashboard(company_key, company_name, role):
+def _show_local_dashboard(company_key, company_name, role):
     """Currency-aware dashboard with maintenance-complete banner."""
     try:
         st.header(f"Business Dashboard: {company_name}")
