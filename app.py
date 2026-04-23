@@ -1951,10 +1951,26 @@ else:
                         )
                     )
                     st.caption(
-                        "Backup Status: {status} | Last Backup: {timestamp} | Cloud Object: {cloud_object}".format(
-                            status=persistence_diag["latest_backup_upload_status"],
-                            timestamp=persistence_diag["last_backup_timestamp"] or "never",
+                        "Local Backup Status: {status} | Last Local Backup: {timestamp} | Local Latest: {local_latest}".format(
+                            status=persistence_diag["latest_local_backup_status"],
+                            timestamp=persistence_diag["last_local_backup_timestamp"] or "never",
+                            local_latest=persistence_diag["local_backup_latest_path"] or "missing",
+                        )
+                    )
+                    st.caption(
+                        "Cloud Backup Status: {status} | Last Cloud Backup: {timestamp} | Cloud Object: {cloud_object}".format(
+                            status=persistence_diag["latest_cloud_backup_status"],
+                            timestamp=persistence_diag["last_cloud_backup_timestamp"] or "never",
                             cloud_object=persistence_diag["cloud_object_path"] or "missing",
+                        )
+                    )
+                    st.caption(
+                        "Local Backup Count: {local_count} | Local Backup Modified: {local_modified} | Local History: {local_history}".format(
+                            local_count=persistence_diag["local_backup_company_count"]
+                            if persistence_diag["local_backup_company_count"] is not None
+                            else "unknown",
+                            local_modified=persistence_diag["local_backup_last_modified"] or "unknown",
+                            local_history=persistence_diag["local_backup_history_path"] or "none",
                         )
                     )
                     st.caption(
@@ -1976,18 +1992,31 @@ else:
                             else "unknown",
                         )
                     )
+                    if persistence_diag["local_cloud_backup_mismatch"]:
+                        st.warning(
+                            "Latest backup mismatch detected: local_backup_company_count={local_count} cloud_backup_company_count={cloud_count}".format(
+                                local_count=persistence_diag["local_backup_company_count"],
+                                cloud_count=persistence_diag["cloud_backup_company_count"],
+                            )
+                        )
                     self_test = run_persistence_self_test()
                     if self_test["mismatch"]:
                         st.warning(
-                            "Persistence self-test mismatch: local_company_count={local_count} cloud_backup_company_count={cloud_count}".format(
+                            "Persistence self-test mismatch: runtime={local_count} local_backup={local_backup_count} cloud_backup={cloud_count}".format(
                                 local_count=self_test["local_company_count"],
+                                local_backup_count=self_test["local_backup_company_count"]
+                                if self_test["local_backup_company_count"] is not None
+                                else "unknown",
                                 cloud_count=self_test["cloud_backup_company_count"],
                             )
                         )
                     else:
                         st.caption(
-                            "Persistence self-test: local_company_count={local_count} cloud_backup_company_count={cloud_count}".format(
+                            "Persistence self-test: runtime={local_count} local_backup={local_backup_count} cloud_backup={cloud_count}".format(
                                 local_count=self_test["local_company_count"],
+                                local_backup_count=self_test["local_backup_company_count"]
+                                if self_test["local_backup_company_count"] is not None
+                                else "unknown",
                                 cloud_count=self_test["cloud_backup_company_count"]
                                 if self_test["cloud_backup_company_count"] is not None
                                 else "unknown",

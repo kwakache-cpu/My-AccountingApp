@@ -187,6 +187,10 @@ DATABASE_PRODUCTION_REQUIRED_TABLES = DATABASE_REQUIRED_TABLES + (
 FIREBASE_RECOVERY_APP = None
 FIREBASE_RECOVERY_BUCKET_NAME = None
 BACKUP_HISTORY_PREFIX = "backups/history"
+LOCAL_BACKUP_ROOT = os.path.join(DB_DIR, "backups")
+LOCAL_LATEST_BACKUP_DIR = os.path.join(LOCAL_BACKUP_ROOT, "latest")
+LOCAL_HISTORY_BACKUP_DIR = os.path.join(LOCAL_BACKUP_ROOT, "history")
+LOCAL_LATEST_BACKUP_PATH = os.path.join(LOCAL_LATEST_BACKUP_DIR, DB_NAME)
 BACKUP_TRIGGER_TABLES = {
     "companies",
     "branches",
@@ -210,6 +214,14 @@ LAST_BACKUP_STATUS = {
     "reason": "no backup attempted yet",
     "latest_object": FIREBASE_OBJECT_NAME,
     "history_object": None,
+    "trigger_tables": [],
+}
+LAST_LOCAL_BACKUP_STATUS = {
+    "status": "not_started",
+    "timestamp": None,
+    "reason": "no local backup attempted yet",
+    "latest_path": LOCAL_LATEST_BACKUP_PATH,
+    "history_path": None,
     "trigger_tables": [],
 }
 LAST_BACKUP_SIGNATURE = None
@@ -488,6 +500,19 @@ def _build_history_backup_object_name(timestamp=None):
     return f"{BACKUP_HISTORY_PREFIX}/eka_enterprise_v3_{timestamp.strftime('%Y%m%d_%H%M%S')}.db"
 
 
+def _build_local_history_backup_path(timestamp=None):
+    timestamp = timestamp or datetime.utcnow()
+    return os.path.join(
+        LOCAL_HISTORY_BACKUP_DIR,
+        f"eka_enterprise_v3_{timestamp.strftime('%Y%m%d_%H%M%S')}.db",
+    )
+
+
+def _ensure_local_backup_directories():
+    os.makedirs(LOCAL_LATEST_BACKUP_DIR, exist_ok=True)
+    os.makedirs(LOCAL_HISTORY_BACKUP_DIR, exist_ok=True)
+
+
 def _update_backup_status(status, reason, latest_object=FIREBASE_OBJECT_NAME, history_object=None, trigger_tables=None):
     LAST_BACKUP_STATUS.update(
         {
@@ -499,6 +524,57 @@ def _update_backup_status(status, reason, latest_object=FIREBASE_OBJECT_NAME, hi
             "trigger_tables": sorted(str(table) for table in (trigger_tables or [])),
         }
     )
+
+
+def _update_local_backup_status(status, reason, latest_path=LOCAL_LATEST_BACKUP_PATH, history_path=None, trigger_tables=None):
+    LAST_LOCAL_BACKUP_STATUS.update(
+        {
+            "status": str(status),
+            "timestamp": datetime.utcnow().isoformat(timespec="seconds"),
+            "reason": str(reason),
+            "latest_path": latest_path,
+            "history_path": history_path,
+            "trigger_tables": sorted(str(table) for table in (trigger_tables or [])),
+        }
+    )
+
+
+def _copy_snapshot_to_local_backups(snapshot_path, history_path, trigger_tables=None, logger_instance=None):
+    logger_instance = logger_instance or logger
+    _ensure_local_backup_directories()
+    shutil.copy2(snapshot_path, LOCAL_LATEST_BACKUP_PATH)
+    shutil.copy2(snapshot_path, history_path)
+
+    latest_health = get_database_health_snapshot(LOCAL_LATEST_BACKUP_PATH, logger_instance=logger_instance)
+    history_health = get_database_health_snapshot(history_path, logger_instance=logger_instance)
+    if not latest_health["production_ready"] or not history_health["production_ready"]:
+        reason = (
+            "local backup copy validation failed: "
+            f"latest_ready={latest_health['production_ready']} history_ready={history_health['production_ready']}"
+        )
+        logger_instance.warning("Local backup failed: %s", reason)
+        _update_local_backup_status(
+            "failed",
+            reason,
+            latest_path=LOCAL_LATEST_BACKUP_PATH,
+            history_path=history_path,
+            trigger_tables=trigger_tables,
+        )
+        return {"ok": False, "reason": reason, "latest_path": LOCAL_LATEST_BACKUP_PATH, "history_path": history_path}
+
+    reason = (
+        f"local backup updated latest={LOCAL_LATEST_BACKUP_PATH} "
+        f"history={history_path} company_count={latest_health['company_count']}"
+    )
+    logger_instance.info("Local backup succeeded: %s", reason)
+    _update_local_backup_status(
+        "copied",
+        reason,
+        latest_path=LOCAL_LATEST_BACKUP_PATH,
+        history_path=history_path,
+        trigger_tables=trigger_tables,
+    )
+    return {"ok": True, "reason": reason, "latest_path": LOCAL_LATEST_BACKUP_PATH, "history_path": history_path}
 
 
 def _extract_mutated_table_name(sql_text):
@@ -567,18 +643,28 @@ def backup_runtime_database_to_cloud(force=False, trigger_tables=None, logger_in
     logger_instance = logger_instance or logger
     diagnostics = get_recovery_source_diagnostics()
     latest_object = diagnostics.get("object_name") or FIREBASE_OBJECT_NAME
-    history_object = _build_history_backup_object_name()
+    backup_timestamp = datetime.utcnow()
+    history_object = _build_history_backup_object_name(backup_timestamp)
+    local_history_path = _build_local_history_backup_path(backup_timestamp)
     trigger_tables = sorted(str(table) for table in (trigger_tables or []))
 
     if not os.path.exists(DB_PATH):
         reason = f"canonical runtime database is missing: {DB_PATH}"
-        logger_instance.warning("Cloud backup skipped: %s", reason)
+        logger_instance.warning("Backup skipped: %s", reason)
+        _update_local_backup_status("skipped", reason, latest_path=LOCAL_LATEST_BACKUP_PATH, history_path=None, trigger_tables=trigger_tables)
         _update_backup_status("skipped", reason, latest_object=latest_object, history_object=None, trigger_tables=trigger_tables)
-        return {"ok": False, "reason": reason, "latest_object": latest_object, "history_object": None}
+        return {
+            "ok": False,
+            "reason": reason,
+            "latest_object": latest_object,
+            "history_object": None,
+            "latest_local_path": LOCAL_LATEST_BACKUP_PATH,
+            "history_local_path": None,
+        }
 
     local_health = get_database_health_snapshot(DB_PATH, logger_instance=logger_instance)
     logger_instance.info(
-        "Cloud backup preflight: db_path=%s db_exists=%s sqlite_open_success=%s db_valid=%s production_ready=%s company_count=%s missing_tables=%s trigger_tables=%s",
+        "Backup preflight: db_path=%s db_exists=%s sqlite_open_success=%s db_valid=%s production_ready=%s company_count=%s missing_tables=%s trigger_tables=%s local_latest=%s cloud_latest=%s",
         local_health["db_path"],
         local_health["file_exists"],
         local_health.get("sqlite_open_success"),
@@ -587,12 +673,22 @@ def backup_runtime_database_to_cloud(force=False, trigger_tables=None, logger_in
         local_health["company_count"],
         ", ".join(local_health.get("missing_tables", [])) or "none",
         ", ".join(trigger_tables) or "none",
+        LOCAL_LATEST_BACKUP_PATH,
+        latest_object,
     )
     if not local_health["production_ready"]:
         reason = "; ".join(local_health.get("readiness_failures", [])) or "canonical runtime database is not production-ready"
-        logger_instance.warning("Cloud backup skipped because canonical database is not production-ready: %s", reason)
+        logger_instance.warning("Backup skipped because canonical database is not production-ready; latest backups protected: %s", reason)
+        _update_local_backup_status("skipped", reason, latest_path=LOCAL_LATEST_BACKUP_PATH, history_path=None, trigger_tables=trigger_tables)
         _update_backup_status("skipped", reason, latest_object=latest_object, history_object=None, trigger_tables=trigger_tables)
-        return {"ok": False, "reason": reason, "latest_object": latest_object, "history_object": None}
+        return {
+            "ok": False,
+            "reason": reason,
+            "latest_object": latest_object,
+            "history_object": None,
+            "latest_local_path": LOCAL_LATEST_BACKUP_PATH,
+            "history_local_path": None,
+        }
 
     signature = (
         os.path.getsize(DB_PATH),
@@ -602,16 +698,17 @@ def backup_runtime_database_to_cloud(force=False, trigger_tables=None, logger_in
     now = time.time()
     if not force and signature == LAST_BACKUP_SIGNATURE and (now - LAST_BACKUP_AT) < BACKUP_DEBOUNCE_SECONDS:
         reason = f"backup debounced for unchanged canonical database within {BACKUP_DEBOUNCE_SECONDS}s"
-        logger_instance.info("Cloud backup skipped: %s", reason)
+        logger_instance.info("Backup skipped: %s", reason)
+        _update_local_backup_status("debounced", reason, latest_path=LOCAL_LATEST_BACKUP_PATH, history_path=None, trigger_tables=trigger_tables)
         _update_backup_status("debounced", reason, latest_object=latest_object, history_object=None, trigger_tables=trigger_tables)
-        return {"ok": True, "reason": reason, "latest_object": latest_object, "history_object": None}
-
-    bucket = _get_firebase_recovery_bucket()
-    if bucket is None:
-        reason = diagnostics.get("credential_error") or "firebase backup bucket is not accessible"
-        logger_instance.warning("Cloud backup skipped because Firebase bucket is unavailable: %s", reason)
-        _update_backup_status("failed", reason, latest_object=latest_object, history_object=None, trigger_tables=trigger_tables)
-        return {"ok": False, "reason": reason, "latest_object": latest_object, "history_object": None}
+        return {
+            "ok": True,
+            "reason": reason,
+            "latest_object": latest_object,
+            "history_object": None,
+            "latest_local_path": LOCAL_LATEST_BACKUP_PATH,
+            "history_local_path": None,
+        }
 
     snapshot_path = None
     try:
@@ -619,23 +716,104 @@ def backup_runtime_database_to_cloud(force=False, trigger_tables=None, logger_in
         snapshot_health = get_database_health_snapshot(snapshot_path, logger_instance=logger_instance)
         if not snapshot_health["production_ready"]:
             reason = "; ".join(snapshot_health.get("readiness_failures", [])) or "snapshot database is not production-ready"
-            logger_instance.warning("Cloud backup skipped because snapshot validation failed: %s", reason)
+            logger_instance.warning("Backup skipped because snapshot validation failed; latest backups protected: %s", reason)
+            _update_local_backup_status("failed", reason, latest_path=LOCAL_LATEST_BACKUP_PATH, history_path=None, trigger_tables=trigger_tables)
             _update_backup_status("failed", reason, latest_object=latest_object, history_object=None, trigger_tables=trigger_tables)
-            return {"ok": False, "reason": reason, "latest_object": latest_object, "history_object": None}
+            return {
+                "ok": False,
+                "reason": reason,
+                "latest_object": latest_object,
+                "history_object": None,
+                "latest_local_path": LOCAL_LATEST_BACKUP_PATH,
+                "history_local_path": None,
+            }
+
+        logger_instance.info(
+            "Validated backup snapshot created: snapshot=%s company_count=%s local_latest=%s local_history=%s cloud_latest=%s cloud_history=%s",
+            snapshot_path,
+            snapshot_health["company_count"],
+            LOCAL_LATEST_BACKUP_PATH,
+            local_history_path,
+            latest_object,
+            history_object,
+        )
+
+        try:
+            local_backup_result = _copy_snapshot_to_local_backups(
+                snapshot_path,
+                local_history_path,
+                trigger_tables=trigger_tables,
+                logger_instance=logger_instance,
+            )
+        except Exception as exc:
+            local_backup_result = {
+                "ok": False,
+                "reason": f"local backup copy failed: {exc}",
+                "latest_path": LOCAL_LATEST_BACKUP_PATH,
+                "history_path": local_history_path,
+            }
+            logger_instance.warning("Local backup failed: %s", local_backup_result["reason"])
+            _update_local_backup_status(
+                "failed",
+                local_backup_result["reason"],
+                latest_path=LOCAL_LATEST_BACKUP_PATH,
+                history_path=local_history_path,
+                trigger_tables=trigger_tables,
+            )
+
+        bucket = _get_firebase_recovery_bucket()
+        if bucket is None:
+            cloud_reason = diagnostics.get("credential_error") or "firebase backup bucket is not accessible"
+            logger_instance.warning("Cloud backup skipped because Firebase bucket is unavailable: %s", cloud_reason)
+            _update_backup_status("failed", cloud_reason, latest_object=latest_object, history_object=None, trigger_tables=trigger_tables)
+            return {
+                "ok": False,
+                "reason": f"local_ok={local_backup_result.get('ok')} cloud_failed={cloud_reason}",
+                "local_ok": bool(local_backup_result.get("ok")),
+                "cloud_ok": False,
+                "latest_object": latest_object,
+                "history_object": None,
+                "latest_local_path": local_backup_result.get("latest_path"),
+                "history_local_path": local_backup_result.get("history_path"),
+            }
 
         bucket.blob(latest_object).upload_from_filename(snapshot_path)
         bucket.blob(history_object).upload_from_filename(snapshot_path)
-        LAST_BACKUP_SIGNATURE = signature
-        LAST_BACKUP_AT = now
-        reason = f"uploaded canonical database backup to bucket={diagnostics.get('bucket_name')} latest={latest_object} history={history_object}"
+        cloud_reason = f"uploaded canonical database backup to bucket={diagnostics.get('bucket_name')} latest={latest_object} history={history_object}"
+        logger_instance.info("Cloud backup succeeded: %s", cloud_reason)
+        _update_backup_status("uploaded", cloud_reason, latest_object=latest_object, history_object=history_object, trigger_tables=trigger_tables)
+
+        all_ok = bool(local_backup_result.get("ok"))
+        if all_ok:
+            LAST_BACKUP_SIGNATURE = signature
+            LAST_BACKUP_AT = now
+        reason = (
+            f"local_ok={local_backup_result.get('ok')} local_latest={local_backup_result.get('latest_path')} "
+            f"local_history={local_backup_result.get('history_path')} cloud_ok=True cloud_latest={latest_object} cloud_history={history_object}"
+        )
         logger_instance.info("Cloud backup succeeded: %s", reason)
-        _update_backup_status("uploaded", reason, latest_object=latest_object, history_object=history_object, trigger_tables=trigger_tables)
-        return {"ok": True, "reason": reason, "latest_object": latest_object, "history_object": history_object}
+        return {
+            "ok": all_ok,
+            "reason": reason,
+            "local_ok": bool(local_backup_result.get("ok")),
+            "cloud_ok": True,
+            "latest_object": latest_object,
+            "history_object": history_object,
+            "latest_local_path": local_backup_result.get("latest_path"),
+            "history_local_path": local_backup_result.get("history_path"),
+        }
     except Exception as exc:
         reason = f"cloud backup upload failed: {exc}"
         logger_instance.warning("Cloud backup failed: %s", reason)
         _update_backup_status("failed", reason, latest_object=latest_object, history_object=None, trigger_tables=trigger_tables)
-        return {"ok": False, "reason": reason, "latest_object": latest_object, "history_object": None}
+        return {
+            "ok": False,
+            "reason": reason,
+            "latest_object": latest_object,
+            "history_object": None,
+            "latest_local_path": LOCAL_LATEST_BACKUP_PATH,
+            "history_local_path": local_history_path,
+        }
     finally:
         if snapshot_path and os.path.exists(snapshot_path):
             try:
@@ -662,7 +840,14 @@ def _run_post_commit_persistence_hook(conn):
 def get_persistence_diagnostics():
     local_health = get_database_health_snapshot(DB_PATH, logger_instance=logger)
     recovery_diagnostics = get_recovery_source_diagnostics()
+    local_backup = get_local_backup_diagnostics(logger_instance=logger)
     cloud_backup = get_cloud_backup_diagnostics(logger_instance=logger)
+    backup_counts_known = local_backup.get("company_count") is not None and cloud_backup.get("company_count") is not None
+    local_cloud_mismatch = (
+        int(local_backup.get("company_count") or 0) != int(cloud_backup.get("company_count") or 0)
+        if backup_counts_known
+        else False
+    )
     return {
         "canonical_db_path": DB_PATH,
         "local_db_valid": local_health["structural_valid"],
@@ -671,8 +856,21 @@ def get_persistence_diagnostics():
         "latest_backup_upload_status": LAST_BACKUP_STATUS.get("status"),
         "last_backup_timestamp": LAST_BACKUP_STATUS.get("timestamp"),
         "last_backup_reason": LAST_BACKUP_STATUS.get("reason"),
+        "latest_cloud_backup_status": LAST_BACKUP_STATUS.get("status"),
+        "last_cloud_backup_timestamp": LAST_BACKUP_STATUS.get("timestamp"),
+        "last_cloud_backup_reason": LAST_BACKUP_STATUS.get("reason"),
         "cloud_object_path": LAST_BACKUP_STATUS.get("latest_object") or recovery_diagnostics.get("object_name"),
         "history_object_path": LAST_BACKUP_STATUS.get("history_object"),
+        "latest_local_backup_status": LAST_LOCAL_BACKUP_STATUS.get("status"),
+        "last_local_backup_timestamp": LAST_LOCAL_BACKUP_STATUS.get("timestamp"),
+        "last_local_backup_reason": LAST_LOCAL_BACKUP_STATUS.get("reason"),
+        "local_backup_latest_path": LAST_LOCAL_BACKUP_STATUS.get("latest_path") or LOCAL_LATEST_BACKUP_PATH,
+        "local_backup_history_path": LAST_LOCAL_BACKUP_STATUS.get("history_path"),
+        "local_backup_company_count": local_backup.get("company_count"),
+        "local_backup_last_modified": local_backup.get("last_modified"),
+        "local_backup_production_ready": local_backup.get("production_ready"),
+        "local_backup_reason": local_backup.get("reason"),
+        "local_cloud_backup_mismatch": local_cloud_mismatch,
         "restore_source_used_at_startup": LAST_RESTORE_SOURCE,
         "bucket_name": recovery_diagnostics.get("bucket_name"),
         "cloud_backup_company_count": cloud_backup.get("company_count"),
@@ -680,6 +878,48 @@ def get_persistence_diagnostics():
         "cloud_backup_newer_than_local": cloud_backup.get("newer_than_local"),
         "cloud_backup_reason": cloud_backup.get("reason"),
     }
+
+
+def get_local_backup_diagnostics(logger_instance=None):
+    logger_instance = logger_instance or logger
+    latest_path = LAST_LOCAL_BACKUP_STATUS.get("latest_path") or LOCAL_LATEST_BACKUP_PATH
+    result = {
+        "ok": False,
+        "latest_path": latest_path,
+        "history_path": LAST_LOCAL_BACKUP_STATUS.get("history_path"),
+        "last_modified": None,
+        "company_count": None,
+        "production_ready": False,
+        "reason": "latest local backup diagnostics not available",
+    }
+    if not os.path.exists(latest_path):
+        result["reason"] = f"latest local backup file was not found: {latest_path}"
+        logger_instance.info("Local backup diagnostics: %s", result["reason"])
+        return result
+
+    try:
+        local_backup_health = get_database_health_snapshot(latest_path, logger_instance=logger_instance)
+        result["company_count"] = local_backup_health.get("company_count")
+        result["production_ready"] = bool(local_backup_health.get("production_ready"))
+        result["last_modified"] = datetime.utcfromtimestamp(os.path.getmtime(latest_path)).isoformat(timespec="seconds")
+        result["ok"] = bool(local_backup_health.get("production_ready"))
+        result["reason"] = (
+            "latest local backup is production-ready"
+            if result["ok"]
+            else "; ".join(local_backup_health.get("readiness_failures", [])) or "latest local backup is not production-ready"
+        )
+        logger_instance.info(
+            "Local backup diagnostics collected: latest=%s last_modified=%s company_count=%s production_ready=%s",
+            latest_path,
+            result["last_modified"],
+            result["company_count"],
+            result["production_ready"],
+        )
+        return result
+    except Exception as exc:
+        result["reason"] = f"latest local backup diagnostics failed: {exc}"
+        logger_instance.warning("Local backup diagnostics failed: %s", result["reason"])
+        return result
 
 
 def get_cloud_backup_diagnostics(logger_instance=None):
@@ -781,27 +1021,47 @@ def get_cloud_backup_diagnostics(logger_instance=None):
 def run_persistence_self_test(logger_instance=None):
     logger_instance = logger_instance or logger
     local_health = get_database_health_snapshot(DB_PATH, logger_instance=logger_instance)
+    local_backup = get_local_backup_diagnostics(logger_instance=logger_instance)
     cloud_backup = get_cloud_backup_diagnostics(logger_instance=logger_instance)
-    mismatch = (
+    local_cloud_mismatch = (
+        local_backup.get("company_count") is not None
+        and cloud_backup.get("company_count") is not None
+        and int(local_backup.get("company_count") or 0) != int(cloud_backup.get("company_count") or 0)
+    )
+    runtime_cloud_mismatch = (
         cloud_backup.get("company_count") is not None
         and int(local_health.get("company_count") or 0) != int(cloud_backup.get("company_count") or 0)
     )
+    runtime_local_backup_mismatch = (
+        local_backup.get("company_count") is not None
+        and int(local_health.get("company_count") or 0) != int(local_backup.get("company_count") or 0)
+    )
     result = {
-        "ok": bool(cloud_backup.get("ok")),
+        "ok": bool(local_backup.get("ok")) and bool(cloud_backup.get("ok")) and not local_cloud_mismatch,
         "local_company_count": int(local_health.get("company_count") or 0),
+        "local_backup_company_count": local_backup.get("company_count"),
         "cloud_backup_company_count": cloud_backup.get("company_count"),
+        "latest_local_backup_path": local_backup.get("latest_path"),
         "latest_backup_object_path": cloud_backup.get("object_name"),
+        "last_local_backup_time": local_backup.get("last_modified"),
+        "last_cloud_backup_time": cloud_backup.get("last_modified"),
         "last_backup_time": cloud_backup.get("last_modified"),
-        "mismatch": mismatch,
-        "reason": cloud_backup.get("reason"),
+        "mismatch": bool(local_cloud_mismatch or runtime_cloud_mismatch or runtime_local_backup_mismatch),
+        "local_cloud_mismatch": local_cloud_mismatch,
+        "runtime_cloud_mismatch": runtime_cloud_mismatch,
+        "runtime_local_backup_mismatch": runtime_local_backup_mismatch,
+        "reason": f"local_backup={local_backup.get('reason')}; cloud_backup={cloud_backup.get('reason')}",
     }
     logger_instance.info(
-        "Persistence self-test: local_company_count=%s cloud_backup_company_count=%s mismatch=%s latest_backup_object=%s last_backup_time=%s reason=%s",
+        "Persistence self-test: local_company_count=%s local_backup_company_count=%s cloud_backup_company_count=%s mismatch=%s local_latest=%s cloud_latest=%s local_backup_time=%s cloud_backup_time=%s reason=%s",
         result["local_company_count"],
+        result["local_backup_company_count"],
         result["cloud_backup_company_count"],
         result["mismatch"],
+        result["latest_local_backup_path"],
         result["latest_backup_object_path"],
-        result["last_backup_time"] or "unknown",
+        result["last_local_backup_time"] or "unknown",
+        result["last_cloud_backup_time"] or "unknown",
         result["reason"],
     )
     return result
@@ -836,9 +1096,11 @@ def force_backup_after_company_creation(company_name, company_key=None, logger_i
     )
     if backup_result.get("ok"):
         logger_instance.info(
-            "Company creation backup upload succeeded: company_key=%s company_name=%s latest_object_updated=%s history_snapshot_created=%s",
+            "Company creation backup upload succeeded: company_key=%s company_name=%s local_latest_updated=%s local_history_created=%s latest_object_updated=%s history_snapshot_created=%s",
             company_key or "unknown",
             company_name,
+            backup_result.get("latest_local_path"),
+            backup_result.get("history_local_path"),
             backup_result.get("latest_object"),
             backup_result.get("history_object"),
         )
@@ -853,6 +1115,8 @@ def force_backup_after_company_creation(company_name, company_key=None, logger_i
         "ok": bool(backup_result.get("ok")),
         "reason": backup_result.get("reason"),
         "company_count": company_count,
+        "latest_local_path": backup_result.get("latest_local_path"),
+        "history_local_path": backup_result.get("history_local_path"),
         "latest_object": backup_result.get("latest_object"),
         "history_object": backup_result.get("history_object"),
     }
