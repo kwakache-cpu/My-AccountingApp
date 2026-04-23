@@ -145,6 +145,59 @@ def _initialize_openai_client_quietly():
 
 
 client = _initialize_openai_client_quietly()
+
+
+def test_openai_assistant_health():
+    try:
+        api_key = st.secrets.get("OPENAI_API_KEY")
+    except Exception as exc:
+        return {
+            "success": False,
+            "key_present": False,
+            "client_initialized": False,
+            "response": "",
+            "error": f"OPENAI_API_KEY not configured: {type(exc).__name__}",
+        }
+
+    if not api_key:
+        return {
+            "success": False,
+            "key_present": False,
+            "client_initialized": False,
+            "response": "",
+            "error": "OPENAI_API_KEY not configured",
+        }
+
+    try:
+        test_client = client or OpenAI(api_key=api_key)
+        completion = test_client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": "Reply with a short operational status only."},
+                {"role": "user", "content": "ping"},
+            ],
+            temperature=0,
+            max_tokens=20,
+        )
+        response_text = (completion.choices[0].message.content or "").strip()
+        return {
+            "success": True,
+            "key_present": True,
+            "client_initialized": True,
+            "response": response_text[:120],
+            "error": "",
+        }
+    except Exception as exc:
+        logger.warning("OpenAI health test failed: %s", exc)
+        return {
+            "success": False,
+            "key_present": True,
+            "client_initialized": client is not None,
+            "response": "",
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+
+
 FIREBASE_APP = None
 FIREBASE_BUCKET_NAME = None
 FIREBASE_OBJECT_NAME = "backups/eka_enterprise_v3.db"
@@ -2067,6 +2120,33 @@ else:
                             )
                         else:
                             st.warning(f"Backup export unavailable: {export_result.get('reason')}")
+                    st.markdown("---")
+                    st.caption("AI Assistant Health")
+                    ai_health_key = "admin_ai_health_test_result"
+                    ai_health_result = st.session_state.get(ai_health_key)
+                    ai_col1, ai_col2 = st.columns([1, 2])
+                    with ai_col1:
+                        if st.button("Test AI Assistant", key="test_ai_assistant_health_btn", use_container_width=True):
+                            ai_health_result = test_openai_assistant_health()
+                            st.session_state[ai_health_key] = ai_health_result
+                    with ai_col2:
+                        if ai_health_result:
+                            st.caption(
+                                "OPENAI_API_KEY present: {key_present} | OpenAI client initialized: {client_ready} | Test API call success: {success}".format(
+                                    key_present="Yes" if ai_health_result.get("key_present") else "No",
+                                    client_ready="Yes" if ai_health_result.get("client_initialized") else "No",
+                                    success="Yes" if ai_health_result.get("success") else "No",
+                                )
+                            )
+                            if ai_health_result.get("success"):
+                                st.success("AI assistant is operational.")
+                                st.caption(
+                                    "Last test response: {response}".format(
+                                        response=(ai_health_result.get("response") or "")[:50] or "empty response",
+                                    )
+                                )
+                            else:
+                                st.warning(ai_health_result.get("error") or "AI assistant test failed.")
                 except Exception as persistence_diag_error:
                     logger.warning(f"Persistence diagnostics unavailable: {persistence_diag_error}")
 
