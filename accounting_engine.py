@@ -88,18 +88,95 @@ def _sync_source_document_posting(conn, source_table, source_id, entry_id, posti
 def _period_locked(conn, company_key, entry_date):
     if not company_key or not entry_date:
         return False
+    period_columns = {
+        row[1]
+        for row in conn.execute("PRAGMA table_info(accounting_periods)").fetchall()
+    }
+    status_clause = ""
+    if "status" in period_columns:
+        status_clause = " OR lower(COALESCE(status, 'Open')) IN ('closed', 'locked')"
     row = conn.execute(
-        """
+        f"""
         SELECT 1
         FROM accounting_periods
         WHERE company_key = ?
-          AND is_locked = 1
+          AND (COALESCE(is_locked, 0) = 1{status_clause})
           AND date(?) BETWEEN date(start_date) AND date(end_date)
         LIMIT 1
         """,
         (company_key, _resolve_date(entry_date)),
     ).fetchone()
     return bool(row)
+
+
+def _period_label_for_date(entry_date):
+    return pd.Timestamp(_resolve_date(entry_date)).strftime("%Y-%m")
+
+
+def get_period_control_diagnostics(company_key, as_of_date=None, conn=None):
+    owns_connection = conn is None
+    conn = conn or get_connection()
+    try:
+        period_columns = {
+            row[1]
+            for row in conn.execute("PRAGMA table_info(accounting_periods)").fetchall()
+        }
+        has_status = "status" in period_columns
+        current_period = _period_label_for_date(as_of_date or datetime.now().date())
+        rows = conn.execute(
+            """
+            SELECT period_label,
+                   start_date,
+                   end_date,
+                   COALESCE(is_locked, 0) AS is_locked,
+                   {status_expr} AS status,
+                   locked_at,
+                   locked_by
+            FROM accounting_periods
+            WHERE company_key = ?
+            ORDER BY period_label DESC
+            """.format(status_expr="COALESCE(NULLIF(status, ''), CASE WHEN COALESCE(is_locked, 0) = 1 THEN 'Locked' ELSE 'Open' END)" if has_status else "CASE WHEN COALESCE(is_locked, 0) = 1 THEN 'Locked' ELSE 'Open' END"),
+            (company_key,),
+        ).fetchall()
+        period_counts = {"Open": 0, "Closed": 0, "Locked": 0}
+        normalized_rows = []
+        current_status = "Open"
+        for row in rows:
+            status = str(row["status"] or "Open").strip().title()
+            if bool(int(row["is_locked"] or 0)):
+                status = "Locked"
+            if status not in period_counts:
+                status = "Open"
+            period_counts[status] += 1
+            item = {
+                "period_label": row["period_label"],
+                "start_date": row["start_date"],
+                "end_date": row["end_date"],
+                "status": status,
+                "is_locked": bool(int(row["is_locked"] or 0)),
+                "locked_at": row["locked_at"],
+                "locked_by": row["locked_by"],
+            }
+            normalized_rows.append(item)
+            if str(row["period_label"]) == current_period:
+                current_status = status
+        warnings = []
+        if not has_status:
+            warnings.append("accounting_periods.status column is missing; legacy is_locked fallback is in use.")
+        if current_status in {"Closed", "Locked"}:
+            warnings.append(f"Current reporting period {current_period} is {current_status}; posting is blocked.")
+        return {
+            "current_period": current_period,
+            "current_period_status": current_status,
+            "period_counts": period_counts,
+            "periods": normalized_rows,
+            "posting_blocked_for_statuses": ["Closed", "Locked"],
+            "warnings": warnings,
+            "ok": not warnings,
+        }
+    finally:
+        if owns_connection and conn:
+            conn.close()
 
 
 def _system_setting_value(conn, column_name, default=None):
@@ -1943,6 +2020,7 @@ def get_bank_reconciliation(company_key, start_date=None, end_date=None):
             FROM payments
             WHERE company_key = ?
               AND method IN ('Bank', 'Mobile Money')
+              AND COALESCE(approval_status, 'Posted') = 'Posted'
               {start_clause}
               {end_clause}
             ORDER BY date(payment_date), id
@@ -2002,6 +2080,88 @@ def get_bank_reconciliation(company_key, start_date=None, end_date=None):
         }
     finally:
         conn.close()
+
+
+def get_reporting_trust_diagnostics(company_key, start_date=None, end_date=None, branch_id=None, conn=None):
+    """Validate report outputs against posted journal data and reconciliation rules."""
+    owns_connection = conn is None
+    conn = conn or get_connection()
+    try:
+        trial_balance = get_trial_balance(company_key, start_date=start_date, end_date=end_date, branch_id=branch_id)
+        total_debits = round(sum(float(row.get("debit_total") or 0.0) for row in trial_balance), 2)
+        total_credits = round(sum(float(row.get("credit_total") or 0.0) for row in trial_balance), 2)
+        trial_balance_difference = round(total_debits - total_credits, 2)
+
+        balance_sheet = generate_balance_sheet(company_key, end_date or datetime.now().date(), branch_id=branch_id)
+        assets = round(sum(float(row.get("amount") or 0.0) for row in balance_sheet if str(row.get("category")).title() == "Asset"), 2)
+        liabilities = round(sum(float(row.get("amount") or 0.0) for row in balance_sheet if str(row.get("category")).title() == "Liability"), 2)
+        equity = round(sum(float(row.get("amount") or 0.0) for row in balance_sheet if str(row.get("category")).title() == "Equity"), 2)
+        balance_sheet_difference = round(assets - (liabilities + equity), 2)
+
+        income_statement = generate_income_statement(company_key, start_date, end_date or datetime.now().date(), branch_id=branch_id)
+        income_accounts = [row for row in income_statement if str(row.get("category")).title() == "Income"]
+        expense_accounts = [row for row in income_statement if str(row.get("category")).title() == "Expense"]
+        net_profit = round(
+            sum(float(row.get("amount") or 0.0) for row in income_statement if str(row.get("account_name")) == "Net Profit"),
+            2,
+        )
+
+        integrity = get_finance_integrity_diagnostics(company_key, as_of_date=end_date, branch_id=branch_id, conn=conn)
+        bank_reconciliation = get_bank_reconciliation(company_key, start_date=start_date, end_date=end_date)
+        period_control = get_period_control_diagnostics(company_key, as_of_date=end_date or datetime.now().date(), conn=conn)
+
+        warnings = []
+        if abs(trial_balance_difference) >= 0.01:
+            warnings.append(f"Trial Balance is out of balance by {trial_balance_difference:.2f}.")
+        if abs(balance_sheet_difference) >= 0.01:
+            warnings.append(f"Balance Sheet does not balance by {balance_sheet_difference:.2f}.")
+        if not income_accounts and not expense_accounts:
+            warnings.append("Profit & Loss has no revenue or expense journal activity for the selected range.")
+        if integrity["unbalanced_journal_count"]:
+            warnings.append(f"{integrity['unbalanced_journal_count']} posted journal(s) are unbalanced.")
+        if integrity["orphaned_journal_reference_count"]:
+            warnings.append(f"{integrity['orphaned_journal_reference_count']} posted journal source reference(s) are orphaned.")
+        if bank_reconciliation["summary"]["unmatched_total"]:
+            warnings.append("Cash/Bank reconciliation has unmatched posted journal movement.")
+        warnings.extend(period_control.get("warnings") or [])
+
+        return {
+            "report_source": "journal_entries + journal_lines, Posted only, non-voided only",
+            "trial_balance": {
+                "total_debits": total_debits,
+                "total_credits": total_credits,
+                "difference": trial_balance_difference,
+                "balanced": abs(trial_balance_difference) < 0.01,
+                "account_count": len(trial_balance),
+            },
+            "balance_sheet": {
+                "assets": assets,
+                "liabilities": liabilities,
+                "equity": equity,
+                "difference": balance_sheet_difference,
+                "balanced": abs(balance_sheet_difference) < 0.01,
+            },
+            "profit_and_loss": {
+                "income_account_count": len(income_accounts),
+                "expense_account_count": len(expense_accounts),
+                "net_profit": net_profit,
+                "journal_driven": True,
+            },
+            "reconciliation": {
+                "accounts_receivable": integrity["accounts_receivable"],
+                "accounts_payable": integrity["accounts_payable"],
+                "inventory": integrity["inventory"],
+                "cash_bank": bank_reconciliation["summary"],
+                "unbalanced_journal_count": integrity["unbalanced_journal_count"],
+                "orphaned_journal_reference_count": integrity["orphaned_journal_reference_count"],
+            },
+            "period_control": period_control,
+            "warnings": warnings,
+            "ok": not warnings,
+        }
+    finally:
+        if owns_connection and conn:
+            conn.close()
 
 
 def get_customer_balance(company_key, customer_id, as_of_date=None, conn=None):

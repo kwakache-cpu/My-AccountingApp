@@ -746,12 +746,16 @@ def is_period_locked(company_key, entry_date, conn=None):
     if conn is None:
         return False
     try:
+        period_columns = {row[1] for row in conn.execute("PRAGMA table_info(accounting_periods)").fetchall()}
+        status_clause = ""
+        if "status" in period_columns:
+            status_clause = " OR lower(COALESCE(status, 'Open')) IN ('closed', 'locked')"
         row = conn.execute(
-            """
+            f"""
             SELECT 1
             FROM accounting_periods
             WHERE company_key = ?
-              AND is_locked = 1
+              AND (COALESCE(is_locked, 0) = 1{status_clause})
               AND date(?) BETWEEN date(start_date) AND date(end_date)
             LIMIT 1
             """,
@@ -764,25 +768,65 @@ def is_period_locked(company_key, entry_date, conn=None):
 
 
 def set_period_lock(company_key, period_date, locked, locked_by=None):
+    return set_period_status(company_key, period_date, "Locked" if locked else "Open", changed_by=locked_by)
+
+
+def set_period_status(company_key, period_date, status, changed_by=None):
     period_dt = pd.to_datetime(period_date).date()
     start_date = period_dt.replace(day=1)
     next_month = (pd.Timestamp(start_date) + pd.offsets.MonthBegin(1)).date()
     end_date = (pd.Timestamp(next_month) - pd.Timedelta(days=1)).date()
     period_label = start_date.strftime("%Y-%m")
+    normalized_status = str(status or "Open").strip().title()
+    if normalized_status not in {"Open", "Closed", "Locked"}:
+        raise ValueError("Accounting period status must be Open, Closed, or Locked.")
+    is_locked = normalized_status == "Locked"
     conn = get_connection()
     try:
         conn.execute(
             """
-            INSERT INTO accounting_periods (company_key, period_label, start_date, end_date, is_locked, locked_at, locked_by)
-            VALUES (?, ?, ?, ?, ?, CASE WHEN ? = 1 THEN CURRENT_TIMESTAMP ELSE NULL END, ?)
+            INSERT INTO accounting_periods (
+                company_key, period_label, start_date, end_date, status, is_locked,
+                closed_at, closed_by, locked_at, locked_by, reopened_at, reopened_by
+            )
+            VALUES (
+                ?, ?, ?, ?, ?, ?,
+                CASE WHEN ? = 'Closed' THEN CURRENT_TIMESTAMP ELSE NULL END,
+                CASE WHEN ? = 'Closed' THEN ? ELSE NULL END,
+                CASE WHEN ? = 'Locked' THEN CURRENT_TIMESTAMP ELSE NULL END,
+                CASE WHEN ? = 'Locked' THEN ? ELSE NULL END,
+                CASE WHEN ? = 'Open' THEN CURRENT_TIMESTAMP ELSE NULL END,
+                CASE WHEN ? = 'Open' THEN ? ELSE NULL END
+            )
             ON CONFLICT(company_key, period_label) DO UPDATE SET
                 start_date = excluded.start_date,
                 end_date = excluded.end_date,
+                status = excluded.status,
                 is_locked = excluded.is_locked,
-                locked_at = CASE WHEN excluded.is_locked = 1 THEN CURRENT_TIMESTAMP ELSE NULL END,
-                locked_by = excluded.locked_by
+                closed_at = CASE WHEN excluded.status = 'Closed' THEN CURRENT_TIMESTAMP ELSE closed_at END,
+                closed_by = CASE WHEN excluded.status = 'Closed' THEN excluded.closed_by ELSE closed_by END,
+                locked_at = CASE WHEN excluded.status = 'Locked' THEN CURRENT_TIMESTAMP ELSE locked_at END,
+                locked_by = CASE WHEN excluded.status = 'Locked' THEN excluded.locked_by ELSE locked_by END,
+                reopened_at = CASE WHEN excluded.status = 'Open' THEN CURRENT_TIMESTAMP ELSE reopened_at END,
+                reopened_by = CASE WHEN excluded.status = 'Open' THEN excluded.reopened_by ELSE reopened_by END
             """,
-            (company_key, period_label, start_date.isoformat(), end_date.isoformat(), int(bool(locked)), int(bool(locked)), locked_by),
+            (
+                company_key,
+                period_label,
+                start_date.isoformat(),
+                end_date.isoformat(),
+                normalized_status,
+                int(is_locked),
+                normalized_status,
+                normalized_status,
+                changed_by,
+                normalized_status,
+                normalized_status,
+                changed_by,
+                normalized_status,
+                normalized_status,
+                changed_by,
+            ),
         )
         conn.commit()
     finally:

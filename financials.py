@@ -64,6 +64,7 @@ get_display_currency = eka_modules.get_display_currency
 get_exchange_rate = eka_modules.get_exchange_rate
 post_transaction = eka_modules.post_transaction
 set_period_lock = eka_modules.set_period_lock
+set_period_status = eka_modules.set_period_status
 show_journal_entries = eka_modules.show_journal_entries
 
 
@@ -421,6 +422,9 @@ def _show_manual_record_transaction_legacy(company_key, role):
     account_map = accounts if isinstance(accounts, dict) else {}
     with st.expander("Period Lock Controls", expanded=False):
         period_date = st.date_input("Accounting Period", value=datetime.now().date().replace(day=1), key=f"period_date_{company_key}")
+        if st.button("Close Period", key=f"close_period_{company_key}"):
+            set_period_status(company_key, period_date, "Closed", changed_by=role)
+            st.success(f"Closed {period_date.strftime('%Y-%m')}")
         col1, col2 = st.columns(2)
         if col1.button("🔒 Lock Period", key=f"lock_period_{company_key}"):
             set_period_lock(company_key, period_date, True, locked_by=role)

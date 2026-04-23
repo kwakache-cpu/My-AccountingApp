@@ -35,6 +35,7 @@ from accounting_engine import (
     get_journal_dominance_diagnostics,
     get_month_sales_total,
     get_recent_accounting_activity,
+    get_reporting_trust_diagnostics,
 )
 
 try:
@@ -2222,6 +2223,50 @@ else:
                             if workflow_diag.get("duplicate_postings"):
                                 with st.expander("Duplicate Posted Journal Impact", expanded=False):
                                     st.dataframe(pd.DataFrame(workflow_diag["duplicate_postings"]), use_container_width=True)
+                            reporting_diag = get_reporting_trust_diagnostics(
+                                selected_health_company,
+                                end_date=datetime.now().date(),
+                                branch_id=st.session_state.get("active_branch_id"),
+                                conn=conn,
+                            )
+                            st.caption("Reporting Trust & Period Controls")
+                            rt1, rt2, rt3 = st.columns(3)
+                            rt1.metric(
+                                "Trial Balance",
+                                "Balanced" if reporting_diag["trial_balance"]["balanced"] else "Out of Balance",
+                                format_currency(reporting_diag["trial_balance"]["difference"]),
+                            )
+                            rt2.metric(
+                                "Balance Sheet",
+                                "Balanced" if reporting_diag["balance_sheet"]["balanced"] else "Needs Review",
+                                format_currency(reporting_diag["balance_sheet"]["difference"]),
+                            )
+                            rt3.metric(
+                                "Period Status",
+                                reporting_diag["period_control"]["current_period_status"],
+                                reporting_diag["period_control"]["current_period"],
+                            )
+                            rc1, rc2, rc3 = st.columns(3)
+                            rc1.metric(
+                                "Cash/Bank Unmatched",
+                                format_currency(reporting_diag["reconciliation"]["cash_bank"]["unmatched_total"]),
+                            )
+                            rc2.metric(
+                                "Unbalanced Journals",
+                                int(reporting_diag["reconciliation"]["unbalanced_journal_count"] or 0),
+                            )
+                            rc3.metric(
+                                "Orphaned References",
+                                int(reporting_diag["reconciliation"]["orphaned_journal_reference_count"] or 0),
+                            )
+                            st.caption(f"Report source: {reporting_diag['report_source']}")
+                            if reporting_diag.get("warnings"):
+                                st.warning("Reporting warnings: " + " ".join(reporting_diag["warnings"]))
+                            else:
+                                st.success("Reporting trust and period-control checks passed.")
+                            with st.expander("Accounting Period Control Summary", expanded=False):
+                                st.json(reporting_diag["period_control"]["period_counts"])
+                                st.dataframe(pd.DataFrame(reporting_diag["period_control"]["periods"]), use_container_width=True)
                     st.markdown("---")
                     st.caption("Admin Backup Export")
                     export_state_key = "admin_backup_export_payload"
