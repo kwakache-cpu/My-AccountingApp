@@ -35,6 +35,29 @@ except Exception:
 pos_success_key = "pos_transaction_success"
 scanner_active = True
 DOCUMENT_WORKFLOW_STATUSES = ["Draft", "Submitted", "Approved", "Posted", "Cancelled", "Voided"]
+ENTERPRISE_ROLE_PERMISSIONS = {
+    "Dev": {
+        "system_health",
+        "backup_export",
+        "restore_diagnostics",
+        "company_deploy",
+        "company_lifecycle",
+        "period_control",
+        "post_journal",
+        "system_configuration",
+    },
+    "Master Admin": {
+        "backup_export",
+        "restore_diagnostics",
+        "company_lifecycle",
+        "period_control",
+        "post_journal",
+        "system_configuration",
+    },
+    "Sub-Admin": {"period_control", "post_journal"},
+    "Bookkeeper": {"post_journal"},
+    "Branch_Bookkeeper": {"post_journal"},
+}
 
 # Setup Logger
 logger = logging.getLogger(__name__)
@@ -73,9 +96,42 @@ from accounting_engine import (
 )
 
 
-def log_audit_action(conn, company_key, user_role, action, module_name, details=None, branch_id=None):
+def log_audit_action(
+    conn,
+    company_key,
+    user_role,
+    action,
+    module_name,
+    details=None,
+    branch_id=None,
+    action_type=None,
+    document_ref=None,
+    before_after_summary=None,
+):
     """Proxy audit logging so app.py can import the shared action from this module."""
-    return database_log_audit_action(conn, company_key, user_role, action, module_name, details, branch_id)
+    return database_log_audit_action(
+        conn,
+        company_key,
+        user_role,
+        action,
+        module_name,
+        details,
+        branch_id,
+        action_type=action_type,
+        document_ref=document_ref,
+        before_after_summary=before_after_summary,
+    )
+
+
+def user_has_permission(role, permission):
+    return permission in ENTERPRISE_ROLE_PERMISSIONS.get(str(role or ""), set())
+
+
+def require_permission(role, permission, action_label=None):
+    if user_has_permission(role, permission):
+        return True
+    st.warning(f"You do not have permission to {action_label or permission}.")
+    return False
 
 
 def _hash_security_answer(answer):
@@ -772,6 +828,8 @@ def set_period_lock(company_key, period_date, locked, locked_by=None):
 
 
 def set_period_status(company_key, period_date, status, changed_by=None):
+    if changed_by and not user_has_permission(changed_by, "period_control"):
+        raise PermissionError("This role cannot change accounting period controls.")
     period_dt = pd.to_datetime(period_date).date()
     start_date = period_dt.replace(day=1)
     next_month = (pd.Timestamp(start_date) + pd.offsets.MonthBegin(1)).date()

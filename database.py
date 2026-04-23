@@ -2147,7 +2147,14 @@ def ensure_schema_integrity(conn):
             "created_at": "TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
             "updated_at": "TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
         },
-        "audit_logs": {"details": "TEXT", "branch_id": "TEXT"},
+        "audit_logs": {
+            "details": "TEXT",
+            "branch_id": "TEXT",
+            "action_type": "TEXT",
+            "document_ref": "TEXT",
+            "before_after_summary": "TEXT",
+            "event_id": "TEXT",
+        },
         "system_logs": {"timestamp": "TEXT", "level": "TEXT", "module_name": "TEXT", "message": "TEXT"},
         "customers": {"customer_id": "TEXT", "current_balance": "REAL DEFAULT 0"},
         "customer_transactions": {"branch_id": "TEXT", "reference": "TEXT", "created_by": "TEXT", "transaction_date": "TEXT"},
@@ -2210,6 +2217,24 @@ def ensure_schema_integrity(conn):
     je_columns = {row[1] for row in cursor.fetchall()}
     if "branch_id" not in je_columns:
         cursor.execute("ALTER TABLE journal_entries ADD COLUMN branch_id TEXT")
+
+    safe_indexes = (
+        "CREATE INDEX IF NOT EXISTS idx_audit_logs_company_timestamp ON audit_logs(company_key, timestamp DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_audit_logs_action_type ON audit_logs(action_type)",
+        "CREATE INDEX IF NOT EXISTS idx_journal_entries_reporting ON journal_entries(company_key, approval_status, is_voided, date)",
+        "CREATE INDEX IF NOT EXISTS idx_journal_entries_source ON journal_entries(company_key, source_table, source_id)",
+        "CREATE INDEX IF NOT EXISTS idx_journal_entries_customer ON journal_entries(company_key, customer_id, date)",
+        "CREATE INDEX IF NOT EXISTS idx_journal_entries_supplier ON journal_entries(company_key, supplier_id, date)",
+        "CREATE INDEX IF NOT EXISTS idx_invoices_company_status ON invoices(company_key, approval_status, invoice_date)",
+        "CREATE INDEX IF NOT EXISTS idx_bills_company_status ON bills(company_key, approval_status, bill_date)",
+        "CREATE INDEX IF NOT EXISTS idx_payments_company_status ON payments(company_key, approval_status, payment_date)",
+        "CREATE INDEX IF NOT EXISTS idx_accounting_periods_company_status ON accounting_periods(company_key, status, is_locked)",
+    )
+    for index_sql in safe_indexes:
+        try:
+            cursor.execute(index_sql)
+        except sqlite3.Error as index_error:
+            logger.warning("Enterprise index creation skipped: %s", index_error)
 
     cursor.execute("PRAGMA table_info(stock)")
     stock_columns = {row[1] for row in cursor.fetchall()}
@@ -3322,6 +3347,10 @@ def _deploy_full_schema(conn):
                 action TEXT NOT NULL,
                 module_name TEXT,
                 details TEXT,
+                action_type TEXT,
+                document_ref TEXT,
+                before_after_summary TEXT,
+                event_id TEXT,
                 ip_address TEXT
             )
         """)
@@ -3330,6 +3359,10 @@ def _deploy_full_schema(conn):
         audit_column_defs = {
             "branch_id": "TEXT",
             "details": "TEXT",
+            "action_type": "TEXT",
+            "document_ref": "TEXT",
+            "before_after_summary": "TEXT",
+            "event_id": "TEXT",
             "ip_address": "TEXT",
         }
         for column_name, column_def in audit_column_defs.items():
@@ -3929,16 +3962,120 @@ def init_db():
 # 4. UTILITY FUNCTIONS
 # =================================================================
 
-def log_audit_action(conn, company_key, user_role, action, module_name, details=None, branch_id=None):
-    """Logs security events to the audit trail."""
+def _classify_audit_action(action):
+    normalized = str(action or "").strip().lower()
+    action_map = {
+        "create": ("create", "created", "deploy", "register", "saved"),
+        "edit": ("edit", "update", "updated", "modify", "modified"),
+        "approve": ("approve", "approved"),
+        "post": ("post", "posted", "journal", "payment"),
+        "reverse": ("reverse", "reversal"),
+        "void": ("void", "voided", "cancel", "cancelled", "archive", "wipe"),
+        "auth": ("login", "logout", "authentication", "password"),
+        "backup_restore": ("backup", "restore", "recovery", "vault"),
+        "admin": ("admin", "license", "subscription", "system"),
+    }
+    for action_type, tokens in action_map.items():
+        if any(token in normalized for token in tokens):
+            return action_type
+    return "other"
+
+
+def log_audit_action(
+    conn,
+    company_key,
+    user_role,
+    action,
+    module_name,
+    details=None,
+    branch_id=None,
+    action_type=None,
+    document_ref=None,
+    before_after_summary=None,
+):
+    """Logs security events to the audit trail without forcing caller transactions to commit early."""
     try:
-        conn.execute("""
-            INSERT INTO audit_logs (company_key, user_role, action, module_name, details, branch_id)
-            VALUES (?, ?, ?, ?, ?, ?)
-        """, (company_key, user_role, action, module_name, details, branch_id))
-        conn.commit()
+        was_in_transaction = bool(getattr(conn, "in_transaction", False))
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(audit_logs)").fetchall()}
+        event_id = f"AUD-{datetime.utcnow().strftime('%Y%m%d%H%M%S%f')}"
+        if {"action_type", "document_ref", "before_after_summary", "event_id"}.issubset(columns):
+            conn.execute(
+                """
+                INSERT INTO audit_logs (
+                    company_key, user_role, action, module_name, details, branch_id,
+                    action_type, document_ref, before_after_summary, event_id
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    company_key,
+                    user_role,
+                    action,
+                    module_name,
+                    details,
+                    branch_id,
+                    action_type or _classify_audit_action(action),
+                    document_ref,
+                    before_after_summary,
+                    event_id,
+                ),
+            )
+        else:
+            conn.execute(
+                """
+                INSERT INTO audit_logs (company_key, user_role, action, module_name, details, branch_id)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (company_key, user_role, action, module_name, details, branch_id),
+            )
+        if not was_in_transaction:
+            conn.commit()
     except Exception as e:
         logger.warning(f"Audit log failed: {e}")
+
+
+def get_audit_operations_summary(conn=None, company_key=None, limit=50):
+    owns_connection = conn is None
+    conn = conn or get_connection()
+    try:
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(audit_logs)").fetchall()}
+        action_type_expr = "COALESCE(NULLIF(action_type, ''), 'other')" if "action_type" in columns else "'legacy'"
+        where_clause = "WHERE company_key = ?" if company_key else ""
+        params = (company_key,) if company_key else ()
+        action_rows = conn.execute(
+            f"""
+            SELECT {action_type_expr} AS action_type, COUNT(*) AS event_count
+            FROM audit_logs
+            {where_clause}
+            GROUP BY {action_type_expr}
+            ORDER BY event_count DESC
+            """,
+            params,
+        ).fetchall()
+        recent_rows = conn.execute(
+            f"""
+            SELECT timestamp, company_key, user_role, action, module_name,
+                   {action_type_expr} AS action_type,
+                   details
+            FROM audit_logs
+            {where_clause}
+            ORDER BY timestamp DESC
+            LIMIT ?
+            """,
+            params + (int(limit),),
+        ).fetchall()
+        return {
+            "ok": True,
+            "action_counts": [dict(row) for row in action_rows],
+            "recent_events": [dict(row) for row in recent_rows],
+            "enhanced_columns_present": {"action_type", "document_ref", "before_after_summary", "event_id"}.issubset(columns),
+        }
+    except Exception as exc:
+        logger.warning("Audit operations summary unavailable: %s", exc)
+        return {"ok": False, "reason": str(exc), "action_counts": [], "recent_events": [], "enhanced_columns_present": False}
+    finally:
+        if owns_connection and conn:
+            conn.close()
 
 def get_company_data(company_key):
     """Retrieves full profile for a specific license."""

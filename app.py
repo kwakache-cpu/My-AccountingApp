@@ -10,6 +10,7 @@ from database import (
     get_firebase_service_account_info,
     get_schema_manifest_diagnostics,
     get_connection,
+    get_audit_operations_summary,
     get_persistence_diagnostics,
     get_recovery_source_diagnostics,
     run_persistence_self_test,
@@ -2134,6 +2135,18 @@ else:
                             "Legacy/obsolete tables still present for compatibility review: "
                             + ", ".join(schema_diag["legacy_obsolete_tables_present"])
                         )
+                    audit_summary = get_audit_operations_summary(conn=conn, limit=25)
+                    st.markdown("---")
+                    st.caption("Audit & Operations Visibility")
+                    au1, au2, au3 = st.columns(3)
+                    total_audit_events = sum(int(row.get("event_count") or 0) for row in audit_summary.get("action_counts", []))
+                    au1.metric("Audit Events", total_audit_events)
+                    au2.metric("Enhanced Audit Columns", "Yes" if audit_summary.get("enhanced_columns_present") else "No")
+                    au3.metric("Audit Status", "Healthy" if audit_summary.get("ok") else "Needs Review")
+                    with st.expander("Audit Action Summary", expanded=False):
+                        st.dataframe(pd.DataFrame(audit_summary.get("action_counts", [])), use_container_width=True)
+                    with st.expander("Recent Audit Events", expanded=False):
+                        st.dataframe(pd.DataFrame(audit_summary.get("recent_events", [])), use_container_width=True)
                     with st.expander("Schema Manifest Summary", expanded=False):
                         st.markdown("Required source-of-truth tables")
                         st.write(", ".join(schema_diag.get("required_production_tables", [])) or "none")
@@ -2446,7 +2459,16 @@ else:
                                     company_key=created_company_key,
                                     logger_instance=logger,
                                 )
-                                log_audit_action(conn, 'SYSTEM', 'Dev', f'Manual license deployment for {company_name}', 'System Admin')
+                                log_audit_action(
+                                    conn,
+                                    'SYSTEM',
+                                    'Dev',
+                                    f'Manual license deployment for {company_name}',
+                                    'System Admin',
+                                    details=f"company_key={created_company_key}; expiry={new_expiry.isoformat()}",
+                                    action_type="admin",
+                                    document_ref=created_company_key,
+                                )
                                 if backup_result.get("ok"):
                                     st.success(
                                         f"License deployed for {company_name} until {new_expiry.date()}. "
