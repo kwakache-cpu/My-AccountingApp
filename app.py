@@ -6,6 +6,7 @@ from database import (
     create_company_record,
     ensure_schema,
     force_backup_after_company_creation,
+    get_downloadable_backup_export,
     get_firebase_service_account_info,
     get_connection,
     get_persistence_diagnostics,
@@ -2022,6 +2023,36 @@ else:
                                 else "unknown",
                             )
                         )
+                    st.markdown("---")
+                    st.caption("Admin Backup Export")
+                    export_state_key = "admin_backup_export_payload"
+                    export_result = st.session_state.get(export_state_key)
+                    export_col1, export_col2 = st.columns([1, 2])
+                    with export_col1:
+                        if st.button("Prepare Backup Export", key="prepare_admin_backup_export_btn", use_container_width=True):
+                            export_result = get_downloadable_backup_export(logger_instance=logger)
+                            st.session_state[export_state_key] = export_result
+                    with export_col2:
+                        if export_result and export_result.get("ok") and export_result.get("data"):
+                            st.download_button(
+                                "Download Latest ERP Backup",
+                                data=export_result["data"],
+                                file_name=export_result["filename"],
+                                mime=export_result.get("mime") or "application/octet-stream",
+                                key="download_admin_backup_export_btn",
+                                use_container_width=True,
+                            )
+                    if export_result:
+                        if export_result.get("ok"):
+                            st.caption(
+                                "Prepared from {source} | Company Count: {count} | File: {filename}".format(
+                                    source=export_result.get("source"),
+                                    count=export_result.get("company_count"),
+                                    filename=export_result.get("filename"),
+                                )
+                            )
+                        else:
+                            st.warning(f"Backup export unavailable: {export_result.get('reason')}")
                 except Exception as persistence_diag_error:
                     logger.warning(f"Persistence diagnostics unavailable: {persistence_diag_error}")
 

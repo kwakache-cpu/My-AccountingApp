@@ -922,6 +922,135 @@ def get_local_backup_diagnostics(logger_instance=None):
         return result
 
 
+def get_downloadable_backup_export(logger_instance=None):
+    logger_instance = logger_instance or logger
+    timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+
+    if os.path.exists(DB_PATH):
+        try:
+            runtime_health = get_database_health_snapshot(DB_PATH, logger_instance=logger_instance)
+            if runtime_health["production_ready"]:
+                snapshot_path = _create_runtime_snapshot_file(DB_PATH)
+                try:
+                    snapshot_health = get_database_health_snapshot(snapshot_path, logger_instance=logger_instance)
+                    if snapshot_health["production_ready"]:
+                        with open(snapshot_path, "rb") as snapshot_file:
+                            payload = snapshot_file.read()
+                        logger_instance.info(
+                            "Admin backup export prepared from runtime snapshot: db_path=%s company_count=%s bytes=%s",
+                            DB_PATH,
+                            snapshot_health["company_count"],
+                            len(payload),
+                        )
+                        return {
+                            "ok": True,
+                            "source": "runtime_snapshot",
+                            "filename": f"eka_enterprise_v3_runtime_{timestamp}.db",
+                            "mime": "application/octet-stream",
+                            "data": payload,
+                            "company_count": snapshot_health["company_count"],
+                            "reason": "download prepared from validated runtime snapshot",
+                        }
+                finally:
+                    if os.path.exists(snapshot_path):
+                        try:
+                            os.remove(snapshot_path)
+                        except OSError:
+                            pass
+        except Exception as exc:
+            logger_instance.warning("Runtime backup export preparation failed: %s", exc)
+
+    diagnostics = get_recovery_source_diagnostics()
+    latest_object = diagnostics.get("object_name") or FIREBASE_OBJECT_NAME
+    bucket = _get_firebase_recovery_bucket()
+    if bucket is None:
+        reason = diagnostics.get("credential_error") or "firebase backup bucket is not accessible"
+        logger_instance.warning("Admin backup export unavailable: %s", reason)
+        return {
+            "ok": False,
+            "source": "unavailable",
+            "filename": None,
+            "mime": "application/octet-stream",
+            "data": None,
+            "company_count": None,
+            "reason": reason,
+        }
+
+    temp_download_path = None
+    try:
+        blob = bucket.blob(latest_object)
+        if not blob.exists():
+            reason = f"trusted cloud backup object was not found: bucket={diagnostics.get('bucket_name')} object={latest_object}"
+            logger_instance.warning("Admin backup export unavailable: %s", reason)
+            return {
+                "ok": False,
+                "source": "cloud_backup",
+                "filename": None,
+                "mime": "application/octet-stream",
+                "data": None,
+                "company_count": None,
+                "reason": reason,
+            }
+
+        temp_fd, temp_download_path = tempfile.mkstemp(
+            prefix="eka_backup_export_",
+            suffix=".db",
+            dir=DB_DIR,
+        )
+        os.close(temp_fd)
+        blob.download_to_filename(temp_download_path)
+        cloud_health = get_database_health_snapshot(temp_download_path, logger_instance=logger_instance)
+        if not cloud_health["production_ready"]:
+            reason = "; ".join(cloud_health.get("readiness_failures", [])) or "downloaded cloud backup is not production-ready"
+            logger_instance.warning("Admin backup export blocked because cloud backup validation failed: %s", reason)
+            return {
+                "ok": False,
+                "source": "cloud_backup",
+                "filename": None,
+                "mime": "application/octet-stream",
+                "data": None,
+                "company_count": cloud_health.get("company_count"),
+                "reason": reason,
+            }
+
+        with open(temp_download_path, "rb") as download_file:
+            payload = download_file.read()
+        logger_instance.info(
+            "Admin backup export prepared from cloud backup: bucket=%s object=%s company_count=%s bytes=%s",
+            diagnostics.get("bucket_name"),
+            latest_object,
+            cloud_health["company_count"],
+            len(payload),
+        )
+        return {
+            "ok": True,
+            "source": "cloud_backup",
+            "filename": f"eka_enterprise_v3_cloud_{timestamp}.db",
+            "mime": "application/octet-stream",
+            "data": payload,
+            "company_count": cloud_health["company_count"],
+            "reason": f"download prepared from validated cloud backup object {latest_object}",
+        }
+    except Exception as exc:
+        reason = f"cloud backup export failed: {exc}"
+        logger_instance.warning("Admin backup export failed: %s", reason)
+        return {
+            "ok": False,
+            "source": "cloud_backup",
+            "filename": None,
+            "mime": "application/octet-stream",
+            "data": None,
+            "company_count": None,
+            "reason": reason,
+        }
+    finally:
+        if temp_download_path and os.path.exists(temp_download_path):
+            try:
+                os.remove(temp_download_path)
+            except OSError:
+                pass
+
+
 def get_cloud_backup_diagnostics(logger_instance=None):
     logger_instance = logger_instance or logger
     diagnostics = get_recovery_source_diagnostics()
