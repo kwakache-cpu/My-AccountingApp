@@ -1387,8 +1387,15 @@ def main():
     # SQLite continuity on ephemeral hosting is temporary; managed persistent DB remains the target architecture.
     ensure_schema()
     startup_status = startup_database()
-    bootstrap_needed = bool(startup_status.get("bootstrap_needed")) if isinstance(startup_status, dict) else False
+    startup_mode = str(startup_status.get("startup_mode", startup_status.get("stage", ""))) if isinstance(startup_status, dict) else ""
+    bootstrap_needed = (
+        bool(startup_status.get("bootstrap_needed"))
+        and startup_mode == "bootstrap_mode"
+        if isinstance(startup_status, dict)
+        else False
+    )
     st.session_state["bootstrap_needed"] = bootstrap_needed
+    st.session_state["database_startup_mode"] = startup_mode
     startup_ok = bool(startup_status.get("ok")) if isinstance(startup_status, dict) else bool(startup_status)
     if not startup_ok:
         logger.error(

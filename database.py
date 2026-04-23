@@ -1207,16 +1207,21 @@ def _build_startup_result(
     recovery_attempted=False,
     recovery_succeeded=False,
     bootstrap_needed=False,
+    startup_mode=None,
+    cloud_backup_company_count=None,
 ):
+    final_startup_mode = startup_mode or stage
     return {
         "ok": bool(ok),
         "stage": str(stage),
         "reason": str(reason),
+        "startup_mode": str(final_startup_mode),
         "db_path": db_path,
         "file_exists": bool(file_exists),
         "structurally_valid": bool(structurally_valid),
         "production_ready": bool(production_ready),
         "company_count": int(company_count or 0),
+        "cloud_backup_company_count": cloud_backup_company_count,
         "recovery_attempted": bool(recovery_attempted),
         "recovery_succeeded": bool(recovery_succeeded),
         "bootstrap_needed": bool(bootstrap_needed),
@@ -2919,6 +2924,7 @@ def startup_database():
     db_health_before_startup = get_database_health_snapshot(DB_PATH, logger_instance=logger)
     cloud_restore_used = False
     recovery_attempted = False
+    startup_cloud_backup_company_count = None
     failure_reason = "; ".join(db_health_before_startup.get("readiness_failures", [])) or "local database is not production-ready"
     failure_stage = "startup_validation"
     logger.info(
@@ -2942,6 +2948,62 @@ def startup_database():
         False,
     )
     if _is_bootstrap_candidate(db_health_before_startup):
+        local_bootstrap_company_count = int(db_health_before_startup.get("company_count") or 0)
+        logger.warning(
+            "Local database is bootstrap-empty; checking trusted cloud backup before allowing bootstrap mode: db_path=%s local_company_count=%s",
+            db_health_before_startup["db_path"],
+            local_bootstrap_company_count,
+        )
+        recovery_attempted = True
+        recovery_result = attempt_production_database_recovery(force_restore=True)
+        cloud_restore_used = bool(recovery_result.get("ok"))
+        cloud_backup_health = recovery_result.get("health") or {}
+        cloud_backup_company_count = (
+            int(cloud_backup_health.get("company_count") or 0)
+            if cloud_backup_health.get("company_count") is not None
+            else None
+        )
+        startup_cloud_backup_company_count = cloud_backup_company_count
+        db_health_before_startup = get_database_health_snapshot(DB_PATH, logger_instance=logger)
+        if cloud_restore_used and db_health_before_startup["production_ready"]:
+            logger.info(
+                "Bootstrap mode bypassed in favor of trusted cloud restore: local_company_count=%s cloud_backup_company_count=%s replaced_local_empty_db=%s final_company_count=%s final_startup_mode=%s",
+                local_bootstrap_company_count,
+                cloud_backup_company_count,
+                recovery_result.get("replacement_performed"),
+                db_health_before_startup["company_count"],
+                "restored_from_cloud",
+            )
+        else:
+            logger.warning(
+                "Cloud restore did not replace bootstrap-empty database; bootstrap mode remains allowed only because no production-ready cloud backup was restored: local_company_count=%s cloud_backup_company_count=%s recovery_attempted=%s recovery_succeeded=%s recovery_stage=%s recovery_reason=%s final_startup_mode=%s",
+                local_bootstrap_company_count,
+                cloud_backup_company_count,
+                recovery_attempted,
+                cloud_restore_used,
+                recovery_result.get("stage"),
+                recovery_result.get("reason"),
+                "bootstrap_mode",
+            )
+            return _build_startup_result(
+                ok=True,
+                stage="bootstrap_mode",
+                reason=(
+                    "no company has been created yet locally and no production-ready cloud backup was restored; "
+                    f"cloud_recovery_reason={recovery_result.get('reason', 'unknown')}"
+                ),
+                db_path=db_health_before_startup["db_path"],
+                file_exists=db_health_before_startup["file_exists"],
+                structurally_valid=db_health_before_startup["structural_valid"],
+                production_ready=db_health_before_startup["production_ready"],
+                company_count=db_health_before_startup["company_count"],
+                recovery_attempted=recovery_attempted,
+                recovery_succeeded=cloud_restore_used,
+                bootstrap_needed=True,
+                startup_mode="bootstrap_mode",
+                cloud_backup_company_count=cloud_backup_company_count,
+            )
+    if _is_bootstrap_candidate(db_health_before_startup):
         logger.info(
             "Database startup entering bootstrap mode: db_path=%s company_count=%s production_ready=%s recovery_attempted=%s",
             db_health_before_startup["db_path"],
@@ -2961,6 +3023,8 @@ def startup_database():
             recovery_attempted=recovery_attempted,
             recovery_succeeded=cloud_restore_used,
             bootstrap_needed=True,
+            startup_mode="bootstrap_mode",
+            cloud_backup_company_count=startup_cloud_backup_company_count,
         )
     if ERP_PRODUCTION_MODE and not db_health_before_startup["production_ready"]:
         logger.warning(
@@ -2970,6 +3034,12 @@ def startup_database():
         recovery_attempted = True
         recovery_result = attempt_production_database_recovery(force_restore=True)
         cloud_restore_used = bool(recovery_result.get("ok"))
+        recovery_health = recovery_result.get("health") or {}
+        startup_cloud_backup_company_count = (
+            int(recovery_health.get("company_count") or 0)
+            if recovery_health.get("company_count") is not None
+            else startup_cloud_backup_company_count
+        )
         db_health_before_startup = get_database_health_snapshot(DB_PATH, logger_instance=logger)
         logger.info(
             "Database startup recovery result: db_path=%s db_exists=%s db_valid=%s production_ready=%s company_count=%s readiness_failures=%s recovery_attempted=%s recovery_source_found=%s temp_download_succeeded=%s replacement_performed=%s recovery_succeeded=%s",
@@ -3003,6 +3073,8 @@ def startup_database():
                 recovery_attempted=recovery_attempted,
                 recovery_succeeded=cloud_restore_used,
                 bootstrap_needed=True,
+                startup_mode="bootstrap_mode",
+                cloud_backup_company_count=startup_cloud_backup_company_count,
             )
         if not db_health_before_startup["production_ready"]:
             failure_stage = str(recovery_result.get("stage") or "recovery_validation")
@@ -3026,6 +3098,8 @@ def startup_database():
                 company_count=db_health_before_startup["company_count"],
                 recovery_attempted=recovery_attempted,
                 recovery_succeeded=cloud_restore_used,
+                startup_mode="recovery_failed",
+                cloud_backup_company_count=startup_cloud_backup_company_count,
             )
     conn = None
     backup_path = None
@@ -3042,12 +3116,13 @@ def startup_database():
             _run_lightweight_integrity_checks(conn)
             conn.commit()
             logger.info(
-                "Database startup completed in fallback mode: db_path=%s db_valid=%s production_ready=%s recovery_attempted=%s recovery_succeeded=%s",
+                "Database startup completed in fallback mode: db_path=%s db_valid=%s production_ready=%s recovery_attempted=%s recovery_succeeded=%s final_startup_mode=%s",
                 DB_PATH,
                 is_database_valid(DB_PATH, logger_instance=logger),
                 is_database_ready_for_production(DB_PATH, logger_instance=logger),
                 recovery_attempted,
                 cloud_restore_used,
+                "restored_from_cloud" if cloud_restore_used else "local_production_ready",
             )
             final_health = get_database_health_snapshot(DB_PATH, logger_instance=logger)
             return _build_startup_result(
@@ -3061,6 +3136,8 @@ def startup_database():
                 company_count=final_health["company_count"],
                 recovery_attempted=recovery_attempted,
                 recovery_succeeded=cloud_restore_used,
+                startup_mode="restored_from_cloud" if cloud_restore_used else "local_production_ready",
+                cloud_backup_company_count=startup_cloud_backup_company_count,
             )
 
         current_version = _get_schema_version(conn)
@@ -3143,12 +3220,13 @@ def startup_database():
             after_counts,
         )
         logger.info(
-            "Database startup completed: db_path=%s db_valid=%s production_ready=%s recovery_attempted=%s recovery_succeeded=%s",
+            "Database startup completed: db_path=%s db_valid=%s production_ready=%s recovery_attempted=%s recovery_succeeded=%s final_startup_mode=%s",
             DB_PATH,
             is_database_valid(DB_PATH, logger_instance=logger),
             is_database_ready_for_production(DB_PATH, logger_instance=logger),
             recovery_attempted,
             cloud_restore_used,
+            "restored_from_cloud" if cloud_restore_used else "local_production_ready",
         )
         final_health = get_database_health_snapshot(DB_PATH, logger_instance=logger)
         return _build_startup_result(
@@ -3162,6 +3240,8 @@ def startup_database():
             company_count=final_health["company_count"],
             recovery_attempted=recovery_attempted,
             recovery_succeeded=cloud_restore_used,
+            startup_mode="restored_from_cloud" if cloud_restore_used else "local_production_ready",
+            cloud_backup_company_count=startup_cloud_backup_company_count,
         )
     except Exception as exc:
         failure_stage = "startup_exception"
@@ -3201,6 +3281,8 @@ def startup_database():
             company_count=failed_health["company_count"],
             recovery_attempted=recovery_attempted,
             recovery_succeeded=cloud_restore_used,
+            startup_mode="startup_failed",
+            cloud_backup_company_count=startup_cloud_backup_company_count,
         )
     finally:
         if conn:
