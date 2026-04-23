@@ -30,6 +30,8 @@ VALID_ACCOUNT_TYPES = {"Asset", "Liability", "Equity", "Income", "Expense"}
 VALID_DOCUMENT_CONTROL_STATUSES = {"Draft", "Submitted", "Approved", "Posted", "Cancelled", "Voided", "Active"}
 CONTROLLED_SOURCE_TABLES = {"invoices", "bills", "payments", "stock_movements", "vouchers"}
 CONTROL_ACCOUNT_NAMES = {"Accounts Receivable", "Accounts Payable", "Inventory"}
+UNIFIED_POSTING_ENGINE_VERSION = "phase7_unified_posting_engine_v1"
+POSTING_PERMISSION_ROLES = {"Dev", "Master Admin", "Sub-Admin", "Bookkeeper", "Branch_Bookkeeper"}
 HEADER_ACCOUNT_NAMES = {
     "Assets",
     "Current Assets",
@@ -40,6 +42,40 @@ HEADER_ACCOUNT_NAMES = {
     "Income",
     "Expenses",
 }
+
+
+def _log_posting_engine_event(conn, level, message):
+    try:
+        conn.execute(
+            """
+            INSERT INTO system_logs (timestamp, level, module_name, message)
+            VALUES (CURRENT_TIMESTAMP, ?, 'Unified Posting Engine', ?)
+            """,
+            (str(level or "INFO").upper(), str(message or "")),
+        )
+    except Exception:
+        logger.debug("Posting engine event logging skipped.", exc_info=True)
+
+
+def _persist_posting_engine_event(level, message):
+    conn = None
+    try:
+        conn = get_connection()
+        _log_posting_engine_event(conn, level, message)
+        conn.commit()
+    except Exception:
+        logger.debug("Posting engine event persistence skipped.", exc_info=True)
+    finally:
+        if conn:
+            conn.close()
+
+
+def _assert_posting_role_allowed(user_role):
+    if user_role is None:
+        return
+    normalized_role = str(user_role or "").strip()
+    if normalized_role not in POSTING_PERMISSION_ROLES:
+        raise PermissionError(f"Role '{normalized_role or 'Unknown'}' is not allowed to post accounting impact.")
 
 
 def normalize_document_status(value, default="Draft"):
@@ -730,6 +766,116 @@ def get_document_workflow_diagnostics(company_key, branch_id=None, conn=None):
             conn.close()
 
 
+def get_unified_posting_engine_diagnostics(company_key, branch_id=None, conn=None):
+    """Report Phase 7 posting-engine convergence and remaining transitional paths."""
+    owns_connection = conn is None
+    conn = conn or get_connection()
+    try:
+        branch_clause = "AND branch_id = ?" if branch_id else ""
+        params = [company_key] + ([branch_id] if branch_id else [])
+        missing_linkage_row = conn.execute(
+            f"""
+            SELECT COUNT(*) AS row_count
+            FROM journal_entries
+            WHERE company_key = ?
+              AND COALESCE(is_voided, 0) = 0
+              AND COALESCE(approval_status, 'Posted') = 'Posted'
+              AND (
+                    TRIM(COALESCE(source_table, '')) = ''
+                 OR source_id IS NULL
+                 OR TRIM(COALESCE(source_document_type, '')) = ''
+                 OR source_document_id IS NULL
+              )
+              {branch_clause}
+            """,
+            tuple(params),
+        ).fetchone()
+        duplicate_postings = _source_document_duplicate_postings(conn, company_key, branch_id=branch_id)
+        duplicate_attempt_row = conn.execute(
+            """
+            SELECT COUNT(*) AS row_count
+            FROM system_logs
+            WHERE module_name = 'Unified Posting Engine'
+              AND level IN ('WARNING', 'ERROR')
+              AND lower(message) LIKE '%blocked posting%'
+              AND lower(message) LIKE '%already posted%'
+            """
+        ).fetchone()
+        reversal_rows = conn.execute(
+            f"""
+            SELECT COALESCE(NULLIF(source_table, ''), 'journal_entries') AS source_table,
+                   COUNT(*) AS row_count
+            FROM journal_entries
+            WHERE company_key = ?
+              AND (
+                    lower(COALESCE(source_type, '')) = 'reversal'
+                 OR reversed_entry_id IS NOT NULL
+                 OR COALESCE(is_voided, 0) = 1
+              )
+              {branch_clause}
+            GROUP BY COALESCE(NULLIF(source_table, ''), 'journal_entries')
+            ORDER BY source_table
+            """,
+            tuple(params),
+        ).fetchall()
+        legacy_rows = conn.execute(
+            f"""
+            SELECT COALESCE(NULLIF(source_table, ''), 'missing') AS source_table,
+                   COUNT(*) AS row_count
+            FROM journal_entries
+            WHERE company_key = ?
+              AND COALESCE(is_voided, 0) = 0
+              AND COALESCE(approval_status, 'Posted') = 'Posted'
+              AND lower(COALESCE(source_table, '')) NOT IN ('invoices', 'bills', 'payments', 'stock_movements', 'vouchers')
+              {branch_clause}
+            GROUP BY COALESCE(NULLIF(source_table, ''), 'missing')
+            ORDER BY row_count DESC
+            """,
+            tuple(params),
+        ).fetchall()
+        transitional_sources = [
+            {"source_table": row["source_table"], "posted_journal_count": int(row["row_count"] or 0)}
+            for row in legacy_rows
+        ]
+        warnings = []
+        missing_linkage_count = int(missing_linkage_row["row_count"] or 0) if missing_linkage_row else 0
+        if missing_linkage_count:
+            warnings.append(f"{missing_linkage_count} posted journal(s) are missing complete source-document linkage.")
+        if duplicate_postings:
+            warnings.append(f"{len(duplicate_postings)} source document(s) have duplicate posted journal impact.")
+        if transitional_sources:
+            warnings.append("Some posted journals still use transitional/non-controlled source tables.")
+        return {
+            "engine_version": UNIFIED_POSTING_ENGINE_VERSION,
+            "authoritative_posting_service": "accounting_engine.post_accounting_impact",
+            "low_level_journal_writer": "accounting_engine.post_journal_entry",
+            "controlled_source_tables": sorted(CONTROLLED_SOURCE_TABLES),
+            "enforced_checks": [
+                "Posted document status",
+                "Posting role permission when role context is supplied",
+                "Accounting period open",
+                "Duplicate source-document prevention",
+                "Balanced debits and credits",
+                "Valid active posting accounts",
+                "Source document linkage metadata",
+                "Posted timestamp and posting user metadata",
+            ],
+            "missing_source_linkage_count": missing_linkage_count,
+            "duplicate_posting_count": len(duplicate_postings),
+            "duplicate_post_attempts_blocked": int(duplicate_attempt_row["row_count"] or 0) if duplicate_attempt_row else 0,
+            "reversal_void_counts": [
+                {"source_table": row["source_table"], "count": int(row["row_count"] or 0)}
+                for row in reversal_rows
+            ],
+            "transitional_source_tables": transitional_sources,
+            "warnings": warnings,
+            "ok": not warnings,
+        }
+    finally:
+        if owns_connection and conn:
+            conn.close()
+
+
 def get_or_create_account(conn, account_name, account_type, parent_id=None, account_code=None):
     account_name = str(account_name or "").strip()
     account_type = str(account_type or "").strip().title()
@@ -1075,6 +1221,82 @@ def post_journal_entry(
     except Exception:
         if owns_connection:
             conn.rollback()
+        raise
+    finally:
+        if owns_connection and conn:
+            conn.close()
+
+
+def post_accounting_impact(
+    company_key,
+    date,
+    description,
+    reference,
+    lines,
+    created_by,
+    branch_id=None,
+    customer_id=None,
+    supplier_id=None,
+    inventory_item_id=None,
+    payment_id=None,
+    source_module=None,
+    source_table=None,
+    source_type=None,
+    source_id=None,
+    approval_status="Posted",
+    manual_entry=False,
+    user_role=None,
+    conn=None,
+):
+    """Authoritative Phase 7 posting service for document-to-ledger impact.
+
+    Document-specific screens still build their business-specific journal lines,
+    but final accounting impact should pass through this service boundary.
+    """
+    owns_connection = conn is None
+    conn = conn or get_connection()
+    try:
+        effective_user_role = user_role
+        if effective_user_role is None and str(created_by or "").strip() in POSTING_PERMISSION_ROLES:
+            effective_user_role = str(created_by or "").strip()
+        _assert_posting_role_allowed(effective_user_role)
+        entry_id = post_journal_entry(
+            company_key=company_key,
+            date=date,
+            description=description,
+            reference=reference,
+            lines=lines,
+            created_by=created_by,
+            branch_id=branch_id,
+            customer_id=customer_id,
+            supplier_id=supplier_id,
+            inventory_item_id=inventory_item_id,
+            payment_id=payment_id,
+            source_module=source_module,
+            source_table=source_table,
+            source_type=source_type,
+            source_id=source_id,
+            approval_status=approval_status,
+            manual_entry=manual_entry,
+            conn=conn,
+        )
+        _log_posting_engine_event(
+            conn,
+            "INFO",
+            f"posted source_table={source_table or 'none'} source_id={source_id or 'none'} entry_id={entry_id}",
+        )
+        if owns_connection:
+            conn.commit()
+        return entry_id
+    except Exception as exc:
+        message = str(exc)
+        level = "WARNING" if "already posted" in message.lower() or "duplicate" in message.lower() else "ERROR"
+        event_message = f"blocked posting source_table={source_table or 'none'} source_id={source_id or 'none'} reason={message}"
+        if owns_connection:
+            conn.rollback()
+            _persist_posting_engine_event(level, event_message)
+        else:
+            _log_posting_engine_event(conn, level, event_message)
         raise
     finally:
         if owns_connection and conn:

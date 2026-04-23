@@ -92,7 +92,7 @@ from accounting_engine import (
     get_supplier_balances,
     get_trial_balance as engine_get_trial_balance,
     is_legacy_mirroring_enabled,
-    post_journal_entry,
+    post_accounting_impact as post_journal_entry,
 )
 
 

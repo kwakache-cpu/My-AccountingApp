@@ -2230,6 +2230,35 @@ else:
                             if workflow_diag.get("duplicate_postings"):
                                 with st.expander("Duplicate Posted Journal Impact", expanded=False):
                                     st.dataframe(pd.DataFrame(workflow_diag["duplicate_postings"]), use_container_width=True)
+                            posting_engine_diag = company_operations_snapshot["posting_engine"]
+                            st.caption("Unified Posting Engine")
+                            pe1, pe2, pe3 = st.columns(3)
+                            pe1.metric(
+                                "Posting Engine",
+                                "Unified" if posting_engine_diag.get("ok") else "Review",
+                                posting_engine_diag.get("engine_version", "unknown"),
+                            )
+                            pe2.metric(
+                                "Duplicate Attempts Blocked",
+                                int(posting_engine_diag.get("duplicate_post_attempts_blocked") or 0),
+                            )
+                            pe3.metric(
+                                "Missing Source Linkage",
+                                int(posting_engine_diag.get("missing_source_linkage_count") or 0),
+                            )
+                            if posting_engine_diag.get("warnings"):
+                                st.warning("Posting engine warnings: " + " ".join(posting_engine_diag["warnings"]))
+                            else:
+                                st.success("Unified posting engine checks passed.")
+                            with st.expander("Posting Engine Transition Map", expanded=False):
+                                st.write("Authoritative service: " + posting_engine_diag.get("authoritative_posting_service", "unknown"))
+                                st.write("Controlled source tables: " + ", ".join(posting_engine_diag.get("controlled_source_tables") or []))
+                                st.markdown("Enforced checks")
+                                st.write(", ".join(posting_engine_diag.get("enforced_checks") or []))
+                                st.markdown("Transitional/non-controlled source tables")
+                                st.dataframe(pd.DataFrame(posting_engine_diag.get("transitional_source_tables") or []), use_container_width=True)
+                                st.markdown("Reversal / void counts")
+                                st.dataframe(pd.DataFrame(posting_engine_diag.get("reversal_void_counts") or []), use_container_width=True)
                             reporting_diag = company_operations_snapshot["reporting_trust"]
                             st.caption("Reporting Trust & Period Controls")
                             rt1, rt2, rt3 = st.columns(3)

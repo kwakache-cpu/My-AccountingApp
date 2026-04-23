@@ -111,6 +111,7 @@ def build_operations_console_snapshot(
         "accounting_core": None,
         "document_workflow": None,
         "reporting_trust": None,
+        "posting_engine": None,
     }
 
     if conn is not None:
@@ -128,6 +129,7 @@ def build_operations_console_snapshot(
             get_document_workflow_diagnostics,
             get_journal_dominance_diagnostics,
             get_reporting_trust_diagnostics,
+            get_unified_posting_engine_diagnostics,
         )
 
         report_end_date = end_date or datetime.now().date()
@@ -152,6 +154,14 @@ def build_operations_console_snapshot(
             lambda: get_reporting_trust_diagnostics(
                 selected_company_key,
                 end_date=report_end_date,
+                branch_id=branch_id,
+                conn=conn,
+            ),
+        )
+        snapshot["posting_engine"] = _safe_section(
+            "posting_engine",
+            lambda: get_unified_posting_engine_diagnostics(
+                selected_company_key,
                 branch_id=branch_id,
                 conn=conn,
             ),

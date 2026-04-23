@@ -17,7 +17,7 @@ from accounting_engine import (
     get_ar_aging_report,
     get_bank_reconciliation,
     get_finance_integrity_diagnostics,
-    post_journal_entry,
+    post_accounting_impact as post_journal_entry,
 )
 logger = logging.getLogger(__name__)
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
