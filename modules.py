@@ -4494,17 +4494,27 @@ def show_aging(company_key, aging_type="Receivable"):
                     )
                     st.dataframe(format_currency_dataframe(supplier_df), use_container_width=True, hide_index=True)
 
-                    supplier_tx_rows = conn.execute(
-                        """
-                        SELECT s.name, st.transaction_date, st.transaction_type, st.amount, st.description, st.reference, st.created_by
-                        FROM supplier_transactions st
-                        JOIN suppliers s ON s.id = st.supplier_id
-                        WHERE st.company_key = ?
-                        ORDER BY st.transaction_date DESC, st.id DESC
-                        LIMIT 100
-                        """,
-                        (company_key,),
-                    ).fetchall()
+                    try:
+                        supplier_tx_rows = conn.execute(
+                            """
+                            SELECT s.name, st.transaction_date, st.transaction_type, st.amount, st.description, st.reference, st.created_by
+                            FROM supplier_transactions st
+                            JOIN suppliers s ON s.id = st.supplier_id
+                            WHERE st.company_key = ?
+                            ORDER BY st.transaction_date DESC, st.id DESC
+                            LIMIT 100
+                            """,
+                            (company_key,),
+                        ).fetchall()
+                    except sqlite3.OperationalError as tx_error:
+                        if "supplier_transactions" in str(tx_error).lower():
+                            supplier_tx_rows = []
+                            st.warning(
+                                "Supplier transaction history is being prepared. Supplier balances and registration remain available."
+                            )
+                            logger.warning("Supplier transaction history unavailable because supplier_transactions is missing: %s", tx_error)
+                        else:
+                            raise
                     if supplier_tx_rows:
                         st.markdown("Ledger Transactions")
                         ledger_df = pd.DataFrame(
