@@ -205,14 +205,13 @@ def _get_active_company_id(expected_company_id=None):
 
 def _get_openai_client():
     """Create an OpenAI client only when the API key is available."""
-    if st.session_state.get("ai_active") is False:
-        return None
     try:
         api_key = st.secrets.get("OPENAI_API_KEY")
         if not api_key:
             st.session_state["ai_active"] = False
             logger.info("OPENAI_API_KEY is not configured; AI assistant disabled.")
             return None
+        st.session_state["ai_active"] = True
         return OpenAI(api_key=api_key)
     except Exception as exc:
         logger.warning("OpenAI client initialization failed; AI assistant disabled: %s", exc)

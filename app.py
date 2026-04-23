@@ -124,7 +124,7 @@ GATEKEEPER_SYSTEM_PROMPT = (
 )
 
 
-def _initialize_openai_client_quietly():
+def _get_openai_client_from_secrets():
     try:
         api_key = st.secrets.get("OPENAI_API_KEY")
     except Exception as exc:
@@ -144,7 +144,7 @@ def _initialize_openai_client_quietly():
         return None
 
 
-client = _initialize_openai_client_quietly()
+client = _get_openai_client_from_secrets()
 
 
 def test_openai_assistant_health():
@@ -169,7 +169,15 @@ def test_openai_assistant_health():
         }
 
     try:
-        test_client = client or OpenAI(api_key=api_key)
+        test_client = _get_openai_client_from_secrets()
+        if test_client is None:
+            return {
+                "success": False,
+                "key_present": True,
+                "client_initialized": False,
+                "response": "",
+                "error": "OpenAI client could not initialize",
+            }
         completion = test_client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[
@@ -648,11 +656,12 @@ E.K.A Support Team
 
 def ask_gatekeeper_ai(user_input):
     """Send the raw user prompt directly to OpenAI and return the response text."""
-    if st.session_state.get("ai_active") is False or client is None:
+    openai_client = _get_openai_client_from_secrets()
+    if openai_client is None:
         return "AI assistant is not configured yet."
 
     try:
-        response = client.chat.completions.create(
+        response = openai_client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[
                 {
