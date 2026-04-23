@@ -203,7 +203,7 @@ def _get_active_company_id(expected_company_id=None):
     return active_company_id
 
 
-def _get_openai_client():
+def get_openai_client_from_secrets():
     """Create an OpenAI client only when the API key is available."""
     try:
         api_key = st.secrets.get("OPENAI_API_KEY")
@@ -217,6 +217,11 @@ def _get_openai_client():
         logger.warning("OpenAI client initialization failed; AI assistant disabled: %s", exc)
         st.session_state["ai_active"] = False
         return None
+
+
+def _get_openai_client():
+    """Backward-compatible wrapper for the shared OpenAI loader."""
+    return get_openai_client_from_secrets()
 
 
 def _table_exists(conn, table_name):

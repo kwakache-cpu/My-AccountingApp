@@ -94,6 +94,7 @@ BOG_DISPLAY_RATES = eka_modules.BOG_DISPLAY_RATES
 accounting_ai_response = eka_modules.accounting_ai_response
 format_currency = eka_modules.format_currency
 get_exchange_rate = eka_modules.get_exchange_rate
+get_openai_client_from_secrets = eka_modules.get_openai_client_from_secrets
 initialize_paystack_payment = eka_modules.initialize_paystack_payment
 log_audit_action = eka_modules.log_audit_action
 render_accounting_assistant_sidebar = eka_modules.render_accounting_assistant_sidebar
@@ -124,27 +125,7 @@ GATEKEEPER_SYSTEM_PROMPT = (
 )
 
 
-def _get_openai_client_from_secrets():
-    try:
-        api_key = st.secrets.get("OPENAI_API_KEY")
-    except Exception as exc:
-        logger.info("OpenAI secret lookup unavailable; AI assistant disabled: %s", exc)
-        st.session_state["ai_active"] = False
-        return None
-    if not api_key:
-        logger.info("OPENAI_API_KEY is not configured; AI assistant disabled.")
-        st.session_state["ai_active"] = False
-        return None
-    try:
-        st.session_state["ai_active"] = True
-        return OpenAI(api_key=api_key)
-    except Exception as exc:
-        logger.warning("OpenAI client initialization failed; AI assistant disabled: %s", exc)
-        st.session_state["ai_active"] = False
-        return None
-
-
-client = _get_openai_client_from_secrets()
+client = get_openai_client_from_secrets()
 
 
 def test_openai_assistant_health():
@@ -169,7 +150,7 @@ def test_openai_assistant_health():
         }
 
     try:
-        test_client = _get_openai_client_from_secrets()
+        test_client = get_openai_client_from_secrets()
         if test_client is None:
             return {
                 "success": False,
@@ -656,7 +637,7 @@ E.K.A Support Team
 
 def ask_gatekeeper_ai(user_input):
     """Send the raw user prompt directly to OpenAI and return the response text."""
-    openai_client = _get_openai_client_from_secrets()
+    openai_client = get_openai_client_from_secrets()
     if openai_client is None:
         return "AI assistant is not configured yet."
 
