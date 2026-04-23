@@ -1782,6 +1782,41 @@ def save_bill_state():
     _sync_data_editor_to_session("bill_items_editor", "bill_items")
 
 
+def _normalize_bill_items(raw_items):
+    if raw_items is None:
+        return []
+    if hasattr(raw_items, "to_dict"):
+        rows = raw_items.to_dict("records")
+    elif isinstance(raw_items, list):
+        rows = raw_items
+    else:
+        rows = []
+
+    normalized_items = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        item_name = str(row.get("item_name") or "").strip()
+        quantity_raw = row.get("quantity")
+        unit_price_raw = row.get("unit_price")
+        if not item_name and quantity_raw in (None, "", 0, 0.0) and unit_price_raw in (None, "", 0, 0.0):
+            continue
+        try:
+            quantity = float(quantity_raw or 0)
+            unit_price = float(unit_price_raw or 0)
+        except (TypeError, ValueError):
+            continue
+        if item_name and quantity > 0 and unit_price >= 0:
+            normalized_items.append(
+                {
+                    "item_name": item_name,
+                    "quantity": quantity,
+                    "unit_price": unit_price,
+                }
+            )
+    return normalized_items
+
+
 def _trigger_scan_feedback(message_key, message, level="success", beep_key=None):
     st.session_state[message_key] = {"level": level, "text": message}
     if beep_key:
@@ -2413,10 +2448,11 @@ def show_create_bill_page(company_key):
                 if not supplier_name:
                     st.error("Supplier is required.")
                     return
-                valid_items = [item for item in st.session_state.bill_items if item["item_name"].strip() and item["quantity"] > 0 and item["unit_price"] > 0]
+                valid_items = _normalize_bill_items(edited_df)
                 if not valid_items:
                     st.error("At least one valid item is required.")
                     return
+                st.session_state.bill_items = valid_items
                 total_amount = sum(item["quantity"] * item["unit_price"] for item in valid_items)
                 if total_amount <= 0:
                     st.error("Total amount must be greater than 0.")
