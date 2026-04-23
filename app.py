@@ -8,6 +8,7 @@ from database import (
     force_backup_after_company_creation,
     get_downloadable_backup_export,
     get_firebase_service_account_info,
+    get_schema_manifest_diagnostics,
     get_connection,
     get_persistence_diagnostics,
     get_recovery_source_diagnostics,
@@ -2088,6 +2089,52 @@ else:
                                 else "unknown",
                             )
                         )
+                    schema_diag = get_schema_manifest_diagnostics(conn)
+                    st.markdown("---")
+                    st.caption("Schema Manifest Health")
+                    st.caption(
+                        "Manifest Version: {version} | Source Tables: {source_present}/{source_total} | Compatibility Tables: {compat_present}/{compat_total}".format(
+                            version=schema_diag.get("manifest_version"),
+                            source_present=len(schema_diag.get("categories", {}).get("source_of_truth", {}).get("present", [])),
+                            source_total=schema_diag.get("categories", {}).get("source_of_truth", {}).get("total", 0),
+                            compat_present=len(schema_diag.get("categories", {}).get("compatibility_detail", {}).get("present", [])),
+                            compat_total=schema_diag.get("categories", {}).get("compatibility_detail", {}).get("total", 0),
+                        )
+                    )
+                    if schema_diag.get("ok"):
+                        st.success("Schema manifest check passed for required source-of-truth tables and columns.")
+                    else:
+                        st.warning("Schema manifest check needs attention.")
+                    if schema_diag.get("missing_source_of_truth_tables"):
+                        st.error(
+                            "Missing required production tables: "
+                            + ", ".join(schema_diag["missing_source_of_truth_tables"])
+                        )
+                    if schema_diag.get("missing_compatibility_detail_tables"):
+                        st.warning(
+                            "Missing compatibility/detail tables: "
+                            + ", ".join(schema_diag["missing_compatibility_detail_tables"])
+                        )
+                    if schema_diag.get("missing_required_columns"):
+                        st.warning(
+                            "Missing required columns: "
+                            + "; ".join(
+                                f"{table_name}({', '.join(columns)})"
+                                for table_name, columns in sorted(schema_diag["missing_required_columns"].items())
+                            )
+                        )
+                    if schema_diag.get("legacy_obsolete_tables_present"):
+                        st.info(
+                            "Legacy/obsolete tables still present for compatibility review: "
+                            + ", ".join(schema_diag["legacy_obsolete_tables_present"])
+                        )
+                    with st.expander("Schema Manifest Summary", expanded=False):
+                        st.markdown("Required source-of-truth tables")
+                        st.write(", ".join(schema_diag.get("required_production_tables", [])) or "none")
+                        st.markdown("Compatibility/detail tables")
+                        st.write(", ".join(schema_diag.get("compatibility_detail_tables", [])) or "none")
+                        st.markdown("Legacy/obsolete references tracked")
+                        st.write(", ".join(schema_diag.get("legacy_obsolete_tables", [])) or "none")
                     st.markdown("---")
                     st.caption("Admin Backup Export")
                     export_state_key = "admin_backup_export_payload"

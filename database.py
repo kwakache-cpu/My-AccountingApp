@@ -184,6 +184,53 @@ DATABASE_REQUIRED_TABLES = (
 DATABASE_PRODUCTION_REQUIRED_TABLES = DATABASE_REQUIRED_TABLES + (
     "database_identity",
 )
+SCHEMA_MANIFEST = {
+    "source_of_truth": {
+        "companies": ("key", "name", "subscription_expiry", "status"),
+        "branches": ("branch_id", "company_key", "branch_name"),
+        "users": ("company_key", "full_name", "login_key", "role", "status"),
+        "chart_of_accounts": ("id", "name", "type", "account_name", "account_type", "posting_allowed", "control_account"),
+        "journal_entries": ("id", "company_key", "date", "description", "approval_status"),
+        "journal_lines": ("id", "entry_id", "account_id", "debit", "credit"),
+        "customers": ("id", "company_key", "name", "currency"),
+        "suppliers": ("id", "company_key", "name", "currency"),
+        "invoices": ("id", "company_key", "invoice_number", "invoice_date", "approval_status", "amount"),
+        "bills": ("id", "company_key", "bill_number", "bill_date", "approval_status", "amount"),
+        "payments": ("id", "company_key", "payment_date", "payment_type", "approval_status", "amount"),
+        "payment_allocations": ("id", "company_key", "payment_id", "amount"),
+        "inventory": ("id", "company_key", "item_name", "qty", "cost_price"),
+        "stock_movements": ("id", "company_key", "inventory_item_id", "movement_type", "quantity"),
+        "fixed_assets": ("id", "company_key", "asset_name", "cost", "book_value"),
+        "payroll": ("id", "company_key", "emp_name", "net_salary", "status"),
+        "vouchers": ("id", "company_key", "date", "v_type", "approval_status"),
+        "bank_accounts": ("id", "company_key", "account_name", "currency"),
+        "accounting_periods": ("id", "company_key", "period_label", "is_locked"),
+        "system_settings": ("id", "base_currency", "display_currency", "exchange_rate"),
+        "audit_logs": ("id", "company_key", "user_role", "action", "module_name"),
+        "schema_version": ("version", "description", "applied_at"),
+        "database_identity": ("instance_id", "created_at", "last_verified_at"),
+    },
+    "compatibility_detail": {
+        "customer_transactions": ("id", "company_key", "customer_id", "transaction_type", "amount"),
+        "supplier_transactions": ("id", "company_key", "supplier_id", "transaction_type", "amount"),
+        "bill_lines": ("id", "bill_id", "item_name", "quantity", "unit_price", "line_total"),
+        "payroll_records": ("id", "company_key", "employee_name", "net_pay", "status"),
+        "recurring_transactions": ("id", "company_key", "description", "frequency", "next_run_date"),
+        "transactions": ("id", "company_key", "transaction_date", "account", "debit", "credit"),
+        "system_logs": ("id", "timestamp", "level", "module_name", "message"),
+        "counterparties": ("id", "company_key", "party_name", "party_type"),
+        "maintenance_settings": ("id", "maintenance_date", "is_active", "message"),
+        "pending_approvals": ("id", "company_key", "payment_reference", "amount"),
+        "accounts_payable": ("id", "vendor", "amount", "status", "due_date"),
+        "purchase_orders": ("id", "item", "quantity", "cost", "status"),
+    },
+    "legacy_obsolete": {
+        "sales_invoices": ("id", "customer_name", "amount", "status", "date"),
+        "stock": ("id", "barcode"),
+        "supplier_ledger": (),
+    },
+}
+SCHEMA_MANIFEST_VERSION = 1
 FIREBASE_RECOVERY_APP = None
 FIREBASE_RECOVERY_BUCKET_NAME = None
 BACKUP_HISTORY_PREFIX = "backups/history"
@@ -234,6 +281,130 @@ def get_firebase_runtime_config():
         "databaseURL": str(_read_runtime_secret("FIREBASE_DATABASE_URL", FIREBASE_DATABASE_URL) or "").strip(),
         "key_path": FIREBASE_KEY_PATH,
     }
+
+
+def get_schema_manifest():
+    """Return the authoritative schema classification used by startup diagnostics."""
+    return {
+        classification: {
+            table_name: tuple(required_columns)
+            for table_name, required_columns in tables.items()
+        }
+        for classification, tables in SCHEMA_MANIFEST.items()
+    }
+
+
+def _get_existing_tables(conn):
+    rows = conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()
+    return {str(row[0]) for row in rows}
+
+
+def _get_existing_columns(conn, table_name):
+    try:
+        return {str(row[1]) for row in conn.execute(f"PRAGMA table_info({table_name})").fetchall()}
+    except sqlite3.Error:
+        return set()
+
+
+def get_schema_manifest_diagnostics(conn=None):
+    """
+    Compare the live database schema with the manifest.
+    This is diagnostic-only and never creates, drops, or rewrites data.
+    """
+    owns_connection = conn is None
+    diagnostics_conn = conn
+    if diagnostics_conn is None:
+        diagnostics_conn = get_connection()
+    try:
+        existing_tables = _get_existing_tables(diagnostics_conn)
+        manifest = get_schema_manifest()
+        categories = {}
+        missing_required_columns = {}
+        for classification, tables in manifest.items():
+            present = []
+            missing = []
+            for table_name, required_columns in tables.items():
+                if table_name in existing_tables:
+                    present.append(table_name)
+                    if classification != "legacy_obsolete":
+                        existing_columns = _get_existing_columns(diagnostics_conn, table_name)
+                        missing_columns = [
+                            column_name
+                            for column_name in required_columns
+                            if column_name and column_name not in existing_columns
+                        ]
+                        if missing_columns:
+                            missing_required_columns[table_name] = missing_columns
+                else:
+                    missing.append(table_name)
+            categories[classification] = {
+                "present": sorted(present),
+                "missing": sorted(missing),
+                "total": len(tables),
+            }
+        legacy_present = categories["legacy_obsolete"]["present"]
+        warnings = []
+        if categories["source_of_truth"]["missing"]:
+            warnings.append(
+                "Missing source-of-truth tables: " + ", ".join(categories["source_of_truth"]["missing"])
+            )
+        if missing_required_columns:
+            warnings.append(
+                "Missing required columns: "
+                + "; ".join(
+                    f"{table_name}({', '.join(columns)})"
+                    for table_name, columns in sorted(missing_required_columns.items())
+                )
+            )
+        if legacy_present:
+            warnings.append("Legacy/obsolete tables still present: " + ", ".join(legacy_present))
+        return {
+            "manifest_version": SCHEMA_MANIFEST_VERSION,
+            "db_path": DB_PATH,
+            "categories": categories,
+            "required_production_tables": sorted(manifest["source_of_truth"].keys()),
+            "compatibility_detail_tables": sorted(manifest["compatibility_detail"].keys()),
+            "legacy_obsolete_tables": sorted(manifest["legacy_obsolete"].keys()),
+            "missing_source_of_truth_tables": categories["source_of_truth"]["missing"],
+            "missing_compatibility_detail_tables": categories["compatibility_detail"]["missing"],
+            "legacy_obsolete_tables_present": legacy_present,
+            "missing_required_columns": missing_required_columns,
+            "warnings": warnings,
+            "ok": not categories["source_of_truth"]["missing"] and not missing_required_columns,
+        }
+    except sqlite3.Error as exc:
+        return {
+            "manifest_version": SCHEMA_MANIFEST_VERSION,
+            "db_path": DB_PATH,
+            "categories": {},
+            "required_production_tables": sorted(SCHEMA_MANIFEST["source_of_truth"].keys()),
+            "compatibility_detail_tables": sorted(SCHEMA_MANIFEST["compatibility_detail"].keys()),
+            "legacy_obsolete_tables": sorted(SCHEMA_MANIFEST["legacy_obsolete"].keys()),
+            "missing_source_of_truth_tables": [],
+            "missing_compatibility_detail_tables": [],
+            "legacy_obsolete_tables_present": [],
+            "missing_required_columns": {},
+            "warnings": [f"Schema diagnostics unavailable: {exc}"],
+            "ok": False,
+        }
+    finally:
+        if owns_connection and diagnostics_conn:
+            diagnostics_conn.close()
+
+
+def log_schema_manifest_diagnostics(conn):
+    diagnostics = get_schema_manifest_diagnostics(conn)
+    logger.info(
+        "Schema manifest check: ok=%s source_missing=%s compatibility_missing=%s legacy_present=%s missing_columns=%s",
+        diagnostics["ok"],
+        diagnostics["missing_source_of_truth_tables"],
+        diagnostics["missing_compatibility_detail_tables"],
+        diagnostics["legacy_obsolete_tables_present"],
+        diagnostics["missing_required_columns"],
+    )
+    for warning in diagnostics.get("warnings", []):
+        logger.warning("Schema manifest warning: %s", warning)
+    return diagnostics
 
 
 def _read_runtime_secret(secret_name, default=None):
@@ -2714,6 +2885,16 @@ def _ensure_app_compatibility_tables(conn):
         )
         """
     )
+    cursor.execute("PRAGMA table_info(accounts_payable)")
+    accounts_payable_columns = {row[1] for row in cursor.fetchall()}
+    for column_name, column_def in {
+        "vendor": "TEXT",
+        "amount": "REAL",
+        "status": "TEXT",
+        "due_date": "TEXT",
+    }.items():
+        if column_name not in accounts_payable_columns:
+            cursor.execute(f"ALTER TABLE accounts_payable ADD COLUMN {column_name} {column_def}")
     cursor.execute(
         """
         CREATE TABLE IF NOT EXISTS purchase_orders (
@@ -2725,6 +2906,16 @@ def _ensure_app_compatibility_tables(conn):
         )
         """
     )
+    cursor.execute("PRAGMA table_info(purchase_orders)")
+    purchase_order_columns = {row[1] for row in cursor.fetchall()}
+    for column_name, column_def in {
+        "item": "TEXT",
+        "quantity": "INTEGER",
+        "cost": "REAL",
+        "status": "TEXT",
+    }.items():
+        if column_name not in purchase_order_columns:
+            cursor.execute(f"ALTER TABLE purchase_orders ADD COLUMN {column_name} {column_def}")
 
 
 def _run_lightweight_integrity_checks(conn):
@@ -2736,6 +2927,7 @@ def _run_lightweight_integrity_checks(conn):
     _ensure_database_identity_table(conn)
     ensure_schema_integrity(conn)
     _ensure_app_compatibility_tables(conn)
+    log_schema_manifest_diagnostics(conn)
 
 
 def _advanced_startup_available():
