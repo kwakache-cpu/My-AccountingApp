@@ -1471,12 +1471,26 @@ def log_system_event(level, module_name, message):
     conn = get_connection()
     try:
         conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS system_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT,
+                level TEXT,
+                module_name TEXT,
+                message TEXT
+            )
+            """
+        )
+        conn.execute(
             "INSERT INTO system_logs (timestamp, level, module_name, message) VALUES (?, ?, ?, ?)",
             (datetime.now().isoformat(timespec="seconds"), level, module_name, message),
         )
         conn.commit()
+    except sqlite3.Error as exc:
+        logger.warning("System event logging failed for module=%s level=%s: %s", module_name, level, exc)
     finally:
-        conn.close()
+        if conn:
+            conn.close()
 
 
 def get_excel_bin(df):

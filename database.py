@@ -1977,6 +1977,7 @@ def ensure_schema_integrity(conn):
             "updated_at": "TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
         },
         "audit_logs": {"details": "TEXT", "branch_id": "TEXT"},
+        "system_logs": {"timestamp": "TEXT", "level": "TEXT", "module_name": "TEXT", "message": "TEXT"},
         "customers": {"customer_id": "TEXT", "current_balance": "REAL DEFAULT 0"},
         "customer_transactions": {"branch_id": "TEXT", "reference": "TEXT", "created_by": "TEXT", "transaction_date": "TEXT"},
         "supplier_transactions": {"reference": "TEXT", "created_by": "TEXT", "transaction_date": "TEXT"},
@@ -3136,6 +3137,28 @@ def _deploy_full_schema(conn):
         for column_name, column_def in audit_column_defs.items():
             if column_name not in audit_columns:
                 cursor.execute(f"ALTER TABLE audit_logs ADD COLUMN {column_name} {column_def}")
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS system_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT,
+                level TEXT,
+                module_name TEXT,
+                message TEXT
+            )
+            """
+        )
+        cursor.execute("PRAGMA table_info(system_logs)")
+        system_log_columns = {row[1] for row in cursor.fetchall()}
+        system_log_column_defs = {
+            "timestamp": "TEXT",
+            "level": "TEXT",
+            "module_name": "TEXT",
+            "message": "TEXT",
+        }
+        for column_name, column_def in system_log_column_defs.items():
+            if column_name not in system_log_columns:
+                cursor.execute(f"ALTER TABLE system_logs ADD COLUMN {column_name} {column_def}")
 
         # --- TABLE 7: MAINTENANCE & SYSTEM SETTINGS ---
         cursor.execute("""
