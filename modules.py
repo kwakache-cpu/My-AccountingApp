@@ -4266,6 +4266,9 @@ def show_banking(company_key, role):
 # ==========================================
 def show_aging(company_key, aging_type="Receivable"):
     st.header(f"📋 Accounts {aging_type}")
+    branch_id = st.session_state.get("active_branch_id")
+    active_user = st.session_state.get("user") or {}
+    role = active_user.get("role", "User")
     if aging_type == "Receivable":
         v_type = "Sales"
         status_filter = "Pending"
@@ -4275,9 +4278,6 @@ def show_aging(company_key, aging_type="Receivable"):
 
     try:
         if aging_type == "Receivable":
-            branch_id = st.session_state.get("active_branch_id")
-            active_user = st.session_state.get("user") or {}
-            role = active_user.get("role", "User")
             tabs = st.tabs(["Customer Ledger", "Aging View"])
         else:
             tabs = [st.container()]
