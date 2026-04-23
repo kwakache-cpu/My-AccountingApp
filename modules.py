@@ -5770,49 +5770,77 @@ def _register_supplier(conn, company_key, name, phone, email, address, category)
 
 def _record_supplier_ledger_transaction(conn, company_key, supplier_id, transaction_type, amount, description, role, reference=None, transaction_date=None, post_to_gl=True):
     """Record a debit/credit to a specific supplier's account."""
-    if transaction_type not in ["Debit", "Credit"]:
-        raise ValueError("Transaction type must be 'Debit' or 'Credit'")
-    
-    if transaction_type == "Debit":
-        debit = amount
-        credit = 0
-    else:
-        debit = 0
-        credit = amount
-    
-    # Post to supplier ledger
-    conn.execute(
-        """
-        INSERT INTO supplier_ledger (supplier_id, date, description, debit, credit, balance, reference)
-        VALUES (?, ?, ?, ?, ?, 
-                COALESCE((SELECT balance FROM supplier_ledger WHERE supplier_id = ? ORDER BY id DESC LIMIT 1), 0) + ? - ?,
-                ?)
-        """,
-        (supplier_id, transaction_date or datetime.now().date(), description, debit, credit, supplier_id, debit, credit, reference or ""),
-    )
-    
+    transaction_type = str(transaction_type or "").strip().title()
+    if transaction_type not in {"Debit", "Credit"}:
+        raise ValueError("Transaction type must be Debit or Credit.")
+
+    amount = float(amount or 0.0)
+    if amount <= 0:
+        raise ValueError("Amount must be greater than zero.")
+
+    tx_date = transaction_date.isoformat() if hasattr(transaction_date, "isoformat") else (transaction_date or datetime.now().date().isoformat())
+    supplier = conn.execute(
+        "SELECT id, name FROM suppliers WHERE id = ? AND company_key = ?",
+        (int(supplier_id), company_key),
+    ).fetchone()
+    if not supplier:
+        raise ValueError("Selected supplier could not be found.")
+
     if post_to_gl:
-        # Post to general ledger
-        supplier_name = conn.execute("SELECT name FROM suppliers WHERE id = ?", (supplier_id,)).fetchone()[0]
+        ap_account_id = get_account_id(conn, "Accounts Payable", "Liability")
+        contra_account_id = get_account_id(conn, "Cash", "Asset") if transaction_type == "Debit" else get_account_id(conn, "Purchases", "Expense")
+        lines = (
+            [
+                {"account_id": ap_account_id, "debit": amount, "credit": 0},
+                {"account_id": contra_account_id, "debit": 0, "credit": amount},
+            ]
+            if transaction_type == "Debit"
+            else [
+                {"account_id": contra_account_id, "debit": amount, "credit": 0},
+                {"account_id": ap_account_id, "debit": 0, "credit": amount},
+            ]
+        )
         post_journal_entry(
             company_key=company_key,
-            date=transaction_date or datetime.now().date(),
-            description=f"{description} - {supplier_name}",
+            date=tx_date,
+            description=f"{description} - {supplier['name']}",
             reference=reference or f"SUP-{supplier_id}-{datetime.now().strftime('%Y%m%d%H%M%S')}",
-            lines=[
-                {
-                    "account_id": get_account_id(conn, "Accounts Payable", "Liability"),
-                    "debit": debit,
-                    "credit": credit,
-                },
-                {
-                    "account_id": get_account_id(conn, "Cash" if transaction_type == "Credit" else "Purchases", "Asset" if transaction_type == "Credit" else "Expense"),
-                    "debit": credit,
-                    "credit": debit,
-                },
-            ],
+            lines=lines,
             created_by=role,
+            supplier_id=int(supplier_id),
+            source_module="Accounts Payable",
+            source_table="supplier_transactions",
+            conn=conn,
         )
+
+    conn.execute(
+        """
+        INSERT INTO supplier_transactions (
+            company_key, supplier_id, transaction_type, amount,
+            description, reference, transaction_date, created_by
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            company_key,
+            int(supplier_id),
+            transaction_type,
+            amount,
+            description,
+            reference,
+            tx_date,
+            role,
+        ),
+    )
+    new_balance = get_supplier_balance(company_key, int(supplier_id), as_of_date=tx_date, conn=conn)
+    previous_balance = round(new_balance - (amount if transaction_type == "Credit" else -amount), 2)
+    return {
+        "supplier_name": supplier["name"],
+        "previous_balance": previous_balance,
+        "new_balance": new_balance,
+        "delta": amount if transaction_type == "Credit" else -amount,
+        "transaction_date": tx_date,
+    }
 
 
 # ==========================================

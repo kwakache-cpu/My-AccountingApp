@@ -1985,6 +1985,7 @@ def ensure_schema_integrity(conn):
         "audit_logs": {"details": "TEXT", "branch_id": "TEXT"},
         "customers": {"customer_id": "TEXT", "current_balance": "REAL DEFAULT 0"},
         "customer_transactions": {"branch_id": "TEXT", "reference": "TEXT", "created_by": "TEXT", "transaction_date": "TEXT"},
+        "supplier_transactions": {"reference": "TEXT", "created_by": "TEXT", "transaction_date": "TEXT"},
         "journal_entries": {
             "branch_id": "TEXT",
             "customer_id": "INTEGER",
@@ -2427,6 +2428,26 @@ def ensure_schema_integrity(conn):
     for column_name, column_def in supplier_column_defs.items():
         if column_name not in supplier_columns:
             cursor.execute(f"ALTER TABLE suppliers ADD COLUMN {column_name} {column_def}")
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS supplier_transactions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            company_key TEXT NOT NULL,
+            supplier_id INTEGER NOT NULL,
+            transaction_type TEXT NOT NULL,
+            amount REAL NOT NULL,
+            description TEXT,
+            reference TEXT,
+            transaction_date TEXT NOT NULL,
+            created_by TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (company_key) REFERENCES companies(key) ON DELETE CASCADE,
+            FOREIGN KEY (supplier_id) REFERENCES suppliers(id) ON DELETE CASCADE
+        )
+        """
+    )
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_supplier_transactions_supplier_date ON supplier_transactions(supplier_id, transaction_date DESC)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_supplier_transactions_company_date ON supplier_transactions(company_key, transaction_date DESC)")
     cursor.execute(
         """
         CREATE TABLE IF NOT EXISTS invoices (
