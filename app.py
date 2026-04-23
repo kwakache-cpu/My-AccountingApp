@@ -8,15 +8,10 @@ from database import (
     force_backup_after_company_creation,
     get_downloadable_backup_export,
     get_firebase_service_account_info,
-    get_schema_manifest_diagnostics,
     get_connection,
-    get_audit_operations_summary,
-    get_persistence_diagnostics,
     get_recovery_source_diagnostics,
-    run_persistence_self_test,
     startup_database,
 )
-from openai import OpenAI
 import json
 import logging
 import os
@@ -32,11 +27,13 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 import uuid
 from accounting_engine import (
-    get_document_workflow_diagnostics,
-    get_journal_dominance_diagnostics,
     get_month_sales_total,
     get_recent_accounting_activity,
-    get_reporting_trust_diagnostics,
+)
+from enterprise_services import (
+    build_operations_console_snapshot,
+    get_ai_service_status,
+    get_service_ownership_map,
 )
 
 try:
@@ -102,8 +99,7 @@ BOG_DISPLAY_RATES = eka_modules.BOG_DISPLAY_RATES
 accounting_ai_response = eka_modules.accounting_ai_response
 format_currency = eka_modules.format_currency
 get_exchange_rate = eka_modules.get_exchange_rate
-get_openai_client_status = eka_modules.get_openai_client_status
-get_openai_client_from_secrets = eka_modules.get_openai_client_from_secrets
+get_openai_client_status = get_ai_service_status
 initialize_paystack_payment = eka_modules.initialize_paystack_payment
 log_audit_action = eka_modules.log_audit_action
 render_accounting_assistant_sidebar = eka_modules.render_accounting_assistant_sidebar
@@ -132,9 +128,6 @@ show_vouchers = eka_modules.show_vouchers
 GATEKEEPER_SYSTEM_PROMPT = (
     "You are a professional Chartered Accountant. Provide clear, accurate financial guidance based on the ERP data."
 )
-
-
-client = get_openai_client_from_secrets()
 
 
 def test_openai_assistant_health():
@@ -2016,7 +2009,8 @@ else:
                 st.subheader("System Health")
                 st.caption(st.session_state.get("cloud_vault_status", "🔴 Cloud Vault: Local Mode"))
                 try:
-                    persistence_diag = get_persistence_diagnostics()
+                    operations_snapshot = build_operations_console_snapshot(conn=conn)
+                    persistence_diag = operations_snapshot["persistence"]
                     st.caption(
                         "Canonical DB: {path} | Local Valid: {valid} | Company Count: {count}".format(
                             path=persistence_diag["canonical_db_path"],
@@ -2073,7 +2067,7 @@ else:
                                 cloud_count=persistence_diag["cloud_backup_company_count"],
                             )
                         )
-                    self_test = run_persistence_self_test()
+                    self_test = operations_snapshot["persistence_self_test"]
                     if self_test["mismatch"]:
                         st.warning(
                             "Persistence self-test mismatch: runtime={local_count} local_backup={local_backup_count} cloud_backup={cloud_count}".format(
@@ -2096,7 +2090,7 @@ else:
                                 else "unknown",
                             )
                         )
-                    schema_diag = get_schema_manifest_diagnostics(conn)
+                    schema_diag = operations_snapshot["schema"]
                     st.markdown("---")
                     st.caption("Schema Manifest Health")
                     st.caption(
@@ -2135,7 +2129,7 @@ else:
                             "Legacy/obsolete tables still present for compatibility review: "
                             + ", ".join(schema_diag["legacy_obsolete_tables_present"])
                         )
-                    audit_summary = get_audit_operations_summary(conn=conn, limit=25)
+                    audit_summary = operations_snapshot["audit"]
                     st.markdown("---")
                     st.caption("Audit & Operations Visibility")
                     au1, au2, au3 = st.columns(3)
@@ -2154,6 +2148,8 @@ else:
                         st.write(", ".join(schema_diag.get("compatibility_detail_tables", [])) or "none")
                         st.markdown("Legacy/obsolete references tracked")
                         st.write(", ".join(schema_diag.get("legacy_obsolete_tables", [])) or "none")
+                    with st.expander("Service Ownership Map", expanded=False):
+                        st.dataframe(pd.DataFrame(get_service_ownership_map()), use_container_width=True)
                     if total_companies:
                         selected_health_company = None
                         try:
@@ -2171,11 +2167,13 @@ else:
                         except Exception as journal_company_error:
                             logger.warning("Could not load companies for journal dominance diagnostics: %s", journal_company_error)
                         if selected_health_company:
-                            journal_diag = get_journal_dominance_diagnostics(
-                                selected_health_company,
-                                branch_id=st.session_state.get("active_branch_id"),
+                            company_operations_snapshot = build_operations_console_snapshot(
                                 conn=conn,
+                                selected_company_key=selected_health_company,
+                                branch_id=st.session_state.get("active_branch_id"),
+                                end_date=datetime.now().date(),
                             )
+                            journal_diag = company_operations_snapshot["accounting_core"]
                             st.markdown("---")
                             st.caption("Accounting Core Dominance")
                             jd1, jd2, jd3 = st.columns(3)
@@ -2208,11 +2206,7 @@ else:
                                 st.success("Accounting core dominance check passed.")
                             with st.expander("Compatibility Tables: History Only", expanded=False):
                                 st.dataframe(pd.DataFrame(journal_diag["compatibility_tables"]), use_container_width=True)
-                            workflow_diag = get_document_workflow_diagnostics(
-                                selected_health_company,
-                                branch_id=st.session_state.get("active_branch_id"),
-                                conn=conn,
-                            )
+                            workflow_diag = company_operations_snapshot["document_workflow"]
                             st.caption("Controlled Document Workflow")
                             wd1, wd2, wd3 = st.columns(3)
                             wd1.metric("Workflow Integrity", "Healthy" if workflow_diag.get("ok") else "Needs Review")
@@ -2236,12 +2230,7 @@ else:
                             if workflow_diag.get("duplicate_postings"):
                                 with st.expander("Duplicate Posted Journal Impact", expanded=False):
                                     st.dataframe(pd.DataFrame(workflow_diag["duplicate_postings"]), use_container_width=True)
-                            reporting_diag = get_reporting_trust_diagnostics(
-                                selected_health_company,
-                                end_date=datetime.now().date(),
-                                branch_id=st.session_state.get("active_branch_id"),
-                                conn=conn,
-                            )
+                            reporting_diag = company_operations_snapshot["reporting_trust"]
                             st.caption("Reporting Trust & Period Controls")
                             rt1, rt2, rt3 = st.columns(3)
                             rt1.metric(
