@@ -205,18 +205,63 @@ def _get_active_company_id(expected_company_id=None):
 
 def get_openai_client_status():
     """Return a safe OpenAI client status without exposing the API key."""
+    diagnostics = {
+        "streamlit_imported": st is not None,
+        "secrets_accessible": False,
+        "top_level_secret_keys": [],
+        "top_level_key_present": False,
+        "openai_section_present": False,
+        "nested_key_present": False,
+        "secret_source": "missing",
+        "provided_length": 0,
+    }
     try:
-        api_key = st.secrets.get("OPENAI_API_KEY")
+        secrets_obj = st.secrets
+        diagnostics["secrets_accessible"] = True
+        try:
+            diagnostics["top_level_secret_keys"] = sorted(str(key) for key in secrets_obj.keys())
+        except Exception:
+            diagnostics["top_level_secret_keys"] = []
+        api_key = secrets_obj.get("OPENAI_API_KEY")
+        diagnostics["top_level_key_present"] = bool(api_key)
+        diagnostics["openai_section_present"] = "openai" in diagnostics["top_level_secret_keys"]
+        if api_key:
+            diagnostics["secret_source"] = "top_level"
+        else:
+            openai_section = secrets_obj.get("openai", {})
+            if openai_section:
+                try:
+                    api_key = openai_section.get("OPENAI_API_KEY")
+                except AttributeError:
+                    api_key = None
+                diagnostics["nested_key_present"] = bool(api_key)
+                if api_key:
+                    diagnostics["secret_source"] = "nested_openai_section"
     except Exception as exc:
         logger.info("OpenAI secret lookup unavailable; AI assistant disabled: %s", exc)
         st.session_state["ai_active"] = False
+        logger.info("OpenAI secret diagnostics: %s", diagnostics)
         return {
             "client": None,
             "key_present": False,
             "client_initialized": False,
             "error_type": "missing_key",
             "message": "AI assistant is not configured yet.",
+            **diagnostics,
         }
+
+    diagnostics["provided_length"] = len(str(api_key or ""))
+    logger.info(
+        "OpenAI secret diagnostics: streamlit_imported=%s secrets_accessible=%s top_level_keys=%s top_level_key_present=%s openai_section_present=%s nested_key_present=%s secret_source=%s provided_length=%s",
+        diagnostics["streamlit_imported"],
+        diagnostics["secrets_accessible"],
+        ",".join(diagnostics["top_level_secret_keys"]) or "none",
+        diagnostics["top_level_key_present"],
+        diagnostics["openai_section_present"],
+        diagnostics["nested_key_present"],
+        diagnostics["secret_source"],
+        diagnostics["provided_length"],
+    )
 
     if not api_key:
         st.session_state["ai_active"] = False
@@ -227,6 +272,7 @@ def get_openai_client_status():
             "client_initialized": False,
             "error_type": "missing_key",
             "message": "AI assistant is not configured yet.",
+            **diagnostics,
         }
 
     try:
@@ -238,6 +284,7 @@ def get_openai_client_status():
             "client_initialized": True,
             "error_type": None,
             "message": "",
+            **diagnostics,
         }
     except Exception as exc:
         logger.warning("OpenAI client initialization failed; AI assistant disabled: %s", exc)
@@ -248,6 +295,7 @@ def get_openai_client_status():
             "client_initialized": False,
             "error_type": "client_init_failed",
             "message": "AI assistant could not initialize.",
+            **diagnostics,
         }
 
 

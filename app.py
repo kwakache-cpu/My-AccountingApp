@@ -139,6 +139,14 @@ def test_openai_assistant_health():
             "client_initialized": False,
             "response": "",
             "error": openai_status.get("message") or "OpenAI client could not initialize",
+            "secret_source": openai_status.get("secret_source", "missing"),
+            "provided_length": openai_status.get("provided_length", 0),
+            "streamlit_imported": openai_status.get("streamlit_imported"),
+            "secrets_accessible": openai_status.get("secrets_accessible"),
+            "top_level_secret_keys": openai_status.get("top_level_secret_keys", []),
+            "top_level_key_present": openai_status.get("top_level_key_present"),
+            "openai_section_present": openai_status.get("openai_section_present"),
+            "nested_key_present": openai_status.get("nested_key_present"),
         }
 
     try:
@@ -158,6 +166,14 @@ def test_openai_assistant_health():
             "client_initialized": True,
             "response": response_text[:120],
             "error": "",
+            "secret_source": openai_status.get("secret_source", "missing"),
+            "provided_length": openai_status.get("provided_length", 0),
+            "streamlit_imported": openai_status.get("streamlit_imported"),
+            "secrets_accessible": openai_status.get("secrets_accessible"),
+            "top_level_secret_keys": openai_status.get("top_level_secret_keys", []),
+            "top_level_key_present": openai_status.get("top_level_key_present"),
+            "openai_section_present": openai_status.get("openai_section_present"),
+            "nested_key_present": openai_status.get("nested_key_present"),
         }
     except Exception as exc:
         logger.warning("OpenAI health test failed: %s", exc)
@@ -167,6 +183,14 @@ def test_openai_assistant_health():
             "client_initialized": bool(openai_status.get("client_initialized")),
             "response": "",
             "error": f"{type(exc).__name__}: {exc}",
+            "secret_source": openai_status.get("secret_source", "missing"),
+            "provided_length": openai_status.get("provided_length", 0),
+            "streamlit_imported": openai_status.get("streamlit_imported"),
+            "secrets_accessible": openai_status.get("secrets_accessible"),
+            "top_level_secret_keys": openai_status.get("top_level_secret_keys", []),
+            "top_level_key_present": openai_status.get("top_level_key_present"),
+            "openai_section_present": openai_status.get("openai_section_present"),
+            "nested_key_present": openai_status.get("nested_key_present"),
         }
 
 
@@ -2106,10 +2130,30 @@ else:
                     with ai_col2:
                         if ai_health_result:
                             st.caption(
+                                "OpenAI secret source detected: {source} | provided_length: {length}".format(
+                                    source=ai_health_result.get("secret_source", "missing"),
+                                    length=ai_health_result.get("provided_length", 0),
+                                )
+                            )
+                            st.caption(
                                 "OPENAI_API_KEY present: {key_present} | OpenAI client initialized: {client_ready} | Test API call success: {success}".format(
                                     key_present="Yes" if ai_health_result.get("key_present") else "No",
                                     client_ready="Yes" if ai_health_result.get("client_initialized") else "No",
                                     success="Yes" if ai_health_result.get("success") else "No",
+                                )
+                            )
+                            st.caption(
+                                "Secrets visible: streamlit_imported={streamlit_imported} st.secrets_accessible={secrets_accessible} top_level_keys={keys}".format(
+                                    streamlit_imported="Yes" if ai_health_result.get("streamlit_imported") else "No",
+                                    secrets_accessible="Yes" if ai_health_result.get("secrets_accessible") else "No",
+                                    keys=", ".join(ai_health_result.get("top_level_secret_keys") or []) or "none",
+                                )
+                            )
+                            st.caption(
+                                "OpenAI path checks: top_level_key={top_level} openai_section={section} nested_key={nested}".format(
+                                    top_level="Yes" if ai_health_result.get("top_level_key_present") else "No",
+                                    section="Yes" if ai_health_result.get("openai_section_present") else "No",
+                                    nested="Yes" if ai_health_result.get("nested_key_present") else "No",
                                 )
                             )
                             if ai_health_result.get("success"):
