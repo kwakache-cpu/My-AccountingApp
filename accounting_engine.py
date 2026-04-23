@@ -378,6 +378,7 @@ def get_finance_integrity_diagnostics(company_key, as_of_date=None, branch_id=No
             JOIN journal_lines jl ON jl.entry_id = je.id
             WHERE je.company_key = ?
               AND COALESCE(je.is_voided, 0) = 0
+              AND COALESCE(je.approval_status, 'Posted') = 'Posted'
               {branch_clause}
             GROUP BY je.id
             HAVING ABS(COALESCE(SUM(jl.debit), 0) - COALESCE(SUM(jl.credit), 0)) >= 0.01
@@ -394,6 +395,7 @@ def get_finance_integrity_diagnostics(company_key, as_of_date=None, branch_id=No
               AND TRIM(COALESCE(source_table, '')) != ''
               AND source_id IS NOT NULL
               AND COALESCE(is_voided, 0) = 0
+              AND COALESCE(approval_status, 'Posted') = 'Posted'
               {branch_clause}
             """.format(branch_clause="AND branch_id = ?" if branch_id else ""),
             tuple([company_key] + ([branch_id] if branch_id else [])),
@@ -446,6 +448,90 @@ def get_finance_integrity_diagnostics(company_key, as_of_date=None, branch_id=No
             "source_documents_missing_gl_count": len(source_document_mismatches),
             "source_document_mismatches": source_document_mismatches,
             "chart_of_accounts": coa_diagnostics,
+        }
+    finally:
+        if owns_connection and conn:
+            conn.close()
+
+
+def get_journal_dominance_diagnostics(company_key, as_of_date=None, branch_id=None, conn=None):
+    """
+    Report whether accounting outputs are journal-led.
+    Compatibility tables are inspected only for warnings; they do not drive balances.
+    """
+    owns_connection = conn is None
+    conn = conn or get_connection()
+    try:
+        integrity = get_finance_integrity_diagnostics(company_key, as_of_date=as_of_date, branch_id=branch_id, conn=conn)
+        legacy_tables = ["transactions", "vouchers", "customer_transactions", "supplier_transactions"]
+        legacy_usage = []
+        for table_name in legacy_tables:
+            exists = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name = ?",
+                (table_name,),
+            ).fetchone()
+            row_count = 0
+            if exists:
+                try:
+                    if table_name in {"transactions", "vouchers", "customer_transactions", "supplier_transactions"}:
+                        company_column = "company_key"
+                        row = conn.execute(
+                            f"SELECT COUNT(*) AS row_count FROM {table_name} WHERE {company_column} = ?",
+                            (company_key,),
+                        ).fetchone()
+                    else:
+                        row = conn.execute(f"SELECT COUNT(*) AS row_count FROM {table_name}").fetchone()
+                    row_count = int(row["row_count"] or 0) if row else 0
+                except sqlite3.Error:
+                    row_count = 0
+            legacy_usage.append(
+                {
+                    "table": table_name,
+                    "classification": "compatibility_history_only",
+                    "exists": bool(exists),
+                    "row_count": row_count,
+                    "controls_balances": False,
+                }
+            )
+        posted_journal_count = conn.execute(
+            """
+            SELECT COUNT(*) AS journal_count
+            FROM journal_entries
+            WHERE company_key = ?
+              AND COALESCE(is_voided, 0) = 0
+              AND COALESCE(approval_status, 'Posted') = 'Posted'
+              {branch_clause}
+            """.format(branch_clause="AND branch_id = ?" if branch_id else ""),
+            tuple([company_key] + ([branch_id] if branch_id else [])),
+        ).fetchone()
+        warnings = []
+        if not integrity["accounts_receivable"]["reconciled"]:
+            warnings.append("A/R customer detail does not reconcile to the journal control account.")
+        if not integrity["accounts_payable"]["reconciled"]:
+            warnings.append("A/P supplier detail does not reconcile to the journal control account.")
+        if integrity["unbalanced_journal_count"]:
+            warnings.append(f"{integrity['unbalanced_journal_count']} posted journal(s) are unbalanced.")
+        if integrity["orphaned_journal_reference_count"]:
+            warnings.append(f"{integrity['orphaned_journal_reference_count']} posted journal source reference(s) are orphaned.")
+        if integrity["source_documents_missing_gl_count"]:
+            warnings.append(f"{integrity['source_documents_missing_gl_count']} source document posting-state issue(s) detected.")
+        active_legacy = [item for item in legacy_usage if item["row_count"] > 0]
+        if active_legacy:
+            warnings.append(
+                "Compatibility/history tables contain rows but are not used for balances: "
+                + ", ".join(f"{item['table']}={item['row_count']}" for item in active_legacy)
+            )
+        return {
+            "source_of_truth": "journal_entries + journal_lines",
+            "posted_journal_count": int(posted_journal_count["journal_count"] or 0) if posted_journal_count else 0,
+            "trial_balance_source": "journal_entries + journal_lines, Posted only",
+            "general_ledger_source": "journal_entries + journal_lines, Posted only",
+            "ar_balance_source": "journal_entries + journal_lines filtered by customer_id and Accounts Receivable",
+            "ap_balance_source": "journal_entries + journal_lines filtered by supplier_id and Accounts Payable",
+            "compatibility_tables": legacy_usage,
+            "integrity": integrity,
+            "warnings": warnings,
+            "ok": not warnings,
         }
     finally:
         if owns_connection and conn:
@@ -1554,22 +1640,12 @@ def get_ar_aging_report(company_key, as_of_date=None):
                   AND jl.debit > 0
                   AND lower({_coa_name_expression()}) LIKE 'accounts receivable%'
                   AND date(je.date) <= date(?)
+                  AND COALESCE(je.is_voided, 0) = 0
+                  AND COALESCE(je.approval_status, 'Posted') = 'Posted'
                 """,
                 (company_key, int(customer["id"]), _resolve_date(report_date.date())),
             ).fetchone()
             oldest_date = pd.Timestamp(oldest_row["oldest_open_date"]) if oldest_row and oldest_row["oldest_open_date"] else pd.Timestamp(report_date)
-            if oldest_row is None or oldest_row["oldest_open_date"] is None:
-                tx_rows = conn.execute(
-                    """
-                    SELECT transaction_date
-                    FROM customer_transactions
-                    WHERE company_key = ? AND customer_id = ? AND transaction_type = 'Debit'
-                    ORDER BY date(transaction_date) ASC, id ASC
-                    """,
-                    (company_key, int(customer["id"])),
-                ).fetchall()
-                if tx_rows:
-                    oldest_date = min(pd.Timestamp(row["transaction_date"]) for row in tx_rows if row["transaction_date"])
             days = int((report_date - oldest_date).days) if oldest_date is not None else 0
             rows.append(
                 {
@@ -1600,6 +1676,8 @@ def get_supplier_balance(company_key, supplier_id, as_of_date=None, conn=None):
             WHERE je.company_key = ?
               AND je.supplier_id = ?
               AND lower({_coa_name_expression()}) LIKE 'accounts payable%'
+              AND COALESCE(je.is_voided, 0) = 0
+              AND COALESCE(je.approval_status, 'Posted') = 'Posted'
               {"AND date(je.date) <= date(?)" if as_of_date else ""}
             """,
             (company_key, int(supplier_id), _resolve_date(as_of_date)) if as_of_date else (company_key, int(supplier_id)),
@@ -1669,6 +1747,8 @@ def get_ap_aging_report(company_key, as_of_date=None):
                   AND jl.credit > 0
                   AND lower({_coa_name_expression()}) LIKE 'accounts payable%'
                   AND date(je.date) <= date(?)
+                  AND COALESCE(je.is_voided, 0) = 0
+                  AND COALESCE(je.approval_status, 'Posted') = 'Posted'
                 """,
                 (company_key, supplier_id, _resolve_date(report_date.date())),
             ).fetchone()
@@ -1821,6 +1901,8 @@ def get_customer_balance(company_key, customer_id, as_of_date=None, conn=None):
             WHERE je.company_key = ?
               AND je.customer_id = ?
               AND lower({_coa_name_expression()}) LIKE 'accounts receivable%'
+              AND COALESCE(je.is_voided, 0) = 0
+              AND COALESCE(je.approval_status, 'Posted') = 'Posted'
               { "AND date(je.date) <= date(?)" if as_of_date else "" }
             """,
             (company_key, int(customer_id), _resolve_date(as_of_date)) if as_of_date else (company_key, int(customer_id)),

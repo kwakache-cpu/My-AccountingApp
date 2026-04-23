@@ -91,6 +91,8 @@ def _journal_df(company_key, branch_id=None, start_date=None, end_date=None, acc
             JOIN journal_lines jl ON jl.entry_id = je.id
             JOIN chart_of_accounts c ON c.id = jl.account_id
             WHERE je.company_key = ?
+              AND COALESCE(je.is_voided, 0) = 0
+              AND COALESCE(je.approval_status, 'Posted') = 'Posted'
         """
         params = [company_key]
         if branch_id:
@@ -1230,6 +1232,8 @@ def get_ledger_balances(company_key, start_date=None, end_date=None, account_nam
             JOIN journal_entries je ON je.id = jl.entry_id
             JOIN chart_of_accounts c ON c.id = jl.account_id
             WHERE je.company_key = ?
+              AND COALESCE(je.is_voided, 0) = 0
+              AND COALESCE(je.approval_status, 'Posted') = 'Posted'
         """
         params = [company_key]
         if start_date:

@@ -30,7 +30,7 @@ import sqlite3
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 import uuid
-from accounting_engine import get_month_sales_total, get_recent_accounting_activity
+from accounting_engine import get_journal_dominance_diagnostics, get_month_sales_total, get_recent_accounting_activity
 
 try:
     import firebase_admin
@@ -2135,6 +2135,60 @@ else:
                         st.write(", ".join(schema_diag.get("compatibility_detail_tables", [])) or "none")
                         st.markdown("Legacy/obsolete references tracked")
                         st.write(", ".join(schema_diag.get("legacy_obsolete_tables", [])) or "none")
+                    if total_companies:
+                        selected_health_company = None
+                        try:
+                            health_companies = conn.execute(
+                                "SELECT key, name FROM companies ORDER BY name LIMIT 100"
+                            ).fetchall()
+                            if health_companies:
+                                health_company_names = [f"{row['name']} ({row['key']})" for row in health_companies]
+                                selected_health_label = st.selectbox(
+                                    "Accounting integrity company",
+                                    health_company_names,
+                                    key="journal_dominance_company_select",
+                                )
+                                selected_health_company = health_companies[health_company_names.index(selected_health_label)]["key"]
+                        except Exception as journal_company_error:
+                            logger.warning("Could not load companies for journal dominance diagnostics: %s", journal_company_error)
+                        if selected_health_company:
+                            journal_diag = get_journal_dominance_diagnostics(
+                                selected_health_company,
+                                branch_id=st.session_state.get("active_branch_id"),
+                                conn=conn,
+                            )
+                            st.markdown("---")
+                            st.caption("Accounting Core Dominance")
+                            jd1, jd2, jd3 = st.columns(3)
+                            jd1.metric("Journal Integrity", "Healthy" if journal_diag.get("ok") else "Needs Review")
+                            jd2.metric(
+                                "A/R Reconciliation",
+                                "Matched"
+                                if journal_diag["integrity"]["accounts_receivable"]["reconciled"]
+                                else "Mismatch",
+                                format_currency(journal_diag["integrity"]["accounts_receivable"]["difference"]),
+                            )
+                            jd3.metric(
+                                "A/P Reconciliation",
+                                "Matched"
+                                if journal_diag["integrity"]["accounts_payable"]["reconciled"]
+                                else "Mismatch",
+                                format_currency(journal_diag["integrity"]["accounts_payable"]["difference"]),
+                            )
+                            st.caption(
+                                "Source of truth: {source} | Posted journals: {count} | Unbalanced: {unbalanced} | Orphaned refs: {orphaned}".format(
+                                    source=journal_diag["source_of_truth"],
+                                    count=journal_diag["posted_journal_count"],
+                                    unbalanced=journal_diag["integrity"]["unbalanced_journal_count"],
+                                    orphaned=journal_diag["integrity"]["orphaned_journal_reference_count"],
+                                )
+                            )
+                            if journal_diag.get("warnings"):
+                                st.warning("Accounting core warnings: " + " ".join(journal_diag["warnings"]))
+                            else:
+                                st.success("Accounting core dominance check passed.")
+                            with st.expander("Compatibility Tables: History Only", expanded=False):
+                                st.dataframe(pd.DataFrame(journal_diag["compatibility_tables"]), use_container_width=True)
                     st.markdown("---")
                     st.caption("Admin Backup Export")
                     export_state_key = "admin_backup_export_payload"
