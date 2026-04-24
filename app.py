@@ -102,6 +102,7 @@ format_currency = eka_modules.format_currency
 get_exchange_rate = eka_modules.get_exchange_rate
 get_openai_client_status = get_ai_service_status
 initialize_paystack_payment = eka_modules.initialize_paystack_payment
+test_paystack_connection = eka_modules.test_paystack_connection
 log_audit_action = eka_modules.log_audit_action
 render_accounting_assistant_sidebar = eka_modules.render_accounting_assistant_sidebar
 show_accounts_payable = eka_modules.show_accounts_payable
@@ -2106,6 +2107,39 @@ else:
                             callback_configured="Yes" if paystack_diag.get("callback_url_configured") else "No",
                         )
                     )
+                    paystack_health_key = "admin_paystack_health_test_result"
+                    paystack_health_result = st.session_state.get(paystack_health_key)
+                    paystack_col1, paystack_col2 = st.columns([1, 2])
+                    with paystack_col1:
+                        if st.button("Test Paystack Connection", key="test_paystack_connection_btn", use_container_width=True):
+                            if require_role_permission(u["role"], "view_system_health", action_label="test Paystack configuration"):
+                                paystack_health_result = test_paystack_connection()
+                                st.session_state[paystack_health_key] = paystack_health_result
+                    with paystack_col2:
+                        if paystack_health_result:
+                            st.caption(
+                                "Secret key present: {secret_key} | Public key present: {public_key} | Callback URL configured: {callback_url}".format(
+                                    secret_key="Yes" if paystack_health_result.get("secret_key_present") else "No",
+                                    public_key="Yes" if paystack_health_result.get("public_key_present") else "No",
+                                    callback_url="Yes" if paystack_health_result.get("callback_url_present") else "No",
+                                )
+                            )
+                            st.caption(
+                                "Currency: {currency} | Config ready: {config_ready} | Optional webhook secret present: {webhook_secret}".format(
+                                    currency=paystack_health_result.get("currency") or "GHS",
+                                    config_ready="Yes" if paystack_health_result.get("config_ready") else "No",
+                                    webhook_secret="Yes" if paystack_health_result.get("webhook_secret_present") else "No",
+                                )
+                            )
+                            st.caption(
+                                "Last test result: {message}".format(
+                                    message=paystack_health_result.get("message") or "No result",
+                                )
+                            )
+                            if paystack_health_result.get("success"):
+                                st.success(paystack_health_result.get("message") or "Paystack configuration is ready.")
+                            else:
+                                st.warning(paystack_health_result.get("error") or "Paystack health test failed.")
                     schema_diag = operations_snapshot["schema"]
                     st.markdown("---")
                     st.caption("Schema Manifest Health")

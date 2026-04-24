@@ -417,6 +417,42 @@ def get_paystack_diagnostics():
     }
 
 
+def test_paystack_connection():
+    config = get_paystack_runtime_config()
+    config_ready = bool(
+        config["secret_key_present"]
+        and config["public_key_present"]
+        and config["callback_url_configured"]
+        and str(config.get("currency") or "").upper() == "GHS"
+    )
+    missing_parts = []
+    if not config["secret_key_present"]:
+        missing_parts.append("PAYSTACK_SECRET_KEY")
+    if not config["public_key_present"]:
+        missing_parts.append("PAYSTACK_PUBLIC_KEY")
+    if not config["callback_url_configured"]:
+        missing_parts.append("PAYSTACK_CALLBACK_URL")
+    if str(config.get("currency") or "").upper() != "GHS":
+        missing_parts.append("PAYSTACK_CURRENCY must be GHS")
+
+    return {
+        "secret_key_present": config["secret_key_present"],
+        "public_key_present": config["public_key_present"],
+        "callback_url_present": config["callback_url_configured"],
+        "currency": config["currency"],
+        "config_ready": config_ready,
+        "webhook_secret_present": bool(config.get("webhook_secret")),
+        "calls_paystack": False,
+        "success": config_ready,
+        "error": "" if config_ready else "Missing or invalid Paystack configuration: " + ", ".join(missing_parts),
+        "message": (
+            "Configuration ready. Live payment test requires initializing checkout."
+            if config_ready
+            else "Paystack configuration is incomplete."
+        ),
+    }
+
+
 def _generate_paystack_reference(prefix="ONB"):
     return f"{prefix}-{datetime.now().strftime('%Y%m%d%H%M%S')}-{uuid.uuid4().hex[:8].upper()}"
 
