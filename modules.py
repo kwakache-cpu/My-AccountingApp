@@ -15,8 +15,12 @@ import requests
 import streamlit as st
 import streamlit.components.v1 as components
 from dateutil.relativedelta import relativedelta
-from openai import OpenAI
 from PIL import Image
+try:
+    from openai import OpenAI
+except ImportError:
+    OpenAI = None
+
 try:
     import cv2
     from pyzbar import pyzbar
@@ -35,28 +39,128 @@ except Exception:
 pos_success_key = "pos_transaction_success"
 scanner_active = True
 DOCUMENT_WORKFLOW_STATUSES = ["Draft", "Submitted", "Approved", "Posted", "Cancelled", "Voided"]
+ALL_ENTERPRISE_PERMISSIONS = {
+    "view_dashboard",
+    "manage_company",
+    "manage_branches",
+    "manage_users",
+    "manage_chart_of_accounts",
+    "create_customer",
+    "create_supplier",
+    "create_invoice",
+    "create_bill",
+    "receive_customer_payment",
+    "make_supplier_payment",
+    "post_accounting_document",
+    "void_or_reverse_document",
+    "close_period",
+    "reopen_period",
+    "lock_period",
+    "view_reports",
+    "view_audit_trail",
+    "view_system_health",
+    "export_backup",
+    "restore_backup",
+    "manage_integrations",
+    "use_ai_assistant",
+}
+ROLE_NAME_ALIASES = {
+    "Gatekeeper": "Dev",
+    "Branch Admin": "Sub-Admin",
+    "Manager": "Sub-Admin",
+    "Branch Manager": "Sub-Admin",
+    "Branch Bookkeeper": "Branch_Bookkeeper",
+    "Cashier": "Staff",
+}
+PERMISSION_ALIASES = {
+    "system_health": {"view_system_health"},
+    "backup_export": {"export_backup"},
+    "restore_diagnostics": {"restore_backup", "view_system_health"},
+    "company_deploy": {"manage_company"},
+    "company_lifecycle": {"manage_company"},
+    "period_control": {"close_period", "reopen_period", "lock_period"},
+    "post_journal": {"post_accounting_document"},
+    "system_configuration": {"manage_company", "manage_integrations"},
+}
 ENTERPRISE_ROLE_PERMISSIONS = {
-    "Dev": {
-        "system_health",
-        "backup_export",
-        "restore_diagnostics",
-        "company_deploy",
-        "company_lifecycle",
-        "period_control",
-        "post_journal",
-        "system_configuration",
-    },
+    "Dev": set(ALL_ENTERPRISE_PERMISSIONS),
     "Master Admin": {
-        "backup_export",
-        "restore_diagnostics",
-        "company_lifecycle",
-        "period_control",
-        "post_journal",
-        "system_configuration",
+        "view_dashboard",
+        "manage_company",
+        "manage_branches",
+        "manage_users",
+        "manage_chart_of_accounts",
+        "create_customer",
+        "create_supplier",
+        "create_invoice",
+        "create_bill",
+        "receive_customer_payment",
+        "make_supplier_payment",
+        "post_accounting_document",
+        "void_or_reverse_document",
+        "close_period",
+        "reopen_period",
+        "lock_period",
+        "view_reports",
+        "view_audit_trail",
+        "view_system_health",
+        "export_backup",
+        "restore_backup",
+        "manage_integrations",
+        "use_ai_assistant",
     },
-    "Sub-Admin": {"period_control", "post_journal"},
-    "Bookkeeper": {"post_journal"},
-    "Branch_Bookkeeper": {"post_journal"},
+    "Sub-Admin": {
+        "view_dashboard",
+        "manage_company",
+        "manage_branches",
+        "manage_users",
+        "manage_chart_of_accounts",
+        "create_customer",
+        "create_supplier",
+        "create_invoice",
+        "create_bill",
+        "receive_customer_payment",
+        "make_supplier_payment",
+        "post_accounting_document",
+        "close_period",
+        "view_reports",
+        "view_audit_trail",
+        "use_ai_assistant",
+    },
+    "Bookkeeper": {
+        "view_dashboard",
+        "manage_chart_of_accounts",
+        "create_customer",
+        "create_supplier",
+        "create_invoice",
+        "create_bill",
+        "receive_customer_payment",
+        "make_supplier_payment",
+        "post_accounting_document",
+        "view_reports",
+        "use_ai_assistant",
+    },
+    "Branch_Bookkeeper": {
+        "view_dashboard",
+        "create_customer",
+        "create_supplier",
+        "create_invoice",
+        "create_bill",
+        "receive_customer_payment",
+        "make_supplier_payment",
+        "post_accounting_document",
+        "view_reports",
+        "use_ai_assistant",
+    },
+    "Staff": {
+        "view_dashboard",
+        "create_customer",
+        "create_supplier",
+        "create_invoice",
+        "receive_customer_payment",
+        "view_reports",
+    },
+    "Demo": {"view_dashboard"},
 }
 
 # Setup Logger
@@ -123,14 +227,81 @@ def log_audit_action(
     )
 
 
+def _normalize_role_name(role):
+    normalized = str(role or "").strip()
+    return ROLE_NAME_ALIASES.get(normalized, normalized)
+
+
+def _resolve_permission_targets(permission):
+    permission_name = str(permission or "").strip()
+    targets = PERMISSION_ALIASES.get(permission_name, permission_name)
+    if isinstance(targets, (set, list, tuple)):
+        return {str(item).strip() for item in targets if str(item).strip()}
+    return {permission_name} if permission_name else set()
+
+
+def _record_permission_security_event(role, permission, action_label=None, company_key=None, conn=None, branch_id=None):
+    event_role = _normalize_role_name(role) or "Unknown"
+    permission_targets = sorted(_resolve_permission_targets(permission))
+    permission_label = ", ".join(permission_targets) or str(permission or "unknown")
+    message = (
+        f"Permission denied for role={event_role} permission={permission_label} "
+        f"action={action_label or permission_label}"
+    )
+    owned_connection = conn is None
+    local_conn = conn
+    try:
+        if local_conn is None:
+            local_conn = get_connection()
+        local_conn.execute(
+            """
+            INSERT INTO system_logs (timestamp, level, module_name, message)
+            VALUES (CURRENT_TIMESTAMP, 'WARNING', 'Security', ?)
+            """,
+            (message,),
+        )
+        if company_key:
+            database_log_audit_action(
+                local_conn,
+                company_key,
+                event_role,
+                f"Permission denied: {action_label or permission_label}",
+                "Security",
+                details=f"permission={permission_label}",
+                branch_id=branch_id,
+                action_type="admin",
+                document_ref=str(company_key),
+            )
+        if owned_connection:
+            local_conn.commit()
+    except Exception:
+        logger.debug("Permission security logging skipped.", exc_info=True)
+    finally:
+        if owned_connection and local_conn:
+            local_conn.close()
+
+
 def user_has_permission(role, permission):
-    return permission in ENTERPRISE_ROLE_PERMISSIONS.get(str(role or ""), set())
+    normalized_role = _normalize_role_name(role)
+    granted_permissions = ENTERPRISE_ROLE_PERMISSIONS.get(normalized_role, set())
+    permission_targets = _resolve_permission_targets(permission)
+    if not granted_permissions or not permission_targets:
+        return False
+    return any(target in granted_permissions for target in permission_targets)
 
 
-def require_permission(role, permission, action_label=None):
+def require_permission(role, permission, action_label=None, company_key=None, conn=None, branch_id=None):
     if user_has_permission(role, permission):
         return True
-    st.warning(f"You do not have permission to {action_label or permission}.")
+    _record_permission_security_event(
+        role,
+        permission,
+        action_label=action_label,
+        company_key=company_key,
+        conn=conn,
+        branch_id=branch_id,
+    )
+    st.warning("You do not have permission to perform this action.")
     return False
 
 
@@ -828,14 +999,25 @@ def set_period_lock(company_key, period_date, locked, locked_by=None):
 
 
 def set_period_status(company_key, period_date, status, changed_by=None):
-    if changed_by and not user_has_permission(changed_by, "period_control"):
+    normalized_status = str(status or "Open").strip().title()
+    required_permission = {
+        "Closed": "close_period",
+        "Locked": "lock_period",
+        "Open": "reopen_period",
+    }.get(normalized_status)
+    if changed_by and required_permission and not user_has_permission(changed_by, required_permission):
+        _record_permission_security_event(
+            changed_by,
+            required_permission,
+            action_label=f"{normalized_status.lower()} accounting period",
+            company_key=company_key,
+        )
         raise PermissionError("This role cannot change accounting period controls.")
     period_dt = pd.to_datetime(period_date).date()
     start_date = period_dt.replace(day=1)
     next_month = (pd.Timestamp(start_date) + pd.offsets.MonthBegin(1)).date()
     end_date = (pd.Timestamp(next_month) - pd.Timedelta(days=1)).date()
     period_label = start_date.strftime("%Y-%m")
-    normalized_status = str(status or "Open").strip().title()
     if normalized_status not in {"Open", "Closed", "Locked"}:
         raise ValueError("Accounting period status must be Open, Closed, or Locked.")
     is_locked = normalized_status == "Locked"
@@ -887,6 +1069,17 @@ def set_period_status(company_key, period_date, status, changed_by=None):
             ),
         )
         conn.commit()
+        if changed_by:
+            log_audit_action(
+                conn,
+                company_key,
+                _normalize_role_name(changed_by),
+                f"Accounting Period {normalized_status}",
+                "Period Control",
+                details=f"period_label={period_label}; status={normalized_status}",
+                action_type="admin",
+                document_ref=period_label,
+            )
     finally:
         conn.close()
 
@@ -980,6 +1173,7 @@ def save_transaction(description, lines, company_key=None, reference=None, creat
 
 def show_journal_entries(company_key, role):
     st.header("🧾 General Journal")
+    can_post_manual_entries = user_has_permission(role, "post_accounting_document")
 
     branch_id = st.session_state.get("active_branch_id")
     branches = get_company_branches(company_key)
@@ -1084,8 +1278,11 @@ def show_journal_entries(company_key, role):
     if form_key not in st.session_state:
         st.session_state[form_key] = False
 
-    if st.button("Add Manual Entry", key=f"btn_manual_journal_{company_key}"):
-        st.session_state[form_key] = not st.session_state[form_key]
+    if can_post_manual_entries:
+        if st.button("Add Manual Entry", key=f"btn_manual_journal_{company_key}"):
+            st.session_state[form_key] = not st.session_state[form_key]
+    else:
+        st.caption("You can review journal entries, but you do not have permission to add manual entries.")
 
     if st.session_state.get(form_key, False):
         with st.form(f"manual_journal_entry_form_{company_key}"):
@@ -1135,6 +1332,16 @@ def show_journal_entries(company_key, role):
             submitted = st.form_submit_button("Save Manual Entry")
 
             if submitted:
+                if not require_permission(
+                    role,
+                    "post_accounting_document",
+                    action_label="post accounting documents",
+                    company_key=company_key,
+                    branch_id=branch_for_entry,
+                ):
+                    if conn:
+                        conn.close()
+                    return
                 selected_account = str(account or "").split(" - ", 1)[-1].strip()
                 if not selected_account:
                     st.warning("Enter an account before saving the manual entry.")
@@ -2528,6 +2735,9 @@ def show_create_bill_page(company_key):
         if not company_key:
             st.warning("No active company was found.")
             return
+        if not user_has_permission(role, "create_bill"):
+            st.warning("You do not have permission to perform this action.")
+            return
 
         suppliers = conn.execute("SELECT id, name FROM suppliers WHERE company_key = ? ORDER BY name", (company_key,)).fetchall()
         supplier_options = [""] + [row["name"] for row in suppliers]
@@ -2570,6 +2780,15 @@ def show_create_bill_page(company_key):
             submitted = st.form_submit_button("Submit")
 
             if submitted:
+                if not require_permission(
+                    role,
+                    "create_bill",
+                    action_label="create bills",
+                    company_key=company_key,
+                    conn=conn,
+                    branch_id=branch_id,
+                ):
+                    return
                 if not supplier_name:
                     st.error("Supplier is required.")
                     return
@@ -2623,6 +2842,16 @@ def show_create_bill_page(company_key):
                     )
 
                 if posting_state == "Posted":
+                    if not require_permission(
+                        role,
+                        "post_accounting_document",
+                        action_label="post accounting documents",
+                        company_key=company_key,
+                        conn=conn,
+                        branch_id=branch_id,
+                    ):
+                        conn.rollback()
+                        return
                     post_journal_entry(
                         company_key=company_key,
                         date=bill_date,
@@ -3389,7 +3618,7 @@ def show_chart_of_accounts(company_key, role):
         if 'conn' in locals() and conn:
             conn.close()
 
-    if role not in ("Staff", "Demo"):
+    if user_has_permission(role, "manage_chart_of_accounts"):
         with st.form("add_coa_form"):
             acc_code = st.text_input("Account Code")
             acc_name = st.text_input("Account Name")
@@ -3397,6 +3626,13 @@ def show_chart_of_accounts(company_key, role):
             if st.form_submit_button("Add Account"):
                 if acc_name:
                     try:
+                        if not require_permission(
+                            role,
+                            "manage_chart_of_accounts",
+                            action_label="manage the chart of accounts",
+                            company_key=company_key,
+                        ):
+                            return
                         conn = get_connection()
                         engine_get_or_create_account(conn, acc_name, _normalize_account_category(acc_type), account_code=acc_code)
                         conn.commit()
@@ -3412,8 +3648,7 @@ def show_chart_of_accounts(company_key, role):
 # ==========================================
 def show_company_setup(company_key, company_name, role):
     st.header("⚙️ System Configuration")
-    if role not in ("Master Admin", "Sub-Admin"):
-        st.error("Access Denied")
+    if not require_permission(role, "manage_company", action_label="manage company settings", company_key=company_key):
         return
     st.subheader("Company Profile")
     conn = None
@@ -3466,6 +3701,14 @@ def show_company_setup(company_key, company_name, role):
                             ),
                         )
                         if st.form_submit_button("Update Client Settings"):
+                            if not require_permission(
+                                role,
+                                "manage_company",
+                                action_label="update company settings",
+                                company_key=company_key,
+                                conn=conn,
+                            ):
+                                return
                             conn.execute(
                                 """
                                 UPDATE companies
@@ -3487,7 +3730,7 @@ def show_company_setup(company_key, company_name, role):
                             st.success("Entry Updated")
                             st.rerun()
 
-            if role == "Master Admin":
+            if user_has_permission(role, "manage_branches") or user_has_permission(role, "manage_users"):
                 st.markdown("---")
                 st.subheader("Branch Deployment")
                 try:
@@ -3520,6 +3763,13 @@ def show_company_setup(company_key, company_name, role):
                         branch_manager = st.text_input("Branch Manager Name", key="deploy_branch_manager")
                         branch_type = st.selectbox("Branch Type", ["Retail", "Warehouse", "Office", "Other"], key="deploy_branch_type")
                         if st.form_submit_button("Deploy Branch"):
+                            if not require_permission(
+                                role,
+                                "manage_branches",
+                                action_label="manage branches",
+                                company_key=company_key,
+                            ):
+                                return
                             if not branch_name.strip():
                                 st.error("Enter a branch name.")
                             else:
@@ -3589,6 +3839,14 @@ def show_company_setup(company_key, company_name, role):
                     submitted = st.form_submit_button("Create Staff Login")
 
                     if submitted:
+                        if not require_permission(
+                            role,
+                            "manage_users",
+                            action_label="manage users",
+                            company_key=company_key,
+                            conn=conn,
+                        ):
+                            return
                         if not staff_name.strip():
                             st.warning("Enter a staff name before creating a login.")
                         elif not manual_login_key.strip():
@@ -5701,11 +5959,14 @@ def show_reports(company_key, branch_id=None):
     """Route report navigation to the IFRS financial reporting suite."""
     from financials import show_financial_reports, show_ledger_viewer, show_record_transaction
 
+    role = st.session_state.get("user", {}).get("role", "System")
+    if not require_permission(role, "view_reports", action_label="view reports", company_key=company_key, branch_id=branch_id):
+        return
     if branch_id is not None:
         st.session_state.active_branch_id = branch_id
     tabs = st.tabs(["📊 Financial Statements", "📚 Ledger", "🧾 Record Transaction"])
     with tabs[0]:
-        show_financial_reports(company_key)
+        show_financial_reports(company_key, role)
     with tabs[1]:
         show_ledger_viewer(company_key, st.session_state.get("user", {}).get("role"))
     with tabs[2]:
@@ -5823,6 +6084,15 @@ def show_ai_assistant(client_id):
     active_company_id = _get_active_company_id(client_id)
     if not active_company_id:
         st.warning("No active company context is available for the AI assistant.")
+        return
+    role = st.session_state.get("user", {}).get("role", "System")
+    if not require_permission(
+        role,
+        "use_ai_assistant",
+        action_label="use the AI assistant",
+        company_key=active_company_id,
+        branch_id=st.session_state.get("active_branch_id"),
+    ):
         return
 
     st.header("🤖 Gatekeeper Admin")
@@ -6024,8 +6294,13 @@ def _record_supplier_ledger_transaction(conn, company_key, supplier_id, transact
 # ==========================================
 def show_audit_trail(company_key, role="User", branch_id=None):
     st.header("🔍 System Audit Trail")
-    if role == "Branch_Bookkeeper":
-        st.error("Access denied. Branch Bookkeepers cannot view the audit trail.")
+    if not require_permission(
+        role,
+        "view_audit_trail",
+        action_label="view the audit trail",
+        company_key=company_key,
+        branch_id=branch_id,
+    ):
         return
     try:
         conn = get_connection()
@@ -6059,8 +6334,7 @@ def show_audit_trail(company_key, role="User", branch_id=None):
 
 
 def show_branch_management(company_key, role):
-    if role != "Master Admin":
-        st.error("Access denied. Only Master Admins can manage branches.")
+    if not require_permission(role, "manage_branches", action_label="manage branches", company_key=company_key):
         return
 
     from financials import get_income_statement

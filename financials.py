@@ -63,9 +63,11 @@ get_currency_symbol = eka_modules.get_currency_symbol
 get_display_currency = eka_modules.get_display_currency
 get_exchange_rate = eka_modules.get_exchange_rate
 post_transaction = eka_modules.post_transaction
+require_permission = eka_modules.require_permission
 set_period_lock = eka_modules.set_period_lock
 set_period_status = eka_modules.set_period_status
 show_journal_entries = eka_modules.show_journal_entries
+user_has_permission = eka_modules.user_has_permission
 
 
 def _resolve_date(value):
@@ -709,6 +711,8 @@ def show_customers_page(company_key, role):
         email = st.text_input("Email")
         phone = st.text_input("Phone")
         if st.form_submit_button("Save Customer") and name:
+            if not require_permission(role, "create_customer", action_label="create customers", company_key=company_key):
+                return
             conn = get_connection()
             conn.execute(
                 "INSERT OR IGNORE INTO customers (company_key, name, email, phone, currency) VALUES (?, ?, ?, ?, 'GHS')",
@@ -736,6 +740,8 @@ def show_suppliers_page(company_key, role):
         email = st.text_input("Email", key=f"supplier_email_{company_key}")
         phone = st.text_input("Phone", key=f"supplier_phone_{company_key}")
         if st.form_submit_button("Save Supplier") and name:
+            if not require_permission(role, "create_supplier", action_label="create suppliers", company_key=company_key):
+                return
             conn = get_connection()
             conn.execute(
                 "INSERT OR IGNORE INTO suppliers (company_key, name, email, phone, currency) VALUES (?, ?, ?, ?, 'GHS')",
@@ -758,6 +764,9 @@ def show_suppliers_page(company_key, role):
 
 def show_create_invoice_page(company_key, role):
     st.header("📄 Create Invoice")
+    if not user_has_permission(role, "create_invoice"):
+        st.warning("You do not have permission to perform this action.")
+        return
     conn = get_connection()
     customers = [row[0] for row in conn.execute("SELECT name FROM customers WHERE company_key = ? ORDER BY name", (company_key,)).fetchall()]
     conn.close()
@@ -771,6 +780,9 @@ def show_create_invoice_page(company_key, role):
         description = st.text_input("Description", key=f"invoice_description_{company_key}")
         if st.form_submit_button("Save Invoice") and customer_name and amount > 0:
             conn = get_connection()
+            if not require_permission(role, "create_invoice", action_label="create invoices", company_key=company_key, conn=conn):
+                conn.close()
+                return
             row = conn.execute(
                 "SELECT id FROM customers WHERE company_key = ? AND name = ? LIMIT 1",
                 (company_key, customer_name),
@@ -803,6 +815,16 @@ def show_create_invoice_page(company_key, role):
                 st.stop()
 
             if posting_state == "Posted":
+                if not require_permission(
+                    role,
+                    "post_accounting_document",
+                    action_label="post accounting documents",
+                    company_key=company_key,
+                    conn=conn,
+                ):
+                    conn.rollback()
+                    conn.close()
+                    return
                 journal_lines = [
                     {"account_id": get_account_id(conn, "Cash" if status == "Paid" else "Accounts Receivable", "Asset"), "debit": amount + output_vat, "credit": 0},
                     {"account_id": get_account_id(conn, "Sales Revenue", "Income"), "debit": 0, "credit": amount},
@@ -844,6 +866,9 @@ def show_create_invoice_page(company_key, role):
 
 def show_receive_payment_page(company_key, role):
     st.header("💳 Receive Payment")
+    if not user_has_permission(role, "receive_customer_payment"):
+        st.warning("You do not have permission to perform this action.")
+        return
     conn = get_connection()
     customers = [row[0] for row in conn.execute("SELECT name FROM customers WHERE company_key = ? ORDER BY name", (company_key,)).fetchall()]
     conn.close()
@@ -856,6 +881,15 @@ def show_receive_payment_page(company_key, role):
         payment_date = st.date_input("Payment Date", value=datetime.now().date(), key=f"receive_payment_date_{company_key}")
         if st.form_submit_button("Save Receipt") and amount > 0 and customer_name:
             conn = get_connection()
+            if not require_permission(
+                role,
+                "receive_customer_payment",
+                action_label="receive customer payments",
+                company_key=company_key,
+                conn=conn,
+            ):
+                conn.close()
+                return
             row = conn.execute(
                 "SELECT id FROM customers WHERE company_key = ? AND name = ? LIMIT 1",
                 (company_key, customer_name),
@@ -867,6 +901,16 @@ def show_receive_payment_page(company_key, role):
             )
             payment_id = int(conn.execute("SELECT last_insert_rowid()").fetchone()[0])
             if posting_state == "Posted":
+                if not require_permission(
+                    role,
+                    "post_accounting_document",
+                    action_label="post accounting documents",
+                    company_key=company_key,
+                    conn=conn,
+                ):
+                    conn.rollback()
+                    conn.close()
+                    return
                 lines = [
                     {"account_id": get_account_id(conn, "Cash", "Asset"), "debit": amount, "credit": 0},
                     {"account_id": get_account_id(conn, "Accounts Receivable", "Asset"), "debit": 0, "credit": amount},
@@ -907,6 +951,9 @@ def show_receive_payment_page(company_key, role):
 
 def show_supplier_payment_page(company_key, role):
     st.header("💸 Supplier Payment")
+    if not user_has_permission(role, "make_supplier_payment"):
+        st.warning("You do not have permission to perform this action.")
+        return
     conn = get_connection()
     suppliers = [row[0] for row in conn.execute("SELECT name FROM suppliers WHERE company_key = ? ORDER BY name", (company_key,)).fetchall()]
     conn.close()
@@ -919,6 +966,15 @@ def show_supplier_payment_page(company_key, role):
         payment_date = st.date_input("Payment Date", value=datetime.now().date(), key=f"supplier_payment_date_{company_key}")
         if st.form_submit_button("Save Payment") and amount > 0 and supplier_name:
             conn = get_connection()
+            if not require_permission(
+                role,
+                "make_supplier_payment",
+                action_label="make supplier payments",
+                company_key=company_key,
+                conn=conn,
+            ):
+                conn.close()
+                return
             row = conn.execute(
                 "SELECT id FROM suppliers WHERE company_key = ? AND name = ? LIMIT 1",
                 (company_key, supplier_name),
@@ -930,6 +986,16 @@ def show_supplier_payment_page(company_key, role):
             )
             payment_id = int(conn.execute("SELECT last_insert_rowid()").fetchone()[0])
             if posting_state == "Posted":
+                if not require_permission(
+                    role,
+                    "post_accounting_document",
+                    action_label="post accounting documents",
+                    company_key=company_key,
+                    conn=conn,
+                ):
+                    conn.rollback()
+                    conn.close()
+                    return
                 lines = [
                     {"account_id": get_account_id(conn, "Accounts Payable", "Liability"), "debit": amount, "credit": 0},
                     {"account_id": get_account_id(conn, "Cash", "Asset"), "debit": 0, "credit": amount},
@@ -988,6 +1054,8 @@ def _show_legacy_ledger_viewer(company_key, role):
 
 def show_ledger_viewer(company_key, role):
     st.header("📚 Ledger Viewer")
+    if not require_permission(role, "view_reports", action_label="view reports", company_key=company_key):
+        return
     branch_id = st.session_state.get("active_branch_id")
     start_date, end_date, account_name = _filter_controls(f"ledger_override_{company_key}")
     tabs = st.tabs(["General Journal", "Sales Journal", "Purchases Journal", "Cash Book", "General Ledger"])
@@ -1006,6 +1074,8 @@ def show_ledger_viewer(company_key, role):
 
 
 def show_record_transaction(company_key, role):
+    if not require_permission(role, "post_accounting_document", action_label="post accounting documents", company_key=company_key):
+        return
     show_journal_entries(company_key, role)
 
 
@@ -1452,14 +1522,24 @@ def _convert_money_frame(dataframe):
 
 def show_financial_reports(company_key, role=None):
     st.header("📊 Financial Reports")
+    effective_role = role or st.session_state.get("user", {}).get("role", "System")
+    if not require_permission(effective_role, "view_reports", action_label="view reports", company_key=company_key):
+        return
     with st.expander("Year-End Closing", expanded=False):
         closing_date = st.date_input("Closing Date", value=datetime.now().date(), key=f"year_end_close_{company_key}")
         if st.button("Post Year-End Closing Entry", key=f"year_end_close_btn_{company_key}"):
             try:
+                if not require_permission(
+                    effective_role,
+                    "close_period",
+                    action_label="post year-end closing entries",
+                    company_key=company_key,
+                ):
+                    return
                 entry_id = close_fiscal_year(
                     company_key,
                     closing_date,
-                    role or st.session_state.get("user", {}).get("role", "System"),
+                    effective_role,
                     branch_id=st.session_state.get("active_branch_id"),
                 )
                 if entry_id:
@@ -1470,7 +1550,7 @@ def show_financial_reports(company_key, role=None):
                 st.error(f"Year-end closing failed: {exc}")
     
     # Consolidator for Master Admins
-    if role == "Master Admin":
+    if effective_role == "Master Admin":
         if st.button("🔄 Generate Consolidated Group Reports", key=f"consolidator_{company_key}"):
             st.session_state.consolidated_view = True
             st.rerun()
@@ -1479,7 +1559,7 @@ def show_financial_reports(company_key, role=None):
                 st.session_state.consolidated_view = False
                 st.rerun()
     
-    consolidated = st.session_state.get("consolidated_view", False) and role == "Master Admin"
+    consolidated = st.session_state.get("consolidated_view", False) and effective_role == "Master Admin"
     
     try:
         start_date, end_date, account_name = _filter_controls(f"financial_ifrs_safe_{company_key}")

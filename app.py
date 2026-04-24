@@ -34,6 +34,7 @@ from enterprise_services import (
     build_operations_console_snapshot,
     get_ai_service_status,
     get_service_ownership_map,
+    require_role_permission,
 )
 
 try:
@@ -2305,8 +2306,22 @@ else:
                     export_col1, export_col2 = st.columns([1, 2])
                     with export_col1:
                         if st.button("Prepare Backup Export", key="prepare_admin_backup_export_btn", use_container_width=True):
-                            export_result = get_downloadable_backup_export(logger_instance=logger)
-                            st.session_state[export_state_key] = export_result
+                            if require_role_permission(u["role"], "export_backup", action_label="export backups"):
+                                export_result = get_downloadable_backup_export(logger_instance=logger)
+                                st.session_state[export_state_key] = export_result
+                                try:
+                                    log_audit_action(
+                                        conn,
+                                        u.get("key", "SYSTEM"),
+                                        u["role"],
+                                        "Backup Export Prepared" if export_result.get("ok") else "Backup Export Attempt Failed",
+                                        "System Health",
+                                        details=export_result.get("reason"),
+                                        action_type="backup_restore",
+                                        document_ref=export_result.get("filename") or export_result.get("source"),
+                                    )
+                                except Exception:
+                                    logger.debug("Backup export audit logging skipped.", exc_info=True)
                     with export_col2:
                         if export_result and export_result.get("ok") and export_result.get("data"):
                             st.download_button(
@@ -2335,8 +2350,9 @@ else:
                     ai_col1, ai_col2 = st.columns([1, 2])
                     with ai_col1:
                         if st.button("Test AI Assistant", key="test_ai_assistant_health_btn", use_container_width=True):
-                            ai_health_result = test_openai_assistant_health()
-                            st.session_state[ai_health_key] = ai_health_result
+                            if require_role_permission(u["role"], "use_ai_assistant", action_label="use the AI assistant"):
+                                ai_health_result = test_openai_assistant_health()
+                                st.session_state[ai_health_key] = ai_health_result
                     with ai_col2:
                         if ai_health_result:
                             st.caption(
@@ -2458,6 +2474,8 @@ else:
 
                     if submitted:
                         if company_name and manual_key:
+                            if not require_role_permission(u["role"], "manage_company", action_label="deploy company licenses"):
+                                st.stop()
                             new_expiry = datetime.now() + relativedelta(months=+int(duration_months))
                             try:
                                 created_company_key = create_company_record(
@@ -2593,6 +2611,8 @@ else:
                         action_col1, action_col2 = st.columns(2)
                         with action_col1:
                             if st.button("Apply Company Action", key="apply_company_action_btn"):
+                                if not require_role_permission(u["role"], "manage_company", action_label="manage companies"):
+                                    st.stop()
                                 if not confirm_action:
                                     st.warning("Confirm the company action before applying it.")
                                 else:
@@ -2634,6 +2654,8 @@ else:
                                         st.error(f"Company action failed: {action_error}")
                         with action_col2:
                             if st.button("Reactivate Archived Company", key="reactivate_archived_company_btn"):
+                                if not require_role_permission(u["role"], "manage_company", action_label="reactivate companies"):
+                                    st.stop()
                                 try:
                                     conn.execute(
                                         """

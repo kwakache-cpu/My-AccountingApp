@@ -65,11 +65,18 @@ def has_permission(role, permission):
     return user_has_permission(role, permission)
 
 
-def require_role_permission(role, permission, action_label=None):
+def require_role_permission(role, permission, action_label=None, company_key=None, conn=None, branch_id=None):
     """Compatibility wrapper that keeps permission enforcement behind one boundary."""
     from modules import require_permission
 
-    return require_permission(role, permission, action_label=action_label)
+    return require_permission(
+        role,
+        permission,
+        action_label=action_label,
+        company_key=company_key,
+        conn=conn,
+        branch_id=branch_id,
+    )
 
 
 def _safe_section(label, loader):

@@ -7,7 +7,7 @@ import sqlite3
 
 import pandas as pd
 
-from database import get_connection
+from database import get_connection, log_audit_action as database_log_audit_action
 
 
 LEGACY_TABLES = {"vouchers", "transactions"}
@@ -31,7 +31,6 @@ VALID_DOCUMENT_CONTROL_STATUSES = {"Draft", "Submitted", "Approved", "Posted", "
 CONTROLLED_SOURCE_TABLES = {"invoices", "bills", "payments", "stock_movements", "vouchers"}
 CONTROL_ACCOUNT_NAMES = {"Accounts Receivable", "Accounts Payable", "Inventory"}
 UNIFIED_POSTING_ENGINE_VERSION = "phase7_unified_posting_engine_v1"
-POSTING_PERMISSION_ROLES = {"Dev", "Master Admin", "Sub-Admin", "Bookkeeper", "Branch_Bookkeeper"}
 HEADER_ACCOUNT_NAMES = {
     "Assets",
     "Current Assets",
@@ -74,8 +73,28 @@ def _assert_posting_role_allowed(user_role):
     if user_role is None:
         return
     normalized_role = str(user_role or "").strip()
-    if normalized_role not in POSTING_PERMISSION_ROLES:
+    try:
+        from enterprise_services import has_permission
+
+        allowed = has_permission(normalized_role, "post_accounting_document")
+    except Exception:
+        allowed = normalized_role in {"Dev", "Master Admin", "Sub-Admin", "Bookkeeper", "Branch_Bookkeeper"}
+    if not allowed:
         raise PermissionError(f"Role '{normalized_role or 'Unknown'}' is not allowed to post accounting impact.")
+
+
+def _resolve_effective_posting_role(user_role, created_by):
+    if user_role is not None:
+        return user_role
+    candidate_role = str(created_by or "").strip()
+    if not candidate_role:
+        return None
+    try:
+        from enterprise_services import has_permission
+
+        return candidate_role if has_permission(candidate_role, "post_accounting_document") else None
+    except Exception:
+        return candidate_role if candidate_role in {"Dev", "Master Admin", "Sub-Admin", "Bookkeeper", "Branch_Bookkeeper"} else None
 
 
 def normalize_document_status(value, default="Draft"):
@@ -1256,9 +1275,7 @@ def post_accounting_impact(
     owns_connection = conn is None
     conn = conn or get_connection()
     try:
-        effective_user_role = user_role
-        if effective_user_role is None and str(created_by or "").strip() in POSTING_PERMISSION_ROLES:
-            effective_user_role = str(created_by or "").strip()
+        effective_user_role = _resolve_effective_posting_role(user_role, created_by)
         _assert_posting_role_allowed(effective_user_role)
         entry_id = post_journal_entry(
             company_key=company_key,
@@ -1291,7 +1308,22 @@ def post_accounting_impact(
     except Exception as exc:
         message = str(exc)
         level = "WARNING" if "already posted" in message.lower() or "duplicate" in message.lower() else "ERROR"
-        event_message = f"blocked posting source_table={source_table or 'none'} source_id={source_id or 'none'} reason={message}"
+        event_prefix = "permission denied posting" if isinstance(exc, PermissionError) else "blocked posting"
+        event_message = f"{event_prefix} source_table={source_table or 'none'} source_id={source_id or 'none'} reason={message}"
+        try:
+            database_log_audit_action(
+                conn,
+                company_key,
+                str(effective_user_role or created_by or "System"),
+                f"Permission denied: {source_table or 'accounting_document'} posting" if isinstance(exc, PermissionError) else f"Blocked posting: {source_table or 'accounting_document'}",
+                "Security" if isinstance(exc, PermissionError) else "Unified Posting Engine",
+                details=event_message,
+                branch_id=branch_id,
+                action_type="admin" if isinstance(exc, PermissionError) else "post",
+                document_ref=str(source_id or reference or ""),
+            )
+        except Exception:
+            logger.debug("Posting audit logging skipped.", exc_info=True)
         if owns_connection:
             conn.rollback()
             _persist_posting_engine_event(level, event_message)
@@ -1348,6 +1380,11 @@ def reverse_journal_entry(entry_id, created_by=None, reversal_date=None, reason=
             "UPDATE journal_entries SET reversed_entry_id = ? WHERE id = ?",
             (reversal_id, entry_id),
         )
+        _log_posting_engine_event(
+            conn,
+            "INFO",
+            f"reversed journal entry={entry_id} reversal_entry={reversal_id} reason={reason or 'not provided'}",
+        )
         if owns_connection:
             conn.commit()
         return reversal_id
@@ -1382,6 +1419,11 @@ def void_journal_entry(entry_id, voided_by=None, voided_at=None, reason=None, br
         conn.execute(
             "UPDATE journal_entries SET is_voided = 1, voided_at = ?, voided_by = ?, approval_status = 'Voided' WHERE id = ?",
             (voided_timestamp, voided_by or original["created_by"], entry_id),
+        )
+        _log_posting_engine_event(
+            conn,
+            "INFO",
+            f"voided journal entry={entry_id} reversal_entry={reversal_id} reason={reason or 'not provided'}",
         )
         if owns_connection:
             conn.commit()
