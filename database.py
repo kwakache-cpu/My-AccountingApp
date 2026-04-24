@@ -2235,22 +2235,32 @@ def ensure_schema_integrity(conn):
             cursor.execute("ALTER TABLE journal_entries ADD COLUMN branch_id TEXT")
 
     safe_indexes = (
-        "CREATE INDEX IF NOT EXISTS idx_audit_logs_company_timestamp ON audit_logs(company_key, timestamp DESC)",
-        "CREATE INDEX IF NOT EXISTS idx_audit_logs_action_type ON audit_logs(action_type)",
-        "CREATE INDEX IF NOT EXISTS idx_journal_entries_reporting ON journal_entries(company_key, approval_status, is_voided, date)",
-        "CREATE INDEX IF NOT EXISTS idx_journal_entries_source ON journal_entries(company_key, source_table, source_id)",
-        "CREATE INDEX IF NOT EXISTS idx_journal_entries_customer ON journal_entries(company_key, customer_id, date)",
-        "CREATE INDEX IF NOT EXISTS idx_journal_entries_supplier ON journal_entries(company_key, supplier_id, date)",
-        "CREATE INDEX IF NOT EXISTS idx_invoices_company_status ON invoices(company_key, approval_status, invoice_date)",
-        "CREATE INDEX IF NOT EXISTS idx_bills_company_status ON bills(company_key, approval_status, bill_date)",
-        "CREATE INDEX IF NOT EXISTS idx_payments_company_status ON payments(company_key, approval_status, payment_date)",
-        "CREATE INDEX IF NOT EXISTS idx_accounting_periods_company_status ON accounting_periods(company_key, status, is_locked)",
+        ("audit_logs", "CREATE INDEX IF NOT EXISTS idx_audit_logs_company_timestamp ON audit_logs(company_key, timestamp DESC)"),
+        ("audit_logs", "CREATE INDEX IF NOT EXISTS idx_audit_logs_action_type ON audit_logs(action_type)"),
+        ("journal_entries", "CREATE INDEX IF NOT EXISTS idx_journal_entries_reporting ON journal_entries(company_key, approval_status, is_voided, date)"),
+        ("journal_entries", "CREATE INDEX IF NOT EXISTS idx_journal_entries_source ON journal_entries(company_key, source_table, source_id)"),
+        ("journal_entries", "CREATE INDEX IF NOT EXISTS idx_journal_entries_customer ON journal_entries(company_key, customer_id, date)"),
+        ("journal_entries", "CREATE INDEX IF NOT EXISTS idx_journal_entries_supplier ON journal_entries(company_key, supplier_id, date)"),
+        ("invoices", "CREATE INDEX IF NOT EXISTS idx_invoices_company_status ON invoices(company_key, approval_status, invoice_date)"),
+        ("bills", "CREATE INDEX IF NOT EXISTS idx_bills_company_status ON bills(company_key, approval_status, bill_date)"),
+        ("payments", "CREATE INDEX IF NOT EXISTS idx_payments_company_status ON payments(company_key, approval_status, payment_date)"),
+        ("accounting_periods", "CREATE INDEX IF NOT EXISTS idx_accounting_periods_company_status ON accounting_periods(company_key, status, is_locked)"),
     )
-    for index_sql in safe_indexes:
+    existing_tables = {
+        row[0]
+        for row in cursor.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+    }
+    for table_name, index_sql in safe_indexes:
+        if table_name not in existing_tables:
+            logger.info(
+                "Enterprise index creation deferred: table '%s' does not exist yet during schema integrity pass.",
+                table_name,
+            )
+            continue
         try:
             cursor.execute(index_sql)
         except sqlite3.Error as index_error:
-            logger.warning("Enterprise index creation skipped: %s", index_error)
+            logger.warning("Enterprise index creation skipped for table '%s': %s", table_name, index_error)
 
     cursor.execute("PRAGMA table_info(stock)")
     stock_columns = {row[1] for row in cursor.fetchall()}
