@@ -113,6 +113,7 @@ def build_operations_console_snapshot(
         "service_ownership": get_service_ownership_map(),
         "persistence": _safe_section("persistence", get_persistence_diagnostics),
         "persistence_self_test": _safe_section("persistence_self_test", run_persistence_self_test),
+        "paystack": None,
         "schema": None,
         "audit": None,
         "accounting_core": None,
@@ -120,6 +121,10 @@ def build_operations_console_snapshot(
         "reporting_trust": None,
         "posting_engine": None,
     }
+
+    from modules import get_paystack_diagnostics
+
+    snapshot["paystack"] = _safe_section("paystack", get_paystack_diagnostics)
 
     if conn is not None:
         snapshot["schema"] = _safe_section(

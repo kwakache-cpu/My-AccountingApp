@@ -221,6 +221,7 @@ SCHEMA_MANIFEST = {
         "counterparties": ("id", "company_key", "party_name", "party_type"),
         "maintenance_settings": ("id", "maintenance_date", "is_active", "message"),
         "pending_approvals": ("id", "company_key", "payment_reference", "amount"),
+        "license_payment_transactions": ("id", "reference", "company_key", "expected_amount", "currency", "status"),
         "accounts_payable": ("id", "vendor", "amount", "status", "due_date"),
         "purchase_orders": ("id", "item", "quantity", "cost", "status"),
     },
@@ -2210,6 +2211,30 @@ def ensure_schema_integrity(conn):
         )
         """
     )
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS license_payment_transactions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            reference TEXT UNIQUE,
+            company_key TEXT,
+            company_name TEXT,
+            payer_email TEXT,
+            payment_context TEXT DEFAULT 'license_activation',
+            expected_amount INTEGER DEFAULT 0,
+            currency TEXT DEFAULT 'GHS',
+            status TEXT DEFAULT 'initialized',
+            authorization_url TEXT,
+            callback_url TEXT,
+            metadata_json TEXT,
+            gateway_status_summary TEXT,
+            paid_at TIMESTAMP,
+            verified_at TIMESTAMP,
+            activated_at TIMESTAMP,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
 
     for table_name, columns in critical_columns.items():
         cursor.execute(
@@ -2223,6 +2248,29 @@ def ensure_schema_integrity(conn):
         for column_name, column_def in columns.items():
             if column_name not in existing_columns:
                 cursor.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_def}")
+
+    cursor.execute("PRAGMA table_info(license_payment_transactions)")
+    license_payment_columns = {row[1] for row in cursor.fetchall()}
+    for column_name, column_def in {
+        "company_key": "TEXT",
+        "company_name": "TEXT",
+        "payer_email": "TEXT",
+        "payment_context": "TEXT DEFAULT 'license_activation'",
+        "expected_amount": "INTEGER DEFAULT 0",
+        "currency": "TEXT DEFAULT 'GHS'",
+        "status": "TEXT DEFAULT 'initialized'",
+        "authorization_url": "TEXT",
+        "callback_url": "TEXT",
+        "metadata_json": "TEXT",
+        "gateway_status_summary": "TEXT",
+        "paid_at": "TIMESTAMP",
+        "verified_at": "TIMESTAMP",
+        "activated_at": "TIMESTAMP",
+        "created_at": "TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
+        "updated_at": "TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
+    }.items():
+        if column_name not in license_payment_columns:
+            cursor.execute(f"ALTER TABLE license_payment_transactions ADD COLUMN {column_name} {column_def}")
 
     # Specific check for journal_entries branch_id on databases where the table already exists.
     cursor.execute(
@@ -2261,6 +2309,12 @@ def ensure_schema_integrity(conn):
             cursor.execute(index_sql)
         except sqlite3.Error as index_error:
             logger.warning("Enterprise index creation skipped for table '%s': %s", table_name, index_error)
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_license_payment_transactions_company_status ON license_payment_transactions(company_key, status)"
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_license_payment_transactions_verified_at ON license_payment_transactions(verified_at)"
+    )
 
     cursor.execute("PRAGMA table_info(stock)")
     stock_columns = {row[1] for row in cursor.fetchall()}
@@ -3471,6 +3525,60 @@ def _deploy_full_schema(conn):
         for column_name, column_def in pending_column_defs.items():
             if column_name not in pending_columns:
                 cursor.execute(f"ALTER TABLE pending_approvals ADD COLUMN {column_name} {column_def}")
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS license_payment_transactions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                reference TEXT UNIQUE,
+                company_key TEXT,
+                company_name TEXT,
+                payer_email TEXT,
+                payment_context TEXT DEFAULT 'license_activation',
+                expected_amount INTEGER DEFAULT 0,
+                currency TEXT DEFAULT 'GHS',
+                status TEXT DEFAULT 'initialized',
+                authorization_url TEXT,
+                callback_url TEXT,
+                metadata_json TEXT,
+                gateway_status_summary TEXT,
+                paid_at TIMESTAMP,
+                verified_at TIMESTAMP,
+                activated_at TIMESTAMP,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (company_key) REFERENCES companies (key)
+            )
+            """
+        )
+        cursor.execute("PRAGMA table_info(license_payment_transactions)")
+        license_payment_columns = {row[1] for row in cursor.fetchall()}
+        license_payment_column_defs = {
+            "company_key": "TEXT",
+            "company_name": "TEXT",
+            "payer_email": "TEXT",
+            "payment_context": "TEXT DEFAULT 'license_activation'",
+            "expected_amount": "INTEGER DEFAULT 0",
+            "currency": "TEXT DEFAULT 'GHS'",
+            "status": "TEXT DEFAULT 'initialized'",
+            "authorization_url": "TEXT",
+            "callback_url": "TEXT",
+            "metadata_json": "TEXT",
+            "gateway_status_summary": "TEXT",
+            "paid_at": "TIMESTAMP",
+            "verified_at": "TIMESTAMP",
+            "activated_at": "TIMESTAMP",
+            "created_at": "TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
+            "updated_at": "TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
+        }
+        for column_name, column_def in license_payment_column_defs.items():
+            if column_name not in license_payment_columns:
+                cursor.execute(f"ALTER TABLE license_payment_transactions ADD COLUMN {column_name} {column_def}")
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_license_payment_transactions_company_status ON license_payment_transactions(company_key, status)"
+        )
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_license_payment_transactions_verified_at ON license_payment_transactions(verified_at)"
+        )
 
         # --- TABLE 9: COMPANY USERS ---
         cursor.execute("""

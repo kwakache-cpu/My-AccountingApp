@@ -2091,6 +2091,21 @@ else:
                                 else "unknown",
                             )
                         )
+                    paystack_diag = operations_snapshot["paystack"]
+                    st.markdown("---")
+                    st.caption("Paystack Live Payment Configuration")
+                    st.caption(
+                        "PAYSTACK_SECRET_KEY present: {secret_present} | PAYSTACK_PUBLIC_KEY present: {public_present}".format(
+                            secret_present="Yes" if paystack_diag.get("secret_key_present") else "No",
+                            public_present="Yes" if paystack_diag.get("public_key_present") else "No",
+                        )
+                    )
+                    st.caption(
+                        "Currency: {currency} | Callback URL configured: {callback_configured}".format(
+                            currency=paystack_diag.get("currency") or "GHS",
+                            callback_configured="Yes" if paystack_diag.get("callback_url_configured") else "No",
+                        )
+                    )
                     schema_diag = operations_snapshot["schema"]
                     st.markdown("---")
                     st.caption("Schema Manifest Health")

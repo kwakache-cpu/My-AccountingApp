@@ -5,8 +5,10 @@ import os
 import random
 import string
 import hashlib
+import hmac
 import sqlite3
 import base64
+import uuid
 from datetime import datetime, timedelta
 from io import BytesIO
 
@@ -369,37 +371,500 @@ def get_company_branches(company_key):
 # ==========================================
 # PAYSTACK PAYMENT
 # ==========================================
-def initialize_paystack_payment(email, amount, reference):
-    """Initialize a payment with Paystack."""
-    try:
-        paystack_secret_key = st.secrets.get("paystack_secret_key")
-    except Exception:
-        paystack_secret_key = None
-    if not paystack_secret_key:
-        st.info(
-            "System Configuration Required: the Paystack payment key has not been configured yet. "
-            "Please contact the system administrator to complete payment setup."
-        )
-        return None
-
-    url = "https://api.paystack.co/transaction/initialize"
-    headers = {
-        "Authorization": f"Bearer {paystack_secret_key}",
-        "Content-Type": "application/json"
-    }
-    data = {
-        "email": email,
-        "amount": int(amount * 100),  # Paystack uses pesewas/kobo
-        "reference": reference
-    }
-    try:
-        response = requests.post(url, headers=headers, json=data)
-        response_data = response.json()
-        if response_data.get('status'):
-            return response_data['data']['authorization_url']
-    except Exception as e:
-        logger.error(f"Paystack error: {e}")
+def _read_secret_or_env(*candidate_keys):
+    for key in candidate_keys:
+        if not key:
+            continue
+        try:
+            if st is not None and hasattr(st, "secrets") and key in st.secrets:
+                value = st.secrets[key]
+                if value is not None and str(value).strip():
+                    return str(value).strip()
+        except Exception:
+            pass
+        env_value = os.getenv(key)
+        if env_value and str(env_value).strip():
+            return str(env_value).strip()
     return None
+
+
+def get_paystack_runtime_config():
+    secret_key = _read_secret_or_env("PAYSTACK_SECRET_KEY", "paystack_secret_key")
+    public_key = _read_secret_or_env("PAYSTACK_PUBLIC_KEY", "paystack_public_key")
+    currency = (_read_secret_or_env("PAYSTACK_CURRENCY", "paystack_currency") or "GHS").upper()
+    callback_url = _read_secret_or_env("PAYSTACK_CALLBACK_URL", "paystack_callback_url")
+    webhook_secret = _read_secret_or_env("PAYSTACK_WEBHOOK_SECRET", "paystack_webhook_secret")
+    return {
+        "secret_key": secret_key,
+        "public_key": public_key,
+        "currency": currency,
+        "callback_url": callback_url,
+        "webhook_secret": webhook_secret,
+        "secret_key_present": bool(secret_key),
+        "public_key_present": bool(public_key),
+        "callback_url_configured": bool(callback_url),
+    }
+
+
+def get_paystack_diagnostics():
+    config = get_paystack_runtime_config()
+    return {
+        "secret_key_present": config["secret_key_present"],
+        "public_key_present": config["public_key_present"],
+        "currency": config["currency"],
+        "callback_url_configured": config["callback_url_configured"],
+        "webhook_secret_present": bool(config.get("webhook_secret")),
+    }
+
+
+def _generate_paystack_reference(prefix="ONB"):
+    return f"{prefix}-{datetime.now().strftime('%Y%m%d%H%M%S')}-{uuid.uuid4().hex[:8].upper()}"
+
+
+def _generate_company_key():
+    return (
+        f"EKA-PAY-"
+        f"{''.join(random.choices(string.ascii_uppercase, k=4))}-"
+        f"{''.join(random.choices(string.digits, k=4))}"
+    )
+
+
+def _serialize_paystack_gateway_summary(response_payload):
+    response_data = response_payload.get("data") if isinstance(response_payload, dict) else {}
+    summary = {
+        "status": response_payload.get("status") if isinstance(response_payload, dict) else None,
+        "gateway_status": response_data.get("status") if isinstance(response_data, dict) else None,
+        "gateway_response": response_data.get("gateway_response") if isinstance(response_data, dict) else None,
+        "channel": response_data.get("channel") if isinstance(response_data, dict) else None,
+        "paid_at": response_data.get("paid_at") if isinstance(response_data, dict) else None,
+    }
+    return json.dumps(summary, default=str)
+
+
+def _upsert_license_payment_transaction(
+    conn,
+    *,
+    reference,
+    company_key,
+    company_name,
+    payer_email,
+    payment_context,
+    expected_amount,
+    currency,
+    status,
+    authorization_url=None,
+    callback_url=None,
+    metadata_json=None,
+    gateway_status_summary=None,
+    paid_at=None,
+    verified_at=None,
+    activated_at=None,
+):
+    conn.execute(
+        """
+        INSERT INTO license_payment_transactions (
+            reference,
+            company_key,
+            company_name,
+            payer_email,
+            payment_context,
+            expected_amount,
+            currency,
+            status,
+            authorization_url,
+            callback_url,
+            metadata_json,
+            gateway_status_summary,
+            paid_at,
+            verified_at,
+            activated_at,
+            updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+        ON CONFLICT(reference) DO UPDATE SET
+            company_key = excluded.company_key,
+            company_name = excluded.company_name,
+            payer_email = excluded.payer_email,
+            payment_context = excluded.payment_context,
+            expected_amount = excluded.expected_amount,
+            currency = excluded.currency,
+            status = excluded.status,
+            authorization_url = COALESCE(excluded.authorization_url, license_payment_transactions.authorization_url),
+            callback_url = COALESCE(excluded.callback_url, license_payment_transactions.callback_url),
+            metadata_json = COALESCE(excluded.metadata_json, license_payment_transactions.metadata_json),
+            gateway_status_summary = COALESCE(excluded.gateway_status_summary, license_payment_transactions.gateway_status_summary),
+            paid_at = COALESCE(excluded.paid_at, license_payment_transactions.paid_at),
+            verified_at = COALESCE(excluded.verified_at, license_payment_transactions.verified_at),
+            activated_at = COALESCE(excluded.activated_at, license_payment_transactions.activated_at),
+            updated_at = CURRENT_TIMESTAMP
+        """,
+        (
+            reference,
+            company_key,
+            company_name,
+            payer_email,
+            payment_context,
+            int(expected_amount or 0),
+            currency,
+            status,
+            authorization_url,
+            callback_url,
+            metadata_json,
+            gateway_status_summary,
+            paid_at,
+            verified_at,
+            activated_at,
+        ),
+    )
+
+
+def _activate_verified_license_payment(conn, transaction_row):
+    if not transaction_row:
+        return {"ok": False, "reason": "payment transaction record not found"}
+    if transaction_row["activated_at"]:
+        return {
+            "ok": True,
+            "already_activated": True,
+            "company_key": transaction_row["company_key"],
+            "company_name": transaction_row["company_name"],
+        }
+
+    metadata = {}
+    try:
+        metadata = json.loads(transaction_row["metadata_json"] or "{}")
+    except Exception:
+        metadata = {}
+
+    company_key = str(transaction_row["company_key"] or metadata.get("company_key") or "").strip()
+    company_name = str(transaction_row["company_name"] or metadata.get("company_name") or "").strip()
+    payer_email = str(transaction_row["payer_email"] or metadata.get("user_email") or metadata.get("admin_email") or "").strip() or None
+    subscription_months = max(int(metadata.get("subscription_months") or 12), 1)
+    payment_context = str(transaction_row["payment_context"] or metadata.get("license_context") or "license_activation").strip().lower()
+    if not company_key or not company_name:
+        return {"ok": False, "reason": "payment metadata is missing company activation details"}
+
+    company_row = conn.execute(
+        "SELECT key, name, subscription_expiry FROM companies WHERE key = ? OR lower(name) = lower(?) LIMIT 1",
+        (company_key, company_name),
+    ).fetchone()
+    expiry_base = datetime.now()
+    if company_row and company_row["subscription_expiry"]:
+        try:
+            expiry_base = datetime.fromisoformat(str(company_row["subscription_expiry"]))
+        except Exception:
+            expiry_base = datetime.now()
+    new_expiry = expiry_base + relativedelta(months=+subscription_months)
+
+    backup_result = None
+    if company_row:
+        conn.execute(
+            """
+            UPDATE companies
+            SET subscription_expiry = ?, status = 'Active', deployment_status = 'Live'
+            WHERE key = ?
+            """,
+            (new_expiry.date().isoformat(), company_row["key"]),
+        )
+        resolved_company_key = company_row["key"]
+        resolved_company_name = company_row["name"]
+    else:
+        create_company_record(
+            conn=conn,
+            company_key=company_key,
+            company_name=company_name,
+            subscription_expiry=new_expiry.date().isoformat(),
+            status="Active",
+            deployment_status="Live",
+            contact_email=payer_email,
+        )
+        resolved_company_key = company_key
+        resolved_company_name = company_name
+        conn.commit()
+        backup_result = force_backup_after_company_creation(
+            company_name=resolved_company_name,
+            company_key=resolved_company_key,
+            logger_instance=logger,
+        )
+
+    activated_at = datetime.now().isoformat(timespec="seconds")
+    conn.execute(
+        """
+        UPDATE license_payment_transactions
+        SET activated_at = ?, status = 'success', updated_at = CURRENT_TIMESTAMP
+        WHERE reference = ?
+        """,
+        (activated_at, transaction_row["reference"]),
+    )
+    database_log_audit_action(
+        conn,
+        resolved_company_key,
+        "System",
+        f"Verified Paystack payment: {transaction_row['reference']}",
+        "Payments",
+        details=f"context={payment_context} amount={transaction_row['expected_amount']} currency={transaction_row['currency']}",
+        action_type="payment",
+        document_ref=transaction_row["reference"],
+    )
+    conn.execute(
+        """
+        INSERT INTO system_logs (timestamp, level, module_name, message)
+        VALUES (?, ?, ?, ?)
+        """,
+        (
+            datetime.now().isoformat(timespec="seconds"),
+            "INFO",
+            "Paystack",
+            f"Verified and activated payment reference={transaction_row['reference']} company_key={resolved_company_key}",
+        ),
+    )
+    return {
+        "ok": True,
+        "company_key": resolved_company_key,
+        "company_name": resolved_company_name,
+        "new_expiry": new_expiry.date().isoformat(),
+        "backup_result": backup_result,
+    }
+
+
+def initialize_paystack_payment(
+    email,
+    amount,
+    reference,
+    *,
+    company_key=None,
+    company_name=None,
+    payment_context="license_activation",
+    subscription_months=None,
+    user_id=None,
+    user_email=None,
+    phone_number=None,
+    metadata_extra=None,
+):
+    """Initialize a live Paystack checkout for card or Ghana mobile money."""
+    config = get_paystack_runtime_config()
+    if not config["secret_key_present"]:
+        return {"ok": False, "reason": "Paystack secret key is not configured yet."}
+    if not config["public_key_present"]:
+        return {"ok": False, "reason": "Paystack public key is not configured yet."}
+    if not config["callback_url_configured"]:
+        return {"ok": False, "reason": "Paystack callback URL is not configured yet."}
+
+    expected_amount = int(round(float(amount or 0) * 100))
+    if expected_amount <= 0:
+        return {"ok": False, "reason": "Payment amount must be greater than zero."}
+
+    metadata = {
+        "company_key": company_key,
+        "company_name": company_name,
+        "license_context": payment_context,
+        "subscription_months": int(subscription_months or 0),
+        "user_id": user_id,
+        "user_email": user_email or email,
+    }
+    if phone_number:
+        metadata["phone_number"] = phone_number
+    if metadata_extra:
+        metadata.update(metadata_extra)
+
+    payload = {
+        "email": str(email or "").strip(),
+        "amount": expected_amount,
+        "currency": config["currency"],
+        "reference": str(reference or "").strip(),
+        "callback_url": config["callback_url"],
+        "channels": ["card", "mobile_money"],
+        "metadata": metadata,
+    }
+    if not payload["email"] or not payload["reference"]:
+        return {"ok": False, "reason": "Missing Paystack payment details."}
+
+    headers = {
+        "Authorization": f"Bearer {config['secret_key']}",
+        "Content-Type": "application/json",
+    }
+    conn = None
+    try:
+        response = requests.post(
+            "https://api.paystack.co/transaction/initialize",
+            headers=headers,
+            json=payload,
+            timeout=30,
+        )
+        response_data = response.json()
+        if response.status_code >= 400 or not response_data.get("status"):
+            gateway_message = response_data.get("message") if isinstance(response_data, dict) else "Paystack initialization failed."
+            logger.warning("Paystack initialize failed for reference=%s status_code=%s", reference, response.status_code)
+            return {"ok": False, "reason": str(gateway_message or "Paystack initialization failed.")}
+        authorization_url = response_data.get("data", {}).get("authorization_url")
+        if not authorization_url:
+            return {"ok": False, "reason": "Paystack did not return a checkout URL."}
+        conn = get_connection()
+        _upsert_license_payment_transaction(
+            conn,
+            reference=payload["reference"],
+            company_key=company_key,
+            company_name=company_name,
+            payer_email=payload["email"],
+            payment_context=payment_context,
+            expected_amount=expected_amount,
+            currency=config["currency"],
+            status="initialized",
+            authorization_url=authorization_url,
+            callback_url=config["callback_url"],
+            metadata_json=json.dumps(metadata, default=str),
+            gateway_status_summary=_serialize_paystack_gateway_summary(response_data),
+        )
+        conn.commit()
+        log_system_event("INFO", "Paystack", f"Initialized payment reference={payload['reference']} context={payment_context}")
+        return {
+            "ok": True,
+            "reference": payload["reference"],
+            "authorization_url": authorization_url,
+            "currency": config["currency"],
+            "expected_amount": expected_amount,
+        }
+    except Exception as exc:
+        logger.warning("Paystack initialize request failed for reference=%s: %s", reference, exc)
+        return {"ok": False, "reason": "Paystack checkout could not be initialized right now. Please try again."}
+    finally:
+        if conn:
+            conn.close()
+
+
+def verify_paystack_payment(reference, activate_license=True):
+    config = get_paystack_runtime_config()
+    if not config["secret_key_present"]:
+        return {"ok": False, "reason": "Paystack secret key is not configured yet."}
+    normalized_reference = str(reference or "").strip()
+    if not normalized_reference:
+        return {"ok": False, "reason": "Payment reference is required for verification."}
+
+    conn = None
+    try:
+        conn = get_connection()
+        transaction_row = conn.execute(
+            "SELECT * FROM license_payment_transactions WHERE reference = ? LIMIT 1",
+            (normalized_reference,),
+        ).fetchone()
+        if not transaction_row:
+            return {"ok": False, "reason": "No initialized Paystack payment was found for that reference."}
+        headers = {"Authorization": f"Bearer {config['secret_key']}"}
+        response = requests.get(
+            f"https://api.paystack.co/transaction/verify/{normalized_reference}",
+            headers=headers,
+            timeout=30,
+        )
+        response_data = response.json()
+        data = response_data.get("data") if isinstance(response_data, dict) else {}
+        gateway_ok = bool(response_data.get("status")) and str(data.get("status") or "").lower() == "success"
+        reference_ok = str(data.get("reference") or "").strip() == normalized_reference
+        amount_ok = int(data.get("amount") or 0) == int(transaction_row["expected_amount"] or 0)
+        currency_ok = str(data.get("currency") or "").upper() == str(transaction_row["currency"] or config["currency"]).upper() == "GHS"
+        if not (gateway_ok and reference_ok and amount_ok and currency_ok):
+            _upsert_license_payment_transaction(
+                conn,
+                reference=normalized_reference,
+                company_key=transaction_row["company_key"],
+                company_name=transaction_row["company_name"],
+                payer_email=transaction_row["payer_email"],
+                payment_context=transaction_row["payment_context"],
+                expected_amount=transaction_row["expected_amount"],
+                currency=transaction_row["currency"],
+                status="failed",
+                authorization_url=transaction_row["authorization_url"],
+                callback_url=transaction_row["callback_url"],
+                metadata_json=transaction_row["metadata_json"],
+                gateway_status_summary=_serialize_paystack_gateway_summary(response_data),
+            )
+            conn.commit()
+            return {
+                "ok": False,
+                "reason": "Paystack payment verification failed. Please confirm the payment completed before trying again.",
+                "checks": {
+                    "gateway_ok": gateway_ok,
+                    "reference_ok": reference_ok,
+                    "amount_ok": amount_ok,
+                    "currency_ok": currency_ok,
+                },
+            }
+
+        paid_at = data.get("paid_at") or datetime.now().isoformat(timespec="seconds")
+        verified_at = datetime.now().isoformat(timespec="seconds")
+        _upsert_license_payment_transaction(
+            conn,
+            reference=normalized_reference,
+            company_key=transaction_row["company_key"],
+            company_name=transaction_row["company_name"],
+            payer_email=transaction_row["payer_email"],
+            payment_context=transaction_row["payment_context"],
+            expected_amount=transaction_row["expected_amount"],
+            currency=transaction_row["currency"],
+            status="success",
+            authorization_url=transaction_row["authorization_url"],
+            callback_url=transaction_row["callback_url"],
+            metadata_json=transaction_row["metadata_json"],
+            gateway_status_summary=_serialize_paystack_gateway_summary(response_data),
+            paid_at=paid_at,
+            verified_at=verified_at,
+            activated_at=transaction_row["activated_at"],
+        )
+        activation_result = {"ok": True}
+        if activate_license:
+            refreshed_row = conn.execute(
+                "SELECT * FROM license_payment_transactions WHERE reference = ? LIMIT 1",
+                (normalized_reference,),
+            ).fetchone()
+            activation_result = _activate_verified_license_payment(conn, refreshed_row)
+        conn.commit()
+        return {
+            "ok": bool(activation_result.get("ok")),
+            "reason": activation_result.get("reason"),
+            "reference": normalized_reference,
+            "company_key": activation_result.get("company_key") or transaction_row["company_key"],
+            "company_name": activation_result.get("company_name") or transaction_row["company_name"],
+            "new_expiry": activation_result.get("new_expiry"),
+            "already_activated": activation_result.get("already_activated", False),
+        }
+    except Exception as exc:
+        logger.warning("Paystack verify request failed for reference=%s: %s", normalized_reference, exc)
+        return {"ok": False, "reason": "Paystack verification could not be completed right now. Please try again."}
+    finally:
+        if conn:
+            conn.close()
+
+
+def verify_paystack_webhook_signature(payload_bytes, signature_header):
+    config = get_paystack_runtime_config()
+    secret = config.get("webhook_secret") or config.get("secret_key")
+    if not secret or not signature_header:
+        return False
+    computed_signature = hmac.new(
+        secret.encode("utf-8"),
+        payload_bytes if isinstance(payload_bytes, bytes) else str(payload_bytes or "").encode("utf-8"),
+        hashlib.sha512,
+    ).hexdigest()
+    return hmac.compare_digest(computed_signature, str(signature_header or "").strip())
+
+
+def process_paystack_webhook_event(payload_bytes, signature_header):
+    if not verify_paystack_webhook_signature(payload_bytes, signature_header):
+        return {"ok": False, "reason": "invalid webhook signature"}
+    try:
+        event_payload = json.loads(
+            payload_bytes.decode("utf-8") if isinstance(payload_bytes, bytes) else str(payload_bytes or "{}")
+        )
+    except Exception:
+        return {"ok": False, "reason": "invalid webhook payload"}
+    if str(event_payload.get("event") or "").strip().lower() != "charge.success":
+        return {"ok": False, "reason": "unsupported webhook event"}
+    reference = (
+        event_payload.get("data", {}).get("reference")
+        if isinstance(event_payload.get("data"), dict)
+        else None
+    )
+    if not reference:
+        return {"ok": False, "reason": "webhook event missing payment reference"}
+    return verify_paystack_payment(reference, activate_license=True)
 
 
 def get_master_price_per_month():
@@ -3007,6 +3472,31 @@ def show_vouchers_page(conn, demo_on):
 # ==========================================
 # ONBOARDING & NEW COMPANY REGISTRATION
 # ==========================================
+def _render_onboarding_payment_verification():
+    pending_reg = st.session_state.get("pending_reg") or {}
+    callback_reference = str(st.query_params.get("reference", "") or st.query_params.get("trxref", "") or "").strip()
+    reference = callback_reference or str(pending_reg.get("reference") or "").strip()
+    if not reference:
+        return
+
+    st.markdown("---")
+    st.subheader("Verify Paystack Payment")
+    if callback_reference:
+        st.info("Paystack returned you to the ERP. Verify the payment below to activate your company license.")
+    else:
+        st.caption("After completing Card or Mobile Money checkout, return here and verify the transaction.")
+    st.text_input("Payment Reference", value=reference, disabled=True, key="onboarding_verify_reference_display")
+    if st.button("I have paid / Verify Payment", key="verify_onboarding_paystack_payment_btn"):
+        verification_result = verify_paystack_payment(reference, activate_license=True)
+        if verification_result.get("ok"):
+            company_name = verification_result.get("company_name") or pending_reg.get("company_name") or "your company"
+            company_key = verification_result.get("company_key") or pending_reg.get("company_key") or "pending"
+            st.success(f"Payment verified and license activated for {company_name}. Company Key: {company_key}")
+            st.session_state.pop("pending_reg", None)
+        else:
+            st.warning(verification_result.get("reason") or "Payment verification did not succeed yet.")
+
+
 def show_onboarding_payment():
     """Handle the onboarding payment process for new companies."""
     st.header("🏢 New Company Registration")
@@ -3018,6 +3508,7 @@ def show_onboarding_payment():
         with col1:
             company_name = st.text_input("Company Name")
             admin_email = st.text_input("Admin Email Address")
+            admin_phone = st.text_input("Admin Phone Number (Optional)")
         with col2:
             sector = st.selectbox("Business Sector", ["Retail", "Manufacturing", "Services", "Construction", "Other"])
             subscription_months = st.selectbox("Subscription Duration (Months)", [1, 3, 6, 12, 24], index=3)
@@ -3033,23 +3524,52 @@ def show_onboarding_payment():
                 st.error("Please fill in all required fields.")
             else:
                 try:
-                    reference = f"ONB-{datetime.now().strftime('%Y%m%d%H%M%S')}"
-                    url = initialize_paystack_payment(admin_email, amount, reference)
-                    if url:
-                        st.success("Payment initialized!")
-                        st.session_state.pending_reg = {
-                            'company_name': company_name,
-                            'email': admin_email,
-                            'amount': amount,
-                            'months': int(subscription_months),
-                            'reference': reference
-                        }
-                        st.link_button("Proceed to Paystack", url)
+                    conn = get_connection()
+                    existing_company = conn.execute(
+                        "SELECT key FROM companies WHERE lower(name) = lower(?) LIMIT 1",
+                        (company_name.strip(),),
+                    ).fetchone()
+                    conn.close()
+                    if existing_company:
+                        st.warning("A company with this name already exists. Please use a different company name.")
                     else:
-                        st.warning("Payment could not be initialized yet. Please review the system configuration and try again.")
-                except Exception as e:
-                    st.error(f"Onboarding payment error: {e}")
-                    logger.error(f"Onboarding payment error: {e}")
+                        reference = _generate_paystack_reference("ONB")
+                        company_key = _generate_company_key()
+                        payment_result = initialize_paystack_payment(
+                            admin_email,
+                            amount,
+                            reference,
+                            company_key=company_key,
+                            company_name=company_name.strip(),
+                            payment_context="onboarding",
+                            subscription_months=int(subscription_months),
+                            user_email=admin_email.strip(),
+                            phone_number=admin_phone.strip(),
+                            metadata_extra={"sector": sector},
+                        )
+                        if payment_result.get("ok"):
+                            st.success("Payment initialized successfully.")
+                            st.session_state.pending_reg = {
+                                'company_name': company_name.strip(),
+                                'company_key': company_key,
+                                'email': admin_email.strip(),
+                                'phone_number': admin_phone.strip(),
+                                'amount': amount,
+                                'months': int(subscription_months),
+                                'reference': reference,
+                                'authorization_url': payment_result.get("authorization_url"),
+                            }
+                            st.link_button(
+                                "Continue to Secure Paystack Checkout",
+                                payment_result["authorization_url"],
+                            )
+                            st.caption("Supported checkout channels: Card and Ghana Mobile Money.")
+                        else:
+                            st.warning(payment_result.get("reason") or "Payment could not be initialized yet.")
+                except Exception as exc:
+                    st.warning("Onboarding payment could not be started right now. Please try again.")
+                    logger.warning("Onboarding payment error: %s", exc)
+    _render_onboarding_payment_verification()
 
 
 # ==========================================
