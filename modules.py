@@ -5506,7 +5506,6 @@ def show_pos(company_key, company_name, role):
                     finally:
                         if conn:
                             conn.close()
-                        st.session_state[pos_scan_input_key] = ""
                         st.rerun()
 
         with st.container():
