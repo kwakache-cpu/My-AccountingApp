@@ -1050,10 +1050,14 @@ def _is_openai_quota_error(exc):
 
 
 def _safe_ai_error_message(exc):
+    error_text = str(exc or "")
     if _is_openai_quota_error(exc):
         return "OpenAI quota is unavailable right now."
     if exc is None:
         return ""
+    lowered_error_text = error_text.lower()
+    if "generativelanguage.googleapis.com" in lowered_error_text or "generatecontent" in lowered_error_text or "gemini" in lowered_error_text:
+        return "Gemini request failed (rate limit or quota reached)"
     return f"{type(exc).__name__}: {exc}"
 
 
