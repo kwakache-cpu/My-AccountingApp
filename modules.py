@@ -44,6 +44,9 @@ scanner_active = True
 OPENAI_MODEL = "gpt-4o-mini"
 GEMINI_MODEL = "gemini-2.0-flash"
 AI_TEMPORARY_UNAVAILABLE_MESSAGE = "AI Assistant is temporarily unavailable. Core ERP functions remain fully operational."
+AI_RATE_LIMIT_MESSAGE = "Too many AI requests. Please wait a moment."
+AI_RATE_LIMIT_MAX_CALLS = 5
+AI_RATE_LIMIT_WINDOW_SECONDS = 60
 DOCUMENT_WORKFLOW_STATUSES = ["Draft", "Submitted", "Approved", "Posted", "Cancelled", "Voided"]
 ALL_ENTERPRISE_PERMISSIONS = {
     "view_dashboard",
@@ -1260,7 +1263,59 @@ def _get_openai_client():
     return get_openai_client_from_secrets()
 
 
+def _get_ai_rate_limit_identity():
+    user = st.session_state.get("user") or {}
+    session_identity = st.session_state.setdefault("ai_rate_limit_session_id", str(uuid.uuid4()))
+    return (
+        user.get("key")
+        or user.get("email")
+        or user.get("username")
+        or user.get("company_key")
+        or session_identity
+    )
+
+
+def _consume_ai_rate_limit(purpose="general"):
+    if purpose == "health_test":
+        return True, 0
+
+    now_ts = datetime.utcnow().timestamp()
+    window_start = now_ts - AI_RATE_LIMIT_WINDOW_SECONDS
+    identity = _get_ai_rate_limit_identity()
+    tracker = st.session_state.setdefault("ai_rate_limit_tracker", {})
+    recent_calls = [
+        float(ts)
+        for ts in tracker.get(identity, [])
+        if isinstance(ts, (int, float)) and float(ts) >= window_start
+    ]
+    if len(recent_calls) >= AI_RATE_LIMIT_MAX_CALLS:
+        tracker[identity] = recent_calls
+        return False, len(recent_calls)
+    recent_calls.append(now_ts)
+    tracker[identity] = recent_calls
+    return True, len(recent_calls)
+
+
 def call_ai_assistant(messages, temperature=0.3, max_tokens=1024, purpose="general"):
+    allowed, _ = _consume_ai_rate_limit(purpose=purpose)
+    if not allowed:
+        ai_status = get_ai_client_status()
+        provider = ai_status.get("provider") or ai_status.get("selected_provider", "none")
+        return {
+            "ok": False,
+            "success": False,
+            "content": "",
+            "provider": provider,
+            "provider_used": provider,
+            "fallback_used": False,
+            "status": ai_status,
+            "error": AI_RATE_LIMIT_MESSAGE,
+            "openai_error_safe": "",
+            "gemini_error_safe": "",
+            "response_preview": "",
+            "purpose": purpose,
+        }
+
     ai_status = get_ai_client_status()
     active_client = ai_status["client"]
     provider = ai_status.get("provider")
@@ -1765,7 +1820,7 @@ def accounting_ai_response(module_selection, chat_history):
     if response["ok"]:
         return response["content"].strip()
     logger.error("Accounting assistant request failed via provider %s: %s", response.get("provider"), response.get("error"))
-    return "AI assistant request failed. Please try again."
+    return response.get("error") or "AI assistant request failed. Please try again."
 
 
 def render_accounting_assistant_sidebar(module_selection):
@@ -7079,7 +7134,7 @@ def show_ai_assistant(client_id):
         st.session_state[history_key].append({"role": "assistant", "content": assistant_reply})
     else:
         logger.error("AI assistant request failed via provider %s: %s", response.get("provider"), response.get("error"))
-        failure_message = "AI assistant request failed. Please try again."
+        failure_message = response.get("error") or "AI assistant request failed. Please try again."
         st.session_state[history_key].append({"role": "assistant", "content": failure_message})
         with st.chat_message("assistant"):
             st.markdown(failure_message)

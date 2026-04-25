@@ -670,7 +670,7 @@ def ask_gatekeeper_ai(user_input):
     if response["ok"]:
         return response["content"]
     logger.error("Gatekeeper AI call failed via provider %s: %s", response.get("provider"), sanitize_error_message(response.get("error")))
-    return "AI assistant request failed. Please try again."
+    return response.get("error") or "AI assistant request failed. Please try again."
 
 
 def render_gatekeeper_ai_chat(menu_selection):
