@@ -40,6 +40,9 @@ except Exception:
 
 pos_success_key = "pos_transaction_success"
 scanner_active = True
+OPENAI_MODEL = "gpt-4o-mini"
+GEMINI_MODEL = "gemini-2.0-flash"
+AI_TEMPORARY_UNAVAILABLE_MESSAGE = "AI Assistant is temporarily unavailable. Core ERP functions remain fully operational."
 DOCUMENT_WORKFLOW_STATUSES = ["Draft", "Submitted", "Approved", "Posted", "Cancelled", "Voided"]
 ALL_ENTERPRISE_PERMISSIONS = {
     "view_dashboard",
@@ -932,8 +935,50 @@ def _get_active_company_id(expected_company_id=None):
     return active_company_id
 
 
-def get_openai_client_status():
-    """Return a safe OpenAI client status without exposing the API key."""
+def _safe_session_set(key, value):
+    try:
+        st.session_state[key] = value
+    except Exception:
+        return
+
+
+def _get_secret_value(secret_name, section_name=None):
+    value = None
+    source = "missing"
+    try:
+        secrets_obj = st.secrets
+    except Exception:
+        secrets_obj = None
+
+    if secrets_obj is not None:
+        try:
+            value = secrets_obj.get(secret_name)
+        except Exception:
+            value = None
+        if value:
+            return value, "top_level"
+
+        if section_name:
+            try:
+                section_obj = secrets_obj.get(section_name, {})
+            except Exception:
+                section_obj = {}
+            if section_obj:
+                try:
+                    value = section_obj.get(secret_name)
+                except AttributeError:
+                    value = None
+                if value:
+                    return value, f"nested_{section_name}_section"
+
+    env_value = os.getenv(secret_name)
+    if env_value:
+        return env_value, "environment"
+
+    return None, source
+
+
+def _get_ai_runtime_config():
     diagnostics = {
         "streamlit_imported": st is not None,
         "secrets_accessible": False,
@@ -941,9 +986,19 @@ def get_openai_client_status():
         "top_level_key_present": False,
         "openai_section_present": False,
         "nested_key_present": False,
-        "secret_source": "missing",
+        "gemini_top_level_key_present": False,
+        "gemini_section_present": False,
+        "gemini_nested_key_present": False,
+        "openai_secret_source": "missing",
+        "gemini_secret_source": "missing",
         "provided_length": 0,
+        "gemini_provided_length": 0,
+        "provider_source": "default",
+        "selected_provider": "openai",
+        "fallback_used": False,
+        "last_safe_error": "",
     }
+
     try:
         secrets_obj = st.secrets
         diagnostics["secrets_accessible"] = True
@@ -951,81 +1006,234 @@ def get_openai_client_status():
             diagnostics["top_level_secret_keys"] = sorted(str(key) for key in secrets_obj.keys())
         except Exception:
             diagnostics["top_level_secret_keys"] = []
-        api_key = secrets_obj.get("OPENAI_API_KEY")
-        diagnostics["top_level_key_present"] = bool(api_key)
         diagnostics["openai_section_present"] = "openai" in diagnostics["top_level_secret_keys"]
-        if api_key:
-            diagnostics["secret_source"] = "top_level"
-        else:
-            openai_section = secrets_obj.get("openai", {})
-            if openai_section:
-                try:
-                    api_key = openai_section.get("OPENAI_API_KEY")
-                except AttributeError:
-                    api_key = None
-                diagnostics["nested_key_present"] = bool(api_key)
-                if api_key:
-                    diagnostics["secret_source"] = "nested_openai_section"
-    except Exception as exc:
-        logger.info("OpenAI secret lookup unavailable; AI assistant disabled: %s", exc)
-        st.session_state["ai_active"] = False
-        logger.info("OpenAI secret diagnostics: %s", diagnostics)
-        return {
-            "client": None,
-            "key_present": False,
-            "client_initialized": False,
-            "error_type": "missing_key",
-            "message": "AI assistant is not configured yet.",
-            **diagnostics,
-        }
+        diagnostics["gemini_section_present"] = "gemini" in diagnostics["top_level_secret_keys"]
+    except Exception:
+        secrets_obj = None
 
-    diagnostics["provided_length"] = len(str(api_key or ""))
-    logger.info(
-        "OpenAI secret diagnostics: streamlit_imported=%s secrets_accessible=%s top_level_keys=%s top_level_key_present=%s openai_section_present=%s nested_key_present=%s secret_source=%s provided_length=%s",
-        diagnostics["streamlit_imported"],
-        diagnostics["secrets_accessible"],
-        ",".join(diagnostics["top_level_secret_keys"]) or "none",
-        diagnostics["top_level_key_present"],
-        diagnostics["openai_section_present"],
-        diagnostics["nested_key_present"],
-        diagnostics["secret_source"],
-        diagnostics["provided_length"],
+    openai_key, openai_source = _get_secret_value("OPENAI_API_KEY", section_name="openai")
+    gemini_key, gemini_source = _get_secret_value("GEMINI_API_KEY", section_name="gemini")
+    provider_value, provider_source = _get_secret_value("AI_PROVIDER")
+    provider_name = str(provider_value or "openai").strip().lower()
+    if provider_name not in {"openai", "gemini", "auto"}:
+        provider_name = "openai"
+        provider_source = "default_invalid"
+    diagnostics["provider_source"] = provider_source if provider_source != "missing" else "default"
+    diagnostics["selected_provider"] = provider_name
+    diagnostics["top_level_key_present"] = bool(openai_source == "top_level")
+    diagnostics["nested_key_present"] = bool(openai_source == "nested_openai_section")
+    diagnostics["gemini_top_level_key_present"] = bool(gemini_source == "top_level")
+    diagnostics["gemini_nested_key_present"] = bool(gemini_source == "nested_gemini_section")
+    diagnostics["openai_secret_source"] = openai_source
+    diagnostics["gemini_secret_source"] = gemini_source
+    diagnostics["provided_length"] = len(str(openai_key or ""))
+    diagnostics["gemini_provided_length"] = len(str(gemini_key or ""))
+
+    return {
+        "provider_name": provider_name,
+        "openai_key": openai_key,
+        "gemini_key": gemini_key,
+        "diagnostics": diagnostics,
+    }
+
+
+def _is_openai_quota_error(exc):
+    error_text = str(exc or "").lower()
+    error_code = str(getattr(exc, "code", "") or "").lower()
+    status_code = str(getattr(exc, "status_code", "") or "").lower()
+    return (
+        "insufficient_quota" in error_text
+        or "quota" in error_text
+        or error_code == "insufficient_quota"
+        or status_code == "429"
     )
 
-    if not api_key:
-        st.session_state["ai_active"] = False
-        logger.info("OPENAI_API_KEY is not configured; AI assistant disabled.")
-        return {
-            "client": None,
-            "key_present": False,
-            "client_initialized": False,
-            "error_type": "missing_key",
-            "message": "AI assistant is not configured yet.",
-            **diagnostics,
+
+def _safe_ai_error_message(exc):
+    if _is_openai_quota_error(exc):
+        return "OpenAI quota is unavailable right now."
+    if exc is None:
+        return ""
+    return f"{type(exc).__name__}: {exc}"
+
+
+def _call_gemini_chat(api_key, messages, temperature=0.3, max_tokens=1024):
+    endpoint = (
+        f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
+        f"?key={api_key}"
+    )
+    system_parts = []
+    conversation_parts = []
+    for message in messages:
+        role = (message or {}).get("role", "user")
+        content = str((message or {}).get("content", "") or "").strip()
+        if not content:
+            continue
+        if role == "system":
+            system_parts.append(content)
+            continue
+        gemini_role = "model" if role == "assistant" else "user"
+        conversation_parts.append(
+            {
+                "role": gemini_role,
+                "parts": [{"text": content}],
+            }
+        )
+
+    payload = {
+        "contents": conversation_parts or [{"role": "user", "parts": [{"text": "ping"}]}],
+        "generationConfig": {
+            "temperature": temperature,
+            "maxOutputTokens": max_tokens,
+        },
+    }
+    if system_parts:
+        payload["systemInstruction"] = {
+            "parts": [{"text": "\n\n".join(system_parts)}],
         }
 
-    try:
-        openai_client = OpenAI(api_key=api_key)
-        st.session_state["ai_active"] = True
+    response = requests.post(endpoint, json=payload, timeout=30)
+    response.raise_for_status()
+    response_data = response.json()
+    candidates = response_data.get("candidates") or []
+    if not candidates:
+        raise RuntimeError("Gemini returned no candidates")
+    parts = (((candidates[0] or {}).get("content") or {}).get("parts")) or []
+    response_text = "".join(str(part.get("text") or "") for part in parts).strip()
+    if not response_text:
+        raise RuntimeError("Gemini returned an empty response")
+    return response_text
+
+
+def get_ai_client_status():
+    """Return the shared AI provider status without exposing any API key values."""
+    runtime = _get_ai_runtime_config()
+    diagnostics = dict(runtime["diagnostics"])
+    openai_key = runtime["openai_key"]
+    gemini_key = runtime["gemini_key"]
+    preferred_provider = runtime["provider_name"]
+    logger.info(
+        "AI provider diagnostics: preferred_provider=%s openai_present=%s gemini_present=%s openai_source=%s gemini_source=%s top_level_keys=%s",
+        preferred_provider,
+        "Yes" if bool(openai_key) else "No",
+        "Yes" if bool(gemini_key) else "No",
+        diagnostics["openai_secret_source"],
+        diagnostics["gemini_secret_source"],
+        ",".join(diagnostics["top_level_secret_keys"]) or "none",
+    )
+
+    if preferred_provider == "gemini":
+        if not gemini_key:
+            _safe_session_set("ai_active", False)
+            diagnostics["last_safe_error"] = "Gemini API key is not configured."
+            return {
+                "client": None,
+                "provider": "gemini",
+                "selected_provider": "gemini",
+                "fallback_used": False,
+                "key_present": False,
+                "client_initialized": False,
+                "error_type": "missing_key",
+                "message": "AI assistant is not configured yet.",
+                "openai_key_present": bool(openai_key),
+                "gemini_key_present": False,
+                **diagnostics,
+            }
+        _safe_session_set("ai_active", True)
+        _safe_session_set("ai_provider_selected", "gemini")
         return {
-            "client": openai_client,
+            "client": "gemini",
+            "provider": "gemini",
+            "selected_provider": "gemini",
+            "fallback_used": False,
             "key_present": True,
             "client_initialized": True,
             "error_type": None,
             "message": "",
+            "openai_key_present": bool(openai_key),
+            "gemini_key_present": True,
             **diagnostics,
         }
-    except Exception as exc:
-        logger.warning("OpenAI client initialization failed; AI assistant disabled: %s", exc)
-        st.session_state["ai_active"] = False
+
+    openai_error = None
+    if openai_key:
+        try:
+            if OpenAI is None:
+                raise RuntimeError("OpenAI SDK is not installed")
+            openai_client = OpenAI(api_key=openai_key)
+            _safe_session_set("ai_active", True)
+            _safe_session_set("ai_provider_selected", "openai")
+            return {
+                "client": openai_client,
+                "provider": "openai",
+                "selected_provider": "openai",
+                "fallback_used": False,
+                "key_present": True,
+                "client_initialized": True,
+                "error_type": None,
+                "message": "",
+                "openai_key_present": True,
+                "gemini_key_present": bool(gemini_key),
+                **diagnostics,
+            }
+        except Exception as exc:
+            openai_error = exc
+            diagnostics["last_safe_error"] = _safe_ai_error_message(exc)
+            logger.warning("OpenAI client initialization failed; AI assistant disabled: %s", exc)
+
+    if preferred_provider == "auto" and gemini_key:
+        diagnostics["fallback_used"] = bool(openai_error)
+        diagnostics["last_safe_error"] = diagnostics["last_safe_error"] or ""
+        _safe_session_set("ai_active", True)
+        _safe_session_set("ai_provider_selected", "gemini")
+        _safe_session_set("ai_provider_fallback_used", diagnostics["fallback_used"])
         return {
-            "client": None,
+            "client": "gemini",
+            "provider": "gemini",
+            "selected_provider": "gemini",
+            "fallback_used": diagnostics["fallback_used"],
             "key_present": True,
-            "client_initialized": False,
-            "error_type": "client_init_failed",
-            "message": "AI assistant could not initialize.",
+            "client_initialized": True,
+            "error_type": None,
+            "message": "",
+            "openai_key_present": bool(openai_key),
+            "gemini_key_present": True,
             **diagnostics,
         }
+
+    _safe_session_set("ai_active", False)
+    _safe_session_set("ai_provider_selected", "none")
+    _safe_session_set("ai_provider_fallback_used", False)
+    if preferred_provider == "auto":
+        failure_message = "AI assistant is not configured yet."
+        error_type = "missing_key"
+        if openai_error and not gemini_key:
+            failure_message = "AI assistant could not initialize."
+            error_type = "client_init_failed"
+    elif preferred_provider == "openai":
+        failure_message = "AI assistant is not configured yet." if not openai_key else "AI assistant could not initialize."
+        error_type = "missing_key" if not openai_key else "client_init_failed"
+    else:
+        failure_message = "AI assistant is not configured yet."
+        error_type = "missing_key"
+    return {
+        "client": None,
+        "provider": preferred_provider,
+        "selected_provider": preferred_provider,
+        "fallback_used": False,
+        "key_present": bool(openai_key or gemini_key),
+        "client_initialized": False,
+        "error_type": error_type,
+        "message": failure_message,
+        "openai_key_present": bool(openai_key),
+        "gemini_key_present": bool(gemini_key),
+        **diagnostics,
+    }
+
+
+def get_openai_client_status():
+    """Backward-compatible wrapper around the shared AI provider status."""
+    return get_ai_client_status()
 
 
 def get_openai_client_from_secrets():
@@ -1045,6 +1253,93 @@ def get_openai_unavailable_message(openai_status):
 def _get_openai_client():
     """Backward-compatible wrapper for the shared OpenAI loader."""
     return get_openai_client_from_secrets()
+
+
+def request_ai_chat_completion(messages, temperature=0.3, max_tokens=1024):
+    ai_status = get_ai_client_status()
+    active_client = ai_status["client"]
+    provider = ai_status.get("provider")
+    if active_client is None:
+        return {
+            "ok": False,
+            "content": "",
+            "provider": provider or ai_status.get("selected_provider", "none"),
+            "fallback_used": ai_status.get("fallback_used", False),
+            "status": ai_status,
+            "error": ai_status.get("message") or "AI assistant is not configured yet.",
+        }
+
+    try:
+        if provider == "gemini":
+            response_text = _call_gemini_chat(
+                _get_ai_runtime_config()["gemini_key"],
+                messages=messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+            )
+        else:
+            completion = active_client.chat.completions.create(
+                model=OPENAI_MODEL,
+                messages=messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+            )
+            response_text = (completion.choices[0].message.content or "").strip()
+        _safe_session_set("ai_provider_selected", provider)
+        _safe_session_set("ai_provider_fallback_used", ai_status.get("fallback_used", False))
+        _safe_session_set("ai_provider_last_error", "")
+        return {
+            "ok": True,
+            "content": response_text,
+            "provider": provider,
+            "fallback_used": ai_status.get("fallback_used", False),
+            "status": ai_status,
+            "error": "",
+        }
+    except Exception as exc:
+        if provider == "openai" and _is_openai_quota_error(exc):
+            runtime = _get_ai_runtime_config()
+            gemini_key = runtime["gemini_key"]
+            if runtime["provider_name"] == "auto" and gemini_key:
+                try:
+                    response_text = _call_gemini_chat(
+                        gemini_key,
+                        messages=messages,
+                        temperature=temperature,
+                        max_tokens=max_tokens,
+                    )
+                    _safe_session_set("ai_provider_selected", "gemini")
+                    _safe_session_set("ai_provider_fallback_used", True)
+                    _safe_session_set("ai_provider_last_error", _safe_ai_error_message(exc))
+                    return {
+                        "ok": True,
+                        "content": response_text,
+                        "provider": "gemini",
+                        "fallback_used": True,
+                        "status": {
+                            **ai_status,
+                            "provider": "gemini",
+                            "selected_provider": "gemini",
+                            "fallback_used": True,
+                            "last_safe_error": _safe_ai_error_message(exc),
+                        },
+                        "error": "",
+                    }
+                except Exception as fallback_exc:
+                    exc = fallback_exc
+        safe_error = _safe_ai_error_message(exc)
+        _safe_session_set("ai_provider_last_error", safe_error)
+        return {
+            "ok": False,
+            "content": "",
+            "provider": provider,
+            "fallback_used": ai_status.get("fallback_used", False),
+            "status": {
+                **ai_status,
+                "last_safe_error": safe_error,
+            },
+            "error": AI_TEMPORARY_UNAVAILABLE_MESSAGE,
+        }
 
 
 def _table_exists(conn, table_name):
@@ -1395,10 +1690,9 @@ def _load_accounting_ai_context(company_key):
 
 
 def accounting_ai_response(module_selection, chat_history):
-    openai_status = get_openai_client_status()
-    openai_client = openai_status["client"]
-    if openai_client is None:
-        return f"{get_openai_unavailable_message(openai_status)} You can still use the module data and reports normally."
+    ai_status = get_ai_client_status()
+    if ai_status["client"] is None:
+        return f"{get_openai_unavailable_message(ai_status)} You can still use the module data and reports normally."
 
     company_key = (
         st.session_state.get("company_id")
@@ -1419,17 +1713,11 @@ def accounting_ai_response(module_selection, chat_history):
     ]
     messages.extend(chat_history[-8:])
 
-    try:
-        completion = openai_client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=messages,
-            temperature=0.3,
-            max_tokens=1024,
-        )
-        return completion.choices[0].message.content.strip()
-    except Exception as exc:
-        logger.error("Accounting assistant request failed: %s", exc)
-        return "AI assistant request failed. Please try again."
+    response = request_ai_chat_completion(messages=messages, temperature=0.3, max_tokens=1024)
+    if response["ok"]:
+        return response["content"].strip()
+    logger.error("Accounting assistant request failed via provider %s: %s", response.get("provider"), response.get("error"))
+    return "AI assistant request failed. Please try again."
 
 
 def render_accounting_assistant_sidebar(module_selection):
@@ -6702,11 +6990,10 @@ def show_ai_assistant(client_id):
     with st.chat_message("user"):
         st.markdown(user_question)
 
-    openai_status = get_openai_client_status()
-    openai_client = openai_status["client"]
-    if openai_client is None:
+    ai_status = get_ai_client_status()
+    if ai_status["client"] is None:
         fallback_response = (
-            f"{get_openai_unavailable_message(openai_status)} "
+            f"{get_openai_unavailable_message(ai_status)} "
             "Your 30-day data snapshot is still available above for manual review."
         )
         st.session_state[history_key].append({"role": "assistant", "content": fallback_response})
@@ -6725,26 +7012,25 @@ def show_ai_assistant(client_id):
         f"User question: {user_question}"
     )
 
-    try:
+    response = request_ai_chat_completion(
+        messages=[
+            {
+                "role": "system",
+                "content": ACCOUNTING_ASSISTANT_SYSTEM_PROMPT,
+            },
+            {"role": "user", "content": prompt},
+        ],
+        temperature=0.3,
+        max_tokens=1024,
+    )
+    if response["ok"]:
+        assistant_reply = response["content"].strip()
         with st.chat_message("assistant"):
             with st.spinner("Reviewing your accounting records..."):
-                completion = openai_client.chat.completions.create(
-                    model="gpt-4o-mini",
-                    messages=[
-                        {
-                            "role": "system",
-                            "content": ACCOUNTING_ASSISTANT_SYSTEM_PROMPT,
-                        },
-                        {"role": "user", "content": prompt},
-                    ],
-                    temperature=0.3,
-                    max_tokens=1024,
-                )
-                assistant_reply = completion.choices[0].message.content.strip()
                 st.markdown(assistant_reply)
         st.session_state[history_key].append({"role": "assistant", "content": assistant_reply})
-    except Exception as exc:
-        logger.error("AI assistant request failed: %s", exc)
+    else:
+        logger.error("AI assistant request failed via provider %s: %s", response.get("provider"), response.get("error"))
         failure_message = "AI assistant request failed. Please try again."
         st.session_state[history_key].append({"role": "assistant", "content": failure_message})
         with st.chat_message("assistant"):

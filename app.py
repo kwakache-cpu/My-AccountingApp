@@ -101,6 +101,7 @@ accounting_ai_response = eka_modules.accounting_ai_response
 format_currency = eka_modules.format_currency
 get_exchange_rate = eka_modules.get_exchange_rate
 get_openai_client_status = get_ai_service_status
+request_ai_chat_completion = eka_modules.request_ai_chat_completion
 initialize_paystack_payment = eka_modules.initialize_paystack_payment
 test_paystack_connection = eka_modules.test_paystack_connection
 log_audit_action = eka_modules.log_audit_action
@@ -133,28 +134,36 @@ GATEKEEPER_SYSTEM_PROMPT = (
 
 
 def test_openai_assistant_health():
-    openai_status = get_openai_client_status()
-    test_client = openai_status["client"]
-    if test_client is None:
+    ai_status = get_openai_client_status()
+    if ai_status["client"] is None:
         return {
             "success": False,
-            "key_present": bool(openai_status.get("key_present")),
+            "key_present": bool(ai_status.get("key_present")),
             "client_initialized": False,
             "response": "",
-            "error": openai_status.get("message") or "OpenAI client could not initialize",
-            "secret_source": openai_status.get("secret_source", "missing"),
-            "provided_length": openai_status.get("provided_length", 0),
-            "streamlit_imported": openai_status.get("streamlit_imported"),
-            "secrets_accessible": openai_status.get("secrets_accessible"),
-            "top_level_secret_keys": openai_status.get("top_level_secret_keys", []),
-            "top_level_key_present": openai_status.get("top_level_key_present"),
-            "openai_section_present": openai_status.get("openai_section_present"),
-            "nested_key_present": openai_status.get("nested_key_present"),
+            "error": ai_status.get("message") or "AI client could not initialize",
+            "selected_provider": ai_status.get("selected_provider", "openai"),
+            "active_provider": ai_status.get("provider", ai_status.get("selected_provider", "openai")),
+            "fallback_used": bool(ai_status.get("fallback_used")),
+            "last_safe_error": ai_status.get("last_safe_error", ""),
+            "secret_source": ai_status.get("openai_secret_source", "missing"),
+            "gemini_secret_source": ai_status.get("gemini_secret_source", "missing"),
+            "provided_length": ai_status.get("provided_length", 0),
+            "gemini_provided_length": ai_status.get("gemini_provided_length", 0),
+            "streamlit_imported": ai_status.get("streamlit_imported"),
+            "secrets_accessible": ai_status.get("secrets_accessible"),
+            "top_level_secret_keys": ai_status.get("top_level_secret_keys", []),
+            "top_level_key_present": ai_status.get("top_level_key_present"),
+            "openai_section_present": ai_status.get("openai_section_present"),
+            "nested_key_present": ai_status.get("nested_key_present"),
+            "gemini_key_present": ai_status.get("gemini_key_present"),
+            "gemini_top_level_key_present": ai_status.get("gemini_top_level_key_present"),
+            "gemini_section_present": ai_status.get("gemini_section_present"),
+            "gemini_nested_key_present": ai_status.get("gemini_nested_key_present"),
         }
 
     try:
-        completion = test_client.chat.completions.create(
-            model="gpt-4o-mini",
+        result = request_ai_chat_completion(
             messages=[
                 {"role": "system", "content": "Reply with a short operational status only."},
                 {"role": "user", "content": "ping"},
@@ -162,38 +171,64 @@ def test_openai_assistant_health():
             temperature=0,
             max_tokens=20,
         )
-        response_text = (completion.choices[0].message.content or "").strip()
+        if not result["ok"]:
+            raise RuntimeError(
+                result.get("status", {}).get("last_safe_error")
+                or result.get("error")
+                or "AI assistant request failed."
+            )
+        response_text = (result.get("content") or "").strip()
         return {
             "success": True,
             "key_present": True,
             "client_initialized": True,
             "response": response_text[:120],
             "error": "",
-            "secret_source": openai_status.get("secret_source", "missing"),
-            "provided_length": openai_status.get("provided_length", 0),
-            "streamlit_imported": openai_status.get("streamlit_imported"),
-            "secrets_accessible": openai_status.get("secrets_accessible"),
-            "top_level_secret_keys": openai_status.get("top_level_secret_keys", []),
-            "top_level_key_present": openai_status.get("top_level_key_present"),
-            "openai_section_present": openai_status.get("openai_section_present"),
-            "nested_key_present": openai_status.get("nested_key_present"),
+            "selected_provider": ai_status.get("selected_provider", "openai"),
+            "active_provider": result.get("provider", ai_status.get("provider", "openai")),
+            "fallback_used": bool(result.get("fallback_used")),
+            "last_safe_error": ai_status.get("last_safe_error", ""),
+            "secret_source": ai_status.get("openai_secret_source", "missing"),
+            "gemini_secret_source": ai_status.get("gemini_secret_source", "missing"),
+            "provided_length": ai_status.get("provided_length", 0),
+            "gemini_provided_length": ai_status.get("gemini_provided_length", 0),
+            "streamlit_imported": ai_status.get("streamlit_imported"),
+            "secrets_accessible": ai_status.get("secrets_accessible"),
+            "top_level_secret_keys": ai_status.get("top_level_secret_keys", []),
+            "top_level_key_present": ai_status.get("top_level_key_present"),
+            "openai_section_present": ai_status.get("openai_section_present"),
+            "nested_key_present": ai_status.get("nested_key_present"),
+            "gemini_key_present": ai_status.get("gemini_key_present"),
+            "gemini_top_level_key_present": ai_status.get("gemini_top_level_key_present"),
+            "gemini_section_present": ai_status.get("gemini_section_present"),
+            "gemini_nested_key_present": ai_status.get("gemini_nested_key_present"),
         }
     except Exception as exc:
         logger.warning("OpenAI health test failed: %s", exc)
         return {
             "success": False,
             "key_present": True,
-            "client_initialized": bool(openai_status.get("client_initialized")),
+            "client_initialized": bool(ai_status.get("client_initialized")),
             "response": "",
             "error": f"{type(exc).__name__}: {exc}",
-            "secret_source": openai_status.get("secret_source", "missing"),
-            "provided_length": openai_status.get("provided_length", 0),
-            "streamlit_imported": openai_status.get("streamlit_imported"),
-            "secrets_accessible": openai_status.get("secrets_accessible"),
-            "top_level_secret_keys": openai_status.get("top_level_secret_keys", []),
-            "top_level_key_present": openai_status.get("top_level_key_present"),
-            "openai_section_present": openai_status.get("openai_section_present"),
-            "nested_key_present": openai_status.get("nested_key_present"),
+            "selected_provider": ai_status.get("selected_provider", "openai"),
+            "active_provider": ai_status.get("provider", ai_status.get("selected_provider", "openai")),
+            "fallback_used": bool(ai_status.get("fallback_used")),
+            "last_safe_error": ai_status.get("last_safe_error", ""),
+            "secret_source": ai_status.get("openai_secret_source", "missing"),
+            "gemini_secret_source": ai_status.get("gemini_secret_source", "missing"),
+            "provided_length": ai_status.get("provided_length", 0),
+            "gemini_provided_length": ai_status.get("gemini_provided_length", 0),
+            "streamlit_imported": ai_status.get("streamlit_imported"),
+            "secrets_accessible": ai_status.get("secrets_accessible"),
+            "top_level_secret_keys": ai_status.get("top_level_secret_keys", []),
+            "top_level_key_present": ai_status.get("top_level_key_present"),
+            "openai_section_present": ai_status.get("openai_section_present"),
+            "nested_key_present": ai_status.get("nested_key_present"),
+            "gemini_key_present": ai_status.get("gemini_key_present"),
+            "gemini_top_level_key_present": ai_status.get("gemini_top_level_key_present"),
+            "gemini_section_present": ai_status.get("gemini_section_present"),
+            "gemini_nested_key_present": ai_status.get("gemini_nested_key_present"),
         }
 
 
@@ -646,28 +681,22 @@ E.K.A Support Team
     return True
 
 def ask_gatekeeper_ai(user_input):
-    """Send the raw user prompt directly to OpenAI and return the response text."""
-    openai_status = get_openai_client_status()
-    openai_client = openai_status["client"]
-    if openai_client is None:
-        return openai_status.get("message") or "AI assistant is not configured yet."
-
-    try:
-        response = openai_client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {
-                    "role": "system",
-                    "content": "You are a Senior Chartered Accountant for a Ghanaian enterprise. Provide direct, professional financial analysis without preamble. Answer user queries based on their ERP data confidently and concisely.",
-                },
-                {"role": "user", "content": user_input},
-            ],
-            temperature=0.5,
-        )
-        return response.choices[0].message.content
-    except Exception as e:
-        logger.error(f"OpenAI Gatekeeper AI call failed: {e}")
-        return "AI assistant request failed. Please try again."
+    """Send the raw user prompt through the shared AI provider path."""
+    response = request_ai_chat_completion(
+        messages=[
+            {
+                "role": "system",
+                "content": "You are a Senior Chartered Accountant for a Ghanaian enterprise. Provide direct, professional financial analysis without preamble. Answer user queries based on their ERP data confidently and concisely.",
+            },
+            {"role": "user", "content": user_input},
+        ],
+        temperature=0.5,
+        max_tokens=1024,
+    )
+    if response["ok"]:
+        return response["content"]
+    logger.error("Gatekeeper AI call failed via provider %s: %s", response.get("provider"), response.get("error"))
+    return "AI assistant request failed. Please try again."
 
 
 def render_gatekeeper_ai_chat(menu_selection):
@@ -2395,7 +2424,29 @@ else:
                     st.markdown("---")
                     st.caption("AI Assistant Health")
                     ai_health_key = "admin_ai_health_test_result"
-                    ai_health_result = st.session_state.get(ai_health_key)
+                    ai_runtime_status = get_openai_client_status()
+                    ai_health_result = st.session_state.get(ai_health_key) or {
+                        "success": False,
+                        "response": "",
+                        "error": ai_runtime_status.get("message", ""),
+                        "selected_provider": ai_runtime_status.get("selected_provider", "openai"),
+                        "active_provider": ai_runtime_status.get("provider", ai_runtime_status.get("selected_provider", "openai")),
+                        "fallback_used": bool(ai_runtime_status.get("fallback_used")),
+                        "last_safe_error": ai_runtime_status.get("last_safe_error", ""),
+                        "client_initialized": bool(ai_runtime_status.get("client_initialized")),
+                        "streamlit_imported": ai_runtime_status.get("streamlit_imported"),
+                        "secrets_accessible": ai_runtime_status.get("secrets_accessible"),
+                        "top_level_secret_keys": ai_runtime_status.get("top_level_secret_keys", []),
+                        "top_level_key_present": ai_runtime_status.get("top_level_key_present"),
+                        "openai_section_present": ai_runtime_status.get("openai_section_present"),
+                        "nested_key_present": ai_runtime_status.get("nested_key_present"),
+                        "provided_length": ai_runtime_status.get("provided_length", 0),
+                        "gemini_key_present": ai_runtime_status.get("gemini_key_present"),
+                        "gemini_top_level_key_present": ai_runtime_status.get("gemini_top_level_key_present"),
+                        "gemini_section_present": ai_runtime_status.get("gemini_section_present"),
+                        "gemini_nested_key_present": ai_runtime_status.get("gemini_nested_key_present"),
+                        "gemini_provided_length": ai_runtime_status.get("gemini_provided_length", 0),
+                    }
                     ai_col1, ai_col2 = st.columns([1, 2])
                     with ai_col1:
                         if st.button("Test AI Assistant", key="test_ai_assistant_health_btn", use_container_width=True):
@@ -2405,14 +2456,16 @@ else:
                     with ai_col2:
                         if ai_health_result:
                             st.caption(
-                                "OpenAI secret source detected: {source} | provided_length: {length}".format(
-                                    source=ai_health_result.get("secret_source", "missing"),
-                                    length=ai_health_result.get("provided_length", 0),
+                                "Preferred provider: {selected} | Active provider: {active} | Fallback used: {fallback}".format(
+                                    selected=ai_health_result.get("selected_provider", "openai"),
+                                    active=ai_health_result.get("active_provider", "none"),
+                                    fallback="Yes" if ai_health_result.get("fallback_used") else "No",
                                 )
                             )
                             st.caption(
-                                "OPENAI_API_KEY present: {key_present} | OpenAI client initialized: {client_ready} | Test API call success: {success}".format(
-                                    key_present="Yes" if ai_health_result.get("key_present") else "No",
+                                "OPENAI_API_KEY present: {openai_present} | GEMINI_API_KEY present: {gemini_present} | AI client initialized: {client_ready} | Test API call success: {success}".format(
+                                    openai_present="Yes" if ai_health_result.get("top_level_key_present") or ai_health_result.get("nested_key_present") or ai_health_result.get("provided_length") else "No",
+                                    gemini_present="Yes" if ai_health_result.get("gemini_key_present") else "No",
                                     client_ready="Yes" if ai_health_result.get("client_initialized") else "No",
                                     success="Yes" if ai_health_result.get("success") else "No",
                                 )
@@ -2425,10 +2478,13 @@ else:
                                 )
                             )
                             st.caption(
-                                "OpenAI path checks: top_level_key={top_level} openai_section={section} nested_key={nested}".format(
+                                "OpenAI path checks: top_level_key={top_level} openai_section={section} nested_key={nested} | Gemini path checks: top_level_key={gemini_top_level} gemini_section={gemini_section} nested_key={gemini_nested}".format(
                                     top_level="Yes" if ai_health_result.get("top_level_key_present") else "No",
                                     section="Yes" if ai_health_result.get("openai_section_present") else "No",
                                     nested="Yes" if ai_health_result.get("nested_key_present") else "No",
+                                    gemini_top_level="Yes" if ai_health_result.get("gemini_top_level_key_present") else "No",
+                                    gemini_section="Yes" if ai_health_result.get("gemini_section_present") else "No",
+                                    gemini_nested="Yes" if ai_health_result.get("gemini_nested_key_present") else "No",
                                 )
                             )
                             if ai_health_result.get("success"):
@@ -2440,6 +2496,8 @@ else:
                                 )
                             else:
                                 st.warning(ai_health_result.get("error") or "AI assistant test failed.")
+                                if ai_health_result.get("last_safe_error"):
+                                    st.caption(f"Last safe error: {ai_health_result.get('last_safe_error')}")
                 except Exception as persistence_diag_error:
                     logger.warning(f"Persistence diagnostics unavailable: {persistence_diag_error}")
 

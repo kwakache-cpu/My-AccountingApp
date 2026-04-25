@@ -35,8 +35,8 @@ SERVICE_OWNERSHIP_MAP = [
     },
     {
         "responsibility": "AI assistant configuration",
-        "owner": "modules.get_openai_client_status via enterprise_services",
-        "notes": "One shared OpenAI key/client path with local, non-blocking failures.",
+        "owner": "modules.get_ai_client_status via enterprise_services",
+        "notes": "One shared AI provider path with OpenAI primary and optional Gemini fallback.",
     },
     {
         "responsibility": "System Health operations snapshot",
@@ -52,10 +52,10 @@ def get_service_ownership_map():
 
 
 def get_ai_service_status():
-    """Return the shared OpenAI client/status through the AI service boundary."""
-    from modules import get_openai_client_status
+    """Return the shared AI provider status through the AI service boundary."""
+    from modules import get_ai_client_status
 
-    return get_openai_client_status()
+    return get_ai_client_status()
 
 
 def has_permission(role, permission):
