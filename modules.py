@@ -3379,12 +3379,82 @@ def _render_camera_scanner(module_key, pending_key):
 def _lookup_inventory_by_barcode(conn, company_key, barcode_value):
     return conn.execute(
         """
-        SELECT id, item_name, category, qty, price, cost_price, barcode
+        SELECT id, item_name, item_code, category, qty, price, cost_price, barcode
         FROM inventory
         WHERE company_key = ? AND barcode = ?
         """,
         (company_key, barcode_value),
     ).fetchone()
+
+
+def _lookup_inventory_for_pos(conn, company_key, search_value):
+    normalized_value = str(search_value or "").strip()
+    if not normalized_value:
+        return None, None
+
+    exact_match = conn.execute(
+        """
+        SELECT id, item_name, item_code, category, qty, price, cost_price, barcode
+        FROM inventory
+        WHERE company_key = ?
+          AND qty > 0
+          AND (
+              barcode = ?
+              OR item_code = ?
+              OR LOWER(item_name) = LOWER(?)
+          )
+        ORDER BY item_name
+        LIMIT 1
+        """,
+        (company_key, normalized_value, normalized_value, normalized_value),
+    ).fetchone()
+    if exact_match:
+        if str(exact_match["barcode"] or "").strip() == normalized_value:
+            return exact_match, "barcode"
+        if str(exact_match["item_code"] or "").strip() == normalized_value:
+            return exact_match, "item_code"
+        return exact_match, "item_name"
+
+    fallback_match = conn.execute(
+        """
+        SELECT id, item_name, item_code, category, qty, price, cost_price, barcode
+        FROM inventory
+        WHERE company_key = ?
+          AND qty > 0
+          AND (
+              LOWER(item_name) LIKE LOWER(?)
+              OR LOWER(COALESCE(item_code, '')) LIKE LOWER(?)
+          )
+        ORDER BY item_name
+        LIMIT 1
+        """,
+        (company_key, f"%{normalized_value}%", f"%{normalized_value}%"),
+    ).fetchone()
+    if fallback_match:
+        return fallback_match, "manual_search"
+    return None, None
+
+
+def _search_inventory_for_pos(conn, company_key, search_value):
+    normalized_value = str(search_value or "").strip()
+    if not normalized_value:
+        return []
+    return conn.execute(
+        """
+        SELECT id, item_name, item_code, category, qty, price, cost_price, barcode
+        FROM inventory
+        WHERE company_key = ?
+          AND qty > 0
+          AND (
+              LOWER(item_name) LIKE LOWER(?)
+              OR LOWER(COALESCE(item_code, '')) LIKE LOWER(?)
+              OR COALESCE(barcode, '') LIKE ?
+          )
+        ORDER BY item_name
+        LIMIT 25
+        """,
+        (company_key, f"%{normalized_value}%", f"%{normalized_value}%", f"%{normalized_value}%"),
+    ).fetchall()
 
 
 def _add_item_to_pos_cart(company_key, item_row):
@@ -5291,8 +5361,10 @@ def show_pos(company_key, company_name, role):
     void_success_key = f"pos_void_success_{company_key}"
     pos_message_key = f"pos_message_{company_key}"
     pos_scan_beep_key = f"pos_scan_beep_{company_key}"
-    pos_scan_input_key = f"pos_scan_input_{company_key}"
+    pos_scan_input_key = "pos_barcode_input"
     pos_pending_scan_key = f"pos_pending_scan_{company_key}"
+    pos_product_search_key = f"pos_product_search_{company_key}"
+    pos_product_select_key = f"pos_product_select_{company_key}"
     cart_key = f"pos_cart_{company_key}"
     if role == "Demo":
         _demo_notice()
@@ -5316,7 +5388,7 @@ def show_pos(company_key, company_name, role):
         conn = get_connection()
         company_row = conn.execute("SELECT name, barcode_input_source FROM companies WHERE key = ?", (company_key,)).fetchone()
         items = conn.execute(
-            "SELECT id, item_name, barcode, price, qty FROM inventory WHERE company_key = ? AND qty > 0",
+            "SELECT id, item_name, item_code, barcode, price, cost_price, qty FROM inventory WHERE company_key = ? AND qty > 0",
             (company_key,),
         ).fetchall()
         customers = get_customer_balances(company_key, conn=conn)
@@ -5324,7 +5396,11 @@ def show_pos(company_key, company_name, role):
 
         company_label = company_row[0] if company_row else company_name
         barcode_input_source = company_row[1] if company_row and company_row[1] else "Keyboard Entry"
-        items_df = pd.DataFrame(items, columns=["ID", "Item Name", "Barcode", "Price", "Qty"]) if items else pd.DataFrame()
+        items_df = (
+            pd.DataFrame(items, columns=["ID", "Item Name", "Item Code", "Barcode", "Price", "Cost Price", "Qty"])
+            if items
+            else pd.DataFrame()
+        )
         receipt_html_key = f"pos_receipt_html_{company_key}"
         receipt_print_trigger_key = f"pos_receipt_print_trigger_{company_key}"
         do_print_key = "do_print"
@@ -5383,12 +5459,11 @@ def show_pos(company_key, company_name, role):
 
         with st.form(key=f"pos_form_{company_key}", clear_on_submit=True):
             st.text_input(
-                "Barcode Search",
+                "Scan Barcode",
                 key=pos_scan_input_key,
-                placeholder="Scan barcode and the item will be added to the cart",
-                label_visibility="collapsed",
+                placeholder="Scan barcode and press Enter",
             )
-            _focus_text_input("Barcode Search")
+            _focus_text_input("Scan Barcode")
             if barcode_input_source == "Camera Scanner":
                 _render_camera_scanner(f"pos_{company_key}", pos_pending_scan_key)
             submitted = st.form_submit_button("Scan Barcode")
@@ -5398,12 +5473,18 @@ def show_pos(company_key, company_name, role):
                     conn = None
                     try:
                         conn = get_connection()
-                        matched_item = _lookup_inventory_by_barcode(conn, company_key, pending_pos_barcode)
+                        matched_item, lookup_source = _lookup_inventory_for_pos(conn, company_key, pending_pos_barcode)
                         if matched_item and float(matched_item["qty"] or 0) > 0:
                             st.session_state[checkout_complete_key] = False
                             st.session_state.pop(receipt_key, None)
                             st.session_state.pop(receipt_html_key, None)
                             _add_item_to_pos_cart(company_key, matched_item)
+                            logger.info(
+                                "POS scanner input matched item '%s' via %s for company %s",
+                                matched_item["item_name"],
+                                lookup_source or "unknown",
+                                company_key,
+                            )
                             _trigger_scan_feedback(
                                 pos_message_key,
                                 f"Added {matched_item['item_name']} to the active sale.",
@@ -5411,9 +5492,13 @@ def show_pos(company_key, company_name, role):
                                 pos_scan_beep_key,
                             )
                         else:
+                            logger.info(
+                                "POS scanner input did not match an in-stock product for company %s",
+                                company_key,
+                            )
                             _trigger_scan_feedback(
                                 pos_message_key,
-                                f"No in-stock item found for barcode {pending_pos_barcode}.",
+                                "Product not found",
                                 "warning",
                             )
                     except Exception as exc:
@@ -5435,6 +5520,56 @@ def show_pos(company_key, company_name, role):
                 if items_df.empty:
                     st.info("No stock available for sale. Switch to Manual Entry to continue.")
                 else:
+                    product_search_term = st.text_input(
+                        "Search Product",
+                        key=pos_product_search_key,
+                        placeholder="Search by name, barcode, or item code",
+                    ).strip()
+                    manual_search_options = []
+                    if product_search_term:
+                        conn = None
+                        try:
+                            conn = get_connection()
+                            manual_search_options = _search_inventory_for_pos(conn, company_key, product_search_term)
+                        except Exception as exc:
+                            st.warning(build_user_safe_error(exc, role))
+                        finally:
+                            if conn:
+                                conn.close()
+                        if not manual_search_options:
+                            st.info("No matching stock items found for that search.")
+                    if manual_search_options:
+                        manual_option_labels = [
+                            "{name} | Code {item_code} | Barcode {barcode} | Qty {qty:,.2f}".format(
+                                name=row["item_name"],
+                                item_code=row["item_code"] or "N/A",
+                                barcode=row["barcode"] or "N/A",
+                                qty=float(row["qty"] or 0.0),
+                            )
+                            for row in manual_search_options
+                        ]
+                        selected_search_label = st.selectbox(
+                            "Manual Product Search Results",
+                            manual_option_labels,
+                            key=pos_product_select_key,
+                        )
+                        if st.button("Add Search Result", key=f"pos_add_search_result_{company_key}"):
+                            selected_search_row = manual_search_options[manual_option_labels.index(selected_search_label)]
+                            st.session_state[checkout_complete_key] = False
+                            st.session_state.pop(receipt_key, None)
+                            st.session_state.pop(receipt_html_key, None)
+                            _add_item_to_pos_cart(company_key, selected_search_row)
+                            logger.info(
+                                "POS manual search added item '%s' for company %s",
+                                selected_search_row["item_name"],
+                                company_key,
+                            )
+                            _trigger_scan_feedback(
+                                pos_message_key,
+                                f"Added {selected_search_row['item_name']} to the active sale.",
+                                "success",
+                            )
+                            st.rerun()
                     selected_item = st.selectbox("Select Item", items_df["Item Name"].tolist(), key=f"pos_item_{company_key}")
                     qty_to_sell = st.number_input("Quantity", min_value=1, value=1, key=f"pos_qty_{company_key}")
                     if st.button("Add Selected Item", key=f"pos_add_selected_{company_key}"):
@@ -5448,8 +5583,10 @@ def show_pos(company_key, company_name, role):
                                 {
                                     "id": int(item_row["ID"]),
                                     "item_name": item_row["Item Name"],
+                                    "item_code": item_row["Item Code"],
                                     "barcode": item_row["Barcode"],
                                     "price": float(item_row["Price"] or 0.0),
+                                    "cost_price": float(item_row["Cost Price"] or 0.0),
                                     "qty": float(item_row["Qty"] or 0.0),
                                 },
                             )
