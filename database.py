@@ -2286,6 +2286,19 @@ def _is_bootstrap_candidate(health_snapshot):
     )
 
 
+def _is_empty_local_db_recovery_candidate(health_snapshot):
+    health_snapshot = health_snapshot or {}
+    return all(
+        [
+            bool(health_snapshot.get("file_exists")),
+            bool(health_snapshot.get("sqlite_open_success")),
+            bool(health_snapshot.get("structural_valid")),
+            bool(health_snapshot.get("companies_table_exists")),
+            int(health_snapshot.get("company_count") or 0) == 0,
+        ]
+    )
+
+
 def _build_startup_result(
     ok,
     stage,
@@ -4277,12 +4290,17 @@ def startup_database():
         cloud_restore_used,
         False,
     )
-    if _is_bootstrap_candidate(db_health_before_startup):
+    if _is_empty_local_db_recovery_candidate(db_health_before_startup):
         local_bootstrap_company_count = int(db_health_before_startup.get("company_count") or 0)
         logger.warning(
-            "Local database is bootstrap-empty; checking trusted cloud backup before allowing bootstrap mode: db_path=%s local_company_count=%s",
+            "Empty local DB detected – forcing cloud restore: db_path=%s local_company_count=%s structural_valid=%s required_tables_exist=%s companies_table_exists=%s database_identity_exists=%s schema_version_exists=%s",
             db_health_before_startup["db_path"],
             local_bootstrap_company_count,
+            db_health_before_startup.get("structural_valid"),
+            db_health_before_startup.get("required_tables_exist"),
+            db_health_before_startup.get("companies_table_exists"),
+            db_health_before_startup.get("database_identity_exists"),
+            db_health_before_startup.get("schema_version_exists"),
         )
         recovery_attempted = True
         recovery_result = attempt_production_database_recovery(force_restore=True)
@@ -4297,22 +4315,24 @@ def startup_database():
         db_health_before_startup = get_database_health_snapshot(DB_PATH, logger_instance=logger)
         if cloud_restore_used and db_health_before_startup["production_ready"]:
             logger.info(
-                "Bootstrap mode bypassed in favor of trusted cloud restore: local_company_count=%s cloud_backup_company_count=%s replaced_local_empty_db=%s final_company_count=%s final_startup_mode=%s",
+                "Bootstrap mode bypassed in favor of trusted cloud restore: local_company_count=%s cloud_backup_company_count=%s replaced_local_empty_db=%s restore_source=%s final_company_count=%s final_startup_mode=%s",
                 local_bootstrap_company_count,
                 cloud_backup_company_count,
                 recovery_result.get("replacement_performed"),
+                LAST_RESTORE_SOURCE,
                 db_health_before_startup["company_count"],
                 "restored_from_cloud",
             )
         else:
             logger.warning(
-                "Cloud restore did not replace bootstrap-empty database; bootstrap mode remains allowed only because no production-ready cloud backup was restored: local_company_count=%s cloud_backup_company_count=%s recovery_attempted=%s recovery_succeeded=%s recovery_stage=%s recovery_reason=%s final_startup_mode=%s",
+                "Cloud restore did not replace bootstrap-empty database; bootstrap mode remains allowed only because no production-ready cloud backup was restored: local_company_count=%s cloud_backup_company_count=%s recovery_attempted=%s recovery_succeeded=%s recovery_stage=%s recovery_reason=%s restore_source=%s final_startup_mode=%s",
                 local_bootstrap_company_count,
                 cloud_backup_company_count,
                 recovery_attempted,
                 cloud_restore_used,
                 recovery_result.get("stage"),
                 recovery_result.get("reason"),
+                LAST_RESTORE_SOURCE,
                 "bootstrap_mode",
             )
             return _build_startup_result(
