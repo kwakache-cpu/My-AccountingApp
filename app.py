@@ -8,6 +8,7 @@ from database import (
     force_backup_after_company_creation,
     get_downloadable_backup_export,
     get_firebase_service_account_info,
+    get_company_subscription_snapshot,
     get_connection,
     get_recovery_source_diagnostics,
     startup_database,
@@ -127,7 +128,9 @@ show_payroll = eka_modules.show_payroll
 show_pos = eka_modules.show_pos
 show_reports = eka_modules.show_reports
 show_sales_purchase = eka_modules.show_sales_purchase
+show_subscription_renewal_page = eka_modules.show_subscription_renewal_page
 show_taxation = eka_modules.show_taxation
+get_subscription_billing_admin_snapshot = eka_modules.get_subscription_billing_admin_snapshot
 show_vouchers = eka_modules.show_vouchers
 execute_manual_license_override = eka_modules.execute_manual_license_override
 
@@ -783,25 +786,31 @@ def render_gatekeeper_ai_guide(menu_selection):
             )
 
 def check_license_expiry_with_grace(company_key):
-    """NATIVE SQLITE FIX: No  wrapper"""
-    conn = None
+    """Return a compatibility-friendly subscription snapshot for legacy UI callers."""
     try:
-        conn = get_connection()
-        cursor = conn.cursor()
-        cursor.execute("SELECT name, subscription_expiry FROM companies WHERE key = ?", (company_key,))
-        company_data = cursor.fetchone()
-        if company_data and company_data[1]:
-            expiry_date = datetime.fromisoformat(company_data[1])
-            days_until_expiry = (expiry_date - datetime.now()).days
-            if days_until_expiry < 0: return {'status': 'expired', 'days_left': abs(days_until_expiry)}
-            if days_until_expiry <= 7: return {'status': 'warning', 'days_left': days_until_expiry}
-            return {'status': 'active', 'days_left': days_until_expiry}
-        return {'status': 'unknown'}
-    except Exception as e:
-        return {'status': 'error'}
-    finally:
-        if conn:
-            conn.close()
+        snapshot = get_company_subscription_snapshot(company_key)
+        if not snapshot.get("ok"):
+            return {"status": "error", "days_left": None, "subscription": snapshot}
+        days_left = snapshot.get("days_left")
+        if snapshot.get("renewal_required"):
+            return {
+                "status": "expired",
+                "days_left": abs(int(days_left or 0)),
+                "subscription": snapshot,
+            }
+        if days_left is not None and int(days_left) <= 7:
+            return {
+                "status": "warning",
+                "days_left": int(days_left),
+                "subscription": snapshot,
+            }
+        return {
+            "status": "active" if snapshot.get("access_allowed") else "unknown",
+            "days_left": None if days_left is None else int(days_left),
+            "subscription": snapshot,
+        }
+    except Exception:
+        return {"status": "error", "days_left": None}
 
 def submit_payment_reference(company_key, reference, amount, payment_method):
     """Submit payment reference for admin approval."""
@@ -950,20 +959,13 @@ def login_ui():
                             st.error("This company is currently archived or inactive. Contact Gatekeeper to reactivate access.")
                             conn.close()
                             return
-                        # Check license expiry with grace period
-                        license_status = check_license_expiry_with_grace(admin[0])
-                        
-                        # Allow login if not expired
-                        if license_status['status'] != 'expired':
-                            st.session_state.auth = True
-                            st.session_state.user = {"key": admin[0], "name": admin[1], "role": "Master Admin"}
-                            st.session_state.company_id = admin[0]
-                            log_audit_action(conn, admin[0], "Master Admin", "Successful login", "Authentication")
-                            conn.close()
-                            st.session_state.login_attempts = 0
-                            st.rerun()
-                        else:
-                            st.error(f"Your license expired {license_status['days_left']} days ago. Please renew to access the system.")
+                        st.session_state.auth = True
+                        st.session_state.user = {"key": admin[0], "name": admin[1], "role": "Master Admin"}
+                        st.session_state.company_id = admin[0]
+                        log_audit_action(conn, admin[0], "Master Admin", "Successful login", "Authentication")
+                        conn.close()
+                        st.session_state.login_attempts = 0
+                        st.rerun()
                     
                     # Branch Access Key Login
                     branch_auth = conn.execute(
@@ -978,24 +980,20 @@ def login_ui():
                         (access_key,),
                     ).fetchone()
                     if branch_auth:
-                        license_status = check_license_expiry_with_grace(branch_auth[1])
-                        if license_status['status'] != 'expired':
-                            st.session_state.auth = True
-                            st.session_state.user = {
-                                "key": branch_auth[1],
-                                "name": branch_auth[4],
-                                "role": "Branch_Bookkeeper",
-                                "branch_name": branch_auth[2],
-                                "branch_id": branch_auth[0],
-                            }
-                            st.session_state.company_id = branch_auth[1]
-                            st.session_state.active_branch_id = branch_auth[0]
-                            log_audit_action(conn, branch_auth[1], "Branch_Bookkeeper", "Successful login", "Authentication", branch_id=branch_auth[0])
-                            conn.close()
-                            st.session_state.login_attempts = 0
-                            st.rerun()
-                        else:
-                            st.error(f"Your license expired {license_status['days_left']} days ago. Please renew to access the system.")
+                        st.session_state.auth = True
+                        st.session_state.user = {
+                            "key": branch_auth[1],
+                            "name": branch_auth[4],
+                            "role": "Branch_Bookkeeper",
+                            "branch_name": branch_auth[2],
+                            "branch_id": branch_auth[0],
+                        }
+                        st.session_state.company_id = branch_auth[1]
+                        st.session_state.active_branch_id = branch_auth[0]
+                        log_audit_action(conn, branch_auth[1], "Branch_Bookkeeper", "Successful login", "Authentication", branch_id=branch_auth[0])
+                        conn.close()
+                        st.session_state.login_attempts = 0
+                        st.rerun()
 
                     # Branch Bookkeeper / Staff Check
                     user_login = conn.execute(
@@ -1010,31 +1008,27 @@ def login_ui():
                         (access_key,),
                     ).fetchone()
                     if user_login:
-                        license_status = check_license_expiry_with_grace(user_login[0])
-                        if license_status['status'] != 'expired':
-                            role_name = user_login[2]
-                            if role_name == "Bookkeeper":
-                                role_name = "Branch_Bookkeeper"
-                            if user_login[4]:
-                                conn.execute(
-                                    "UPDATE branches SET branch_access_key = ? WHERE branch_id = ? AND COALESCE(branch_access_key, '') = ''",
-                                    (access_key, user_login[4]),
-                                )
-                            st.session_state.auth = True
-                            st.session_state.user = {
-                                "key": user_login[0],
-                                "name": user_login[1],
-                                "role": role_name,
-                                "staff_name": user_login[3],
-                            }
-                            st.session_state.company_id = user_login[0]
-                            st.session_state.active_branch_id = user_login[4]
-                            log_audit_action(conn, user_login[0], role_name, "Successful login", "Authentication", branch_id=user_login[4])
-                            conn.close()
-                            st.session_state.login_attempts = 0
-                            st.rerun()
-                        else:
-                            st.error(f"Your license expired {license_status['days_left']} days ago. Please renew to access the system.")
+                        role_name = user_login[2]
+                        if role_name == "Bookkeeper":
+                            role_name = "Branch_Bookkeeper"
+                        if user_login[4]:
+                            conn.execute(
+                                "UPDATE branches SET branch_access_key = ? WHERE branch_id = ? AND COALESCE(branch_access_key, '') = ''",
+                                (access_key, user_login[4]),
+                            )
+                        st.session_state.auth = True
+                        st.session_state.user = {
+                            "key": user_login[0],
+                            "name": user_login[1],
+                            "role": role_name,
+                            "staff_name": user_login[3],
+                        }
+                        st.session_state.company_id = user_login[0]
+                        st.session_state.active_branch_id = user_login[4]
+                        log_audit_action(conn, user_login[0], role_name, "Successful login", "Authentication", branch_id=user_login[4])
+                        conn.close()
+                        st.session_state.login_attempts = 0
+                        st.rerun()
 
                     # Failed login attempt
                     st.session_state.login_attempts += 1
@@ -1974,13 +1968,18 @@ if not st.session_state.auth or not check_session_timeout():
 else:
     check_session_lock()  # Check for session revocation
     
-    # Renewal alert
-    license_status = check_license_expiry_with_grace(st.session_state.company_id)
-    if license_status['status'] == 'expiring_soon':
-        st.warning(f"⚠️ Your license expires in {license_status['days_left']} days. Please renew to avoid service interruption.")
-    
     update_activity()  # Update activity on each interaction
     u = st.session_state.user
+    subscription_status = (
+        get_company_subscription_snapshot(st.session_state.company_id)
+        if st.session_state.get("company_id") and u.get("role") not in {"Dev", "Demo"}
+        else {"ok": True, "access_allowed": True, "renewal_required": False, "days_left": None}
+    )
+    if subscription_status.get("ok") and not subscription_status.get("renewal_required"):
+        if subscription_status.get("days_left") is not None and int(subscription_status.get("days_left") or 0) <= 7:
+            st.warning(
+                f"⚠️ Your subscription expires in {subscription_status['days_left']} days. Please renew to avoid service interruption."
+            )
     
     if u['role'] == "Dev":
         # Gatekeeper Dashboard with Enhanced Metrics
@@ -1998,21 +1997,16 @@ else:
                     total_companies = conn.execute("SELECT COUNT(*) FROM companies").fetchone()[0]
                 except Exception:
                     total_companies = 0
-                try:
-                    active_subscriptions = conn.execute("SELECT COUNT(*) FROM companies WHERE status='Active'").fetchone()[0]
-                except Exception:
-                    active_subscriptions = 0
-                try:
-                    monthly_revenue = conn.execute("SELECT SUM(amount) FROM pending_approvals").fetchone()[0] or 0
-                except Exception:
-                    monthly_revenue = 0
+                billing_snapshot = get_subscription_billing_admin_snapshot()
+                active_subscriptions = int(billing_snapshot.get("active_subscriptions") or 0)
+                monthly_revenue = float(billing_snapshot.get("total_verified_revenue") or 0.0)
                 
                 # Display metrics
                 m1, m2, m3, m4 = st.columns(4)
                 m1.metric("Total Licenses", str(total_companies))
                 m2.metric("Active Subscriptions", str(active_subscriptions))
-                m3.metric(label=f"Monthly Revenue ({st.session_state.currency_symbol})", value=format_currency(monthly_revenue))
-                m4.metric("System Uptime", "100%")
+                m3.metric(label=f"Verified Revenue ({st.session_state.currency_symbol})", value=format_currency(monthly_revenue))
+                m4.metric("Trial Companies", int(billing_snapshot.get("trial_subscriptions") or 0))
 
                 if total_companies == 0 and active_subscriptions == 0 and monthly_revenue == 0:
                     st.info(
@@ -2106,6 +2100,7 @@ else:
                             )
                         )
                     paystack_diag = operations_snapshot["paystack"]
+                    subscription_billing_diag = operations_snapshot.get("subscription_billing") or {}
                     st.markdown("---")
                     st.caption("Paystack Live Payment Configuration")
                     st.caption(
@@ -2153,6 +2148,41 @@ else:
                                 st.success(paystack_health_result.get("message") or "Paystack configuration is ready.")
                             else:
                                 st.warning(sanitize_error_message(paystack_health_result.get("error") or "Paystack health test failed."))
+                    st.markdown("---")
+                    st.caption("Subscription Billing Health")
+                    billing_diag = subscription_billing_diag.get("billing", {})
+                    billing_paystack_diag = subscription_billing_diag.get("paystack", paystack_diag)
+                    st.caption(
+                        "Paystack ready: {paystack_ready} | Subscription table: {subscription_table} | Payment table: {payment_table}".format(
+                            paystack_ready="Yes"
+                            if (
+                                billing_paystack_diag.get("secret_key_present")
+                                and billing_paystack_diag.get("public_key_present")
+                                and billing_paystack_diag.get("callback_url_configured")
+                            )
+                            else "No",
+                            subscription_table="Yes" if billing_diag.get("subscription_table_present") else "No",
+                            payment_table="Yes" if billing_diag.get("payment_table_present") else "No",
+                        )
+                    )
+                    st.caption(
+                        "Active: {active} | Trial: {trial} | Expired: {expired} | Failed Payments: {failed}".format(
+                            active=int(billing_diag.get("active_count") or 0),
+                            trial=int(billing_diag.get("trial_count") or 0),
+                            expired=int(billing_diag.get("expired_count") or 0),
+                            failed=int(billing_diag.get("failed_payment_count") or 0),
+                        )
+                    )
+                    latest_successful_payment = billing_diag.get("latest_successful_payment") or {}
+                    if latest_successful_payment:
+                        st.caption(
+                            "Latest successful payment: {reference} | Company: {company_key} | Plan: {plan_name} | Verified: {verified_at}".format(
+                                reference=latest_successful_payment.get("reference") or "unknown",
+                                company_key=latest_successful_payment.get("company_key") or "unknown",
+                                plan_name=latest_successful_payment.get("plan_name") or "unknown",
+                                verified_at=latest_successful_payment.get("verified_at") or "unknown",
+                            )
+                        )
                     schema_diag = operations_snapshot["schema"]
                     st.markdown("---")
                     st.caption("Schema Manifest Health")
@@ -2361,6 +2391,19 @@ else:
                             with st.expander("Accounting Period Control Summary", expanded=False):
                                 st.json(reporting_diag["period_control"]["period_counts"])
                                 st.dataframe(pd.DataFrame(reporting_diag["period_control"]["periods"]), use_container_width=True)
+                    st.markdown("---")
+                    st.caption("Subscription Billing Revenue Visibility")
+                    sb1, sb2, sb3, sb4 = st.columns(4)
+                    sb1.metric("Verified Revenue", format_currency(float(billing_snapshot.get("total_verified_revenue") or 0.0)))
+                    sb2.metric("Active", int(billing_snapshot.get("active_subscriptions") or 0))
+                    sb3.metric("Trials", int(billing_snapshot.get("trial_subscriptions") or 0))
+                    sb4.metric("Expired", int(billing_snapshot.get("expired_subscriptions") or 0))
+                    with st.expander("Revenue by Plan", expanded=False):
+                        st.dataframe(pd.DataFrame(billing_snapshot.get("revenue_by_plan") or []), use_container_width=True)
+                    with st.expander("Recent Subscription Payments", expanded=False):
+                        st.dataframe(pd.DataFrame(billing_snapshot.get("recent_payments") or []), use_container_width=True)
+                    with st.expander("Next Subscription Expiries", expanded=False):
+                        st.dataframe(pd.DataFrame(billing_snapshot.get("next_expiries") or []), use_container_width=True)
                     st.markdown("---")
                     st.caption("Admin Backup Export")
                     export_state_key = "admin_backup_export_payload"
@@ -2880,6 +2923,22 @@ else:
         st.stop()
                     
     else:
+        if subscription_status.get("renewal_required"):
+            show_subscription_renewal_page(st.session_state.company_id, role=u["role"])
+            st.sidebar.markdown("---")
+            if st.sidebar.button("🔴 Secure Logout", width='stretch', key="v3_subscription_logout"):
+                try:
+                    conn = get_connection()
+                    log_audit_action(conn, u.get('key', 'SYSTEM'), u['role'], "User logout", "Authentication")
+                    conn.close()
+                except Exception:
+                    pass
+                st.session_state.auth = False
+                st.session_state.user = None
+                st.session_state.company_id = None
+                st.session_state.login_attempts = 0
+                st.rerun()
+            st.stop()
         _render_primary_sidebar(u, include_settings=True)
         _render_primary_page(u)
         st.sidebar.markdown("---")

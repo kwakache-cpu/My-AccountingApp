@@ -1,6 +1,6 @@
 import sqlite3
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 import os
 import shutil
 import json
@@ -107,6 +107,9 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+
+DEFAULT_SUBSCRIPTION_TRIAL_DAYS = 7
+SUBSCRIPTION_BILLING_STATUSES = {"trial", "active", "expired", "cancelled"}
 logger.info("database module loaded successfully")
 
 IFRS_CHART_OF_ACCOUNTS = [
@@ -176,6 +179,7 @@ CRITICAL_VALIDATION_TABLES = (
 )
 DATABASE_REQUIRED_TABLES = (
     "companies",
+    "company_subscriptions",
     "journal_entries",
     "journal_lines",
     "chart_of_accounts",
@@ -188,6 +192,7 @@ DATABASE_PRODUCTION_REQUIRED_TABLES = DATABASE_REQUIRED_TABLES + (
 SCHEMA_MANIFEST = {
     "source_of_truth": {
         "companies": ("key", "name", "subscription_expiry", "status"),
+        "company_subscriptions": ("company_key", "plan_name", "status", "start_date", "end_date"),
         "branches": ("branch_id", "company_key", "branch_name"),
         "users": ("company_key", "full_name", "login_key", "role", "status"),
         "chart_of_accounts": ("id", "name", "type", "account_name", "account_type", "posting_allowed", "control_account"),
@@ -222,7 +227,7 @@ SCHEMA_MANIFEST = {
         "counterparties": ("id", "company_key", "party_name", "party_type"),
         "maintenance_settings": ("id", "maintenance_date", "is_active", "message"),
         "pending_approvals": ("id", "company_key", "payment_reference", "amount"),
-        "license_payment_transactions": ("id", "reference", "company_key", "expected_amount", "currency", "status"),
+        "license_payment_transactions": ("id", "reference", "company_key", "plan_name", "expected_amount", "currency", "status"),
         "accounts_payable": ("id", "vendor", "amount", "status", "due_date"),
         "purchase_orders": ("id", "item", "quantity", "cost", "status"),
     },
@@ -1438,6 +1443,11 @@ def create_company_record(
     max_branches=1,
     branch_price_per_month=0.0,
     contact_email=None,
+    subscription_plan_name=None,
+    subscription_status=None,
+    subscription_start_date=None,
+    subscription_end_date=None,
+    last_payment_reference=None,
 ):
     if conn is None:
         raise RuntimeError("Database connection is required to create a company record.")
@@ -1472,7 +1482,525 @@ def create_company_record(
             str(contact_email or "").strip() or None,
         ),
     )
+    resolved_status = str(subscription_status or "").strip().lower()
+    resolved_plan_name = str(subscription_plan_name or "").strip() or "Manual"
+    expiry_value = str(subscription_expiry or "").strip()
+    derived_end_date = subscription_end_date
+    if not derived_end_date and expiry_value and expiry_value.lower() != "permanent":
+        derived_end_date = expiry_value
+    derived_start_date = subscription_start_date or datetime.now().date().isoformat()
+    if not resolved_status:
+        if expiry_value.lower() == "permanent":
+            resolved_status = "active"
+            derived_end_date = None
+        elif derived_end_date:
+            parsed_end = _parse_datetime_like(derived_end_date)
+            if parsed_end is not None and parsed_end.date() < datetime.now().date():
+                resolved_status = "expired"
+            else:
+                resolved_status = "active"
+        else:
+            resolved_status = "trial"
+    upsert_company_subscription(
+        conn,
+        company_key=normalized_key,
+        plan_name=resolved_plan_name,
+        status=resolved_status,
+        start_date=derived_start_date,
+        end_date=derived_end_date,
+        last_payment_reference=last_payment_reference,
+    )
     return normalized_key
+
+
+def _parse_datetime_like(value):
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value
+    try:
+        text = str(value).strip()
+    except Exception:
+        return None
+    if not text:
+        return None
+    if text.lower() == "permanent":
+        return None
+    try:
+        return datetime.fromisoformat(text)
+    except Exception:
+        try:
+            return datetime.fromisoformat(f"{text}T00:00:00")
+        except Exception:
+            return None
+
+
+def _normalize_subscription_status(status):
+    normalized = str(status or "").strip().lower()
+    if normalized not in SUBSCRIPTION_BILLING_STATUSES:
+        if normalized in {"warning", "expiring_soon"}:
+            return "active"
+        return "trial"
+    return normalized
+
+
+def _ensure_subscription_billing_schema(cursor):
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS company_subscriptions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            company_key TEXT UNIQUE,
+            plan_name TEXT,
+            status TEXT DEFAULT 'trial',
+            start_date TEXT,
+            end_date TEXT,
+            last_payment_reference TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (company_key) REFERENCES companies (key)
+        )
+        """
+    )
+    cursor.execute("PRAGMA table_info(company_subscriptions)")
+    subscription_columns = {row[1] for row in cursor.fetchall()}
+    subscription_column_defs = {
+        "company_key": "TEXT",
+        "plan_name": "TEXT",
+        "status": "TEXT DEFAULT 'trial'",
+        "start_date": "TEXT",
+        "end_date": "TEXT",
+        "last_payment_reference": "TEXT",
+        "created_at": "TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
+        "updated_at": "TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
+    }
+    for column_name, column_def in subscription_column_defs.items():
+        if column_name not in subscription_columns:
+            cursor.execute(f"ALTER TABLE company_subscriptions ADD COLUMN {column_name} {column_def}")
+    cursor.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_company_subscriptions_company_key ON company_subscriptions(company_key)"
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_company_subscriptions_status_end_date ON company_subscriptions(status, end_date)"
+    )
+
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS license_payment_transactions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            reference TEXT UNIQUE,
+            company_key TEXT,
+            company_name TEXT,
+            payer_email TEXT,
+            payment_context TEXT DEFAULT 'license_activation',
+            plan_name TEXT,
+            expected_amount INTEGER DEFAULT 0,
+            currency TEXT DEFAULT 'GHS',
+            status TEXT DEFAULT 'initialized',
+            authorization_url TEXT,
+            callback_url TEXT,
+            metadata_json TEXT,
+            gateway_status_summary TEXT,
+            paid_at TIMESTAMP,
+            verified_at TIMESTAMP,
+            activated_at TIMESTAMP,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+    cursor.execute("PRAGMA table_info(license_payment_transactions)")
+    license_payment_columns = {row[1] for row in cursor.fetchall()}
+    license_payment_column_defs = {
+        "company_key": "TEXT",
+        "company_name": "TEXT",
+        "payer_email": "TEXT",
+        "payment_context": "TEXT DEFAULT 'license_activation'",
+        "plan_name": "TEXT",
+        "expected_amount": "INTEGER DEFAULT 0",
+        "currency": "TEXT DEFAULT 'GHS'",
+        "status": "TEXT DEFAULT 'initialized'",
+        "authorization_url": "TEXT",
+        "callback_url": "TEXT",
+        "metadata_json": "TEXT",
+        "gateway_status_summary": "TEXT",
+        "paid_at": "TIMESTAMP",
+        "verified_at": "TIMESTAMP",
+        "activated_at": "TIMESTAMP",
+        "created_at": "TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
+        "updated_at": "TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
+    }
+    for column_name, column_def in license_payment_column_defs.items():
+        if column_name not in license_payment_columns:
+            cursor.execute(f"ALTER TABLE license_payment_transactions ADD COLUMN {column_name} {column_def}")
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_license_payment_transactions_company_status ON license_payment_transactions(company_key, status)"
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_license_payment_transactions_verified_at ON license_payment_transactions(verified_at)"
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_license_payment_transactions_plan_status ON license_payment_transactions(plan_name, status)"
+    )
+
+
+def upsert_company_subscription(
+    conn,
+    *,
+    company_key,
+    plan_name,
+    status,
+    start_date,
+    end_date=None,
+    last_payment_reference=None,
+):
+    if conn is None:
+        raise RuntimeError("Database connection is required to update company subscriptions.")
+    normalized_key = str(company_key or "").strip()
+    if not normalized_key:
+        raise ValueError("company_key is required")
+    normalized_status = _normalize_subscription_status(status)
+    normalized_plan_name = str(plan_name or "Trial").strip() or "Trial"
+    start_value = str(start_date or datetime.now().date().isoformat())
+    end_value = str(end_date).strip() if end_date not in (None, "") else None
+    conn.execute(
+        """
+        INSERT INTO company_subscriptions (
+            company_key, plan_name, status, start_date, end_date, last_payment_reference, updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+        ON CONFLICT(company_key) DO UPDATE SET
+            plan_name = excluded.plan_name,
+            status = excluded.status,
+            start_date = excluded.start_date,
+            end_date = excluded.end_date,
+            last_payment_reference = COALESCE(excluded.last_payment_reference, company_subscriptions.last_payment_reference),
+            updated_at = CURRENT_TIMESTAMP
+        """,
+        (
+            normalized_key,
+            normalized_plan_name,
+            normalized_status,
+            start_value,
+            end_value,
+            str(last_payment_reference or "").strip() or None,
+        ),
+    )
+
+
+def ensure_company_trial_subscription(
+    conn,
+    *,
+    company_key,
+    company_name,
+    contact_email=None,
+    trial_days=DEFAULT_SUBSCRIPTION_TRIAL_DAYS,
+):
+    if conn is None:
+        raise RuntimeError("Database connection is required to create a trial company.")
+    normalized_key = str(company_key or "").strip()
+    normalized_name = str(company_name or "").strip()
+    if not normalized_key or not normalized_name:
+        raise ValueError("company_key and company_name are required")
+    today = datetime.now().date()
+    end_date = today + timedelta(days=max(int(trial_days or DEFAULT_SUBSCRIPTION_TRIAL_DAYS), 1))
+    company_row = conn.execute(
+        "SELECT key FROM companies WHERE key = ? LIMIT 1",
+        (normalized_key,),
+    ).fetchone()
+    if not company_row:
+        create_company_record(
+            conn=conn,
+            company_key=normalized_key,
+            company_name=normalized_name,
+            subscription_expiry=end_date.isoformat(),
+            status="Active",
+            deployment_status="Trial",
+            contact_email=contact_email,
+            subscription_plan_name="Trial",
+            subscription_status="trial",
+            subscription_start_date=today.isoformat(),
+            subscription_end_date=end_date.isoformat(),
+        )
+    else:
+        conn.execute(
+            "UPDATE companies SET subscription_expiry = ?, contact_email = COALESCE(?, contact_email), deployment_status = COALESCE(NULLIF(deployment_status, ''), 'Trial') WHERE key = ?",
+            (end_date.isoformat(), str(contact_email or "").strip() or None, normalized_key),
+        )
+        upsert_company_subscription(
+            conn,
+            company_key=normalized_key,
+            plan_name="Trial",
+            status="trial",
+            start_date=today.isoformat(),
+            end_date=end_date.isoformat(),
+        )
+    return {
+        "company_key": normalized_key,
+        "company_name": normalized_name,
+        "status": "trial",
+        "start_date": today.isoformat(),
+        "end_date": end_date.isoformat(),
+        "days_left": max((end_date - today).days, 0),
+    }
+
+
+def get_company_subscription_snapshot(company_key, conn=None, as_of=None):
+    normalized_key = str(company_key or "").strip()
+    if not normalized_key:
+        return {
+            "ok": False,
+            "company_key": normalized_key,
+            "status": "unknown",
+            "access_allowed": False,
+            "renewal_required": True,
+            "days_left": None,
+        }
+    owns_connection = conn is None
+    conn = conn or _open_sqlite_connection()
+    try:
+        today = _parse_datetime_like(as_of) or datetime.now()
+        row = conn.execute(
+            """
+            SELECT cs.company_key, cs.plan_name, cs.status, cs.start_date, cs.end_date, cs.last_payment_reference,
+                   c.subscription_expiry, c.status AS company_status, c.name AS company_name
+            FROM companies c
+            LEFT JOIN company_subscriptions cs ON cs.company_key = c.key
+            WHERE c.key = ?
+            LIMIT 1
+            """,
+            (normalized_key,),
+        ).fetchone()
+        if not row:
+            return {
+                "ok": False,
+                "company_key": normalized_key,
+                "status": "unknown",
+                "access_allowed": False,
+                "renewal_required": True,
+                "days_left": None,
+            }
+
+        status = _normalize_subscription_status(row["status"] or "active")
+        plan_name = str(row["plan_name"] or "").strip() or ("Manual" if row["subscription_expiry"] else "Trial")
+        start_date = row["start_date"]
+        end_date = row["end_date"] or row["subscription_expiry"]
+        if str(row["subscription_expiry"] or "").strip().lower() == "permanent":
+            end_date = None
+            status = "active"
+            plan_name = plan_name or "Manual"
+        parsed_end = _parse_datetime_like(end_date)
+        parsed_start = _parse_datetime_like(start_date)
+        access_allowed = status in {"trial", "active"}
+        renewal_required = status in {"expired", "cancelled"}
+        days_left = None
+        if parsed_end is not None:
+            days_left = (parsed_end.date() - today.date()).days
+            if days_left < 0 and status in {"trial", "active"}:
+                status = "expired"
+                access_allowed = False
+                renewal_required = True
+                if row["status"] and row["status"] != "expired":
+                    conn.execute(
+                        """
+                        UPDATE company_subscriptions
+                        SET status = 'expired', updated_at = CURRENT_TIMESTAMP
+                        WHERE company_key = ?
+                        """,
+                        (normalized_key,),
+                    )
+                    conn.execute(
+                        "UPDATE companies SET subscription_expiry = ? WHERE key = ?",
+                        (parsed_end.date().isoformat(), normalized_key),
+                    )
+                    if owns_connection:
+                        conn.commit()
+        elif status == "cancelled":
+            access_allowed = False
+            renewal_required = True
+        return {
+            "ok": True,
+            "company_key": normalized_key,
+            "company_name": row["company_name"],
+            "plan_name": plan_name,
+            "status": status,
+            "start_date": parsed_start.date().isoformat() if parsed_start else (start_date or None),
+            "end_date": parsed_end.date().isoformat() if parsed_end else None,
+            "last_payment_reference": row["last_payment_reference"],
+            "days_left": days_left,
+            "access_allowed": access_allowed,
+            "renewal_required": renewal_required,
+            "is_trial": status == "trial",
+            "is_active": status in {"trial", "active"} and access_allowed,
+            "is_expired": status == "expired",
+            "is_cancelled": status == "cancelled",
+            "company_status": row["company_status"],
+        }
+    finally:
+        if owns_connection and conn:
+            conn.close()
+
+
+def activate_company_subscription(
+    conn,
+    *,
+    company_key,
+    plan_name,
+    payment_reference,
+    duration_months=None,
+    duration_days=None,
+):
+    if conn is None:
+        raise RuntimeError("Database connection is required to activate subscriptions.")
+    normalized_key = str(company_key or "").strip()
+    if not normalized_key:
+        raise ValueError("company_key is required")
+    today = datetime.now().date()
+    current = get_company_subscription_snapshot(normalized_key, conn=conn, as_of=today.isoformat())
+    current_end = _parse_datetime_like(current.get("end_date")) if current.get("ok") else None
+    if current.get("ok") and current.get("status") in {"trial", "active"} and current_end and current_end.date() >= today:
+        effective_base = current_end.date()
+        start_date = current.get("start_date") or today.isoformat()
+    else:
+        effective_base = today
+        start_date = today.isoformat()
+
+    new_end = datetime.combine(effective_base, datetime.min.time())
+    if int(duration_months or 0) > 0:
+        from dateutil.relativedelta import relativedelta
+
+        new_end = new_end + relativedelta(months=+int(duration_months or 0))
+    elif int(duration_days or 0) > 0:
+        new_end = new_end + timedelta(days=int(duration_days or 0))
+    else:
+        raise ValueError("A subscription activation duration is required.")
+
+    upsert_company_subscription(
+        conn,
+        company_key=normalized_key,
+        plan_name=plan_name,
+        status="active",
+        start_date=start_date,
+        end_date=new_end.date().isoformat(),
+        last_payment_reference=payment_reference,
+    )
+    conn.execute(
+        """
+        UPDATE companies
+        SET subscription_expiry = ?, status = 'Active', deployment_status = 'Live'
+        WHERE key = ?
+        """,
+        (new_end.date().isoformat(), normalized_key),
+    )
+    return {
+        "company_key": normalized_key,
+        "plan_name": str(plan_name or "").strip() or "Subscription",
+        "start_date": start_date,
+        "end_date": new_end.date().isoformat(),
+        "was_extension": bool(current.get("ok") and current.get("status") in {"trial", "active"} and current_end and current_end.date() >= today),
+    }
+
+
+def get_subscription_billing_summary(conn=None):
+    owns_connection = conn is None
+    conn = conn or _open_sqlite_connection()
+    try:
+        totals_row = conn.execute(
+            """
+            SELECT
+                COALESCE(SUM(CASE WHEN status = 'success' THEN expected_amount ELSE 0 END), 0) AS total_verified_revenue,
+                COALESCE(SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END), 0) AS failed_payment_count,
+                COALESCE(SUM(CASE WHEN status = 'abandoned' THEN 1 ELSE 0 END), 0) AS abandoned_payment_count
+            FROM license_payment_transactions
+            """
+        ).fetchone()
+        subscription_counts = conn.execute(
+            """
+            SELECT status, COUNT(*) AS row_count
+            FROM company_subscriptions
+            GROUP BY status
+            """
+        ).fetchall()
+        revenue_by_plan = conn.execute(
+            """
+            SELECT COALESCE(NULLIF(plan_name, ''), 'Unspecified') AS plan_name,
+                   COUNT(*) AS payment_count,
+                   COALESCE(SUM(CASE WHEN status = 'success' THEN expected_amount ELSE 0 END), 0) AS revenue
+            FROM license_payment_transactions
+            GROUP BY COALESCE(NULLIF(plan_name, ''), 'Unspecified')
+            ORDER BY revenue DESC, plan_name
+            """
+        ).fetchall()
+        recent_payments = conn.execute(
+            """
+            SELECT reference, company_key, company_name, plan_name, expected_amount, currency, status, verified_at, paid_at
+            FROM license_payment_transactions
+            ORDER BY COALESCE(verified_at, paid_at, created_at) DESC
+            LIMIT 10
+            """
+        ).fetchall()
+        next_expiries = conn.execute(
+            """
+            SELECT company_key, plan_name, status, end_date
+            FROM company_subscriptions
+            WHERE status IN ('trial', 'active') AND end_date IS NOT NULL
+            ORDER BY end_date ASC
+            LIMIT 10
+            """
+        ).fetchall()
+        status_map = {str(row["status"] or "").strip().lower(): int(row["row_count"] or 0) for row in subscription_counts}
+        latest_success = conn.execute(
+            """
+            SELECT reference, company_key, plan_name, expected_amount, currency, verified_at
+            FROM license_payment_transactions
+            WHERE status = 'success'
+            ORDER BY COALESCE(verified_at, paid_at, created_at) DESC
+            LIMIT 1
+            """
+        ).fetchone()
+        return {
+            "ok": True,
+            "total_verified_revenue": int(totals_row["total_verified_revenue"] or 0),
+            "failed_payment_count": int(totals_row["failed_payment_count"] or 0),
+            "abandoned_payment_count": int(totals_row["abandoned_payment_count"] or 0),
+            "active_subscriptions": status_map.get("active", 0),
+            "trial_subscriptions": status_map.get("trial", 0),
+            "expired_subscriptions": status_map.get("expired", 0),
+            "cancelled_subscriptions": status_map.get("cancelled", 0),
+            "revenue_by_plan": [dict(row) for row in revenue_by_plan],
+            "recent_payments": [dict(row) for row in recent_payments],
+            "next_expiries": [dict(row) for row in next_expiries],
+            "latest_successful_payment": dict(latest_success) if latest_success else None,
+        }
+    finally:
+        if owns_connection and conn:
+            conn.close()
+
+
+def get_subscription_billing_diagnostics(conn=None):
+    owns_connection = conn is None
+    conn = conn or _open_sqlite_connection()
+    try:
+        table_rows = conn.execute(
+            """
+            SELECT name FROM sqlite_master
+            WHERE type = 'table' AND name IN ('company_subscriptions', 'license_payment_transactions')
+            """
+        ).fetchall()
+        table_names = {row[0] for row in table_rows}
+        summary = get_subscription_billing_summary(conn=conn)
+        return {
+            "ok": True,
+            "subscription_table_present": "company_subscriptions" in table_names,
+            "payment_table_present": "license_payment_transactions" in table_names,
+            "active_count": summary.get("active_subscriptions", 0),
+            "trial_count": summary.get("trial_subscriptions", 0),
+            "expired_count": summary.get("expired_subscriptions", 0),
+            "failed_payment_count": summary.get("failed_payment_count", 0),
+            "latest_successful_payment": summary.get("latest_successful_payment"),
+        }
+    finally:
+        if owns_connection and conn:
+            conn.close()
 
 
 def _ensure_db_directory():
@@ -2239,6 +2767,7 @@ def ensure_schema_integrity(conn):
         )
         """
     )
+    _ensure_subscription_billing_schema(cursor)
 
     for table_name, columns in critical_columns.items():
         cursor.execute(
@@ -3554,6 +4083,7 @@ def _deploy_full_schema(conn):
             )
             """
         )
+        _ensure_subscription_billing_schema(cursor)
         cursor.execute("PRAGMA table_info(license_payment_transactions)")
         license_payment_columns = {row[1] for row in cursor.fetchall()}
         license_payment_column_defs = {

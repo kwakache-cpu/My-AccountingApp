@@ -114,6 +114,7 @@ def build_operations_console_snapshot(
         "persistence": _safe_section("persistence", get_persistence_diagnostics),
         "persistence_self_test": _safe_section("persistence_self_test", run_persistence_self_test),
         "paystack": None,
+        "subscription_billing": None,
         "schema": None,
         "audit": None,
         "accounting_core": None,
@@ -122,9 +123,10 @@ def build_operations_console_snapshot(
         "posting_engine": None,
     }
 
-    from modules import get_paystack_diagnostics
+    from modules import get_paystack_diagnostics, get_subscription_billing_health_snapshot
 
     snapshot["paystack"] = _safe_section("paystack", get_paystack_diagnostics)
+    snapshot["subscription_billing"] = _safe_section("subscription_billing", get_subscription_billing_health_snapshot)
 
     if conn is not None:
         snapshot["schema"] = _safe_section(

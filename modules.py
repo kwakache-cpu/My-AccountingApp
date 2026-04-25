@@ -48,6 +48,32 @@ AI_RATE_LIMIT_MESSAGE = "Too many AI requests. Please wait a moment."
 AI_RATE_LIMIT_MAX_CALLS = 5
 AI_RATE_LIMIT_WINDOW_SECONDS = 60
 DOCUMENT_WORKFLOW_STATUSES = ["Draft", "Submitted", "Approved", "Posted", "Cancelled", "Voided"]
+SUBSCRIPTION_PLANS = {
+    "Basic": {
+        "plan_name": "Basic",
+        "amount": 50.0,
+        "currency": "GHS",
+        "duration_months": 1,
+        "duration_days": None,
+        "features": ["Core ERP access", "Single-company subscription", "Standard support"],
+    },
+    "Pro": {
+        "plan_name": "Pro",
+        "amount": 120.0,
+        "currency": "GHS",
+        "duration_months": 1,
+        "duration_days": None,
+        "features": ["Advanced accounting workflows", "Priority support", "Enhanced admin visibility"],
+    },
+    "Enterprise": {
+        "plan_name": "Enterprise",
+        "amount": 500.0,
+        "currency": "GHS",
+        "duration_months": 12,
+        "duration_days": None,
+        "features": ["Annual enterprise plan", "Multi-branch scaling", "Premium support"],
+    },
+}
 ALL_ENTERPRISE_PERMISSIONS = {
     "view_dashboard",
     "manage_company",
@@ -178,11 +204,16 @@ logger = logging.getLogger(__name__)
 
 # Import shared utilities from database
 from database import (
+    activate_company_subscription,
     create_company_record,
+    ensure_company_trial_subscription,
     force_backup_after_company_creation,
     get_firebase_service_account_info,
     get_connection,
+    get_company_subscription_snapshot,
     get_recovery_source_diagnostics,
+    get_subscription_billing_diagnostics,
+    get_subscription_billing_summary,
     log_audit_action as database_log_audit_action,
 )
 from accounting_engine import (
@@ -525,6 +556,73 @@ def get_paystack_diagnostics():
     }
 
 
+def get_subscription_plans():
+    return {plan_name: dict(plan_data) for plan_name, plan_data in SUBSCRIPTION_PLANS.items()}
+
+
+def get_subscription_plan(plan_name):
+    normalized = str(plan_name or "").strip()
+    if normalized in SUBSCRIPTION_PLANS:
+        return dict(SUBSCRIPTION_PLANS[normalized])
+    return dict(SUBSCRIPTION_PLANS["Basic"])
+
+
+def create_trial_company_registration(company_name, contact_email=None, company_key=None, trial_days=7):
+    normalized_name = str(company_name or "").strip()
+    normalized_email = str(contact_email or "").strip() or None
+    normalized_key = str(company_key or _generate_company_key()).strip()
+    if not normalized_name:
+        return {"ok": False, "reason": "Company name is required."}
+    conn = None
+    try:
+        conn = get_connection()
+        existing_company = conn.execute(
+            "SELECT key FROM companies WHERE lower(name) = lower(?) OR key = ? LIMIT 1",
+            (normalized_name, normalized_key),
+        ).fetchone()
+        if existing_company:
+            return {"ok": False, "reason": "A company with this name or key already exists."}
+        trial_result = ensure_company_trial_subscription(
+            conn,
+            company_key=normalized_key,
+            company_name=normalized_name,
+            contact_email=normalized_email,
+            trial_days=trial_days,
+        )
+        conn.commit()
+        database_log_audit_action(
+            conn,
+            normalized_key,
+            "System",
+            "Trial company created",
+            "Subscription Billing",
+            details=f"trial_end={trial_result['end_date']}",
+            action_type="subscription/trial_created",
+            document_ref=normalized_key,
+        )
+        conn.execute(
+            """
+            INSERT INTO system_logs (timestamp, level, module_name, message)
+            VALUES (?, ?, ?, ?)
+            """,
+            (
+                datetime.now().isoformat(timespec="seconds"),
+                "INFO",
+                "Subscription Billing",
+                f"Created trial company company_key={normalized_key} trial_end={trial_result['end_date']}",
+            ),
+        )
+        conn.commit()
+        return {"ok": True, **trial_result}
+    except Exception as exc:
+        if conn:
+            conn.rollback()
+        return {"ok": False, "reason": build_user_safe_error(exc, st.session_state.get('user', {}).get('role'))}
+    finally:
+        if conn:
+            conn.close()
+
+
 def test_paystack_connection():
     config = get_paystack_runtime_config()
     config_ready = bool(
@@ -593,6 +691,7 @@ def _upsert_license_payment_transaction(
     company_name,
     payer_email,
     payment_context,
+    plan_name=None,
     expected_amount,
     currency,
     status,
@@ -612,6 +711,7 @@ def _upsert_license_payment_transaction(
             company_name,
             payer_email,
             payment_context,
+            plan_name,
             expected_amount,
             currency,
             status,
@@ -624,12 +724,13 @@ def _upsert_license_payment_transaction(
             activated_at,
             updated_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
         ON CONFLICT(reference) DO UPDATE SET
             company_key = excluded.company_key,
             company_name = excluded.company_name,
             payer_email = excluded.payer_email,
             payment_context = excluded.payment_context,
+            plan_name = COALESCE(excluded.plan_name, license_payment_transactions.plan_name),
             expected_amount = excluded.expected_amount,
             currency = excluded.currency,
             status = excluded.status,
@@ -648,6 +749,7 @@ def _upsert_license_payment_transaction(
             company_name,
             payer_email,
             payment_context,
+            str(plan_name or "").strip() or None,
             int(expected_amount or 0),
             currency,
             status,
@@ -682,7 +784,9 @@ def _activate_verified_license_payment(conn, transaction_row):
     company_key = str(transaction_row["company_key"] or metadata.get("company_key") or "").strip()
     company_name = str(transaction_row["company_name"] or metadata.get("company_name") or "").strip()
     payer_email = str(transaction_row["payer_email"] or metadata.get("user_email") or metadata.get("admin_email") or "").strip() or None
-    subscription_months = max(int(metadata.get("subscription_months") or 12), 1)
+    subscription_months = max(int(metadata.get("subscription_months") or 0), 0)
+    subscription_days = max(int(metadata.get("subscription_days") or 0), 0)
+    plan_name = str(transaction_row["plan_name"] or metadata.get("plan_name") or "Basic").strip() or "Basic"
     payment_context = str(transaction_row["payment_context"] or metadata.get("license_context") or "license_activation").strip().lower()
     if not company_key or not company_name:
         return {"ok": False, "reason": "payment metadata is missing company activation details"}
@@ -691,24 +795,8 @@ def _activate_verified_license_payment(conn, transaction_row):
         "SELECT key, name, subscription_expiry FROM companies WHERE key = ? OR lower(name) = lower(?) LIMIT 1",
         (company_key, company_name),
     ).fetchone()
-    expiry_base = datetime.now()
-    if company_row and company_row["subscription_expiry"]:
-        try:
-            expiry_base = datetime.fromisoformat(str(company_row["subscription_expiry"]))
-        except Exception:
-            expiry_base = datetime.now()
-    new_expiry = expiry_base + relativedelta(months=+subscription_months)
-
     backup_result = None
     if company_row:
-        conn.execute(
-            """
-            UPDATE companies
-            SET subscription_expiry = ?, status = 'Active', deployment_status = 'Live'
-            WHERE key = ?
-            """,
-            (new_expiry.date().isoformat(), company_row["key"]),
-        )
         resolved_company_key = company_row["key"]
         resolved_company_name = company_row["name"]
     else:
@@ -716,10 +804,14 @@ def _activate_verified_license_payment(conn, transaction_row):
             conn=conn,
             company_key=company_key,
             company_name=company_name,
-            subscription_expiry=new_expiry.date().isoformat(),
+            subscription_expiry=datetime.now().date().isoformat(),
             status="Active",
             deployment_status="Live",
             contact_email=payer_email,
+            subscription_plan_name=plan_name,
+            subscription_status="trial",
+            subscription_start_date=datetime.now().date().isoformat(),
+            subscription_end_date=datetime.now().date().isoformat(),
         )
         resolved_company_key = company_key
         resolved_company_name = company_name
@@ -729,6 +821,18 @@ def _activate_verified_license_payment(conn, transaction_row):
             company_key=resolved_company_key,
             logger_instance=logger,
         )
+
+    if subscription_months <= 0 and subscription_days <= 0:
+        subscription_months = 1
+    activation_result = activate_company_subscription(
+        conn,
+        company_key=resolved_company_key,
+        plan_name=plan_name,
+        payment_reference=transaction_row["reference"],
+        duration_months=subscription_months,
+        duration_days=subscription_days,
+    )
+    new_expiry = activation_result["end_date"]
 
     activated_at = datetime.now().isoformat(timespec="seconds")
     conn.execute(
@@ -745,7 +849,10 @@ def _activate_verified_license_payment(conn, transaction_row):
         "System",
         f"Verified Paystack payment: {transaction_row['reference']}",
         "Payments",
-        details=f"context={payment_context} amount={transaction_row['expected_amount']} currency={transaction_row['currency']}",
+        details=(
+            f"context={payment_context} plan={plan_name} amount={transaction_row['expected_amount']} "
+            f"currency={transaction_row['currency']} new_expiry={new_expiry}"
+        ),
         action_type="payment",
         document_ref=transaction_row["reference"],
     )
@@ -758,14 +865,14 @@ def _activate_verified_license_payment(conn, transaction_row):
             datetime.now().isoformat(timespec="seconds"),
             "INFO",
             "Paystack",
-            f"Verified and activated payment reference={transaction_row['reference']} company_key={resolved_company_key}",
+            f"Verified and activated payment reference={transaction_row['reference']} company_key={resolved_company_key} plan={plan_name}",
         ),
     )
     return {
         "ok": True,
         "company_key": resolved_company_key,
         "company_name": resolved_company_name,
-        "new_expiry": new_expiry.date().isoformat(),
+        "new_expiry": new_expiry,
         "backup_result": backup_result,
     }
 
@@ -777,8 +884,10 @@ def initialize_paystack_payment(
     *,
     company_key=None,
     company_name=None,
+    plan_name=None,
     payment_context="license_activation",
     subscription_months=None,
+    subscription_days=None,
     user_id=None,
     user_email=None,
     phone_number=None,
@@ -800,8 +909,10 @@ def initialize_paystack_payment(
     metadata = {
         "company_key": company_key,
         "company_name": company_name,
+        "plan_name": str(plan_name or "").strip() or None,
         "license_context": payment_context,
         "subscription_months": int(subscription_months or 0),
+        "subscription_days": int(subscription_days or 0),
         "user_id": user_id,
         "user_email": user_email or email,
     }
@@ -850,6 +961,7 @@ def initialize_paystack_payment(
             company_name=company_name,
             payer_email=payload["email"],
             payment_context=payment_context,
+            plan_name=metadata.get("plan_name"),
             expected_amount=expected_amount,
             currency=config["currency"],
             status="initialized",
@@ -892,6 +1004,11 @@ def verify_paystack_payment(reference, activate_license=True):
         ).fetchone()
         if not transaction_row:
             return {"ok": False, "reason": "No initialized Paystack payment was found for that reference."}
+        metadata = {}
+        try:
+            metadata = json.loads(transaction_row["metadata_json"] or "{}")
+        except Exception:
+            metadata = {}
         headers = {"Authorization": f"Bearer {config['secret_key']}"}
         response = requests.get(
             f"https://api.paystack.co/transaction/verify/{normalized_reference}",
@@ -904,7 +1021,11 @@ def verify_paystack_payment(reference, activate_license=True):
         reference_ok = str(data.get("reference") or "").strip() == normalized_reference
         amount_ok = int(data.get("amount") or 0) == int(transaction_row["expected_amount"] or 0)
         currency_ok = str(data.get("currency") or "").upper() == str(transaction_row["currency"] or config["currency"]).upper() == "GHS"
-        if not (gateway_ok and reference_ok and amount_ok and currency_ok):
+        metadata_company_ok = (
+            not metadata.get("company_key")
+            or str(metadata.get("company_key") or "").strip() == str(transaction_row["company_key"] or "").strip()
+        )
+        if not (gateway_ok and reference_ok and amount_ok and currency_ok and metadata_company_ok):
             _upsert_license_payment_transaction(
                 conn,
                 reference=normalized_reference,
@@ -912,6 +1033,7 @@ def verify_paystack_payment(reference, activate_license=True):
                 company_name=transaction_row["company_name"],
                 payer_email=transaction_row["payer_email"],
                 payment_context=transaction_row["payment_context"],
+                plan_name=transaction_row["plan_name"],
                 expected_amount=transaction_row["expected_amount"],
                 currency=transaction_row["currency"],
                 status="failed",
@@ -929,6 +1051,7 @@ def verify_paystack_payment(reference, activate_license=True):
                     "reference_ok": reference_ok,
                     "amount_ok": amount_ok,
                     "currency_ok": currency_ok,
+                    "metadata_company_ok": metadata_company_ok,
                 },
             }
 
@@ -941,6 +1064,7 @@ def verify_paystack_payment(reference, activate_license=True):
             company_name=transaction_row["company_name"],
             payer_email=transaction_row["payer_email"],
             payment_context=transaction_row["payment_context"],
+            plan_name=transaction_row["plan_name"],
             expected_amount=transaction_row["expected_amount"],
             currency=transaction_row["currency"],
             status="success",
@@ -4054,11 +4178,141 @@ def _render_onboarding_payment_verification():
             st.warning(verification_result.get("reason") or "Payment verification did not succeed yet.")
 
 
+def get_subscription_billing_admin_snapshot():
+    conn = None
+    try:
+        conn = get_connection()
+        return get_subscription_billing_summary(conn=conn)
+    finally:
+        if conn:
+            conn.close()
+
+
+def get_subscription_billing_health_snapshot():
+    conn = None
+    try:
+        conn = get_connection()
+        paystack = get_paystack_diagnostics()
+        billing = get_subscription_billing_diagnostics(conn=conn)
+        return {
+            "ok": True,
+            "paystack": paystack,
+            "billing": billing,
+        }
+    finally:
+        if conn:
+            conn.close()
+
+
+def show_subscription_renewal_page(company_key, role="Master Admin"):
+    snapshot = get_company_subscription_snapshot(company_key)
+    if not snapshot.get("ok"):
+        st.error("Subscription details could not be loaded right now.")
+        return
+
+    st.header("Subscription Renewal")
+    if snapshot.get("is_trial"):
+        st.info(
+            "Your 7-day trial is active until {end_date}. Choose a plan below to keep access uninterrupted.".format(
+                end_date=snapshot.get("end_date") or "unknown",
+            )
+        )
+    elif snapshot.get("status") in {"expired", "cancelled"}:
+        st.warning("Your subscription is not active. Complete payment verification to restore ERP access.")
+    else:
+        st.info(
+            "Current plan: {plan_name} | Status: {status} | Ends: {end_date}".format(
+                plan_name=snapshot.get("plan_name") or "Unspecified",
+                status=str(snapshot.get("status") or "").title(),
+                end_date=snapshot.get("end_date") or "Open-ended",
+            )
+        )
+
+    plan_labels = list(SUBSCRIPTION_PLANS.keys())
+    selected_plan_name = st.selectbox("Choose Subscription Plan", plan_labels, key=f"subscription_plan_{company_key}")
+    selected_plan = get_subscription_plan(selected_plan_name)
+    st.caption(
+        "Plan amount: GH₵ {amount:,.2f} | Duration: {duration}".format(
+            amount=float(selected_plan["amount"]),
+            duration=(
+                f"{selected_plan['duration_months']} month(s)"
+                if selected_plan.get("duration_months")
+                else f"{selected_plan.get('duration_days', 0)} day(s)"
+            ),
+        )
+    )
+    if selected_plan.get("features"):
+        st.caption("Features: " + ", ".join(selected_plan["features"]))
+
+    renewal_state_key = f"subscription_payment_{company_key}"
+    company_email = None
+    conn = None
+    try:
+        conn = get_connection()
+        row = conn.execute("SELECT contact_email, name FROM companies WHERE key = ? LIMIT 1", (company_key,)).fetchone()
+        if row:
+            company_email = row["contact_email"]
+    finally:
+        if conn:
+            conn.close()
+
+    button_label = "Start Payment"
+    if st.button(button_label, key=f"subscription_start_payment_{company_key}"):
+        if not company_email:
+            st.warning("A contact email is required on the company profile before starting subscription payment.")
+        else:
+            reference = _generate_paystack_reference("SUB")
+            payment_result = initialize_paystack_payment(
+                company_email,
+                selected_plan["amount"],
+                reference,
+                company_key=company_key,
+                company_name=snapshot.get("company_name"),
+                plan_name=selected_plan_name,
+                payment_context="subscription_renewal",
+                subscription_months=selected_plan.get("duration_months"),
+                subscription_days=selected_plan.get("duration_days"),
+                user_email=company_email,
+                metadata_extra={"features": selected_plan.get("features", [])},
+            )
+            if payment_result.get("ok"):
+                st.session_state[renewal_state_key] = {
+                    "reference": reference,
+                    "plan_name": selected_plan_name,
+                    "authorization_url": payment_result.get("authorization_url"),
+                }
+                st.success("Subscription payment initialized successfully.")
+            else:
+                st.warning(payment_result.get("reason") or "Subscription payment could not be initialized.")
+
+    renewal_state = st.session_state.get(renewal_state_key) or {}
+    if renewal_state.get("authorization_url"):
+        st.link_button("Continue to Secure Paystack Checkout", renewal_state["authorization_url"])
+    verify_reference = str(st.query_params.get("reference", "") or renewal_state.get("reference") or "").strip()
+    if verify_reference:
+        st.text_input(
+            "Payment Reference",
+            value=verify_reference,
+            disabled=True,
+            key=f"subscription_reference_{company_key}",
+        )
+        if st.button("Verify Subscription Payment", key=f"verify_subscription_payment_{company_key}"):
+            verification = verify_paystack_payment(verify_reference, activate_license=True)
+            if verification.get("ok"):
+                st.success(
+                    "Subscription activated. New expiry: {expiry}".format(
+                        expiry=verification.get("new_expiry") or "updated",
+                    )
+                )
+                st.session_state.pop(renewal_state_key, None)
+            else:
+                st.warning(verification.get("reason") or "Subscription payment has not been verified yet.")
+
+
 def show_onboarding_payment():
     """Handle the onboarding payment process for new companies."""
     st.header("🏢 New Company Registration")
-    st.info("Complete the registration and onboarding payment to activate your EKA ERP instance.")
-    master_price_per_month = get_master_price_per_month()
+    st.info("Create a 7-day trial company and optionally complete Paystack payment to activate a paid subscription plan immediately.")
 
     with st.form("onboarding_form"):
         col1, col2 = st.columns(2)
@@ -4068,30 +4322,43 @@ def show_onboarding_payment():
             admin_phone = st.text_input("Admin Phone Number (Optional)")
         with col2:
             sector = st.selectbox("Business Sector", ["Retail", "Manufacturing", "Services", "Construction", "Other"])
-            subscription_months = st.selectbox("Subscription Duration (Months)", [1, 3, 6, 12, 24], index=3)
+            selected_plan_name = st.selectbox("Subscription Plan", list(SUBSCRIPTION_PLANS.keys()), index=0)
 
-        amount = float(master_price_per_month) * int(subscription_months)
+        selected_plan = get_subscription_plan(selected_plan_name)
+        amount = float(selected_plan["amount"])
 
-        st.caption(f"Master Price Per Month: GH₵ {master_price_per_month:,.2f}")
-        st.write(f"### Total Due: GH₵ {amount:,.2f}")
-        submit = st.form_submit_button("Proceed to Payment")
+        st.caption(
+            "7-day trial is created immediately. Selected plan: {plan} | Amount Due: GH₵ {amount:,.2f}".format(
+                plan=selected_plan_name,
+                amount=amount,
+            )
+        )
+        submit = st.form_submit_button("Create Trial Company & Proceed to Payment")
 
         if submit:
             if not company_name or not admin_email:
                 st.error("Please fill in all required fields.")
             else:
+                conn = None
                 try:
                     conn = get_connection()
                     existing_company = conn.execute(
                         "SELECT key FROM companies WHERE lower(name) = lower(?) LIMIT 1",
                         (company_name.strip(),),
                     ).fetchone()
-                    conn.close()
                     if existing_company:
                         st.warning("A company with this name already exists. Please use a different company name.")
                     else:
-                        reference = _generate_paystack_reference("ONB")
                         company_key = _generate_company_key()
+                        trial_result = ensure_company_trial_subscription(
+                            conn,
+                            company_key=company_key,
+                            company_name=company_name.strip(),
+                            contact_email=admin_email.strip(),
+                            trial_days=7,
+                        )
+                        conn.commit()
+                        reference = _generate_paystack_reference("ONB")
                         payment_result = initialize_paystack_payment(
                             admin_email,
                             amount,
@@ -4099,33 +4366,50 @@ def show_onboarding_payment():
                             company_key=company_key,
                             company_name=company_name.strip(),
                             payment_context="onboarding",
-                            subscription_months=int(subscription_months),
+                            plan_name=selected_plan_name,
+                            subscription_months=selected_plan.get("duration_months"),
+                            subscription_days=selected_plan.get("duration_days"),
                             user_email=admin_email.strip(),
                             phone_number=admin_phone.strip(),
-                            metadata_extra={"sector": sector},
+                            metadata_extra={"sector": sector, "trial_end_date": trial_result["end_date"]},
                         )
                         if payment_result.get("ok"):
-                            st.success("Payment initialized successfully.")
+                            st.success(
+                                "Trial company created successfully. Trial ends on {trial_end}. You can continue to Paystack now or use the trial first.".format(
+                                    trial_end=trial_result["end_date"],
+                                )
+                            )
                             st.session_state.pending_reg = {
                                 'company_name': company_name.strip(),
                                 'company_key': company_key,
                                 'email': admin_email.strip(),
                                 'phone_number': admin_phone.strip(),
                                 'amount': amount,
-                                'months': int(subscription_months),
+                                'plan_name': selected_plan_name,
+                                'months': int(selected_plan.get("duration_months") or 0),
                                 'reference': reference,
                                 'authorization_url': payment_result.get("authorization_url"),
+                                'trial_end_date': trial_result["end_date"],
                             }
+                            st.caption(f"Company Key: {company_key}")
                             st.link_button(
                                 "Continue to Secure Paystack Checkout",
                                 payment_result["authorization_url"],
                             )
                             st.caption("Supported checkout channels: Card and Ghana Mobile Money.")
                         else:
-                            st.warning(payment_result.get("reason") or "Payment could not be initialized yet.")
+                            st.warning(
+                                (payment_result.get("reason") or "Payment could not be initialized yet.")
+                                + f" Trial access remains active until {trial_result['end_date']}."
+                            )
                 except Exception as exc:
+                    if conn:
+                        conn.rollback()
                     st.warning("Onboarding payment could not be started right now. Please try again.")
                     logger.warning("Onboarding payment error: %s", sanitize_error_message(exc))
+                finally:
+                    if conn:
+                        conn.close()
     _render_onboarding_payment_verification()
 
 

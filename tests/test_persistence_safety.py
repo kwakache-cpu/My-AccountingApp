@@ -35,6 +35,7 @@ class PersistenceSafetyTests(ERPIsolatedTestCase):
     def test_empty_bootstrap_db_does_not_overwrite_valid_backup(self):
         self._seed_valid_local_backup()
         original_backup_health = self.database.get_database_health_snapshot(self.database.LOCAL_LATEST_BACKUP_PATH)
+        self.conn.execute("DELETE FROM company_subscriptions WHERE company_key = ?", (self.company_key,))
         self.conn.execute("DELETE FROM companies WHERE key = ?", (self.company_key,))
         self.commit()
         result = self.database.backup_runtime_database_to_cloud(force=True)
@@ -46,6 +47,7 @@ class PersistenceSafetyTests(ERPIsolatedTestCase):
 
     def test_non_production_ready_db_is_blocked_from_latest_backup_overwrite(self):
         self._seed_valid_local_backup()
+        self.conn.execute("DELETE FROM company_subscriptions WHERE company_key = ?", (self.company_key,))
         self.conn.execute("DELETE FROM companies WHERE key = ?", (self.company_key,))
         self.commit()
         result = self.database.backup_runtime_database_to_cloud(force=True)
