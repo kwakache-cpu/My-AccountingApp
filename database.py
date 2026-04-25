@@ -534,7 +534,7 @@ def get_firebase_service_account_info():
                 type(exc).__name__,
                 sanitize_error_message(str(exc)),
             )
-            logger.warning("Firebase credentials missing: %s", invalid_secret_reason)
+            logger.warning("Firebase credentials missing: %s", sanitize_error_message(invalid_secret_reason))
             return {
                 "ok": False,
                 "source": "json_secret_fallback",
@@ -1010,7 +1010,7 @@ def _run_post_commit_persistence_hook(conn):
             return
         backup_runtime_database_to_cloud(trigger_tables=sorted(mutated_tables), logger_instance=logger)
     except Exception as exc:
-        logger.warning("Post-commit persistence hook failed: %s", exc)
+        logger.warning("Post-commit persistence hook failed: %s", sanitize_error_message(exc))
 
 
 def get_persistence_diagnostics():
@@ -1546,7 +1546,7 @@ def ensure_schema():
                 conn.rollback()
             except sqlite3.Error:
                 pass
-        logger.warning("Schema safety check failed: %s", exc)
+        logger.warning("Schema safety check failed: %s", sanitize_error_message(exc))
         return False
     finally:
         if conn:
@@ -1824,7 +1824,7 @@ def attempt_production_database_recovery(force_restore=True):
     bucket = _get_firebase_recovery_bucket()
     if bucket is None:
         access_reason = diagnostics["credential_error"] or "firebase bucket is not accessible"
-        logger.error("Trusted backup recovery unavailable because Firebase bucket is not accessible: %s", access_reason)
+        logger.error("Trusted backup recovery unavailable because Firebase bucket is not accessible: %s", sanitize_error_message(access_reason))
         return {
             "ok": False,
             "stage": "recovery_source",
@@ -1856,7 +1856,7 @@ def attempt_production_database_recovery(force_restore=True):
                 diagnostics["backend"],
                 diagnostics["bucket_name"],
                 diagnostics["object_name"],
-                exc,
+                sanitize_error_message(exc),
             )
             return {
                 "ok": False,
@@ -1934,7 +1934,7 @@ def attempt_production_database_recovery(force_restore=True):
                 diagnostics["backend"],
                 diagnostics["bucket_name"],
                 diagnostics["object_name"],
-                exc,
+                sanitize_error_message(exc),
             )
             return {
                 "ok": False,
@@ -2026,7 +2026,7 @@ def attempt_production_database_recovery(force_restore=True):
             "health": final_health,
         }
     except Exception as exc:
-        logger.error("Trusted backup recovery failed: %s", exc)
+        logger.error("Trusted backup recovery failed: %s", sanitize_error_message(exc))
         return {
             "ok": False,
             "stage": "recovery_exception",
@@ -2124,7 +2124,7 @@ def repair_database_schema():
         _run_lightweight_integrity_checks(conn)
         conn.commit()
     except sqlite3.Error as exc:
-        logger.warning("Startup schema repair skipped: %s", exc)
+        logger.warning("Startup schema repair skipped: %s", sanitize_error_message(exc))
     finally:
         if conn:
             conn.close()
@@ -2312,7 +2312,7 @@ def ensure_schema_integrity(conn):
         try:
             cursor.execute(index_sql)
         except sqlite3.Error as index_error:
-            logger.warning("Enterprise index creation skipped for table '%s': %s", table_name, index_error)
+            logger.warning("Enterprise index creation skipped for table '%s': %s", table_name, sanitize_error_message(index_error))
     cursor.execute(
         "CREATE INDEX IF NOT EXISTS idx_license_payment_transactions_company_status ON license_payment_transactions(company_key, status)"
     )
@@ -2474,7 +2474,7 @@ def ensure_schema_integrity(conn):
                 """
             )
     except sqlite3.Error as exc:
-        logger.warning("Chart of accounts unique code hardening could not be applied safely: %s", exc)
+        logger.warning("Chart of accounts unique code hardening could not be applied safely: %s", sanitize_error_message(exc))
 
     cursor.execute(
         """
@@ -3677,7 +3677,7 @@ def _deploy_full_schema(conn):
 
         logger.info("E.K.A CLOUD DATABASE: Full Architectural Sync Complete.")
     except sqlite3.Error as e:
-        logger.error(f"DATABASE INITIALIZATION ERROR: {e}")
+        logger.error("DATABASE INITIALIZATION ERROR: %s", sanitize_error_message(e))
         raise
 
 
@@ -3717,7 +3717,7 @@ def startup_database():
                     preflight_conn.rollback()
                 except sqlite3.Error:
                     pass
-            logger.warning("Preflight integrity preparation failed before production readiness evaluation: %s", exc)
+            logger.warning("Preflight integrity preparation failed before production readiness evaluation: %s", sanitize_error_message(exc))
         finally:
             if preflight_conn:
                 preflight_conn.close()
@@ -4045,7 +4045,7 @@ def startup_database():
         )
     except Exception as exc:
         failure_stage = "startup_exception"
-        failure_reason = str(exc)
+        failure_reason = sanitize_error_message(exc)
         logger.error("Canonical database startup failed: stage=%s reason=%s", failure_stage, failure_reason)
         if conn:
             try:
@@ -4169,7 +4169,7 @@ def log_audit_action(
         if not was_in_transaction:
             conn.commit()
     except Exception as e:
-        logger.warning(f"Audit log failed: {e}")
+        logger.warning("Audit log failed: %s", sanitize_error_message(e))
 
 
 def get_audit_operations_summary(conn=None, company_key=None, limit=50):
@@ -4209,7 +4209,7 @@ def get_audit_operations_summary(conn=None, company_key=None, limit=50):
             "enhanced_columns_present": {"action_type", "document_ref", "before_after_summary", "event_id"}.issubset(columns),
         }
     except Exception as exc:
-        logger.warning("Audit operations summary unavailable: %s", exc)
+        logger.warning("Audit operations summary unavailable: %s", sanitize_error_message(exc))
         return {"ok": False, "reason": str(exc), "action_counts": [], "recent_events": [], "enhanced_columns_present": False}
     finally:
         if owns_connection and conn:
@@ -4234,7 +4234,7 @@ def run_manual_query(query, params=(), commit=False):
             return True
         return cursor.fetchall()
     except sqlite3.Error as e:
-        logger.error(f"Manual Query Error: {e}")
+        logger.error("Manual Query Error: %s", sanitize_error_message(e))
         return None
     finally:
         conn.close()

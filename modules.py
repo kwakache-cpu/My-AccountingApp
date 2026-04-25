@@ -18,7 +18,7 @@ import streamlit as st
 import streamlit.components.v1 as components
 from dateutil.relativedelta import relativedelta
 from PIL import Image
-from security_utils import sanitize_error_message
+from security_utils import build_user_safe_error, sanitize_error_message
 try:
     from openai import OpenAI
 except ImportError:
@@ -72,6 +72,7 @@ ALL_ENTERPRISE_PERMISSIONS = {
     "restore_backup",
     "manage_integrations",
     "use_ai_assistant",
+    "manual_license_override",
 }
 ROLE_NAME_ALIASES = {
     "Gatekeeper": "Dev",
@@ -312,6 +313,106 @@ def require_permission(role, permission, action_label=None, company_key=None, co
     )
     st.warning("You do not have permission to perform this action.")
     return False
+
+
+def execute_manual_license_override(
+    *,
+    conn,
+    actor_role,
+    actor_user,
+    company_name,
+    company_key,
+    duration_months,
+    number_of_branches,
+    max_branches,
+    branch_price_per_month,
+    override_reason,
+    confirmation_checked,
+    logger_instance=None,
+):
+    logger_instance = logger_instance or logger
+    normalized_role = str(actor_role or "").strip()
+    normalized_user = str(actor_user or normalized_role or "SYSTEM").strip()
+    normalized_company_name = str(company_name or "").strip()
+    normalized_company_key = str(company_key or "").strip()
+    normalized_reason = str(override_reason or "").strip()
+    if not user_has_permission(normalized_role, "manual_license_override"):
+        _record_permission_security_event(
+            normalized_role,
+            "manual_license_override",
+            action_label="perform a manual license override",
+            company_key=normalized_company_key or None,
+            conn=conn,
+        )
+        return {"ok": False, "reason": "You do not have permission to perform this action.", "permission_denied": True}
+    if not confirmation_checked:
+        return {
+            "ok": False,
+            "reason": "Confirm that this is an internal/admin-only Paystack bypass before continuing.",
+        }
+    if not normalized_reason:
+        return {"ok": False, "reason": "A manual override reason is required."}
+    if not normalized_company_name or not normalized_company_key:
+        return {"ok": False, "reason": "Company Name and System License Key are required."}
+
+    new_expiry = datetime.now() + relativedelta(months=+int(duration_months))
+    try:
+        created_company_key = create_company_record(
+            conn=conn,
+            company_key=normalized_company_key,
+            company_name=normalized_company_name,
+            subscription_expiry=new_expiry.isoformat(),
+            status="Active",
+            deployment_status="Live",
+            number_of_branches=int(number_of_branches),
+            max_branches=int(max_branches),
+            branch_price_per_month=float(branch_price_per_month),
+        )
+        conn.commit()
+        backup_result = force_backup_after_company_creation(
+            company_name=normalized_company_name,
+            company_key=created_company_key,
+            logger_instance=logger_instance,
+        )
+        database_log_audit_action(
+            conn,
+            "SYSTEM",
+            normalized_role,
+            f"Manual license override for {normalized_company_name}",
+            "System Admin",
+            details=(
+                f"company_key={created_company_key}; expiry={new_expiry.isoformat()}; "
+                f"reason={normalized_reason}"
+            ),
+            action_type="admin/license_override",
+            document_ref=created_company_key,
+        )
+        conn.execute(
+            """
+            INSERT INTO system_logs (timestamp, level, module_name, message)
+            VALUES (?, ?, ?, ?)
+            """,
+            (
+                datetime.now().isoformat(timespec="seconds"),
+                "WARNING",
+                "License Override",
+                (
+                    f"Manual license override executed by {normalized_user} role={normalized_role} "
+                    f"company_key={created_company_key} reason={normalized_reason}"
+                ),
+            ),
+        )
+        conn.commit()
+        return {
+            "ok": True,
+            "company_key": created_company_key,
+            "company_name": normalized_company_name,
+            "new_expiry": new_expiry.date().isoformat(),
+            "backup_result": backup_result,
+        }
+    except Exception as exc:
+        conn.rollback()
+        return {"ok": False, "reason": build_user_safe_error(exc, normalized_role)}
 
 
 def _hash_security_answer(answer):
@@ -919,7 +1020,7 @@ def get_master_price_per_month():
         ).fetchone()
         return float(row[0]) if row and row[0] is not None else 500.0
     except Exception as exc:
-        logger.warning(f"Falling back to default master price: {exc}")
+        logger.warning("Falling back to default master price: %s", sanitize_error_message(exc))
         return 500.0
     finally:
         if conn:
@@ -1187,7 +1288,7 @@ def get_ai_client_status():
         except Exception as exc:
             openai_error = exc
             diagnostics["last_safe_error"] = _safe_ai_error_message(exc)
-            logger.warning("OpenAI client initialization failed; AI assistant disabled: %s", exc)
+            logger.warning("OpenAI client initialization failed; AI assistant disabled: %s", sanitize_error_message(exc))
 
     if preferred_provider == "auto" and gemini_key:
         diagnostics["fallback_used"] = bool(openai_error)
@@ -1380,7 +1481,7 @@ def call_ai_assistant(messages, temperature=0.3, max_tokens=1024, purpose="gener
         if provider == "openai" and runtime["provider_name"] == "auto" and gemini_key:
             openai_failure = _safe_ai_error_message(exc)
             openai_error_safe = openai_failure
-            logger.warning("OpenAI request failed; attempting Gemini fallback: %s", openai_failure)
+            logger.warning("OpenAI request failed; attempting Gemini fallback: %s", sanitize_error_message(openai_failure))
             try:
                 response_text = _call_gemini_chat(
                     gemini_key,
@@ -1471,7 +1572,7 @@ def _fetch_ai_assistant_records(conn, client_id):
             and any(token in str(row.get("description") or "").lower() for token in ("expense", "purchase", "bill"))
         ]
     except Exception as exc:
-        logger.warning("AI assistant journal activity fallback failed for company %s: %s", client_id, exc)
+        logger.warning("AI assistant journal activity fallback failed for company %s: %s", client_id, sanitize_error_message(exc))
 
     if _table_exists(conn, "payroll"):
         payroll_rows = conn.execute(
@@ -1828,7 +1929,7 @@ def accounting_ai_response(module_selection, chat_history):
     response = request_ai_chat_completion(messages=messages, temperature=0.3, max_tokens=1024)
     if response["ok"]:
         return response["content"].strip()
-    logger.error("Accounting assistant request failed via provider %s: %s", response.get("provider"), response.get("error"))
+    logger.error("Accounting assistant request failed via provider %s: %s", response.get("provider"), sanitize_error_message(response.get("error")))
     return response.get("error") or "AI assistant request failed. Please try again."
 
 
@@ -2305,7 +2406,7 @@ def show_journal_entries(company_key, role):
                         if conn:
                             conn.rollback()
                             conn.close()
-                        st.error(f"Could not save the manual journal entry: {exc}")
+                        st.error(build_user_safe_error(exc, role))
 
 
 def _inventory_offset_account(funding_source):
@@ -2681,7 +2782,7 @@ def show_debtors_by_city_report(company_key):
         st.markdown("Road Summary")
         st.dataframe(format_currency_dataframe(road_df), use_container_width=True, hide_index=True)
     except Exception as exc:
-        st.error(f"Debtor city report error: {exc}")
+        st.error(build_user_safe_error(exc, st.session_state.get("user", {}).get("role")))
     finally:
         if conn:
             conn.close()
@@ -2712,7 +2813,7 @@ def log_system_event(level, module_name, message):
         )
         conn.commit()
     except sqlite3.Error as exc:
-        logger.warning("System event logging failed for module=%s level=%s: %s", module_name, level, exc)
+        logger.warning("System event logging failed for module=%s level=%s: %s", module_name, level, sanitize_error_message(exc))
     finally:
         if conn:
             conn.close()
@@ -3900,7 +4001,7 @@ def show_vouchers_page(conn, demo_on):
                 st.rerun()
             except Exception as exc:
                 conn.rollback()
-                st.error(f"Voucher posting failed: {exc}")
+                st.error(build_user_safe_error(exc, st.session_state.get("user", {}).get("role")))
 
     rows = get_recent_accounting_activity(
         st.session_state.get("company_id") or st.session_state.get("user", {}).get("key"),
@@ -4024,7 +4125,7 @@ def show_onboarding_payment():
                             st.warning(payment_result.get("reason") or "Payment could not be initialized yet.")
                 except Exception as exc:
                     st.warning("Onboarding payment could not be started right now. Please try again.")
-                    logger.warning("Onboarding payment error: %s", exc)
+                    logger.warning("Onboarding payment error: %s", sanitize_error_message(exc))
     _render_onboarding_payment_verification()
 
 
@@ -4096,7 +4197,7 @@ def show_inventory(company_key, role):
                     "info",
                 )
         except Exception as exc:
-            st.error(f"Inventory barcode scan failed: {exc}")
+            st.error(build_user_safe_error(exc, st.session_state.get("user", {}).get("role")))
         finally:
             if conn:
                 conn.close()
@@ -4203,11 +4304,11 @@ def show_inventory(company_key, role):
                                 st.success("Entry Updated")
                                 st.rerun()
                             except Exception as exc:
-                                st.error(f"Inventory update failed: {exc}")
+                                st.error(build_user_safe_error(exc, st.session_state.get("user", {}).get("role")))
             else:
                 st.info("No items in inventory.")
         except Exception as e:
-            st.error(f"Error loading inventory: {e}")
+            st.error(build_user_safe_error(e, st.session_state.get("user", {}).get("role")))
 
     with tabs[1]:
         st.subheader("Stock In / Out")
@@ -4365,7 +4466,7 @@ def show_inventory(company_key, role):
                         )
                         st.dataframe(movement_df, use_container_width=True, hide_index=True)
             except Exception as exc:
-                st.error(f"Stock movement error: {exc}")
+                st.error(build_user_safe_error(exc, st.session_state.get("user", {}).get("role")))
             finally:
                 if conn:
                     conn.close()
@@ -4437,7 +4538,7 @@ def show_inventory(company_key, role):
                     st.session_state[success_key] = True
                     st.rerun()
                 except Exception as e:
-                    st.error(f"Error adding item: {e}")
+                    st.error(build_user_safe_error(e, st.session_state.get("user", {}).get("role")))
 
         import_file = st.file_uploader(
             "Import from Excel",
@@ -4453,7 +4554,7 @@ def show_inventory(company_key, role):
                 st.success(f"Imported {added_rows} new inventory row(s).")
                 st.rerun()
             except Exception as exc:
-                st.error(f"Inventory import failed: {exc}")
+                st.error(build_user_safe_error(exc, st.session_state.get("user", {}).get("role")))
 
 
 # ==========================================
@@ -4513,7 +4614,7 @@ def show_vouchers(company_key, role):
                         st.success("Voucher posted successfully!")
                         st.rerun()
                     except Exception as e:
-                        st.error(f"Error posting voucher: {e}")
+                        st.error(build_user_safe_error(e, st.session_state.get("user", {}).get("role")))
 
     st.subheader("Voucher Ledger")
     try:
@@ -4543,7 +4644,7 @@ def show_vouchers(company_key, role):
         else:
             st.info("No vouchers found.")
     except Exception as e:
-        st.error(f"Error loading vouchers: {e}")
+        st.error(build_user_safe_error(e, st.session_state.get("user", {}).get("role")))
 
 
 # ==========================================
@@ -4589,7 +4690,7 @@ def show_chart_of_accounts(company_key, role):
         else:
             st.success("Account structure checks passed.")
     except Exception as e:
-        st.error(f"Error loading chart of accounts: {e}")
+        st.error(build_user_safe_error(e, st.session_state.get("user", {}).get("role")))
     finally:
         if 'conn' in locals() and conn:
             conn.close()
@@ -4616,7 +4717,7 @@ def show_chart_of_accounts(company_key, role):
                         st.success("Account added.")
                         st.rerun()
                     except Exception as e:
-                        st.error(f"Error adding account: {e}")
+                        st.error(build_user_safe_error(e, st.session_state.get("user", {}).get("role")))
 
 
 # ==========================================
@@ -4720,7 +4821,7 @@ def show_company_setup(company_key, company_name, role):
                     ).fetchall()
                     conn.close()
                 except Exception as exc:
-                    st.error(f"Could not load branch deployment details: {exc}")
+                    st.error(build_user_safe_error(exc, role))
                     branches = []
                     branch_count = 0
                     max_branches = 1
@@ -4801,7 +4902,7 @@ def show_company_setup(company_key, company_name, role):
                                     st.success(f"Branch {branch_name} deployed successfully. Access Key: {branch_access_key}")
                                     st.rerun()
                                 except Exception as exc:
-                                    st.error(f"Could not deploy branch: {exc}")
+                                    st.error(build_user_safe_error(exc, role))
                                 finally:
                                     conn.close()
 
@@ -4864,7 +4965,7 @@ def show_company_setup(company_key, company_name, role):
                                 )
                                 st.success("Staff login created successfully.")
                             except Exception as exc:
-                                st.error(f"Could not create staff login: {exc}")
+                                st.error(build_user_safe_error(exc, role))
 
                 users = conn.execute(
                     """
@@ -4889,7 +4990,7 @@ def show_company_setup(company_key, company_name, role):
         else:
             st.info("Company profile not found.")
     except Exception as e:
-        st.error(f"Error loading company setup: {e}")
+        st.error(build_user_safe_error(e, role))
     finally:
         if conn:
             conn.close()
@@ -5032,7 +5133,7 @@ def show_pos(company_key, company_name, role):
                                 "warning",
                             )
                     except Exception as exc:
-                        st.error(f"POS barcode scan failed: {exc}")
+                        st.error(build_user_safe_error(exc, role))
                     finally:
                         if conn:
                             conn.close()
@@ -5145,7 +5246,7 @@ def show_pos(company_key, company_name, role):
                             }
                         )
                     except (ValueError, TypeError) as e:
-                        st.warning(f"Skipping row with invalid data: {e}")
+                        st.warning(build_user_safe_error(e, role))
                         continue
                 if updated_cart != cart:
                     st.session_state[cart_key] = updated_cart
@@ -5325,7 +5426,7 @@ def show_pos(company_key, company_name, role):
                 )
                 st.rerun()
             except Exception as e:
-                st.error(f"Error processing sale: {e}")
+                st.error(build_user_safe_error(e, role))
 
         action_col1, action_col2 = st.columns(2)
         if action_col1.button("Final Checkout", key=f"final_checkout_{company_key}"):
@@ -5374,7 +5475,7 @@ def show_pos(company_key, company_name, role):
             components.html("<script>window.print();</script>", height=0)
             st.session_state['do_print'] = False
     except Exception as e:
-        st.error(f"POS Error: {e}")
+        st.error(build_user_safe_error(e, role))
 # ==========================================
 # SALES & PURCHASE
 # ==========================================
@@ -5489,7 +5590,7 @@ def show_sales_purchase(company_key, role, doc_type="Sales"):
                     st.success(f"{doc_type} saved without ledger impact. Move Posting State to Posted when it is approved.")
                 st.rerun()
             except Exception as e:
-                st.error(f"Error saving {doc_type}: {e}")
+                st.error(build_user_safe_error(e, st.session_state.get("user", {}).get("role")))
 
     try:
         conn = get_connection()
@@ -5519,7 +5620,7 @@ def show_sales_purchase(company_key, role, doc_type="Sales"):
         else:
             st.info(f"No {doc_type} records found.")
     except Exception as e:
-        st.error(f"Error loading {doc_type} records: {e}")
+        st.error(build_user_safe_error(e, st.session_state.get("user", {}).get("role")))
 
     import_file = st.file_uploader(
         f"Import {doc_type} from Excel",
@@ -5535,7 +5636,7 @@ def show_sales_purchase(company_key, role, doc_type="Sales"):
             st.success(f"Imported {added_rows} new {doc_type.lower()} row(s).")
             st.rerun()
         except Exception as exc:
-            st.error(f"{doc_type} import failed: {exc}")
+            st.error(build_user_safe_error(exc, st.session_state.get("user", {}).get("role")))
 
 
 # ==========================================
@@ -5669,7 +5770,7 @@ def show_banking(company_key, role):
                 st.info("No bank or mobile-money journal movements found for the selected period.")
         conn.close()
     except Exception as e:
-        st.error(f"Banking module error: {e}")
+        st.error(build_user_safe_error(e, st.session_state.get("user", {}).get("role")))
 
 
 # ==========================================
@@ -5923,7 +6024,7 @@ def show_aging(company_key, aging_type="Receivable"):
                             st.warning(
                                 "Supplier transaction history is being prepared. Supplier balances and registration remain available."
                             )
-                            logger.warning("Supplier transaction history unavailable because supplier_transactions is missing: %s", tx_error)
+                            logger.warning("Supplier transaction history unavailable because supplier_transactions is missing: %s", sanitize_error_message(tx_error))
                         else:
                             raise
                     if supplier_tx_rows:
@@ -5965,7 +6066,7 @@ def show_aging(company_key, aging_type="Receivable"):
             else:
                 st.info(f"No {aging_type} records found.")
     except Exception as e:
-        st.error(f"Aging module error: {e}")
+        st.error(build_user_safe_error(e, st.session_state.get("user", {}).get("role")))
 
 
 # ==========================================
@@ -5994,7 +6095,7 @@ def show_taxation(company_key):
         col3.metric(f"NHIL ({NHIL_RATE*100:.1f}%) {get_currency_symbol()}", format_currency(nhil))
         col4.metric(f"Total Tax Due ({get_currency_symbol()})", format_currency(total_tax))
     except Exception as e:
-        st.error(f"Taxation module error: {e}")
+        st.error(build_user_safe_error(e, st.session_state.get("user", {}).get("role")))
 
 
 # ==========================================
@@ -6098,7 +6199,7 @@ def show_payroll(company_key, role):
                     st.success("Entry Updated")
                     st.rerun()
                 except Exception as e:
-                    st.error(f"Error saving payroll: {e}")
+                    st.error(build_user_safe_error(e, st.session_state.get("user", {}).get("role")))
 
     st.subheader("Payroll Register")
     conn = None
@@ -6207,7 +6308,7 @@ def show_payroll(company_key, role):
             st.subheader("Payslip Preview")
             st.markdown(st.session_state[payroll_print_preview_key], unsafe_allow_html=True)
     except Exception as e:
-        st.error(f"Error loading payroll: {e}")
+        st.error(build_user_safe_error(e, st.session_state.get("user", {}).get("role")))
     finally:
         if conn:
             conn.close()
@@ -6268,7 +6369,7 @@ def _show_legacy_fixed_assets(company_key, role):
                     st.success("Entry Updated")
                     st.rerun()
                 except Exception as e:
-                    st.error(f"Error adding asset: {e}")
+                    st.error(build_user_safe_error(e, st.session_state.get("user", {}).get("role")))
 
     st.subheader("🏛️ Asset Register")
     try:
@@ -6357,7 +6458,7 @@ def _show_legacy_fixed_assets(company_key, role):
         else:
             st.info("No fixed assets registered yet.")
     except Exception as e:
-        st.error(f"Error loading fixed assets: {e}")
+        st.error(build_user_safe_error(e, st.session_state.get("user", {}).get("role")))
     finally:
         if 'conn' in locals() and conn:
             conn.close()
@@ -6393,7 +6494,7 @@ def show_fixed_assets(company_key, role):
             st.success(f"Depreciation run complete. Posted {posted_entries} journal entr{'y' if posted_entries == 1 else 'ies'}.")
             st.rerun()
         except Exception as exc:
-            st.error(f"Depreciation processing failed: {exc}")
+            st.error(build_user_safe_error(exc, st.session_state.get("user", {}).get("role")))
     action_col2.caption("Straight-line depreciation posts to Depreciation Expense and Accumulated Depreciation.")
 
     with st.expander("Add Fixed Asset", expanded=True):
@@ -6454,7 +6555,7 @@ def show_fixed_assets(company_key, role):
                     st.success("Entry Updated")
                     st.rerun()
                 except Exception as exc:
-                    st.error(f"Error adding asset: {exc}")
+                    st.error(build_user_safe_error(exc, st.session_state.get("user", {}).get("role")))
 
     st.subheader("📦 Asset Register")
     conn = None
@@ -6572,7 +6673,7 @@ def show_fixed_assets(company_key, role):
                     st.success("Entry Updated")
                     st.rerun()
     except Exception as exc:
-        st.error(f"Error loading fixed assets: {exc}")
+        st.error(build_user_safe_error(exc, st.session_state.get("user", {}).get("role")))
     finally:
         if conn:
             conn.close()
@@ -6853,7 +6954,7 @@ def _show_legacy_analytics_reports(company_key, branch_id=None):
             (company_key,) + ((branch_id,) if branch_id else ()),
         ).fetchall()
     except Exception as e:
-        st.error(f"Reports module error: {e}")
+        st.error(build_user_safe_error(e, st.session_state.get("user", {}).get("role")))
         return
     finally:
         if conn:
@@ -7037,7 +7138,7 @@ def show_dashboard(company_key, company_name, role):
             st.session_state.page = "Data Analytics"
             st.rerun()
     except Exception as exc:
-        st.error(f"Dashboard Error: {exc}")
+        st.error(build_user_safe_error(exc, st.session_state.get("user", {}).get("role")))
     finally:
         if conn:
             conn.close()
@@ -7079,7 +7180,7 @@ def show_ai_assistant(client_id):
         conn = get_connection()
         records = _fetch_ai_assistant_records(conn, active_company_id)
     except Exception as exc:
-        logger.error(f"AI assistant data fetch failed: {exc}")
+        logger.error("AI assistant data fetch failed: %s", sanitize_error_message(exc))
         st.error("The AI assistant could not load your accounting records.")
         return
     finally:
@@ -7162,7 +7263,7 @@ def show_ai_assistant(client_id):
                 st.markdown(assistant_reply)
         st.session_state[history_key].append({"role": "assistant", "content": assistant_reply})
     else:
-        logger.error("AI assistant request failed via provider %s: %s", response.get("provider"), response.get("error"))
+        logger.error("AI assistant request failed via provider %s: %s", response.get("provider"), sanitize_error_message(response.get("error")))
         failure_message = response.get("error") or "AI assistant request failed. Please try again."
         st.session_state[history_key].append({"role": "assistant", "content": failure_message})
         with st.chat_message("assistant"):
@@ -7304,7 +7405,7 @@ def show_audit_trail(company_key, role="User", branch_id=None):
         else:
             st.info("No audit records found.")
     except Exception as e:
-        st.error(f"Audit trail error: {e}")
+        st.error(build_user_safe_error(e, role))
 
 
 def show_branch_management(company_key, role):
@@ -7329,7 +7430,7 @@ def show_branch_management(company_key, role):
             else:
                 st.info("No branches found. Add your first branch below.")
         except Exception as e:
-            st.error(f"Error loading branches: {e}")
+            st.error(build_user_safe_error(e, role))
         finally:
             conn.close()
 
@@ -7346,7 +7447,7 @@ def show_branch_management(company_key, role):
             else:
                 can_add = True
         except Exception as e:
-            st.error(f"Error checking branch limit: {e}")
+            st.error(build_user_safe_error(e, role))
             can_add = False
         finally:
             conn.close()
@@ -7387,7 +7488,7 @@ def show_branch_management(company_key, role):
                             # _sync_to_firebase(conn, company_key)
                             st.rerun()
                         except Exception as e:
-                            st.error(f"Error saving branch: {e}")
+                            st.error(build_user_safe_error(e, role))
                         finally:
                             conn.close()
                     else:
@@ -7418,7 +7519,7 @@ def show_branch_management(company_key, role):
                         st.success(f"Updated assignment for {full_name}.")
                         st.rerun()
         except Exception as e:
-            st.error(f"Error in staff assignment: {e}")
+            st.error(build_user_safe_error(e, role))
         finally:
             conn.close()
 
@@ -7508,7 +7609,7 @@ def show_branch_management(company_key, role):
             else:
                 st.info("At least two branches are required for comparison.")
         except Exception as e:
-            st.error(f"Error in branch performance: {e}")
+            st.error(build_user_safe_error(e, role))
         finally:
             conn.close()
 

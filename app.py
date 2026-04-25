@@ -26,7 +26,7 @@ import sqlite3
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 import uuid
-from security_utils import sanitize_error_message
+from security_utils import build_user_safe_error, sanitize_error_message
 from accounting_engine import (
     get_month_sales_total,
     get_recent_accounting_activity,
@@ -129,6 +129,7 @@ show_reports = eka_modules.show_reports
 show_sales_purchase = eka_modules.show_sales_purchase
 show_taxation = eka_modules.show_taxation
 show_vouchers = eka_modules.show_vouchers
+execute_manual_license_override = eka_modules.execute_manual_license_override
 
 GATEKEEPER_SYSTEM_PROMPT = (
     "You are a professional Chartered Accountant. Provide clear, accurate financial guidance based on the ERP data."
@@ -617,7 +618,7 @@ def send_maintenance_email(company_email, company_name, message):
         
         return True
     except Exception as e:
-        logger.error(f"Failed to send maintenance email: {e}")
+        logger.error("Failed to send maintenance email: %s", sanitize_error_message(e))
         return False
 
 
@@ -824,7 +825,7 @@ def submit_payment_reference(company_key, reference, amount, payment_method):
         
         return True
     except Exception as e:
-        logger.error(f"Failed to submit payment reference: {e}")
+        logger.error("Failed to submit payment reference: %s", sanitize_error_message(e))
         return False
     finally:
         if conn:
@@ -844,7 +845,7 @@ def update_license_expiry(company_key, months):
         log_audit_action(conn, company_key, 'System', f'License extended by {months} months', 'License Management')
         return new_expiry
     except Exception as e:
-        logger.error(f"Failed to update license expiry: {e}")
+        logger.error("Failed to update license expiry: %s", sanitize_error_message(e))
         return None
     finally:
         if conn:
@@ -1043,7 +1044,7 @@ def login_ui():
                     
                 except Exception as e:
                     st.error("System error during authentication. Please try again.")
-                    logger.error(f"Login error: {e}")
+                    logger.error("Login error: %s", sanitize_error_message(e))
         elif st.session_state.get('demo_toggle'):
             st.button('🚀 Enter Demo ERP', on_click=enter_demo)
 
@@ -1087,7 +1088,7 @@ def login_ui():
                 conn.close()
             except Exception as e:
                 st.error("System error during recovery. Please try again.")
-                logger.error(f"Recovery error: {e}")
+                logger.error("Recovery error: %s", sanitize_error_message(e))
 
         if st.session_state.get("forgot_security_question"):
             st.markdown(f"**Recovery Question:** {st.session_state['forgot_security_question']}")
@@ -1129,7 +1130,7 @@ def login_ui():
                         conn.close()
                     except Exception as e:
                         st.error("Unable to reset password at this time.")
-                        logger.error(f"Password reset error: {e}")
+                        logger.error("Password reset error: %s", sanitize_error_message(e))
 
     with t3:
         show_onboarding_payment()
@@ -1229,7 +1230,7 @@ def _show_legacy_dashboard(company_key, company_name, role):
                         "Your dashboard data tables are not fully available yet. "
                         "Please run `python fix_db.py` to complete the Safety Sync, then reload the app."
                     )
-                    logger.warning(f"Dashboard schema issue: {db_schema_error}")
+                    logger.warning("Dashboard schema issue: %s", sanitize_error_message(db_schema_error))
                     return
                 raise
 
@@ -1285,7 +1286,7 @@ def _show_legacy_dashboard(company_key, company_name, role):
                     st.info(
                         "Some activity tables are still being prepared. Run `python fix_db.py` to complete the Safety Sync."
                     )
-                    logger.warning(f"Dashboard activity schema issue: {activity_error}")
+                    logger.warning("Dashboard activity schema issue: %s", sanitize_error_message(activity_error))
                 else:
                     raise
 
@@ -1317,7 +1318,7 @@ def _show_legacy_dashboard(company_key, company_name, role):
                 conn.close()
 
     except Exception as e:
-        st.error(f"Dashboard Error: {e}")
+        st.error(build_user_safe_error(e, st.session_state.get("user", {}).get("role")))
 
 def _show_local_dashboard(company_key, company_name, role):
     """Currency-aware dashboard with maintenance-complete banner."""
@@ -1421,7 +1422,7 @@ def _show_local_dashboard(company_key, company_name, role):
             if conn:
                 conn.close()
     except Exception as e:
-        st.error(f"Dashboard Error: {e}")
+        st.error(build_user_safe_error(e, role))
 
 def check_session_lock():
     """Check if current session is still valid, revoke if another device logged in."""
@@ -1458,7 +1459,7 @@ def check_session_lock():
         conn.close()
         return True
     except Exception as e:
-        logger.error(f"Session lock check error: {e}")
+        logger.error("Session lock check error: %s", sanitize_error_message(e))
         return True
 
 
@@ -1519,7 +1520,7 @@ def main():
             )
             settings_conn.commit()
     except Exception as session_sync_error:
-        logger.warning(f"Currency session sync failed: {session_sync_error}")
+        logger.warning("Currency session sync failed: %s", sanitize_error_message(session_sync_error))
     finally:
         if settings_conn:
             settings_conn.close()
@@ -1750,7 +1751,7 @@ def _render_primary_sidebar(user, include_settings=True):
             else:
                 st.session_state.active_branch_id = None
         except Exception as e:
-            logger.error(f"Branch selector error: {e}")
+            logger.error("Branch selector error: %s", sanitize_error_message(e))
             st.session_state.active_branch_id = None
 
     current_page = _ensure_valid_page()
@@ -2227,7 +2228,7 @@ else:
                                 )
                                 selected_health_company = health_companies[health_company_names.index(selected_health_label)]["key"]
                         except Exception as journal_company_error:
-                            logger.warning("Could not load companies for journal dominance diagnostics: %s", journal_company_error)
+                            logger.warning("Could not load companies for journal dominance diagnostics: %s", sanitize_error_message(journal_company_error))
                         if selected_health_company:
                             company_operations_snapshot = build_operations_console_snapshot(
                                 conn=conn,
@@ -2478,7 +2479,7 @@ else:
                                     )
                                 )
                             else:
-                                st.warning(ai_health_result.get("error") or "AI assistant test failed.")
+                                st.warning(sanitize_error_message(ai_health_result.get("error") or "AI assistant test failed."))
                                 if ai_health_result.get("openai_error_safe"):
                                     st.caption(f"OpenAI safe error: {ai_health_result.get('openai_error_safe')}")
                                 if ai_health_result.get("gemini_error_safe"):
@@ -2486,7 +2487,7 @@ else:
                                 if ai_health_result.get("last_safe_error"):
                                     st.caption(f"Last safe error: {ai_health_result.get('last_safe_error')}")
                 except Exception as persistence_diag_error:
-                    logger.warning(f"Persistence diagnostics unavailable: {persistence_diag_error}")
+                    logger.warning("Persistence diagnostics unavailable: %s", sanitize_error_message(persistence_diag_error))
 
                 st.markdown("---")
                 st.subheader("Master Price Setting")
@@ -2519,7 +2520,7 @@ else:
                             conn.commit()
                             st.success(f"Master monthly price updated to {format_currency(master_price)}.")
                         except Exception as price_error:
-                            st.error(f"Could not update master price: {price_error}")
+                            st.error(build_user_safe_error(price_error, u["role"]))
                 
                 # Global Forensic Trail (Dev only) - Enhanced with error handling
                 st.markdown("---")
@@ -2536,7 +2537,7 @@ else:
                     else:
                         st.info("No audit activity found.")
                 except Exception as e:
-                    logger.error(f"Failed to load audit trail: {e}")
+                    logger.error("Failed to load audit trail: %s", sanitize_error_message(e))
                 
                 st.markdown("---")
                 st.subheader("Manual License Deployment")
@@ -2548,6 +2549,13 @@ else:
                     max_branches = st.number_input("Max Branches Allowed", min_value=1, value=5, step=1, help="Developer control: maximum branches this client can create")
                     price_per_branch = st.number_input("Price per Branch (GHS)", min_value=0.0, value=0.0, step=10.0)
                     duration_months = st.number_input("Duration (Months)", min_value=1, max_value=24, value=12)
+                    override_reason = st.text_area(
+                        "Override Reason",
+                        help="Required for internal/admin-only emergency deployments that bypass Paystack.",
+                    )
+                    override_confirmed = st.checkbox(
+                        "I understand this bypasses Paystack and is for internal/admin use only."
+                    )
                     key_col, button_col = st.columns([3, 1])
                     with key_col:
                         manual_key = st.text_input("System License Key", type="password", key="manual_key_input")
@@ -2568,50 +2576,47 @@ else:
 
                     if submitted:
                         if company_name and manual_key:
-                            if not require_role_permission(u["role"], "manage_company", action_label="deploy company licenses"):
+                            if not require_role_permission(
+                                u["role"],
+                                "manual_license_override",
+                                action_label="perform a manual license override",
+                                company_key=manual_key,
+                                conn=conn,
+                            ):
                                 st.stop()
-                            new_expiry = datetime.now() + relativedelta(months=+int(duration_months))
                             try:
-                                created_company_key = create_company_record(
+                                override_result = execute_manual_license_override(
                                     conn=conn,
-                                    company_key=manual_key,
+                                    actor_role=u["role"],
+                                    actor_user=u.get("name") or u.get("role"),
                                     company_name=company_name,
-                                    subscription_expiry=new_expiry.isoformat(),
-                                    status="Active",
-                                    deployment_status="Live",
+                                    company_key=manual_key,
+                                    duration_months=int(duration_months),
                                     number_of_branches=int(number_of_branches),
                                     max_branches=int(max_branches),
                                     branch_price_per_month=float(price_per_branch),
-                                )
-                                conn.commit()
-                                backup_result = force_backup_after_company_creation(
-                                    company_name=company_name,
-                                    company_key=created_company_key,
+                                    override_reason=override_reason,
+                                    confirmation_checked=override_confirmed,
                                     logger_instance=logger,
                                 )
-                                log_audit_action(
-                                    conn,
-                                    'SYSTEM',
-                                    'Dev',
-                                    f'Manual license deployment for {company_name}',
-                                    'System Admin',
-                                    details=f"company_key={created_company_key}; expiry={new_expiry.isoformat()}",
-                                    action_type="admin",
-                                    document_ref=created_company_key,
-                                )
+                                if not override_result.get("ok"):
+                                    st.warning(override_result.get("reason") or "Manual license override could not be completed.")
+                                    st.stop()
+                                new_expiry = override_result.get("new_expiry")
+                                backup_result = override_result.get("backup_result") or {}
                                 if backup_result.get("ok"):
                                     st.success(
-                                        f"License deployed for {company_name} until {new_expiry.date()}. "
+                                        f"License deployed for {company_name} until {new_expiry}. "
                                         "Persistence backup completed."
                                     )
                                 else:
                                     st.warning(
-                                        f"License deployed for {company_name} until {new_expiry.date()}, "
-                                        f"but post-create backup needs attention: {backup_result.get('reason')}"
+                                        f"License deployed for {company_name} until {new_expiry}, "
+                                        f"but post-create backup needs attention: {sanitize_error_message(backup_result.get('reason'))}"
                                     )
                             except Exception as e:
                                 conn.rollback()
-                                st.error(f"Failed to deploy license: {e}")
+                                st.error(build_user_safe_error(e, u["role"]))
                         else:
                             st.error("Company Name and System License Key are required.")
 
@@ -2655,7 +2660,7 @@ else:
 
             except Exception as e:
                 st.error("Failed to load system metrics")
-                logger.error(f"Dashboard metrics error: {e}")
+                logger.error("Dashboard metrics error: %s", sanitize_error_message(e))
 
             st.markdown("---")
             st.subheader("Client Portfolio Manager")
@@ -2745,7 +2750,7 @@ else:
                                         st.rerun()
                                     except Exception as action_error:
                                         conn.rollback()
-                                        st.error(f"Company action failed: {action_error}")
+                                        st.error(build_user_safe_error(action_error, u["role"]))
                         with action_col2:
                             if st.button("Reactivate Archived Company", key="reactivate_archived_company_btn"):
                                 if not require_role_permission(u["role"], "manage_company", action_label="reactivate companies"):
@@ -2776,14 +2781,14 @@ else:
                                     st.rerun()
                                 except Exception as reactivate_error:
                                     conn.rollback()
-                                    st.error(f"Could not reactivate company: {reactivate_error}")
+                                    st.error(build_user_safe_error(reactivate_error, u["role"]))
                 except Exception as portfolio_click_error:
-                    logger.error(f"Portfolio interaction error: {portfolio_click_error}")
+                    logger.error("Portfolio interaction error: %s", sanitize_error_message(portfolio_click_error))
                     st.warning("Company selection is temporarily unavailable, but the portfolio table is still visible.")
 
                 conn.close()
             except Exception as e:
-                st.error(f'Portfolio Error: {e}')
+                st.error(build_user_safe_error(e, u["role"]))
         
         with tab2:
             st.subheader("License Management")
@@ -2858,11 +2863,11 @@ else:
                             st.balloons()
                             st.rerun()
                         except Exception as renew_error:
-                            st.error(f"Failed to extend subscription: {renew_error}")
+                            st.error(build_user_safe_error(renew_error, u["role"]))
 
                 conn.close()
             except Exception as e:
-                st.error(f'License Table Error: {e}')
+                st.error(build_user_safe_error(e, u["role"]))
                     
     elif u['role'] == "Demo":
         demo_user = {"key": "DEMO", "name": "Demo Corporation Ltd", "role": "Demo"}

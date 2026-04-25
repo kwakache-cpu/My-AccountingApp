@@ -1,6 +1,7 @@
 import importlib
 
 from test_support import ERPIsolatedTestCase, build_lines
+from security_utils import build_user_safe_error, sanitize_error_message
 
 
 class PermissionSecurityTests(ERPIsolatedTestCase):
@@ -98,3 +99,148 @@ class PermissionSecurityTests(ERPIsolatedTestCase):
         ).fetchone()
         self.assertGreaterEqual(int(security_log["row_count"] or 0), 1)
         self.assertGreaterEqual(int(audit_log["row_count"] or 0), 1)
+
+    def test_raw_exception_sanitization_removes_secret_like_values(self):
+        message = build_user_safe_error(
+            "Gemini failed at https://generativelanguage.googleapis.com/v1beta/models/test:generateContent?key=AIzaSECRET1234567890 "
+            "Authorization: Bearer SECRET_TOKEN_1234567890",
+            role="Dev",
+        )
+        self.assertIn("An error occurred. Please contact the system administrator.", message)
+        self.assertNotIn("AIzaSECRET1234567890", message)
+        self.assertNotIn("Bearer SECRET_TOKEN_1234567890", message)
+        self.assertNotIn("?key=", message)
+
+    def test_sanitize_error_message_redacts_query_params_headers_and_tokens(self):
+        raw_message = (
+            "Request failed at https://example.com/callback?token=abc1234567890123456789012345&apikey=XYZ9876543210987654321098765 "
+            "Authorization: Bearer SUPER_SECRET_BEARER_TOKEN_1234567890 "
+            "api_key=ANOTHER_SECRET_12345678901234567890"
+        )
+        sanitized = sanitize_error_message(raw_message)
+        self.assertNotIn("abc1234567890123456789012345", sanitized)
+        self.assertNotIn("XYZ9876543210987654321098765", sanitized)
+        self.assertNotIn("SUPER_SECRET_BEARER_TOKEN_1234567890", sanitized)
+        self.assertNotIn("ANOTHER_SECRET_12345678901234567890", sanitized)
+        self.assertIn("[redacted]", sanitized)
+
+    def test_manual_license_override_requires_permission(self):
+        result = self.modules.execute_manual_license_override(
+            conn=self.conn,
+            actor_role="Master Admin",
+            actor_user="Master Admin",
+            company_name="Unauthorized Override Co",
+            company_key="UNAUTH-OVERRIDE-001",
+            duration_months=12,
+            number_of_branches=1,
+            max_branches=1,
+            branch_price_per_month=0.0,
+            override_reason="Unauthorized test",
+            confirmation_checked=True,
+        )
+        self.assertFalse(result["ok"])
+        self.assertTrue(result.get("permission_denied"))
+        self.assertEqual(
+            self.conn.execute(
+                "SELECT COUNT(*) AS row_count FROM companies WHERE key = ?",
+                ("UNAUTH-OVERRIDE-001",),
+            ).fetchone()["row_count"],
+            0,
+        )
+
+    def test_manual_license_override_requires_reason_and_confirmation(self):
+        missing_reason = self.modules.execute_manual_license_override(
+            conn=self.conn,
+            actor_role="Dev",
+            actor_user="Gatekeeper",
+            company_name="Override Missing Reason",
+            company_key="OVERRIDE-NO-REASON",
+            duration_months=12,
+            number_of_branches=1,
+            max_branches=1,
+            branch_price_per_month=0.0,
+            override_reason="",
+            confirmation_checked=True,
+        )
+        self.assertFalse(missing_reason["ok"])
+        self.assertIn("reason", missing_reason["reason"].lower())
+
+        missing_confirmation = self.modules.execute_manual_license_override(
+            conn=self.conn,
+            actor_role="Dev",
+            actor_user="Gatekeeper",
+            company_name="Override Missing Confirmation",
+            company_key="OVERRIDE-NO-CONFIRM",
+            duration_months=12,
+            number_of_branches=1,
+            max_branches=1,
+            branch_price_per_month=0.0,
+            override_reason="Emergency internal deployment",
+            confirmation_checked=False,
+        )
+        self.assertFalse(missing_confirmation["ok"])
+        self.assertIn("paystack bypass", missing_confirmation["reason"].lower())
+
+    def test_denied_override_does_not_activate_license(self):
+        before_count = int(
+            self.conn.execute("SELECT COUNT(*) AS row_count FROM companies").fetchone()["row_count"] or 0
+        )
+        result = self.modules.execute_manual_license_override(
+            conn=self.conn,
+            actor_role="Staff",
+            actor_user="Staff User",
+            company_name="Blocked Company",
+            company_key="BLOCKED-LICENSE-001",
+            duration_months=6,
+            number_of_branches=1,
+            max_branches=1,
+            branch_price_per_month=0.0,
+            override_reason="Should be blocked",
+            confirmation_checked=True,
+        )
+        after_count = int(
+            self.conn.execute("SELECT COUNT(*) AS row_count FROM companies").fetchone()["row_count"] or 0
+        )
+        self.assertFalse(result["ok"])
+        self.assertEqual(before_count, after_count)
+
+    def test_dev_manual_license_override_succeeds_with_reason_and_confirmation(self):
+        result = self.modules.execute_manual_license_override(
+            conn=self.conn,
+            actor_role="Dev",
+            actor_user="Gatekeeper",
+            company_name="Emergency Override Co",
+            company_key="OVERRIDE-OK-001",
+            duration_months=12,
+            number_of_branches=2,
+            max_branches=3,
+            branch_price_per_month=50.0,
+            override_reason="Emergency internal deployment during billing outage",
+            confirmation_checked=True,
+        )
+        self.assertTrue(result["ok"])
+        company_row = self.conn.execute(
+            "SELECT key, name, status, deployment_status FROM companies WHERE key = ?",
+            ("OVERRIDE-OK-001",),
+        ).fetchone()
+        self.assertIsNotNone(company_row)
+        self.assertEqual(company_row["status"], "Active")
+        self.assertEqual(company_row["deployment_status"], "Live")
+        audit_row = self.conn.execute(
+            """
+            SELECT COUNT(*) AS row_count
+            FROM audit_logs
+            WHERE action_type = 'admin/license_override'
+              AND lower(details) LIKE '%emergency internal deployment during billing outage%'
+            """
+        ).fetchone()
+        system_log_row = self.conn.execute(
+            """
+            SELECT COUNT(*) AS row_count
+            FROM system_logs
+            WHERE module_name = 'License Override'
+              AND lower(message) LIKE '%reason=emergency internal deployment during billing outage%'
+            """
+        ).fetchone()
+        self.assertGreaterEqual(int(audit_row["row_count"] or 0), 1)
+        self.assertGreaterEqual(int(system_log_row["row_count"] or 0), 1)

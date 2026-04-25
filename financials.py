@@ -7,6 +7,7 @@ import sys
 
 import pandas as pd
 import streamlit as st
+from security_utils import build_user_safe_error, sanitize_error_message
 
 from database import get_connection
 from accounting_engine import (
@@ -483,7 +484,7 @@ def _show_manual_record_transaction_legacy(company_key, role):
                 st.success("Transaction posted successfully.")
                 st.rerun()
             except Exception as exc:
-                st.error(f"Transaction posting failed: {exc}")
+                st.error(build_user_safe_error(exc, role))
 
 
 def show_invoice_manager(company_key, role):
@@ -550,7 +551,7 @@ def show_invoice_manager(company_key, role):
                     )
                 except sqlite3.IntegrityError as e:
                     conn.close()
-                    st.error(f"Unable to create invoice: {e}")
+                    st.error(build_user_safe_error(e, role))
                     st.stop()
 
                 if posting_state == "Posted":
@@ -613,7 +614,7 @@ def show_invoice_manager(company_key, role):
                     )
                 except sqlite3.IntegrityError as e:
                     conn.close()
-                    st.error(f"Unable to create bill: {e}")
+                    st.error(build_user_safe_error(e, role))
                     st.stop()
 
                 if posting_state == "Posted":
@@ -813,7 +814,7 @@ def show_create_invoice_page(company_key, role):
                 )
             except sqlite3.IntegrityError as e:
                 conn.close()
-                st.error(f"Unable to create invoice: {e}")
+                st.error(build_user_safe_error(e, role))
                 st.stop()
 
             if posting_state == "Posted":
@@ -1557,7 +1558,7 @@ def show_financial_reports(company_key, role=None):
                 else:
                     st.info("No net profit or loss balance was available to close.")
             except Exception as exc:
-                st.error(f"Year-end closing failed: {exc}")
+                st.error(build_user_safe_error(exc, effective_role))
     
     # Consolidator for Master Admins
     if effective_role == "Master Admin":
