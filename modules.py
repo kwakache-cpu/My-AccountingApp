@@ -18,6 +18,7 @@ import streamlit as st
 import streamlit.components.v1 as components
 from dateutil.relativedelta import relativedelta
 from PIL import Image
+from security_utils import sanitize_error_message
 try:
     from openai import OpenAI
 except ImportError:
@@ -763,7 +764,7 @@ def initialize_paystack_payment(
             "expected_amount": expected_amount,
         }
     except Exception as exc:
-        logger.warning("Paystack initialize request failed for reference=%s: %s", reference, exc)
+        logger.warning("Paystack initialize request failed for reference=%s: %s", reference, sanitize_error_message(exc))
         return {"ok": False, "reason": "Paystack checkout could not be initialized right now. Please try again."}
     finally:
         if conn:
@@ -865,7 +866,7 @@ def verify_paystack_payment(reference, activate_license=True):
             "already_activated": activation_result.get("already_activated", False),
         }
     except Exception as exc:
-        logger.warning("Paystack verify request failed for reference=%s: %s", normalized_reference, exc)
+        logger.warning("Paystack verify request failed for reference=%s: %s", normalized_reference, sanitize_error_message(exc))
         return {"ok": False, "reason": "Paystack verification could not be completed right now. Please try again."}
     finally:
         if conn:
@@ -1058,7 +1059,7 @@ def _safe_ai_error_message(exc):
     lowered_error_text = error_text.lower()
     if "generativelanguage.googleapis.com" in lowered_error_text or "generatecontent" in lowered_error_text or "gemini" in lowered_error_text:
         return "Gemini request failed (rate limit or quota reached)"
-    return f"{type(exc).__name__}: {exc}"
+    return sanitize_error_message(f"{type(exc).__name__}: {exc}")
 
 
 def _call_gemini_chat(api_key, messages, temperature=0.3, max_tokens=1024):
@@ -1493,7 +1494,7 @@ def _init_modules_firebase_app():
         credentials_result = get_firebase_service_account_info()
         diagnostics = get_recovery_source_diagnostics()
         if not credentials_result.get("ok"):
-            logger.warning("Modules Firebase client could not load credentials: %s", credentials_result.get("reason"))
+            logger.warning("Modules Firebase client could not load credentials: %s", sanitize_error_message(credentials_result.get("reason")))
             return None
         if not diagnostics.get("bucket_name"):
             logger.warning("Modules Firebase client could not determine a storage bucket name.")

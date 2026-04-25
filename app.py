@@ -26,6 +26,7 @@ import sqlite3
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 import uuid
+from security_utils import sanitize_error_message
 from accounting_engine import (
     get_month_sales_total,
     get_recent_accounting_activity,
@@ -221,13 +222,13 @@ def _get_app_firebase_service_account_info():
     logger.warning(
         "Firebase credentials unavailable for app storage client: source=%s reason=%s",
         credentials_result.get("source", "unknown"),
-        credentials_result.get("reason", "unknown"),
+        sanitize_error_message(credentials_result.get("reason", "unknown")),
     )
     st.warning(
-        credentials_result.get(
+        sanitize_error_message(credentials_result.get(
             "reason",
             "Firebase credentials are unavailable. Please check Streamlit Cloud Secrets.",
-        )
+        ))
     )
     return {
         "ok": False,
@@ -249,10 +250,10 @@ def _init_firebase_storage_client():
         diagnostics = get_recovery_source_diagnostics()
         credentials_result = _get_app_firebase_service_account_info()
         if not credentials_result.get("ok"):
-            logger.warning("Cloud Vault UI client could not load credentials: %s", credentials_result.get("reason"))
+            logger.warning("Cloud Vault UI client could not load credentials: %s", sanitize_error_message(credentials_result.get("reason")))
             return None
         if not diagnostics.get("credentials_loaded"):
-            logger.warning("Cloud Vault UI client could not load credentials: %s", diagnostics.get("credential_error"))
+            logger.warning("Cloud Vault UI client could not load credentials: %s", sanitize_error_message(diagnostics.get("credential_error")))
             return None
         if not diagnostics.get("bucket_name"):
             logger.warning("Cloud Vault UI client could not determine a storage bucket name.")
@@ -276,10 +277,10 @@ def _init_firebase_storage_client():
             FIREBASE_APP = firebase_admin.get_app("eka-silent-sync")
             return FIREBASE_APP
         except Exception as exc:
-            logger.warning("Cloud Vault UI client lookup failed: %s", exc)
+            logger.warning("Cloud Vault UI client lookup failed: %s", sanitize_error_message(exc))
             return None
     except Exception as exc:
-        logger.warning("Cloud Vault UI client initialization failed: %s", exc)
+        logger.warning("Cloud Vault UI client initialization failed: %s", sanitize_error_message(exc))
         return None
 
 
@@ -314,10 +315,10 @@ def _get_cloud_vault_status():
             list(bucket.list_blobs(prefix=diagnostics.get("object_name") or FIREBASE_OBJECT_NAME, max_results=1))
             return "🟢 Cloud Vault: Connected"
         except Exception as exc:
-            logger.warning("Cloud Vault connectivity check failed: %s", exc)
+            logger.warning("Cloud Vault connectivity check failed: %s", sanitize_error_message(exc))
             return "🔴 Cloud Vault: Source Unreachable"
     except Exception as exc:
-        logger.warning("Cloud Vault status check failed: %s", exc)
+        logger.warning("Cloud Vault status check failed: %s", sanitize_error_message(exc))
         return "🔴 Cloud Vault: Source Unreachable"
 
 
@@ -668,7 +669,7 @@ def ask_gatekeeper_ai(user_input):
     )
     if response["ok"]:
         return response["content"]
-    logger.error("Gatekeeper AI call failed via provider %s: %s", response.get("provider"), response.get("error"))
+    logger.error("Gatekeeper AI call failed via provider %s: %s", response.get("provider"), sanitize_error_message(response.get("error")))
     return "AI assistant request failed. Please try again."
 
 
@@ -2141,7 +2142,7 @@ else:
                             if paystack_health_result.get("success"):
                                 st.success(paystack_health_result.get("message") or "Paystack configuration is ready.")
                             else:
-                                st.warning(paystack_health_result.get("error") or "Paystack health test failed.")
+                                st.warning(sanitize_error_message(paystack_health_result.get("error") or "Paystack health test failed."))
                     schema_diag = operations_snapshot["schema"]
                     st.markdown("---")
                     st.caption("Schema Manifest Health")
@@ -2393,7 +2394,7 @@ else:
                                 )
                             )
                         else:
-                            st.warning(f"Backup export unavailable: {export_result.get('reason')}")
+                            st.warning(f"Backup export unavailable: {sanitize_error_message(export_result.get('reason'))}")
                     st.markdown("---")
                     st.caption("AI Assistant Health")
                     ai_health_key = "admin_ai_health_test_result"

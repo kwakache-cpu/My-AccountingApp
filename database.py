@@ -7,6 +7,7 @@ import json
 import re
 import tempfile
 import time
+from security_utils import sanitize_error_message
 
 try:
     import streamlit as st
@@ -448,7 +449,9 @@ def get_firebase_service_account_info():
             if structured_secret_exists_in_streamlit:
                 structured_secret_payload = dict(st.secrets["FIREBASE_SERVICE_ACCOUNT"])
         except Exception as exc:
-            streamlit_failure_reason = f"st.secrets unavailable at runtime: {type(exc).__name__}: {exc}"
+            streamlit_failure_reason = sanitize_error_message(
+                f"st.secrets unavailable at runtime: {type(exc).__name__}: {exc}"
+            )
             logger.warning("st.secrets unavailable at runtime")
     else:
         streamlit_failure_reason = "streamlit import failed"
@@ -504,7 +507,7 @@ def get_firebase_service_account_info():
             return {
                 "ok": False,
                 "source": "file",
-                "reason": f"Firebase credentials from file are invalid: {exc}",
+                "reason": sanitize_error_message(f"Firebase credentials from file are invalid: {exc}"),
                 "key_path": firebase_key_path,
             }
 
@@ -529,13 +532,13 @@ def get_firebase_service_account_info():
             logger.warning(
                 "Firebase secret diagnostics: json.loads failed exception_type=%s message=%s",
                 type(exc).__name__,
-                str(exc),
+                sanitize_error_message(str(exc)),
             )
             logger.warning("Firebase credentials missing: %s", invalid_secret_reason)
             return {
                 "ok": False,
                 "source": "json_secret_fallback",
-                "reason": (
+                "reason": sanitize_error_message(
                     f"Legacy JSON fallback failed after {source_attempt_order}. "
                     f"{invalid_secret_reason}. Parser detail: {exc}"
                 ),
@@ -582,6 +585,7 @@ def get_recovery_source_diagnostics():
     service_account_info = credentials_result.get("service_account_info")
     credentials_source = credentials_result.get("source", "missing")
     credential_error = None if credentials_result.get("ok") else credentials_result.get("reason")
+    credential_error = sanitize_error_message(credential_error) if credential_error else None
 
     project_id = str((service_account_info or {}).get("project_id") or "").strip()
     bucket_name = bucket_override or (f"{project_id}.appspot.com" if project_id else "")
@@ -625,7 +629,7 @@ def _init_firebase_recovery_client():
             diagnostics["project_id_present"],
         )
         if not credentials_result.get("ok"):
-            logger.warning("Firebase recovery credentials are unavailable: %s", credentials_result.get("reason"))
+            logger.warning("Firebase recovery credentials are unavailable: %s", sanitize_error_message(credentials_result.get("reason")))
             return None
         if not diagnostics["bucket_name"]:
             logger.warning("Firebase recovery client could not determine a storage bucket name.")
@@ -649,10 +653,10 @@ def _init_firebase_recovery_client():
             FIREBASE_RECOVERY_APP = firebase_admin.get_app("eka-database-recovery")
             return FIREBASE_RECOVERY_APP
         except Exception as exc:
-            logger.warning("Firebase recovery client lookup failed: %s", exc)
+            logger.warning("Firebase recovery client lookup failed: %s", sanitize_error_message(exc))
             return None
     except Exception as exc:
-        logger.warning("Firebase recovery client initialization failed: %s", exc)
+        logger.warning("Firebase recovery client initialization failed: %s", sanitize_error_message(exc))
         return None
 
 
@@ -663,7 +667,7 @@ def _get_firebase_recovery_bucket():
     try:
         return storage.bucket(app=app)
     except Exception as exc:
-        logger.warning("Firebase recovery bucket unavailable: %s", exc)
+        logger.warning("Firebase recovery bucket unavailable: %s", sanitize_error_message(exc))
         return None
 
 
