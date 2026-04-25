@@ -245,6 +245,7 @@ LOCAL_BACKUP_ROOT = os.path.join(DB_DIR, "backups")
 LOCAL_LATEST_BACKUP_DIR = os.path.join(LOCAL_BACKUP_ROOT, "latest")
 LOCAL_HISTORY_BACKUP_DIR = os.path.join(LOCAL_BACKUP_ROOT, "history")
 LOCAL_LATEST_BACKUP_PATH = os.path.join(LOCAL_LATEST_BACKUP_DIR, DB_NAME)
+LOCAL_RESTORE_GUARD_PATH = os.path.join(DB_DIR, "restore_guard.json")
 BACKUP_TRIGGER_TABLES = {
     "companies",
     "branches",
@@ -311,6 +312,42 @@ def _get_existing_columns(conn, table_name):
         return {str(row[1]) for row in conn.execute(f"PRAGMA table_info({table_name})").fetchall()}
     except sqlite3.Error:
         return set()
+
+
+def _load_restore_guard_state():
+    if not os.path.exists(LOCAL_RESTORE_GUARD_PATH):
+        return {"active": False}
+    try:
+        with open(LOCAL_RESTORE_GUARD_PATH, "r", encoding="utf-8") as guard_file:
+            payload = json.load(guard_file)
+        payload["active"] = bool(payload.get("active"))
+        return payload
+    except Exception as exc:
+        logger.warning("Restore guard state could not be read: %s", sanitize_error_message(exc))
+        return {"active": False, "reason": "guard_read_failed"}
+
+
+def _write_restore_guard_state(payload, logger_instance=None):
+    logger_instance = logger_instance or logger
+    os.makedirs(DB_DIR, exist_ok=True)
+    with open(LOCAL_RESTORE_GUARD_PATH, "w", encoding="utf-8") as guard_file:
+        json.dump(payload, guard_file, indent=2, default=str)
+    logger_instance.info(
+        "Restore guard state updated: active=%s source=%s restored_company_count=%s",
+        payload.get("active"),
+        payload.get("source_db_path"),
+        payload.get("restored_company_count"),
+    )
+
+
+def _clear_restore_guard_state(logger_instance=None):
+    logger_instance = logger_instance or logger
+    if os.path.exists(LOCAL_RESTORE_GUARD_PATH):
+        try:
+            os.remove(LOCAL_RESTORE_GUARD_PATH)
+            logger_instance.info("Restore guard state cleared: %s", LOCAL_RESTORE_GUARD_PATH)
+        except OSError as exc:
+            logger_instance.warning("Restore guard state could not be cleared: %s", sanitize_error_message(exc))
 
 
 def get_schema_manifest_diagnostics(conn=None):
@@ -822,6 +859,7 @@ def _create_runtime_snapshot_file(source_db_path=DB_PATH):
 def backup_runtime_database_to_cloud(force=False, trigger_tables=None, logger_instance=None):
     global LAST_BACKUP_SIGNATURE, LAST_BACKUP_AT
     logger_instance = logger_instance or logger
+    restore_guard = _load_restore_guard_state()
     diagnostics = get_recovery_source_diagnostics()
     latest_object = diagnostics.get("object_name") or FIREBASE_OBJECT_NAME
     backup_timestamp = datetime.utcnow()
@@ -831,6 +869,23 @@ def backup_runtime_database_to_cloud(force=False, trigger_tables=None, logger_in
 
     if not os.path.exists(DB_PATH):
         reason = f"canonical runtime database is missing: {DB_PATH}"
+        logger_instance.warning("Backup skipped: %s", reason)
+        _update_local_backup_status("skipped", reason, latest_path=LOCAL_LATEST_BACKUP_PATH, history_path=None, trigger_tables=trigger_tables)
+        _update_backup_status("skipped", reason, latest_object=latest_object, history_object=None, trigger_tables=trigger_tables)
+        return {
+            "ok": False,
+            "reason": reason,
+            "latest_object": latest_object,
+            "history_object": None,
+            "latest_local_path": LOCAL_LATEST_BACKUP_PATH,
+            "history_local_path": None,
+        }
+
+    if restore_guard.get("active"):
+        reason = (
+            "backup temporarily disabled during first boot after local restore; "
+            f"source={restore_guard.get('source_db_path', 'unknown')}"
+        )
         logger_instance.warning("Backup skipped: %s", reason)
         _update_local_backup_status("skipped", reason, latest_path=LOCAL_LATEST_BACKUP_PATH, history_path=None, trigger_tables=trigger_tables)
         _update_backup_status("skipped", reason, latest_object=latest_object, history_object=None, trigger_tables=trigger_tables)
@@ -1230,6 +1285,57 @@ def get_downloadable_backup_export(logger_instance=None):
                 os.remove(temp_download_path)
             except OSError:
                 pass
+
+
+def restore_runtime_database_from_local_file(source_db_path, logger_instance=None):
+    logger_instance = logger_instance or logger
+    normalized_source = os.path.abspath(str(source_db_path or "").strip())
+    if not normalized_source:
+        raise ValueError("source_db_path is required")
+    if not os.path.exists(normalized_source):
+        raise FileNotFoundError(f"Source database file does not exist: {normalized_source}")
+    if not is_sqlite_file(normalized_source):
+        raise RuntimeError(f"Source file is not a valid SQLite database: {normalized_source}")
+
+    source_health = get_database_health_snapshot(normalized_source, logger_instance=logger_instance)
+    pre_restore_backup = None
+    if os.path.exists(DB_PATH):
+        pre_restore_backup = create_timestamped_backup(DB_PATH, logger=logger_instance, reason="pre_local_restore")
+
+    os.makedirs(DB_DIR, exist_ok=True)
+    shutil.copy2(normalized_source, DB_PATH)
+    restored_health = get_database_health_snapshot(DB_PATH, logger_instance=logger_instance)
+    restored_company_count = int(restored_health.get("company_count") or 0)
+    _write_restore_guard_state(
+        {
+            "active": True,
+            "created_at": datetime.utcnow().isoformat(timespec="seconds"),
+            "source_db_path": normalized_source,
+            "target_db_path": DB_PATH,
+            "restored_company_count": restored_company_count,
+            "restored_production_ready": bool(restored_health.get("production_ready")),
+            "pre_restore_backup_path": pre_restore_backup,
+        },
+        logger_instance=logger_instance,
+    )
+    logger_instance.info(
+        "Local runtime database restored from file: source=%s target=%s company_count_after_restore=%s production_ready=%s",
+        normalized_source,
+        DB_PATH,
+        restored_company_count,
+        restored_health.get("production_ready"),
+    )
+    return {
+        "ok": True,
+        "source_db_path": normalized_source,
+        "target_db_path": DB_PATH,
+        "company_count_after_restore": restored_company_count,
+        "production_ready_after_restore": bool(restored_health.get("production_ready")),
+        "pre_restore_backup_path": pre_restore_backup,
+        "restore_guard_path": LOCAL_RESTORE_GUARD_PATH,
+        "source_health": source_health,
+        "restored_health": restored_health,
+    }
 
 
 def get_cloud_backup_diagnostics(logger_instance=None):
@@ -4246,6 +4352,14 @@ def startup_database():
     global LAST_RESTORE_SOURCE
     LAST_RESTORE_SOURCE = "local_runtime_database"
     logger.info("Database startup entered: db_path=%s", DB_PATH)
+    restore_guard = _load_restore_guard_state()
+    if restore_guard.get("active"):
+        logger.warning(
+            "Local restore guard is active; cloud/local backup uploads remain disabled for this first boot: source=%s target=%s restored_company_count=%s",
+            restore_guard.get("source_db_path"),
+            restore_guard.get("target_db_path"),
+            restore_guard.get("restored_company_count"),
+        )
     _ensure_local_db_file()
     preflight_conn = None
     if os.path.exists(DB_PATH) and is_database_valid(DB_PATH, logger_instance=logger):
@@ -4579,6 +4693,27 @@ def startup_database():
             "restored_from_cloud" if cloud_restore_used else "local_production_ready",
         )
         final_health = get_database_health_snapshot(DB_PATH, logger_instance=logger)
+        final_schema_version = _get_schema_version(conn)
+        logger.info(
+            "Local restore post-startup validation: company_count_after_restore=%s migration_success=%s schema_version=%s",
+            final_health["company_count"],
+            "Yes",
+            final_schema_version,
+        )
+        if restore_guard.get("active"):
+            if int(final_health.get("company_count") or 0) > 0:
+                _clear_restore_guard_state(logger_instance=logger)
+                logger.info(
+                    "Local restore guard cleared after successful startup validation: company_count=%s schema_version=%s",
+                    final_health["company_count"],
+                    final_schema_version,
+                )
+            else:
+                logger.warning(
+                    "Local restore guard remains active because company_count is still zero after startup: company_count=%s schema_version=%s",
+                    final_health["company_count"],
+                    final_schema_version,
+                )
         return _build_startup_result(
             ok=True,
             stage="startup_complete",
