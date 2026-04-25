@@ -1285,6 +1285,8 @@ def request_ai_chat_completion(messages, temperature=0.3, max_tokens=1024):
                 max_tokens=max_tokens,
             )
             response_text = (completion.choices[0].message.content or "").strip()
+            if not response_text:
+                raise RuntimeError("OpenAI returned an empty response")
         _safe_session_set("ai_provider_selected", provider)
         _safe_session_set("ai_provider_fallback_used", ai_status.get("fallback_used", False))
         _safe_session_set("ai_provider_last_error", "")
@@ -1297,36 +1299,38 @@ def request_ai_chat_completion(messages, temperature=0.3, max_tokens=1024):
             "error": "",
         }
     except Exception as exc:
-        if provider == "openai" and _is_openai_quota_error(exc):
+        runtime = _get_ai_runtime_config()
+        gemini_key = runtime["gemini_key"]
+        if provider == "openai" and runtime["provider_name"] == "auto" and gemini_key:
+            openai_failure = _safe_ai_error_message(exc)
+            logger.warning("OpenAI request failed; attempting Gemini fallback: %s", openai_failure)
             runtime = _get_ai_runtime_config()
-            gemini_key = runtime["gemini_key"]
-            if runtime["provider_name"] == "auto" and gemini_key:
-                try:
-                    response_text = _call_gemini_chat(
-                        gemini_key,
-                        messages=messages,
-                        temperature=temperature,
-                        max_tokens=max_tokens,
-                    )
-                    _safe_session_set("ai_provider_selected", "gemini")
-                    _safe_session_set("ai_provider_fallback_used", True)
-                    _safe_session_set("ai_provider_last_error", _safe_ai_error_message(exc))
-                    return {
-                        "ok": True,
-                        "content": response_text,
+            try:
+                response_text = _call_gemini_chat(
+                    gemini_key,
+                    messages=messages,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                )
+                _safe_session_set("ai_provider_selected", "gemini")
+                _safe_session_set("ai_provider_fallback_used", True)
+                _safe_session_set("ai_provider_last_error", openai_failure)
+                return {
+                    "ok": True,
+                    "content": response_text,
+                    "provider": "gemini",
+                    "fallback_used": True,
+                    "status": {
+                        **ai_status,
                         "provider": "gemini",
+                        "selected_provider": "gemini",
                         "fallback_used": True,
-                        "status": {
-                            **ai_status,
-                            "provider": "gemini",
-                            "selected_provider": "gemini",
-                            "fallback_used": True,
-                            "last_safe_error": _safe_ai_error_message(exc),
-                        },
-                        "error": "",
-                    }
-                except Exception as fallback_exc:
-                    exc = fallback_exc
+                        "last_safe_error": openai_failure,
+                    },
+                    "error": "",
+                }
+            except Exception as fallback_exc:
+                exc = fallback_exc
         safe_error = _safe_ai_error_message(exc)
         _safe_session_set("ai_provider_last_error", safe_error)
         return {
