@@ -1255,20 +1255,28 @@ def _get_openai_client():
     return get_openai_client_from_secrets()
 
 
-def request_ai_chat_completion(messages, temperature=0.3, max_tokens=1024):
+def call_ai_assistant(messages, temperature=0.3, max_tokens=1024, purpose="general"):
     ai_status = get_ai_client_status()
     active_client = ai_status["client"]
     provider = ai_status.get("provider")
     if active_client is None:
         return {
             "ok": False,
+            "success": False,
             "content": "",
             "provider": provider or ai_status.get("selected_provider", "none"),
+            "provider_used": provider or ai_status.get("selected_provider", "none"),
             "fallback_used": ai_status.get("fallback_used", False),
             "status": ai_status,
             "error": ai_status.get("message") or "AI assistant is not configured yet.",
+            "openai_error_safe": ai_status.get("last_safe_error", "") if provider == "openai" else "",
+            "gemini_error_safe": ai_status.get("last_safe_error", "") if provider == "gemini" else "",
+            "response_preview": "",
+            "purpose": purpose,
         }
 
+    openai_error_safe = ""
+    gemini_error_safe = ""
     try:
         if provider == "gemini":
             response_text = _call_gemini_chat(
@@ -1277,6 +1285,8 @@ def request_ai_chat_completion(messages, temperature=0.3, max_tokens=1024):
                 temperature=temperature,
                 max_tokens=max_tokens,
             )
+            if not response_text:
+                raise RuntimeError("Gemini returned an empty response")
         else:
             completion = active_client.chat.completions.create(
                 model=OPENAI_MODEL,
@@ -1292,19 +1302,25 @@ def request_ai_chat_completion(messages, temperature=0.3, max_tokens=1024):
         _safe_session_set("ai_provider_last_error", "")
         return {
             "ok": True,
+            "success": True,
             "content": response_text,
             "provider": provider,
+            "provider_used": provider,
             "fallback_used": ai_status.get("fallback_used", False),
             "status": ai_status,
             "error": "",
+            "openai_error_safe": openai_error_safe,
+            "gemini_error_safe": gemini_error_safe,
+            "response_preview": response_text[:120],
+            "purpose": purpose,
         }
     except Exception as exc:
         runtime = _get_ai_runtime_config()
         gemini_key = runtime["gemini_key"]
         if provider == "openai" and runtime["provider_name"] == "auto" and gemini_key:
             openai_failure = _safe_ai_error_message(exc)
+            openai_error_safe = openai_failure
             logger.warning("OpenAI request failed; attempting Gemini fallback: %s", openai_failure)
-            runtime = _get_ai_runtime_config()
             try:
                 response_text = _call_gemini_chat(
                     gemini_key,
@@ -1312,13 +1328,17 @@ def request_ai_chat_completion(messages, temperature=0.3, max_tokens=1024):
                     temperature=temperature,
                     max_tokens=max_tokens,
                 )
+                if not response_text:
+                    raise RuntimeError("Gemini returned an empty response")
                 _safe_session_set("ai_provider_selected", "gemini")
                 _safe_session_set("ai_provider_fallback_used", True)
                 _safe_session_set("ai_provider_last_error", openai_failure)
                 return {
                     "ok": True,
+                    "success": True,
                     "content": response_text,
                     "provider": "gemini",
+                    "provider_used": "gemini",
                     "fallback_used": True,
                     "status": {
                         **ai_status,
@@ -1328,22 +1348,41 @@ def request_ai_chat_completion(messages, temperature=0.3, max_tokens=1024):
                         "last_safe_error": openai_failure,
                     },
                     "error": "",
+                    "openai_error_safe": openai_failure,
+                    "gemini_error_safe": "",
+                    "response_preview": response_text[:120],
+                    "purpose": purpose,
                 }
             except Exception as fallback_exc:
+                gemini_error_safe = _safe_ai_error_message(fallback_exc)
                 exc = fallback_exc
+        elif provider == "openai":
+            openai_error_safe = _safe_ai_error_message(exc)
+        elif provider == "gemini":
+            gemini_error_safe = _safe_ai_error_message(exc)
         safe_error = _safe_ai_error_message(exc)
         _safe_session_set("ai_provider_last_error", safe_error)
         return {
             "ok": False,
+            "success": False,
             "content": "",
             "provider": provider,
+            "provider_used": "gemini" if gemini_error_safe else provider,
             "fallback_used": ai_status.get("fallback_used", False),
             "status": {
                 **ai_status,
                 "last_safe_error": safe_error,
             },
             "error": AI_TEMPORARY_UNAVAILABLE_MESSAGE,
+            "openai_error_safe": openai_error_safe,
+            "gemini_error_safe": gemini_error_safe,
+            "response_preview": "",
+            "purpose": purpose,
         }
+
+
+def request_ai_chat_completion(messages, temperature=0.3, max_tokens=1024):
+    return call_ai_assistant(messages, temperature=temperature, max_tokens=max_tokens, purpose="general")
 
 
 def _table_exists(conn, table_name):
