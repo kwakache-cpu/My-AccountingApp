@@ -656,6 +656,15 @@ E.K.A Support Team
 
 def ask_gatekeeper_ai(user_input):
     """Send the raw user prompt through the shared AI provider path."""
+    user = st.session_state.get("user", {})
+    if not require_role_permission(
+        user.get("role", "System"),
+        "use_ai_assistant",
+        action_label="use the AI assistant",
+        company_key=user.get("key") or user.get("company_key"),
+        branch_id=st.session_state.get("active_branch_id"),
+    ):
+        return "You do not have permission to perform this action."
     response = request_ai_chat_completion(
         messages=[
             {

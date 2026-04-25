@@ -1793,6 +1793,7 @@ def _load_accounting_ai_context(company_key):
 
 
 def accounting_ai_response(module_selection, chat_history):
+    role = st.session_state.get("user", {}).get("role", "System")
     ai_status = get_ai_client_status()
     if ai_status["client"] is None:
         return f"{get_openai_unavailable_message(ai_status)} You can still use the module data and reports normally."
@@ -1802,6 +1803,14 @@ def accounting_ai_response(module_selection, chat_history):
         or st.session_state.get("user", {}).get("key")
         or st.session_state.get("user", {}).get("company_key")
     )
+    if not require_permission(
+        role,
+        "use_ai_assistant",
+        action_label="use the AI assistant",
+        company_key=company_key,
+        branch_id=st.session_state.get("active_branch_id"),
+    ):
+        return "You do not have permission to perform this action."
     messages = [
         {"role": "system", "content": ACCOUNTING_ASSISTANT_SYSTEM_PROMPT},
         {
@@ -1824,6 +1833,12 @@ def accounting_ai_response(module_selection, chat_history):
 
 
 def render_accounting_assistant_sidebar(module_selection):
+    role = st.session_state.get("user", {}).get("role", "System")
+    company_key = (
+        st.session_state.get("company_id")
+        or st.session_state.get("user", {}).get("key")
+        or st.session_state.get("user", {}).get("company_key")
+    )
     history_key = "accounting_ai_sidebar_history"
     if history_key not in st.session_state:
         st.session_state[history_key] = [
@@ -1838,6 +1853,14 @@ def render_accounting_assistant_sidebar(module_selection):
     st.sidebar.markdown(f"**AI Assistant ({get_currency_symbol()})**")
     st.sidebar.caption(module_selection)
     st.sidebar.caption(_selected_currency_context())
+    if not require_permission(
+        role,
+        "use_ai_assistant",
+        action_label="use the AI assistant",
+        company_key=company_key,
+        branch_id=st.session_state.get("active_branch_id"),
+    ):
+        return
     history_container = st.sidebar.container(height=220)
     with history_container:
         for message in st.session_state[history_key][-8:]:
@@ -3627,8 +3650,14 @@ def show_create_bill_page(company_key):
         if not company_key:
             st.warning("No active company was found.")
             return
-        if not user_has_permission(role, "create_bill"):
-            st.warning("You do not have permission to perform this action.")
+        if not require_permission(
+            role,
+            "create_bill",
+            action_label="create bills",
+            company_key=company_key,
+            conn=conn,
+            branch_id=branch_id,
+        ):
             return
 
         suppliers = conn.execute("SELECT id, name FROM suppliers WHERE company_key = ? ORDER BY name", (company_key,)).fetchall()

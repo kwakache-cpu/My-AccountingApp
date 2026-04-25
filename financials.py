@@ -425,15 +425,18 @@ def _show_manual_record_transaction_legacy(company_key, role):
     with st.expander("Period Lock Controls", expanded=False):
         period_date = st.date_input("Accounting Period", value=datetime.now().date().replace(day=1), key=f"period_date_{company_key}")
         if st.button("Close Period", key=f"close_period_{company_key}"):
-            set_period_status(company_key, period_date, "Closed", changed_by=role)
-            st.success(f"Closed {period_date.strftime('%Y-%m')}")
+            if require_permission(role, "close_period", action_label="close accounting periods", company_key=company_key):
+                set_period_status(company_key, period_date, "Closed", changed_by=role)
+                st.success(f"Closed {period_date.strftime('%Y-%m')}")
         col1, col2 = st.columns(2)
         if col1.button("🔒 Lock Period", key=f"lock_period_{company_key}"):
-            set_period_lock(company_key, period_date, True, locked_by=role)
-            st.success(f"Locked {period_date.strftime('%Y-%m')}")
+            if require_permission(role, "lock_period", action_label="lock accounting periods", company_key=company_key):
+                set_period_lock(company_key, period_date, True, locked_by=role)
+                st.success(f"Locked {period_date.strftime('%Y-%m')}")
         if col2.button("🔓 Unlock Period", key=f"unlock_period_{company_key}"):
-            set_period_lock(company_key, period_date, False, locked_by=role)
-            st.success(f"Unlocked {period_date.strftime('%Y-%m')}")
+            if require_permission(role, "reopen_period", action_label="unlock accounting periods", company_key=company_key):
+                set_period_lock(company_key, period_date, False, locked_by=role)
+                st.success(f"Unlocked {period_date.strftime('%Y-%m')}")
 
     with st.form(f"manual_tx_form_{company_key}"):
         tx_date = st.date_input("Transaction Date", value=datetime.now().date(), key=f"manual_tx_date_{company_key}")
@@ -764,8 +767,7 @@ def show_suppliers_page(company_key, role):
 
 def show_create_invoice_page(company_key, role):
     st.header("📄 Create Invoice")
-    if not user_has_permission(role, "create_invoice"):
-        st.warning("You do not have permission to perform this action.")
+    if not require_permission(role, "create_invoice", action_label="create invoices", company_key=company_key):
         return
     conn = get_connection()
     customers = [row[0] for row in conn.execute("SELECT name FROM customers WHERE company_key = ? ORDER BY name", (company_key,)).fetchall()]
@@ -866,8 +868,12 @@ def show_create_invoice_page(company_key, role):
 
 def show_receive_payment_page(company_key, role):
     st.header("💳 Receive Payment")
-    if not user_has_permission(role, "receive_customer_payment"):
-        st.warning("You do not have permission to perform this action.")
+    if not require_permission(
+        role,
+        "receive_customer_payment",
+        action_label="receive customer payments",
+        company_key=company_key,
+    ):
         return
     conn = get_connection()
     customers = [row[0] for row in conn.execute("SELECT name FROM customers WHERE company_key = ? ORDER BY name", (company_key,)).fetchall()]
@@ -951,8 +957,12 @@ def show_receive_payment_page(company_key, role):
 
 def show_supplier_payment_page(company_key, role):
     st.header("💸 Supplier Payment")
-    if not user_has_permission(role, "make_supplier_payment"):
-        st.warning("You do not have permission to perform this action.")
+    if not require_permission(
+        role,
+        "make_supplier_payment",
+        action_label="make supplier payments",
+        company_key=company_key,
+    ):
         return
     conn = get_connection()
     suppliers = [row[0] for row in conn.execute("SELECT name FROM suppliers WHERE company_key = ? ORDER BY name", (company_key,)).fetchall()]
