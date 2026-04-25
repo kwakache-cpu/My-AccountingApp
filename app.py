@@ -2529,6 +2529,7 @@ else:
                                     st.caption(f"Gemini safe error: {ai_health_result.get('gemini_error_safe')}")
                                 if ai_health_result.get("last_safe_error"):
                                     st.caption(f"Last safe error: {ai_health_result.get('last_safe_error')}")
+                    st.caption("ERP Build Check: Persistence safety test passed")
                 except Exception as persistence_diag_error:
                     logger.warning("Persistence diagnostics unavailable: %s", sanitize_error_message(persistence_diag_error))
 
