@@ -4679,7 +4679,9 @@ def show_inventory(company_key, role):
                 })
             else:
                 query = """
-                    SELECT id, item_code, barcode, item_name, category, opening_balance, qty as quantity,
+                    SELECT id, item_code, barcode, item_name, category, description, brand, supplier_name,
+                           expiry_date, batch_number, vat_category, unit, min_stock_level, tax_rate,
+                           warehouse_location, is_active, opening_balance, qty as quantity,
                            price as unit_price, cost_price, (qty * cost_price) as total_value
                     FROM inventory WHERE company_key = ?
                 """
@@ -4737,21 +4739,75 @@ def show_inventory(company_key, role):
                     edit_item_id = st.session_state.get(selected_edit_key, int(df["id"].iloc[0]))
                     edit_row = df.loc[df["id"] == edit_item_id].iloc[0]
                     with st.form(f"inventory_edit_form_{company_key}_{edit_item_id}", clear_on_submit=True):
+                        edit_item_code = st.text_input("Item Code (SKU)", value=str(edit_row.get("item_code") or ""))
                         edit_barcode = st.text_input("Barcode", value=str(edit_row.get("barcode") or ""))
+                        edit_unit = st.text_input("Unit", value=str(edit_row.get("unit") or "pcs"))
                         edit_category = st.text_input("Category", value=str(edit_row["category"] or ""))
+                        edit_description = st.text_area("Description", value=str(edit_row.get("description") or ""))
+                        edit_brand = st.text_input("Brand", value=str(edit_row.get("brand") or ""))
+                        edit_supplier_name = st.text_input("Supplier Name", value=str(edit_row.get("supplier_name") or ""))
+                        existing_expiry_value = str(edit_row.get("expiry_date") or "").strip()
+                        try:
+                            default_expiry_date = (
+                                datetime.fromisoformat(existing_expiry_value).date()
+                                if existing_expiry_value
+                                else None
+                            )
+                        except ValueError:
+                            default_expiry_date = None
+                        edit_expiry_enabled = st.checkbox(
+                            "Set Expiry Date",
+                            value=default_expiry_date is not None,
+                            key=f"inventory_edit_expiry_enabled_{company_key}_{edit_item_id}",
+                        )
+                        edit_expiry_date = st.date_input(
+                            "Expiry Date",
+                            value=default_expiry_date or datetime.now().date(),
+                            key=f"inventory_edit_expiry_date_{company_key}_{edit_item_id}",
+                            disabled=not edit_expiry_enabled,
+                        )
+                        edit_batch_number = st.text_input("Batch Number", value=str(edit_row.get("batch_number") or ""))
+                        edit_vat_category = st.text_input("VAT Category", value=str(edit_row.get("vat_category") or ""))
                         edit_qty = st.number_input("Quantity", min_value=0.0, value=float(edit_row["quantity"] or 0.0))
+                        edit_reorder_level = st.number_input("Reorder Level", min_value=0.0, value=float(edit_row.get("min_stock_level") or 0.0))
                         edit_price = st.number_input(f"Selling Price ({st.session_state.currency_symbol})", min_value=0.0, value=float(edit_row["unit_price"] or 0.0))
                         edit_cost_price = st.number_input(f"Cost Price ({st.session_state.currency_symbol})", min_value=0.0, value=float(edit_row["cost_price"] or 0.0))
+                        edit_tax_rate = st.number_input("Tax Rate", min_value=0.0, value=float(edit_row.get("tax_rate") or 0.0))
+                        edit_warehouse_location = st.text_input("Shelf / Location", value=str(edit_row.get("warehouse_location") or ""))
+                        edit_is_active = st.checkbox("Active", value=bool(edit_row.get("is_active", 1)))
                         if st.form_submit_button("Edit Item"):
                             try:
                                 conn = get_connection()
                                 conn.execute(
                                     """
                                     UPDATE inventory
-                                    SET barcode = ?, category = ?, qty = ?, price = ?, cost_price = ?, updated_at = CURRENT_TIMESTAMP
+                                    SET item_code = ?, barcode = ?, unit = ?, category = ?, description = ?, brand = ?,
+                                        supplier_name = ?, expiry_date = ?, batch_number = ?, vat_category = ?,
+                                        qty = ?, min_stock_level = ?, price = ?, cost_price = ?, tax_rate = ?,
+                                        warehouse_location = ?, is_active = ?, updated_at = CURRENT_TIMESTAMP
                                     WHERE id = ? AND company_key = ?
                                     """,
-                                    (edit_barcode.strip(), edit_category, edit_qty, edit_price, edit_cost_price, int(edit_item_id), company_key),
+                                    (
+                                        edit_item_code.strip(),
+                                        edit_barcode.strip(),
+                                        edit_unit.strip() or "pcs",
+                                        edit_category.strip(),
+                                        edit_description.strip(),
+                                        edit_brand.strip(),
+                                        edit_supplier_name.strip(),
+                                        edit_expiry_date.isoformat() if edit_expiry_enabled else None,
+                                        edit_batch_number.strip(),
+                                        edit_vat_category.strip(),
+                                        edit_qty,
+                                        edit_reorder_level,
+                                        edit_price,
+                                        edit_cost_price,
+                                        edit_tax_rate,
+                                        edit_warehouse_location.strip(),
+                                        1 if edit_is_active else 0,
+                                        int(edit_item_id),
+                                        company_key,
+                                    ),
                                 )
                                 conn.commit()
                                 log_audit_action(conn, company_key, role, "Inventory Item Updated", "Inventory", f"Updated item ID {int(edit_item_id)}")
@@ -4933,14 +4989,32 @@ def show_inventory(company_key, role):
             st.info("Items management is disabled in Demo mode.")
             return
         with st.form("add_inventory_form", clear_on_submit=True):
+            item_code = st.text_input("Item Code (SKU)")
             barcode = st.text_input("New Barcode", value=str(st.session_state.get(inventory_new_barcode_key, "") or ""))
             item_name = st.text_input("Item Name")
+            unit = st.text_input("Unit", value="pcs")
             category = st.text_input("Category")
+            description = st.text_area("Description")
+            brand = st.text_input("Brand")
+            supplier_name = st.text_input("Supplier Name")
+            expiry_enabled = st.checkbox("Set Expiry Date", key=f"inventory_expiry_enabled_{company_key}")
+            expiry_date = st.date_input(
+                "Expiry Date",
+                value=datetime.now().date(),
+                key=f"inventory_expiry_date_{company_key}",
+                disabled=not expiry_enabled,
+            )
+            batch_number = st.text_input("Batch Number")
+            vat_category = st.text_input("VAT Category")
             transaction_date = st.date_input("Transaction Date", value=datetime.now().date(), key=f"inventory_transaction_date_{company_key}")
             opening_stock = st.number_input("Opening Stock Quantity", min_value=0.0, value=0.0)
+            min_stock_level = st.number_input("Reorder Level", min_value=0.0, value=10.0)
             funding_source = st.selectbox("Inventory Funding Source", ["Cash", "Bank", "Mobile Money", "Accounts Payable"])
             price = st.number_input(f"Selling Price ({st.session_state.currency_symbol})", min_value=0.0, value=0.0)
             cost_price = st.number_input(f"Cost Price ({st.session_state.currency_symbol})", min_value=0.0, value=0.0)
+            tax_rate = st.number_input("Tax Rate", min_value=0.0, value=0.0)
+            warehouse_location = st.text_input("Shelf / Location")
+            is_active = st.checkbox("Active", value=True)
             submitted = st.form_submit_button("➕ Add New Item")
             if submitted and item_name:
                 try:
@@ -4954,18 +5028,35 @@ def show_inventory(company_key, role):
                             return
                     conn.execute(
                         """
-                        INSERT INTO inventory (company_key, item_name, barcode, category, opening_balance, qty, price, cost_price, inventory_account_id, cogs_account_id)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        INSERT INTO inventory (
+                            company_key, item_name, item_code, barcode, unit, category, description, brand,
+                            supplier_name, expiry_date, batch_number, vat_category, opening_balance, qty,
+                            min_stock_level, price, cost_price, tax_rate, warehouse_location, is_active,
+                            inventory_account_id, cogs_account_id
+                        )
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                         (
                             company_key,
                             item_name,
+                            item_code.strip(),
                             normalized_barcode,
+                            unit.strip() or "pcs",
                             category,
+                            description.strip(),
+                            brand.strip(),
+                            supplier_name.strip(),
+                            expiry_date.isoformat() if expiry_enabled else None,
+                            batch_number.strip(),
+                            vat_category.strip(),
                             opening_stock,
                             opening_stock,
+                            min_stock_level,
                             price,
                             cost_price,
+                            tax_rate,
+                            warehouse_location.strip(),
+                            1 if is_active else 0,
                             get_account_id(conn, "Inventory", "Asset"),
                             get_account_id(conn, "Cost of Goods Sold", "Expense"),
                         ),
