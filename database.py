@@ -3631,6 +3631,77 @@ def ensure_schema_integrity(conn):
     )
 
 
+def ensure_inventory_schema_integrity(conn):
+    """
+    Ensure additive inventory master columns exist before inventory UI queries run.
+    This helper never drops or recreates stock data.
+    """
+    if conn is None:
+        raise RuntimeError("Database connection is required for inventory schema integrity checks.")
+
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS inventory (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            company_key TEXT NOT NULL,
+            item_name TEXT NOT NULL,
+            item_code TEXT,
+            category TEXT,
+            description TEXT,
+            brand TEXT,
+            supplier_name TEXT,
+            expiry_date TEXT,
+            batch_number TEXT,
+            vat_category TEXT,
+            qty REAL DEFAULT 0,
+            min_stock_level REAL DEFAULT 10,
+            unit TEXT DEFAULT 'pcs',
+            cost_price REAL DEFAULT 0,
+            price REAL DEFAULT 0,
+            tax_rate REAL DEFAULT 0,
+            warehouse_location TEXT,
+            is_active INTEGER DEFAULT 1,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (company_key) REFERENCES companies (key) ON DELETE CASCADE
+        )
+        """
+    )
+    cursor.execute("PRAGMA table_info(inventory)")
+    inventory_columns = {row[1] for row in cursor.fetchall()}
+    inventory_column_defs = {
+        "company_key": "TEXT",
+        "item_code": "TEXT",
+        "barcode": "TEXT",
+        "category": "TEXT",
+        "description": "TEXT",
+        "brand": "TEXT",
+        "supplier_name": "TEXT",
+        "expiry_date": "TEXT",
+        "batch_number": "TEXT",
+        "vat_category": "TEXT",
+        "opening_balance": "REAL DEFAULT 0",
+        "qty": "REAL DEFAULT 0",
+        "min_stock_level": "REAL DEFAULT 10",
+        "unit": "TEXT DEFAULT 'pcs'",
+        "cost_price": "REAL DEFAULT 0",
+        "price": "REAL DEFAULT 0",
+        "inventory_account_id": "INTEGER",
+        "cogs_account_id": "INTEGER",
+        "tax_rate": "REAL DEFAULT 0",
+        "warehouse_location": "TEXT",
+        "is_active": "INTEGER DEFAULT 1",
+        "created_at": "TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
+        "updated_at": "TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
+    }
+    for column_name, column_def in inventory_column_defs.items():
+        if column_name not in inventory_columns:
+            cursor.execute(f"ALTER TABLE inventory ADD COLUMN {column_name} {column_def}")
+    if "quantity" in inventory_columns and "qty" in (inventory_columns | set(inventory_column_defs)):
+        cursor.execute("UPDATE inventory SET qty = COALESCE(qty, quantity, 0)")
+
+
 def _ensure_app_compatibility_tables(conn):
     """
     Keep legacy app-facing tables readable during the migration-safe rollout.
@@ -3828,38 +3899,7 @@ def _deploy_full_schema(conn):
             if column_name not in branch_columns:
                 cursor.execute(f"ALTER TABLE branches ADD COLUMN {column_name} {column_def}")
         cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_branches_access_key ON branches(branch_access_key)")
-        cursor.execute("PRAGMA table_info(inventory)")
-        inventory_columns = {row[1] for row in cursor.fetchall()}
-        inventory_column_defs = {
-            "company_key": "TEXT",
-            "item_code": "TEXT",
-            "barcode": "TEXT",
-            "category": "TEXT",
-            "description": "TEXT",
-            "brand": "TEXT",
-            "supplier_name": "TEXT",
-            "expiry_date": "TEXT",
-            "batch_number": "TEXT",
-            "vat_category": "TEXT",
-            "opening_balance": "REAL DEFAULT 0",
-            "qty": "REAL DEFAULT 0",
-            "min_stock_level": "REAL DEFAULT 10",
-            "unit": "TEXT DEFAULT 'pcs'",
-            "cost_price": "REAL DEFAULT 0",
-            "price": "REAL DEFAULT 0",
-            "inventory_account_id": "INTEGER",
-            "cogs_account_id": "INTEGER",
-            "tax_rate": "REAL DEFAULT 0",
-            "warehouse_location": "TEXT",
-            "is_active": "INTEGER DEFAULT 1",
-            "created_at": "TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
-            "updated_at": "TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
-        }
-        for column_name, column_def in inventory_column_defs.items():
-            if column_name not in inventory_columns:
-                cursor.execute(f"ALTER TABLE inventory ADD COLUMN {column_name} {column_def}")
-        if "quantity" in inventory_columns and "qty" in (inventory_columns | set(inventory_column_defs)):
-            cursor.execute("UPDATE inventory SET qty = COALESCE(qty, quantity, 0)")
+        ensure_inventory_schema_integrity(conn)
         # Indexes for fast product searching
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_inv_comp ON inventory(company_key);")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_inv_name ON inventory(item_name);")

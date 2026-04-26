@@ -207,6 +207,7 @@ from database import (
     activate_company_subscription,
     create_company_record,
     ensure_company_trial_subscription,
+    ensure_inventory_schema_integrity,
     force_backup_after_company_creation,
     get_firebase_service_account_info,
     get_connection,
@@ -4603,6 +4604,21 @@ def show_inventory(company_key, role):
     if st.session_state.get(delete_success_key):
         _trigger_scan_feedback(inventory_message_key, "Item deleted")
         st.session_state.pop(delete_success_key, None)
+
+    schema_conn = None
+    try:
+        schema_conn = get_connection()
+        ensure_inventory_schema_integrity(schema_conn)
+        schema_conn.commit()
+    except Exception as exc:
+        if schema_conn:
+            schema_conn.rollback()
+        logger.warning("Inventory schema integrity check failed: %s", sanitize_error_message(exc))
+        st.error(build_user_safe_error(exc, role))
+        return
+    finally:
+        if schema_conn:
+            schema_conn.close()
 
     _render_flash_message(inventory_message_key, inventory_scan_beep_key)
     st.text_input(
