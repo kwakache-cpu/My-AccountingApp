@@ -3700,6 +3700,53 @@ def ensure_inventory_schema_integrity(conn):
             cursor.execute(f"ALTER TABLE inventory ADD COLUMN {column_name} {column_def}")
     if "quantity" in inventory_columns and "qty" in (inventory_columns | set(inventory_column_defs)):
         cursor.execute("UPDATE inventory SET qty = COALESCE(qty, quantity, 0)")
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS inventory_import_batches (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            import_reference TEXT UNIQUE,
+            company_key TEXT NOT NULL,
+            branch_id TEXT,
+            imported_item_count INTEGER DEFAULT 0,
+            created_count INTEGER DEFAULT 0,
+            updated_count INTEGER DEFAULT 0,
+            skipped_count INTEGER DEFAULT 0,
+            error_count INTEGER DEFAULT 0,
+            total_opening_value REAL DEFAULT 0,
+            imported_by TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            opening_posted INTEGER DEFAULT 0,
+            opening_posted_entry_id INTEGER,
+            opening_posted_at TIMESTAMP,
+            opening_posted_by TEXT,
+            FOREIGN KEY (company_key) REFERENCES companies (key) ON DELETE CASCADE
+        )
+        """
+    )
+    cursor.execute("PRAGMA table_info(inventory_import_batches)")
+    batch_columns = {row[1] for row in cursor.fetchall()}
+    batch_column_defs = {
+        "import_reference": "TEXT",
+        "company_key": "TEXT",
+        "branch_id": "TEXT",
+        "imported_item_count": "INTEGER DEFAULT 0",
+        "created_count": "INTEGER DEFAULT 0",
+        "updated_count": "INTEGER DEFAULT 0",
+        "skipped_count": "INTEGER DEFAULT 0",
+        "error_count": "INTEGER DEFAULT 0",
+        "total_opening_value": "REAL DEFAULT 0",
+        "imported_by": "TEXT",
+        "created_at": "TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
+        "opening_posted": "INTEGER DEFAULT 0",
+        "opening_posted_entry_id": "INTEGER",
+        "opening_posted_at": "TIMESTAMP",
+        "opening_posted_by": "TEXT",
+    }
+    for column_name, column_def in batch_column_defs.items():
+        if column_name not in batch_columns:
+            cursor.execute(f"ALTER TABLE inventory_import_batches ADD COLUMN {column_name} {column_def}")
+    cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_inventory_import_batches_reference ON inventory_import_batches(import_reference)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_inventory_import_batches_company ON inventory_import_batches(company_key, created_at)")
 
 
 def _ensure_app_compatibility_tables(conn):

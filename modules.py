@@ -3743,6 +3743,14 @@ def _validate_stock_import_rows(raw_rows, column_mapping):
     return validated_rows, invalid_rows, summary
 
 
+def _generate_inventory_import_reference(company_key):
+    normalized_company = str(company_key or "INV").strip().upper().replace(" ", "")
+    return "IMP-{company}-{stamp}".format(
+        company=normalized_company[:12] or "INV",
+        stamp=datetime.now().strftime("%Y%m%d%H%M%S"),
+    )
+
+
 def _find_existing_inventory_for_import(conn, company_key, row_data):
     barcode = str(row_data.get("barcode") or "").strip()
     item_code = str(row_data.get("item_code") or "").strip()
@@ -3792,10 +3800,12 @@ def _summarize_stock_import_targets(conn, company_key, validated_rows):
 
 def _import_validated_stock_rows(conn, company_key, validated_rows, existing_item_behavior):
     result = {
+        "import_reference": _generate_inventory_import_reference(company_key),
         "created": 0,
         "updated": 0,
         "skipped": 0,
         "errors": [],
+        "posted_opening_value": 0.0,
     }
 
     inventory_account_id = get_account_id(conn, "Inventory", "Asset")
@@ -3819,6 +3829,7 @@ def _import_validated_stock_rows(conn, company_key, validated_rows, existing_ite
                     (new_qty, int(existing_row["id"]), company_key),
                 )
                 result["updated"] += 1
+                result["posted_opening_value"] += quantity_to_apply * float(row_data.get("cost_price") or 0.0)
                 continue
 
             conn.execute(
@@ -3857,6 +3868,7 @@ def _import_validated_stock_rows(conn, company_key, validated_rows, existing_ite
                 ),
             )
             result["created"] += 1
+            result["posted_opening_value"] += quantity_to_apply * float(row_data.get("cost_price") or 0.0)
         except Exception as exc:
             result["errors"].append(
                 {
@@ -3865,7 +3877,113 @@ def _import_validated_stock_rows(conn, company_key, validated_rows, existing_ite
                     "error_reason": sanitize_error_message(exc),
                 }
             )
+    result["posted_opening_value"] = round(float(result.get("posted_opening_value") or 0.0), 2)
+    conn.execute(
+        """
+        INSERT INTO inventory_import_batches (
+            import_reference, company_key, branch_id, imported_item_count, created_count, updated_count,
+            skipped_count, error_count, total_opening_value, imported_by
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            result["import_reference"],
+            company_key,
+            st.session_state.get("active_branch_id"),
+            int(result.get("created", 0) + result.get("updated", 0)),
+            int(result.get("created") or 0),
+            int(result.get("updated") or 0),
+            int(result.get("skipped") or 0),
+            int(len(result.get("errors") or [])),
+            float(result.get("posted_opening_value") or 0.0),
+            str(st.session_state.get("user", {}).get("role") or "System"),
+        ),
+    )
     return result
+
+
+def _post_inventory_import_opening_value(conn, company_key, import_reference, role):
+    batch_row = conn.execute(
+        """
+        SELECT id, import_reference, imported_item_count, total_opening_value,
+               COALESCE(opening_posted, 0) AS opening_posted,
+               opening_posted_entry_id
+        FROM inventory_import_batches
+        WHERE company_key = ? AND import_reference = ?
+        LIMIT 1
+        """,
+        (company_key, import_reference),
+    ).fetchone()
+    if not batch_row:
+        raise ValueError("Inventory import batch could not be found.")
+    if bool(int(batch_row["opening_posted"] or 0)) or batch_row["opening_posted_entry_id"]:
+        raise ValueError("Opening inventory accounting has already been posted for this import batch.")
+
+    total_opening_value = round(float(batch_row["total_opening_value"] or 0.0), 2)
+    if total_opening_value <= 0:
+        raise ValueError("Opening inventory value is zero, so there is nothing to post.")
+
+    entry_id = post_journal_entry(
+        company_key=company_key,
+        date=datetime.now().date(),
+        description=f"Opening inventory import value for {import_reference}",
+        reference=import_reference,
+        lines=[
+            {"account_id": get_account_id(conn, "Inventory", "Asset"), "debit": total_opening_value, "credit": 0},
+            {"account_id": get_account_id(conn, "Opening Balance Equity", "Equity"), "debit": 0, "credit": total_opening_value},
+        ],
+        created_by=role,
+        branch_id=st.session_state.get("active_branch_id"),
+        source_module="Inventory Import",
+        source_table="inventory_import_batches",
+        source_type="stock_import_opening_inventory",
+        source_id=int(batch_row["id"]),
+        approval_status="Posted",
+        user_role=role,
+        conn=conn,
+    )
+    conn.execute(
+        """
+        UPDATE inventory_import_batches
+        SET opening_posted = 1,
+            opening_posted_entry_id = ?,
+            opening_posted_at = CURRENT_TIMESTAMP,
+            opening_posted_by = ?
+        WHERE id = ?
+        """,
+        (int(entry_id), str(role or "System"), int(batch_row["id"])),
+    )
+    log_system_event(
+        "INFO",
+        "Inventory Import Opening Posting",
+        "Posted opening inventory value import_reference={reference} company_key={company_key} amount={amount:.2f} user={user}".format(
+            reference=import_reference,
+            company_key=company_key,
+            amount=total_opening_value,
+            user=role,
+        ),
+    )
+    try:
+        log_audit_action(
+            conn,
+            company_key,
+            role,
+            "Opening Inventory Import Posted",
+            "Inventory",
+            f"{import_reference} posted for {total_opening_value:,.2f}",
+            branch_id=st.session_state.get("active_branch_id"),
+            action_type="post",
+            document_ref=import_reference,
+        )
+    except Exception:
+        logger.debug("Inventory import opening posting audit logging skipped.", exc_info=True)
+
+    return {
+        "entry_id": int(entry_id),
+        "import_reference": import_reference,
+        "amount": total_opening_value,
+        "item_count": int(batch_row["imported_item_count"] or 0),
+    }
 
 
 def _add_item_to_pos_cart(company_key, item_row):
@@ -5650,11 +5768,82 @@ def show_inventory(company_key, role):
                 ir1.metric("Items Created", int(import_result.get("created") or 0))
                 ir2.metric("Items Updated", int(import_result.get("updated") or 0))
                 ir3.metric("Items Skipped", int(import_result.get("skipped") or 0))
+                st.caption(
+                    "Import Reference: {reference} | Imported Items: {items} | Opening Value: {value}".format(
+                        reference=import_result.get("import_reference") or "unknown",
+                        items=int((import_result.get("created") or 0) + (import_result.get("updated") or 0)),
+                        value=format_currency(float(import_result.get("posted_opening_value") or 0.0)),
+                    )
+                )
                 if import_result.get("errors"):
                     st.warning("Some rows could not be imported.")
                     st.dataframe(pd.DataFrame(import_result.get("errors") or []), use_container_width=True, hide_index=True)
                 else:
                     st.success("Inventory import completed successfully.")
+
+                st.markdown("Post Opening Inventory Value to Accounts?")
+                total_opening_value = round(float(import_result.get("posted_opening_value") or 0.0), 2)
+                imported_item_count = int((import_result.get("created") or 0) + (import_result.get("updated") or 0))
+                st.caption(
+                    "Imported items: {items} | Total imported stock value: {value}".format(
+                        items=imported_item_count,
+                        value=format_currency(total_opening_value),
+                    )
+                )
+                st.caption(
+                    "Proposed entry: Debit Inventory | Credit Opening Balance Equity"
+                )
+                confirmed_opening_post = st.checkbox(
+                    "I confirm I want to post opening inventory value to accounting",
+                    key=f"inventory_import_opening_post_confirm_{company_key}",
+                )
+                if st.button("Post Opening Inventory Value", key=f"inventory_import_opening_post_btn_{company_key}"):
+                    if total_opening_value <= 0:
+                        st.warning("Opening inventory value is zero, so no accounting entry will be posted.")
+                    elif not confirmed_opening_post:
+                        st.warning("Please confirm the opening inventory posting before continuing.")
+                    elif not require_permission(
+                        role,
+                        "post_accounting_document",
+                        action_label="post opening inventory value",
+                        company_key=company_key,
+                        branch_id=st.session_state.get("active_branch_id"),
+                    ):
+                        pass
+                    else:
+                        conn = None
+                        try:
+                            conn = get_connection()
+                            posting_result = _post_inventory_import_opening_value(
+                                conn,
+                                company_key,
+                                str(import_result.get("import_reference") or "").strip(),
+                                role,
+                            )
+                            conn.commit()
+                            st.success(
+                                "Opening inventory value posted successfully for {reference}.".format(
+                                    reference=posting_result["import_reference"],
+                                )
+                            )
+                            st.caption(
+                                "Journal Entry ID: {entry_id} | Amount: {amount}".format(
+                                    entry_id=posting_result["entry_id"],
+                                    amount=format_currency(posting_result["amount"]),
+                                )
+                            )
+                            import_result["opening_posted"] = True
+                            import_result["opening_posted_entry_id"] = posting_result["entry_id"]
+                            st.session_state[inventory_import_result_key] = import_result
+                        except Exception as exc:
+                            if conn:
+                                conn.rollback()
+                            st.error(build_user_safe_error(exc, st.session_state.get("user", {}).get("role")))
+                        finally:
+                            if conn:
+                                conn.close()
+                if import_result.get("opening_posted"):
+                    st.info("Opening inventory accounting has already been posted for this import batch.")
 
 
 # ==========================================
