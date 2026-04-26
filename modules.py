@@ -3486,16 +3486,47 @@ def _search_inventory_for_pos(conn, company_key, search_value):
     ).fetchall()
 
 
+STOCK_IMPORT_MAPPING_FIELDS = {
+    "item_name": "Item Name",
+    "barcode": "Barcode",
+    "item_code": "Item Code / SKU",
+    "category": "Category",
+    "brand": "Brand",
+    "supplier_name": "Supplier Name",
+    "unit": "Unit",
+    "qty": "Quantity",
+    "cost_price": "Cost Price",
+    "price": "Selling Price",
+    "min_stock_level": "Reorder Level",
+    "tax_rate": "Tax Rate",
+    "warehouse_location": "Shelf / Location",
+    "expiry_date": "Expiry Date",
+    "batch_number": "Batch Number",
+    "vat_category": "VAT Category",
+    "description": "Description",
+    "is_active": "Active Status",
+}
+
+
 STOCK_IMPORT_COLUMN_CANDIDATES = {
-    "item_name": ["item name", "product name", "name", "item", "product", "description"],
+    "item_name": ["item name", "product name", "name", "item", "product"],
     "barcode": ["barcode", "bar code", "ean", "upc", "scan code"],
     "item_code": ["item code", "product code", "code", "sku", "stock code"],
     "category": ["category", "group", "product category"],
-    "quantity": ["quantity", "qty", "stock", "opening stock", "stock qty"],
-    "cost_price": ["cost price", "cost", "unit cost", "buying price", "purchase price"],
-    "selling_price": ["selling price", "sale price", "price", "unit price", "retail price"],
-    "supplier": ["supplier", "vendor", "supplier name"],
+    "brand": ["brand", "manufacturer"],
+    "supplier_name": ["supplier", "vendor", "supplier name"],
     "unit": ["unit", "uom", "unit of measure", "measure"],
+    "qty": ["quantity", "qty", "stock", "opening stock", "stock qty"],
+    "cost_price": ["cost price", "cost", "unit cost", "buying price", "purchase price"],
+    "price": ["selling price", "sale price", "price", "unit price", "retail price"],
+    "min_stock_level": ["reorder level", "min stock", "minimum stock", "min stock level"],
+    "tax_rate": ["tax rate", "vat rate", "tax", "vat"],
+    "warehouse_location": ["warehouse location", "location", "shelf", "shelf location", "rack"],
+    "expiry_date": ["expiry date", "expiration date", "exp date", "expiry"],
+    "batch_number": ["batch number", "batch no", "batch", "lot number", "lot no"],
+    "vat_category": ["vat category", "tax category", "vat class"],
+    "description": ["description", "details", "product description"],
+    "is_active": ["active", "is active", "status", "enabled"],
 }
 
 
@@ -3546,7 +3577,7 @@ def _build_stock_import_preview(uploaded_file):
 
     preview_df.columns = [str(column) for column in preview_df.columns]
     detected_columns = _detect_stock_import_columns(preview_df.columns)
-    important_columns = ["item_name", "quantity", "cost_price", "selling_price"]
+    important_columns = ["item_name", "qty", "cost_price", "price"]
     missing_important = [column for column in important_columns if column not in detected_columns]
     return {
         "file_name": file_name or "uploaded_file",
@@ -3556,7 +3587,160 @@ def _build_stock_import_preview(uploaded_file):
         "mapping_suggestion": detected_columns,
         "missing_important_columns": missing_important,
         "preview_rows": preview_df.head(20).fillna("").to_dict(orient="records"),
+        "all_rows": preview_df.fillna("").to_dict(orient="records"),
     }
+
+
+def _parse_import_numeric(value, field_label, required=False):
+    normalized = str(value or "").strip()
+    if not normalized:
+        if required:
+            raise ValueError(f"{field_label} is required.")
+        return None
+    try:
+        return float(normalized.replace(",", ""))
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{field_label} must be numeric.") from exc
+
+
+def _parse_import_date(value, field_label):
+    normalized = str(value or "").strip()
+    if not normalized:
+        return None
+    parsed = pd.to_datetime(normalized, errors="coerce")
+    if pd.isna(parsed):
+        raise ValueError(f"{field_label} must be a valid date.")
+    return parsed.date().isoformat()
+
+
+def _parse_import_bool(value):
+    normalized = str(value or "").strip().lower()
+    if not normalized:
+        return 1
+    if normalized in {"1", "true", "yes", "y", "active", "enabled"}:
+        return 1
+    if normalized in {"0", "false", "no", "n", "inactive", "disabled"}:
+        return 0
+    raise ValueError("Active Status must be Yes/No, True/False, 1/0, or Active/Inactive.")
+
+
+def _build_stock_import_row_error(row_number, reasons):
+    return {"row_number": row_number, "error_reason": "; ".join(reasons)}
+
+
+def _validate_stock_import_rows(raw_rows, column_mapping):
+    validated_rows = []
+    invalid_rows = []
+    seen_barcodes = {}
+    seen_item_codes = {}
+    duplicate_barcode_rows = set()
+    duplicate_item_code_rows = set()
+
+    for row_index, raw_row in enumerate(raw_rows, start=2):
+        clean_row = {}
+        errors = []
+
+        def mapped_value(field_name):
+            source_column = column_mapping.get(field_name)
+            if not source_column:
+                return ""
+            return raw_row.get(source_column, "")
+
+        item_name = str(mapped_value("item_name") or "").strip()
+        if not item_name:
+            errors.append("Item Name is required.")
+        clean_row["item_name"] = item_name
+
+        barcode = str(mapped_value("barcode") or "").strip()
+        item_code = str(mapped_value("item_code") or "").strip()
+        clean_row["barcode"] = barcode
+        clean_row["item_code"] = item_code
+        clean_row["category"] = str(mapped_value("category") or "").strip()
+        clean_row["brand"] = str(mapped_value("brand") or "").strip()
+        clean_row["supplier_name"] = str(mapped_value("supplier_name") or "").strip()
+        clean_row["unit"] = str(mapped_value("unit") or "").strip() or "pcs"
+        clean_row["vat_category"] = str(mapped_value("vat_category") or "").strip()
+        clean_row["description"] = str(mapped_value("description") or "").strip()
+        clean_row["batch_number"] = str(mapped_value("batch_number") or "").strip()
+        clean_row["warehouse_location"] = str(mapped_value("warehouse_location") or "").strip()
+
+        try:
+            qty_value = _parse_import_numeric(mapped_value("qty"), "Quantity", required=True)
+            if qty_value is not None and qty_value < 0:
+                errors.append("Quantity must be zero or greater.")
+            clean_row["qty"] = qty_value
+        except ValueError as exc:
+            errors.append(str(exc))
+
+        try:
+            price_value = _parse_import_numeric(mapped_value("price"), "Selling Price", required=True)
+            if price_value is not None and price_value < 0:
+                errors.append("Selling Price must be zero or greater.")
+            clean_row["price"] = price_value
+        except ValueError as exc:
+            errors.append(str(exc))
+
+        try:
+            cost_price_value = _parse_import_numeric(mapped_value("cost_price"), "Cost Price", required=False)
+            if cost_price_value is not None and cost_price_value < 0:
+                errors.append("Cost Price must be zero or greater.")
+            clean_row["cost_price"] = cost_price_value
+        except ValueError as exc:
+            errors.append(str(exc))
+
+        try:
+            reorder_value = _parse_import_numeric(mapped_value("min_stock_level"), "Reorder Level", required=False)
+            if reorder_value is not None and reorder_value < 0:
+                errors.append("Reorder Level must be zero or greater.")
+            clean_row["min_stock_level"] = reorder_value
+        except ValueError as exc:
+            errors.append(str(exc))
+
+        try:
+            tax_rate_value = _parse_import_numeric(mapped_value("tax_rate"), "Tax Rate", required=False)
+            if tax_rate_value is not None and tax_rate_value < 0:
+                errors.append("Tax Rate must be zero or greater.")
+            clean_row["tax_rate"] = tax_rate_value
+        except ValueError as exc:
+            errors.append(str(exc))
+
+        try:
+            clean_row["expiry_date"] = _parse_import_date(mapped_value("expiry_date"), "Expiry Date")
+        except ValueError as exc:
+            errors.append(str(exc))
+
+        try:
+            clean_row["is_active"] = _parse_import_bool(mapped_value("is_active"))
+        except ValueError as exc:
+            errors.append(str(exc))
+
+        if barcode:
+            if barcode in seen_barcodes:
+                duplicate_barcode_rows.update({seen_barcodes[barcode], row_index})
+                errors.append("Duplicate barcode found in uploaded file.")
+            else:
+                seen_barcodes[barcode] = row_index
+        if item_code:
+            if item_code in seen_item_codes:
+                duplicate_item_code_rows.update({seen_item_codes[item_code], row_index})
+                errors.append("Duplicate item code found in uploaded file.")
+            else:
+                seen_item_codes[item_code] = row_index
+
+        if errors:
+            invalid_rows.append(_build_stock_import_row_error(row_index, errors))
+        else:
+            clean_row["row_number"] = row_index
+            validated_rows.append(clean_row)
+
+    summary = {
+        "total_rows": len(raw_rows),
+        "valid_rows": len(validated_rows),
+        "invalid_rows": len(invalid_rows),
+        "duplicate_barcodes": len(duplicate_barcode_rows),
+        "duplicate_item_codes": len(duplicate_item_code_rows),
+    }
+    return validated_rows, invalid_rows, summary
 
 
 def _add_item_to_pos_cart(company_key, item_row):
@@ -4598,6 +4782,8 @@ def show_inventory(company_key, role):
     inventory_pending_scan_key = f"inventory_pending_scan_{company_key}"
     inventory_new_barcode_key = f"inventory_new_barcode_{company_key}"
     inventory_import_preview_key = f"inventory_import_preview_{company_key}"
+    inventory_import_mapping_key = f"inventory_import_mapping_{company_key}"
+    inventory_import_validation_key = f"inventory_import_validation_{company_key}"
     if st.session_state.get(success_key):
         _trigger_scan_feedback(inventory_message_key, "Item added successfully!")
         st.session_state.pop(success_key, None)
@@ -5114,7 +5300,12 @@ def show_inventory(company_key, role):
         )
         if import_file and st.button("Analyze Stock File", key=f"inventory_import_btn_{company_key}"):
             try:
-                st.session_state[inventory_import_preview_key] = _build_stock_import_preview(import_file)
+                preview_payload = _build_stock_import_preview(import_file)
+                st.session_state[inventory_import_preview_key] = preview_payload
+                st.session_state[inventory_import_mapping_key] = preview_payload.get("mapping_suggestion") or {}
+                st.session_state.pop(inventory_import_validation_key, None)
+                st.session_state["validated_stock_rows"] = []
+                st.session_state["invalid_stock_rows"] = []
                 logger.info(
                     "Stock import preview prepared for company %s file=%s rows=%s",
                     company_key,
@@ -5123,6 +5314,10 @@ def show_inventory(company_key, role):
                 )
             except Exception as exc:
                 st.session_state.pop(inventory_import_preview_key, None)
+                st.session_state.pop(inventory_import_mapping_key, None)
+                st.session_state.pop(inventory_import_validation_key, None)
+                st.session_state["validated_stock_rows"] = []
+                st.session_state["invalid_stock_rows"] = []
                 st.error(build_user_safe_error(exc, st.session_state.get("user", {}).get("role")))
 
         stock_import_preview = st.session_state.get(inventory_import_preview_key)
@@ -5162,6 +5357,77 @@ def show_inventory(company_key, role):
             if preview_rows:
                 st.markdown("Preview of first 20 rows")
                 st.dataframe(pd.DataFrame(preview_rows), use_container_width=True)
+
+            st.markdown("Column Mapping")
+            current_mapping = dict(st.session_state.get(inventory_import_mapping_key) or {})
+            available_columns = ["-- Not mapped --"] + list(stock_import_preview.get("detected_columns") or [])
+            mapping_updates = {}
+            mapping_columns_left, mapping_columns_right = st.columns(2)
+            mapping_items = list(STOCK_IMPORT_MAPPING_FIELDS.items())
+            midpoint = (len(mapping_items) + 1) // 2
+            for column_group, group_items in (
+                (mapping_columns_left, mapping_items[:midpoint]),
+                (mapping_columns_right, mapping_items[midpoint:]),
+            ):
+                with column_group:
+                    for field_name, field_label in group_items:
+                        suggested_column = current_mapping.get(field_name)
+                        selected_index = (
+                            available_columns.index(suggested_column)
+                            if suggested_column in available_columns
+                            else 0
+                        )
+                        selected_column = st.selectbox(
+                            field_label,
+                            available_columns,
+                            index=selected_index,
+                            key=f"inventory_import_map_{company_key}_{field_name}",
+                        )
+                        mapping_updates[field_name] = "" if selected_column == "-- Not mapped --" else selected_column
+            st.session_state[inventory_import_mapping_key] = mapping_updates
+
+            if st.button("Validate Stock Import Data", key=f"inventory_import_validate_{company_key}"):
+                try:
+                    validated_rows, invalid_rows, validation_summary = _validate_stock_import_rows(
+                        stock_import_preview.get("all_rows") or [],
+                        mapping_updates,
+                    )
+                    validation_payload = {
+                        "summary": validation_summary,
+                        "invalid_rows": invalid_rows,
+                    }
+                    st.session_state[inventory_import_validation_key] = validation_payload
+                    st.session_state["validated_stock_rows"] = validated_rows
+                    st.session_state["invalid_stock_rows"] = invalid_rows
+                    logger.info(
+                        "Stock import validation completed for company %s: valid=%s invalid=%s",
+                        company_key,
+                        validation_summary.get("valid_rows"),
+                        validation_summary.get("invalid_rows"),
+                    )
+                except Exception as exc:
+                    st.session_state.pop(inventory_import_validation_key, None)
+                    st.session_state["validated_stock_rows"] = []
+                    st.session_state["invalid_stock_rows"] = []
+                    st.error(build_user_safe_error(exc, st.session_state.get("user", {}).get("role")))
+
+            validation_payload = st.session_state.get(inventory_import_validation_key) or {}
+            validation_summary = validation_payload.get("summary") or {}
+            invalid_rows = validation_payload.get("invalid_rows") or []
+            if validation_summary:
+                st.markdown("Validation Results")
+                vr1, vr2, vr3, vr4, vr5 = st.columns(5)
+                vr1.metric("Total Rows", int(validation_summary.get("total_rows") or 0))
+                vr2.metric("Valid Rows", int(validation_summary.get("valid_rows") or 0))
+                vr3.metric("Invalid Rows", int(validation_summary.get("invalid_rows") or 0))
+                vr4.metric("Duplicate Barcodes", int(validation_summary.get("duplicate_barcodes") or 0))
+                vr5.metric("Duplicate Item Codes", int(validation_summary.get("duplicate_item_codes") or 0))
+                if invalid_rows:
+                    st.warning("Some rows need attention before import can continue.")
+                    st.dataframe(pd.DataFrame(invalid_rows), use_container_width=True, hide_index=True)
+                else:
+                    st.success("All validated rows passed the current checks.")
+                st.caption("Validation complete. No inventory has been imported yet.")
 
 
 # ==========================================
