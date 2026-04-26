@@ -3743,6 +3743,131 @@ def _validate_stock_import_rows(raw_rows, column_mapping):
     return validated_rows, invalid_rows, summary
 
 
+def _find_existing_inventory_for_import(conn, company_key, row_data):
+    barcode = str(row_data.get("barcode") or "").strip()
+    item_code = str(row_data.get("item_code") or "").strip()
+    if barcode:
+        existing_row = conn.execute(
+            """
+            SELECT id, item_name, qty, barcode, item_code
+            FROM inventory
+            WHERE company_key = ? AND barcode = ?
+            LIMIT 1
+            """,
+            (company_key, barcode),
+        ).fetchone()
+        if existing_row:
+            return existing_row, "barcode"
+    if item_code:
+        existing_row = conn.execute(
+            """
+            SELECT id, item_name, qty, barcode, item_code
+            FROM inventory
+            WHERE company_key = ? AND item_code = ?
+            LIMIT 1
+            """,
+            (company_key, item_code),
+        ).fetchone()
+        if existing_row:
+            return existing_row, "item_code"
+    return None, None
+
+
+def _summarize_stock_import_targets(conn, company_key, validated_rows):
+    create_count = 0
+    update_count = 0
+    for row_data in validated_rows:
+        existing_row, _ = _find_existing_inventory_for_import(conn, company_key, row_data)
+        if existing_row:
+            update_count += 1
+        else:
+            create_count += 1
+    return {
+        "total_rows": len(validated_rows),
+        "valid_rows": len(validated_rows),
+        "items_to_create": create_count,
+        "items_that_may_update": update_count,
+    }
+
+
+def _import_validated_stock_rows(conn, company_key, validated_rows, existing_item_behavior):
+    result = {
+        "created": 0,
+        "updated": 0,
+        "skipped": 0,
+        "errors": [],
+    }
+
+    inventory_account_id = get_account_id(conn, "Inventory", "Asset")
+    cogs_account_id = get_account_id(conn, "Cost of Goods Sold", "Expense")
+
+    for row_data in validated_rows:
+        try:
+            existing_row, matched_by = _find_existing_inventory_for_import(conn, company_key, row_data)
+            quantity_to_apply = max(float(row_data.get("qty") or 0.0), 0.0)
+            if existing_row:
+                if existing_item_behavior == "skip":
+                    result["skipped"] += 1
+                    continue
+                new_qty = max(float(existing_row["qty"] or 0.0), 0.0) + quantity_to_apply
+                conn.execute(
+                    """
+                    UPDATE inventory
+                    SET qty = ?, updated_at = CURRENT_TIMESTAMP
+                    WHERE id = ? AND company_key = ?
+                    """,
+                    (new_qty, int(existing_row["id"]), company_key),
+                )
+                result["updated"] += 1
+                continue
+
+            conn.execute(
+                """
+                INSERT INTO inventory (
+                    company_key, item_name, barcode, item_code, category, brand, supplier_name, unit, qty,
+                    cost_price, price, min_stock_level, tax_rate, warehouse_location, expiry_date,
+                    batch_number, vat_category, description, is_active, opening_balance,
+                    inventory_account_id, cogs_account_id
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    company_key,
+                    str(row_data.get("item_name") or "").strip(),
+                    str(row_data.get("barcode") or "").strip(),
+                    str(row_data.get("item_code") or "").strip(),
+                    str(row_data.get("category") or "").strip(),
+                    str(row_data.get("brand") or "").strip(),
+                    str(row_data.get("supplier_name") or "").strip(),
+                    str(row_data.get("unit") or "").strip() or "pcs",
+                    quantity_to_apply,
+                    float(row_data.get("cost_price") or 0.0),
+                    float(row_data.get("price") or 0.0),
+                    float(row_data.get("min_stock_level") or 0.0),
+                    float(row_data.get("tax_rate") or 0.0),
+                    str(row_data.get("warehouse_location") or "").strip(),
+                    str(row_data.get("expiry_date") or "").strip() or None,
+                    str(row_data.get("batch_number") or "").strip(),
+                    str(row_data.get("vat_category") or "").strip(),
+                    str(row_data.get("description") or "").strip(),
+                    int(row_data.get("is_active") if row_data.get("is_active") is not None else 1),
+                    quantity_to_apply,
+                    inventory_account_id,
+                    cogs_account_id,
+                ),
+            )
+            result["created"] += 1
+        except Exception as exc:
+            result["errors"].append(
+                {
+                    "row_number": row_data.get("row_number"),
+                    "item_name": row_data.get("item_name"),
+                    "error_reason": sanitize_error_message(exc),
+                }
+            )
+    return result
+
+
 def _add_item_to_pos_cart(company_key, item_row):
     cart_key = f"pos_cart_{company_key}"
     cart = st.session_state.setdefault(cart_key, [])
@@ -4784,6 +4909,7 @@ def show_inventory(company_key, role):
     inventory_import_preview_key = f"inventory_import_preview_{company_key}"
     inventory_import_mapping_key = f"inventory_import_mapping_{company_key}"
     inventory_import_validation_key = f"inventory_import_validation_{company_key}"
+    inventory_import_result_key = f"inventory_import_result_{company_key}"
     if st.session_state.get(success_key):
         _trigger_scan_feedback(inventory_message_key, "Item added successfully!")
         st.session_state.pop(success_key, None)
@@ -5304,6 +5430,7 @@ def show_inventory(company_key, role):
                 st.session_state[inventory_import_preview_key] = preview_payload
                 st.session_state[inventory_import_mapping_key] = preview_payload.get("mapping_suggestion") or {}
                 st.session_state.pop(inventory_import_validation_key, None)
+                st.session_state.pop(inventory_import_result_key, None)
                 st.session_state["validated_stock_rows"] = []
                 st.session_state["invalid_stock_rows"] = []
                 logger.info(
@@ -5316,6 +5443,7 @@ def show_inventory(company_key, role):
                 st.session_state.pop(inventory_import_preview_key, None)
                 st.session_state.pop(inventory_import_mapping_key, None)
                 st.session_state.pop(inventory_import_validation_key, None)
+                st.session_state.pop(inventory_import_result_key, None)
                 st.session_state["validated_stock_rows"] = []
                 st.session_state["invalid_stock_rows"] = []
                 st.error(build_user_safe_error(exc, st.session_state.get("user", {}).get("role")))
@@ -5397,6 +5525,7 @@ def show_inventory(company_key, role):
                         "invalid_rows": invalid_rows,
                     }
                     st.session_state[inventory_import_validation_key] = validation_payload
+                    st.session_state.pop(inventory_import_result_key, None)
                     st.session_state["validated_stock_rows"] = validated_rows
                     st.session_state["invalid_stock_rows"] = invalid_rows
                     logger.info(
@@ -5428,6 +5557,104 @@ def show_inventory(company_key, role):
                 else:
                     st.success("All validated rows passed the current checks.")
                 st.caption("Validation complete. No inventory has been imported yet.")
+
+                validated_stock_rows = st.session_state.get("validated_stock_rows") or []
+                if validated_stock_rows:
+                    import_summary_conn = None
+                    try:
+                        import_summary_conn = get_connection()
+                        import_summary = _summarize_stock_import_targets(import_summary_conn, company_key, validated_stock_rows)
+                    except Exception as exc:
+                        import_summary = None
+                        st.warning(build_user_safe_error(exc, st.session_state.get("user", {}).get("role")))
+                    finally:
+                        if import_summary_conn:
+                            import_summary_conn.close()
+
+                    if import_summary:
+                        st.markdown("Import Confirmation")
+                        ic1, ic2, ic3, ic4 = st.columns(4)
+                        ic1.metric("Total Rows", int(import_summary.get("total_rows") or 0))
+                        ic2.metric("Valid Rows", int(import_summary.get("valid_rows") or 0))
+                        ic3.metric("Items to Create", int(import_summary.get("items_to_create") or 0))
+                        ic4.metric("Items That May Update", int(import_summary.get("items_that_may_update") or 0))
+
+                        existing_item_behavior = st.radio(
+                            "Existing item handling",
+                            ["Increase stock (default)", "Skip existing items"],
+                            index=0,
+                            key=f"inventory_import_existing_behavior_{company_key}",
+                        )
+                        confirmed_import = st.checkbox(
+                            "I confirm I want to import these items",
+                            key=f"inventory_import_confirm_{company_key}",
+                        )
+                        if st.button("Import Valid Inventory", key=f"inventory_import_execute_{company_key}"):
+                            if not confirmed_import:
+                                st.warning("Please confirm the inventory import before continuing.")
+                            else:
+                                conn = None
+                                try:
+                                    conn = get_connection()
+                                    import_result = _import_validated_stock_rows(
+                                        conn,
+                                        company_key,
+                                        validated_stock_rows,
+                                        "increase_stock" if existing_item_behavior == "Increase stock (default)" else "skip",
+                                    )
+                                    conn.commit()
+                                    log_system_event(
+                                        "INFO",
+                                        "Stock Import",
+                                        "Imported inventory for company_key={company_key} created={created} updated={updated} skipped={skipped}".format(
+                                            company_key=company_key,
+                                            created=import_result.get("created") or 0,
+                                            updated=import_result.get("updated") or 0,
+                                            skipped=import_result.get("skipped") or 0,
+                                        ),
+                                    )
+                                    try:
+                                        log_audit_action(
+                                            conn,
+                                            company_key,
+                                            role,
+                                            "Inventory Import",
+                                            "Inventory",
+                                            "Created {created}, Updated {updated}, Skipped {skipped}".format(
+                                                created=import_result.get("created") or 0,
+                                                updated=import_result.get("updated") or 0,
+                                                skipped=import_result.get("skipped") or 0,
+                                            ),
+                                            branch_id=st.session_state.get("active_branch_id"),
+                                        )
+                                    except Exception:
+                                        logger.debug("Inventory import audit logging skipped.", exc_info=True)
+                                    st.session_state[inventory_import_result_key] = import_result
+                                    st.session_state["validated_stock_rows"] = []
+                                    st.session_state["invalid_stock_rows"] = []
+                                    st.session_state.pop(inventory_import_validation_key, None)
+                                    st.session_state.pop(inventory_import_preview_key, None)
+                                    st.session_state.pop(inventory_import_mapping_key, None)
+                                except Exception as exc:
+                                    if conn:
+                                        conn.rollback()
+                                    st.error(build_user_safe_error(exc, st.session_state.get("user", {}).get("role")))
+                                finally:
+                                    if conn:
+                                        conn.close()
+
+            import_result = st.session_state.get(inventory_import_result_key) or {}
+            if import_result:
+                st.markdown("Import Result Summary")
+                ir1, ir2, ir3 = st.columns(3)
+                ir1.metric("Items Created", int(import_result.get("created") or 0))
+                ir2.metric("Items Updated", int(import_result.get("updated") or 0))
+                ir3.metric("Items Skipped", int(import_result.get("skipped") or 0))
+                if import_result.get("errors"):
+                    st.warning("Some rows could not be imported.")
+                    st.dataframe(pd.DataFrame(import_result.get("errors") or []), use_container_width=True, hide_index=True)
+                else:
+                    st.success("Inventory import completed successfully.")
 
 
 # ==========================================
