@@ -3390,14 +3390,13 @@ def _lookup_inventory_by_barcode(conn, company_key, barcode_value):
 def _lookup_inventory_for_pos(conn, company_key, search_value):
     normalized_value = str(search_value or "").strip()
     if not normalized_value:
-        return None, None
+        return None, None, None
 
     exact_match = conn.execute(
         """
         SELECT id, item_name, item_code, category, qty, price, cost_price, barcode
         FROM inventory
         WHERE company_key = ?
-          AND qty > 0
           AND (
               barcode = ?
               OR item_code = ?
@@ -3410,29 +3409,58 @@ def _lookup_inventory_for_pos(conn, company_key, search_value):
     ).fetchone()
     if exact_match:
         if str(exact_match["barcode"] or "").strip() == normalized_value:
-            return exact_match, "barcode"
+            return exact_match, "barcode", "in_company"
         if str(exact_match["item_code"] or "").strip() == normalized_value:
-            return exact_match, "item_code"
-        return exact_match, "item_name"
+            return exact_match, "item_code", "in_company"
+        return exact_match, "item_name", "in_company"
 
     fallback_match = conn.execute(
         """
         SELECT id, item_name, item_code, category, qty, price, cost_price, barcode
         FROM inventory
         WHERE company_key = ?
-          AND qty > 0
           AND (
               LOWER(item_name) LIKE LOWER(?)
               OR LOWER(COALESCE(item_code, '')) LIKE LOWER(?)
+              OR COALESCE(barcode, '') LIKE ?
           )
         ORDER BY item_name
         LIMIT 1
         """,
-        (company_key, f"%{normalized_value}%", f"%{normalized_value}%"),
+        (company_key, f"%{normalized_value}%", f"%{normalized_value}%", f"%{normalized_value}%"),
     ).fetchone()
     if fallback_match:
-        return fallback_match, "manual_search"
-    return None, None
+        return fallback_match, "manual_search", "in_company"
+
+    other_company_match = conn.execute(
+        """
+        SELECT id, item_name, item_code, category, qty, price, cost_price, barcode, company_key
+        FROM inventory
+        WHERE company_key <> ?
+          AND (
+              barcode = ?
+              OR item_code = ?
+              OR LOWER(item_name) = LOWER(?)
+              OR LOWER(item_name) LIKE LOWER(?)
+              OR LOWER(COALESCE(item_code, '')) LIKE LOWER(?)
+              OR COALESCE(barcode, '') LIKE ?
+          )
+        ORDER BY item_name
+        LIMIT 1
+        """,
+        (
+            company_key,
+            normalized_value,
+            normalized_value,
+            normalized_value,
+            f"%{normalized_value}%",
+            f"%{normalized_value}%",
+            f"%{normalized_value}%",
+        ),
+    ).fetchone()
+    if other_company_match:
+        return other_company_match, "other_company", "other_company"
+    return None, None, None
 
 
 def _search_inventory_for_pos(conn, company_key, search_value):
@@ -5473,8 +5501,8 @@ def show_pos(company_key, company_name, role):
                     conn = None
                     try:
                         conn = get_connection()
-                        matched_item, lookup_source = _lookup_inventory_for_pos(conn, company_key, pending_pos_barcode)
-                        if matched_item and float(matched_item["qty"] or 0) > 0:
+                        matched_item, lookup_source, match_scope = _lookup_inventory_for_pos(conn, company_key, pending_pos_barcode)
+                        if matched_item and match_scope == "in_company" and float(matched_item["qty"] or 0) > 0:
                             st.session_state[checkout_complete_key] = False
                             st.session_state.pop(receipt_key, None)
                             st.session_state.pop(receipt_html_key, None)
@@ -5491,9 +5519,31 @@ def show_pos(company_key, company_name, role):
                                 "success",
                                 pos_scan_beep_key,
                             )
+                        elif matched_item and match_scope == "in_company":
+                            logger.info(
+                                "POS scanner found item '%s' with zero stock for company %s",
+                                matched_item["item_name"],
+                                company_key,
+                            )
+                            _trigger_scan_feedback(
+                                pos_message_key,
+                                "Product found but stock is zero. Please add stock before sale.",
+                                "warning",
+                            )
+                        elif matched_item and match_scope == "other_company":
+                            logger.info(
+                                "POS scanner found matching item under another company context while active company is %s",
+                                company_key,
+                            )
+                            _trigger_scan_feedback(
+                                pos_message_key,
+                                "Product exists under another company context and is unavailable in this POS.",
+                                "warning",
+                            )
                         else:
                             logger.info(
-                                "POS scanner input did not match an in-stock product for company %s",
+                                "POS scanner input '%s' did not match any product for active company %s",
+                                pending_pos_barcode,
                                 company_key,
                             )
                             _trigger_scan_feedback(
