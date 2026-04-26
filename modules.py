@@ -3994,20 +3994,30 @@ def _add_item_to_pos_cart(company_key, item_row):
         if int(existing_line["inventory_item_id"]) == item_id:
             existing_line["qty"] += 1
             existing_line["line_total"] = existing_line["qty"] * existing_line["price"]
-            return
+            return existing_line
 
-    cart.append(
-        {
-            "inventory_item_id": item_id,
-            "name": item_row["item_name"],
-            "barcode": item_row["barcode"] or "",
-            "price": float(item_row["price"] or 0.0),
-            "cost_price": float(item_row["cost_price"] or 0.0),
-            "available_qty": float(item_row["qty"] or 0.0),
-            "qty": 1,
-            "line_total": float(item_row["price"] or 0.0),
-        }
+    new_line = {
+        "inventory_item_id": item_id,
+        "name": item_row["item_name"],
+        "barcode": item_row["barcode"] or "",
+        "price": float(item_row["price"] or 0.0),
+        "cost_price": float(item_row["cost_price"] or 0.0),
+        "available_qty": float(item_row["qty"] or 0.0),
+        "qty": 1,
+        "line_total": float(item_row["price"] or 0.0),
+    }
+    cart.append(new_line)
+    return new_line
+
+
+def _get_pos_cart_summary(company_key):
+    cart = st.session_state.setdefault(f"pos_cart_{company_key}", [])
+    item_count = int(sum(int(line.get("qty") or 0) for line in cart))
+    grand_total = round(
+        sum(float(line.get("qty") or 0) * float(line.get("price") or 0) for line in cart),
+        2,
     )
+    return {"item_count": item_count, "grand_total": grand_total, "line_count": len(cart)}
 
 
 def _import_sales_from_excel(conn, company_key, doc_type, file_obj, created_by):
@@ -6364,33 +6374,15 @@ def show_pos(company_key, company_name, role):
             barcode_input_source = selected_barcode_source
 
         st.caption(f"Barcode input mode: {barcode_input_source}")
-
-        # Manual Entry - always visible at the top
-        st.subheader("Manual Item Entry")
-        manual_item_name = st.text_input("New Item Name", key=f"manual_pos_item_{company_key}")
-        manual_price = st.number_input(f"Manual Price ({st.session_state.currency_symbol})", min_value=0.0, value=0.0, key=f"manual_pos_price_{company_key}")
-        manual_qty = st.number_input("Quantity", min_value=1, value=1, key=f"manual_pos_qty_{company_key}")
-        if st.button("Add Manual Item", key=f"pos_add_manual_{company_key}"):
-            if manual_item_name and float(manual_price) > 0:
-                st.session_state[checkout_complete_key] = False
-                st.session_state.pop(receipt_key, None)
-                st.session_state.pop(receipt_html_key, None)
-                cart = st.session_state.setdefault(cart_key, [])
-                cart.append(
-                    {
-                        "inventory_item_id": None,
-                        "name": manual_item_name.strip(),
-                        "barcode": "",
-                        "price": float(manual_price),
-                        "available_qty": None,
-                        "qty": int(manual_qty),
-                        "line_total": int(manual_qty) * float(manual_price),
-                    }
-                )
-                _trigger_scan_feedback(pos_message_key, f"Added manual item {manual_item_name.strip()} to the cart.")
-                st.rerun()
-            else:
-                st.warning("Enter a valid manual item and price before adding it.")
+        scanner_cart_summary = _get_pos_cart_summary(company_key)
+        scan_summary_col1, scan_summary_col2, scan_summary_col3 = st.columns([1, 1, 1])
+        scan_summary_col1.metric("Cart Items", scanner_cart_summary["item_count"])
+        scan_summary_col2.metric("Cart Total", format_currency(scanner_cart_summary["grand_total"]))
+        if scan_summary_col3.button("Quick Clear Cart", key=f"pos_quick_clear_cart_{company_key}", use_container_width=True):
+            st.session_state[cart_key] = []
+            st.session_state[checkout_complete_key] = False
+            _trigger_scan_feedback(pos_message_key, "Cart cleared.", "info")
+            st.rerun()
 
         with st.form(key=f"pos_form_{company_key}", clear_on_submit=True):
             st.text_input(
@@ -6413,7 +6405,7 @@ def show_pos(company_key, company_name, role):
                             st.session_state[checkout_complete_key] = False
                             st.session_state.pop(receipt_key, None)
                             st.session_state.pop(receipt_html_key, None)
-                            _add_item_to_pos_cart(company_key, matched_item)
+                            cart_line = _add_item_to_pos_cart(company_key, matched_item)
                             logger.info(
                                 "POS scanner input matched item '%s' via %s for company %s",
                                 matched_item["item_name"],
@@ -6422,7 +6414,11 @@ def show_pos(company_key, company_name, role):
                             )
                             _trigger_scan_feedback(
                                 pos_message_key,
-                                f"Added {matched_item['item_name']} to the active sale.",
+                                "{item_name} added at {price}. Qty in cart: {qty}.".format(
+                                    item_name=matched_item["item_name"],
+                                    price=format_currency(float(cart_line.get("price") or 0.0)),
+                                    qty=int(cart_line.get("qty") or 0),
+                                ),
                                 "success",
                                 pos_scan_beep_key,
                             )
@@ -6464,6 +6460,32 @@ def show_pos(company_key, company_name, role):
                         if conn:
                             conn.close()
                         st.rerun()
+
+        st.subheader("Manual Item Entry")
+        manual_item_name = st.text_input("New Item Name", key=f"manual_pos_item_{company_key}")
+        manual_price = st.number_input(f"Manual Price ({st.session_state.currency_symbol})", min_value=0.0, value=0.0, key=f"manual_pos_price_{company_key}")
+        manual_qty = st.number_input("Quantity", min_value=1, value=1, key=f"manual_pos_qty_{company_key}")
+        if st.button("Add Manual Item", key=f"pos_add_manual_{company_key}"):
+            if manual_item_name and float(manual_price) > 0:
+                st.session_state[checkout_complete_key] = False
+                st.session_state.pop(receipt_key, None)
+                st.session_state.pop(receipt_html_key, None)
+                cart = st.session_state.setdefault(cart_key, [])
+                cart.append(
+                    {
+                        "inventory_item_id": None,
+                        "name": manual_item_name.strip(),
+                        "barcode": "",
+                        "price": float(manual_price),
+                        "available_qty": None,
+                        "qty": int(manual_qty),
+                        "line_total": int(manual_qty) * float(manual_price),
+                    }
+                )
+                _trigger_scan_feedback(pos_message_key, f"Added manual item {manual_item_name.strip()} to the cart.")
+                st.rerun()
+            else:
+                st.warning("Enter a valid manual item and price before adding it.")
 
         with st.container():
             item_mode = st.radio(
