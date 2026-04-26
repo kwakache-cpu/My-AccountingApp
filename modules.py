@@ -3485,6 +3485,74 @@ def _search_inventory_for_pos(conn, company_key, search_value):
     ).fetchall()
 
 
+STOCK_IMPORT_COLUMN_CANDIDATES = {
+    "item_name": ["item name", "product name", "name", "item", "product", "description"],
+    "barcode": ["barcode", "bar code", "ean", "upc", "scan code"],
+    "item_code": ["item code", "product code", "code", "sku", "stock code"],
+    "category": ["category", "group", "product category"],
+    "quantity": ["quantity", "qty", "stock", "opening stock", "stock qty"],
+    "cost_price": ["cost price", "cost", "unit cost", "buying price", "purchase price"],
+    "selling_price": ["selling price", "sale price", "price", "unit price", "retail price"],
+    "supplier": ["supplier", "vendor", "supplier name"],
+    "unit": ["unit", "uom", "unit of measure", "measure"],
+}
+
+
+def _normalize_import_column_name(column_name):
+    normalized = str(column_name or "").strip().lower()
+    normalized = normalized.replace("_", " ").replace("-", " ")
+    return " ".join(normalized.split())
+
+
+def _detect_stock_import_columns(columns):
+    normalized_columns = {_normalize_import_column_name(column): str(column) for column in columns}
+    detected = {}
+    for target_field, aliases in STOCK_IMPORT_COLUMN_CANDIDATES.items():
+        for alias in aliases:
+            if alias in normalized_columns:
+                detected[target_field] = normalized_columns[alias]
+                break
+        if target_field in detected:
+            continue
+        for normalized_name, original_name in normalized_columns.items():
+            if any(alias in normalized_name for alias in aliases):
+                detected[target_field] = original_name
+                break
+    return detected
+
+
+def _build_stock_import_preview(uploaded_file):
+    file_name = str(getattr(uploaded_file, "name", "") or "").strip()
+    lower_name = file_name.lower()
+    if lower_name.endswith(".csv"):
+        uploaded_file.seek(0)
+        preview_df = pd.read_csv(uploaded_file)
+        file_type = "csv"
+    elif lower_name.endswith(".xlsx"):
+        uploaded_file.seek(0)
+        preview_df = pd.read_excel(uploaded_file)
+        file_type = "xlsx"
+    else:
+        raise ValueError("Unsupported file format. Please upload an Excel (.xlsx) or CSV (.csv) file.")
+
+    if preview_df is None or preview_df.empty:
+        raise ValueError("The uploaded file is empty or has no readable rows.")
+
+    preview_df.columns = [str(column) for column in preview_df.columns]
+    detected_columns = _detect_stock_import_columns(preview_df.columns)
+    important_columns = ["item_name", "quantity", "cost_price", "selling_price"]
+    missing_important = [column for column in important_columns if column not in detected_columns]
+    return {
+        "file_name": file_name or "uploaded_file",
+        "file_type": file_type,
+        "total_rows": int(len(preview_df.index)),
+        "detected_columns": list(preview_df.columns),
+        "mapping_suggestion": detected_columns,
+        "missing_important_columns": missing_important,
+        "preview_rows": preview_df.head(20).fillna("").to_dict(orient="records"),
+    }
+
+
 def _add_item_to_pos_cart(company_key, item_row):
     cart_key = f"pos_cart_{company_key}"
     cart = st.session_state.setdefault(cart_key, [])
@@ -4523,6 +4591,7 @@ def show_inventory(company_key, role):
     inventory_scan_input_key = f"inventory_scan_input_{company_key}"
     inventory_pending_scan_key = f"inventory_pending_scan_{company_key}"
     inventory_new_barcode_key = f"inventory_new_barcode_{company_key}"
+    inventory_import_preview_key = f"inventory_import_preview_{company_key}"
     if st.session_state.get(success_key):
         _trigger_scan_feedback(inventory_message_key, "Item added successfully!")
         st.session_state.pop(success_key, None)
@@ -4922,21 +4991,65 @@ def show_inventory(company_key, role):
                 except Exception as e:
                     st.error(build_user_safe_error(e, st.session_state.get("user", {}).get("role")))
 
+        st.markdown("---")
+        st.subheader("Stock Import Wizard")
+        st.caption("Preview only. No inventory has been imported yet.")
         import_file = st.file_uploader(
-            "Import from Excel",
-            type=["xlsx"],
+            "Upload stock file",
+            type=["xlsx", "csv"],
             key=f"inventory_import_{company_key}",
+            help="Upload an Excel or CSV file to preview stock items and suggested column mappings.",
         )
-        if import_file and st.button("Import Inventory File", key=f"inventory_import_btn_{company_key}"):
+        if import_file and st.button("Analyze Stock File", key=f"inventory_import_btn_{company_key}"):
             try:
-                conn = get_connection()
-                added_rows = _import_inventory_from_excel(conn, company_key, import_file)
-                conn.commit()
-                conn.close()
-                st.success(f"Imported {added_rows} new inventory row(s).")
-                st.rerun()
+                st.session_state[inventory_import_preview_key] = _build_stock_import_preview(import_file)
+                logger.info(
+                    "Stock import preview prepared for company %s file=%s rows=%s",
+                    company_key,
+                    st.session_state[inventory_import_preview_key]["file_name"],
+                    st.session_state[inventory_import_preview_key]["total_rows"],
+                )
             except Exception as exc:
+                st.session_state.pop(inventory_import_preview_key, None)
                 st.error(build_user_safe_error(exc, st.session_state.get("user", {}).get("role")))
+
+        stock_import_preview = st.session_state.get(inventory_import_preview_key)
+        if stock_import_preview:
+            st.caption(
+                "File: {file_name} | Format: {file_type} | Total rows: {total_rows}".format(
+                    file_name=stock_import_preview.get("file_name") or "uploaded_file",
+                    file_type=(stock_import_preview.get("file_type") or "unknown").upper(),
+                    total_rows=stock_import_preview.get("total_rows") or 0,
+                )
+            )
+            st.caption(
+                "Detected columns: {columns}".format(
+                    columns=", ".join(stock_import_preview.get("detected_columns") or []) or "none",
+                )
+            )
+            mapping_suggestion = stock_import_preview.get("mapping_suggestion") or {}
+            if mapping_suggestion:
+                mapping_rows = [
+                    {"ERP Field": field_name.replace("_", " ").title(), "Detected File Column": column_name}
+                    for field_name, column_name in mapping_suggestion.items()
+                ]
+                st.dataframe(pd.DataFrame(mapping_rows), hide_index=True, use_container_width=True)
+            else:
+                st.info("No likely stock column mappings were detected yet.")
+
+            missing_important_columns = stock_import_preview.get("missing_important_columns") or []
+            if missing_important_columns:
+                st.warning(
+                    "Missing important columns: "
+                    + ", ".join(column.replace("_", " ").title() for column in missing_important_columns)
+                )
+            else:
+                st.success("Important stock columns were detected in the uploaded file.")
+
+            preview_rows = stock_import_preview.get("preview_rows") or []
+            if preview_rows:
+                st.markdown("Preview of first 20 rows")
+                st.dataframe(pd.DataFrame(preview_rows), use_container_width=True)
 
 
 # ==========================================
