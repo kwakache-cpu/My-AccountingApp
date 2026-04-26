@@ -3,6 +3,7 @@ psycopg2-binary==2.9.11
 streamlit
 openai
 pandas
+openpyxl
 python-dateutil
 firebase-admin
 pyzbar

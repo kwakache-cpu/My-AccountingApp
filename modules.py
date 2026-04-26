@@ -3524,16 +3524,21 @@ def _detect_stock_import_columns(columns):
 def _build_stock_import_preview(uploaded_file):
     file_name = str(getattr(uploaded_file, "name", "") or "").strip()
     lower_name = file_name.lower()
-    if lower_name.endswith(".csv"):
-        uploaded_file.seek(0)
-        preview_df = pd.read_csv(uploaded_file)
-        file_type = "csv"
-    elif lower_name.endswith(".xlsx"):
-        uploaded_file.seek(0)
-        preview_df = pd.read_excel(uploaded_file)
-        file_type = "xlsx"
-    else:
-        raise ValueError("Unsupported file format. Please upload an Excel (.xlsx) or CSV (.csv) file.")
+    try:
+        if lower_name.endswith(".csv"):
+            uploaded_file.seek(0)
+            preview_df = pd.read_csv(uploaded_file)
+            file_type = "csv"
+        elif lower_name.endswith(".xlsx"):
+            uploaded_file.seek(0)
+            preview_df = pd.read_excel(uploaded_file)
+            file_type = "xlsx"
+        else:
+            raise ValueError("Unsupported file format. Please upload an Excel (.xlsx) or CSV (.csv) file.")
+    except ImportError as exc:
+        if "openpyxl" in str(exc).lower():
+            raise ValueError("Excel support is not installed. Please contact the system administrator or upload CSV.") from exc
+        raise
 
     if preview_df is None or preview_df.empty:
         raise ValueError("The uploaded file is empty or has no readable rows.")
