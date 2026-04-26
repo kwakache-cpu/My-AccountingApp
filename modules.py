@@ -2954,62 +2954,102 @@ def get_excel_bin(df):
         return b""
 
 
-def _build_receipt(company_name, items, total_amount, sale_date):
+def _build_receipt(receipt_data):
     lines = [
-        company_name,
-        "STANDARD POS RECEIPT",
-        f"Date: {sale_date}",
-        "-" * 36,
-        "Item                     Qty    Price",
-        "-" * 36,
+        str(receipt_data.get("company_name") or ""),
+        "SALE COMPLETED SUCCESSFULLY",
     ]
-    for item in items:
+    if receipt_data.get("branch_name"):
+        lines.append(f"Branch: {receipt_data['branch_name']}")
+    lines.extend(
+        [
+            f"Receipt No: {receipt_data.get('receipt_number') or 'N/A'}",
+            f"Date: {receipt_data.get('sale_datetime') or ''}",
+            f"Cashier: {receipt_data.get('cashier') or ''}",
+            f"Payment: {receipt_data.get('payment_method') or ''}",
+            "-" * 40,
+            "Item                     Qty   Unit    Total",
+            "-" * 40,
+        ]
+    )
+    for item in receipt_data.get("items", []):
         lines.append(
-            f"{item['name'][:20]:<20} {int(item['qty']):>3} {float(item['price']):>8.2f}"
+            f"{str(item.get('name') or '')[:20]:<20} {int(item.get('qty') or 0):>3} {float(item.get('price') or 0.0):>6.2f} {float(item.get('line_total') or 0.0):>8.2f}"
         )
     lines.extend(
         [
-            "-" * 36,
-            f"TOTAL: GHs {float(total_amount):,.2f}",
+            "-" * 40,
+            f"Subtotal: {format_currency(float(receipt_data.get('subtotal') or 0.0))}",
+            f"Discount: {format_currency(float(receipt_data.get('discount_total') or 0.0))}",
+            f"Tax: {format_currency(float(receipt_data.get('tax_total') or 0.0))}",
+            f"Grand Total: {format_currency(float(receipt_data.get('grand_total') or 0.0))}",
         ]
     )
+    if receipt_data.get("payment_method") == "Cash":
+        lines.append(f"Amount Tendered: {format_currency(float(receipt_data.get('amount_tendered') or 0.0))}")
+        lines.append(f"Change Due: {format_currency(float(receipt_data.get('change_due') or 0.0))}")
+    elif receipt_data.get("payment_reference"):
+        lines.append(f"Reference: {receipt_data['payment_reference']}")
     return "\n".join(lines)
 
 
-def _build_receipt_html(company_name, items, total_amount, sale_date):
+def _build_receipt_html(receipt_data):
     rows = []
-    for index, item in enumerate(items, start=1):
+    for item in receipt_data.get("items", []):
         rows.append(
             f"<tr>"
-            f"<td style='padding: 0.5rem 0.25rem; border-bottom:1px solid #ddd;'>{index}</td>"
-            f"<td style='padding: 0.5rem 0.25rem; border-bottom:1px solid #ddd;'>{item['name']}</td>"
-            f"<td style='padding: 0.5rem 0.25rem; border-bottom:1px solid #ddd; text-align:right;'>{int(item['qty'])}</td>"
-            f"<td style='padding: 0.5rem 0.25rem; border-bottom:1px solid #ddd; text-align:right;'>{format_currency(item['price'])}</td>"
-            f"<td style='padding: 0.5rem 0.25rem; border-bottom:1px solid #ddd; text-align:right;'>{format_currency(item['qty'] * item['price'])}</td>"
+            f"<td style='padding: 0.4rem 0.2rem; border-bottom:1px dashed #ddd;'>{item.get('name') or ''}</td>"
+            f"<td style='padding: 0.4rem 0.2rem; border-bottom:1px dashed #ddd; text-align:center;'>{int(item.get('qty') or 0)}</td>"
+            f"<td style='padding: 0.4rem 0.2rem; border-bottom:1px dashed #ddd; text-align:right;'>{format_currency(float(item.get('price') or 0.0))}</td>"
+            f"<td style='padding: 0.4rem 0.2rem; border-bottom:1px dashed #ddd; text-align:right;'>{format_currency(float(item.get('line_total') or 0.0))}</td>"
             f"</tr>"
         )
+    payment_reference_html = ""
+    if receipt_data.get("payment_reference"):
+        payment_reference_html = (
+            f"<div style='font-size:0.8rem; color:#444;'>Reference: {receipt_data['payment_reference']}</div>"
+        )
+    amount_tendered_html = ""
+    change_due_html = ""
+    if receipt_data.get("payment_method") == "Cash":
+        amount_tendered_html = (
+            f"<div style='display:flex; justify-content:space-between;'><span>Amount Tendered</span><strong>{format_currency(float(receipt_data.get('amount_tendered') or 0.0))}</strong></div>"
+        )
+        change_due_html = (
+            f"<div style='display:flex; justify-content:space-between;'><span>Change Due</span><strong>{format_currency(float(receipt_data.get('change_due') or 0.0))}</strong></div>"
+        )
     return f"""
-    <div class='receipt-preview printable' style='font-family: Arial, sans-serif; color: #111;'>
-        <div style='margin-bottom:1rem;'>
-            <h2 style='margin:0;padding:0;'>{company_name}</h2>
-            <div style='font-size:0.95rem; color:#555;'>STANDARD POS RECEIPT</div>
-            <div style='font-size:0.9rem; color:#555;'>Date: {sale_date}</div>
+    <div class='receipt-preview printable' style='font-family: Arial, sans-serif; color: #111; max-width: 360px; margin: 0 auto;'>
+        <div style='text-align:center; margin-bottom:0.75rem;'>
+            <h3 style='margin:0;'>{receipt_data.get("company_name") or ""}</h3>
+            <div style='font-size:0.85rem; color:#555;'>{receipt_data.get("branch_name") or "Main Branch"}</div>
+            <div style='font-size:0.8rem; margin-top:0.3rem;'>Receipt: {receipt_data.get("receipt_number") or "N/A"}</div>
+            <div style='font-size:0.8rem;'>Date: {receipt_data.get("sale_datetime") or ""}</div>
+            <div style='font-size:0.8rem;'>Cashier: {receipt_data.get("cashier") or ""}</div>
         </div>
-        <table style='width:100%; border-collapse: collapse; margin-bottom:1rem; font-size:0.95rem;'>
+        <table style='width:100%; border-collapse: collapse; margin-bottom:0.75rem; font-size:0.85rem;'>
             <thead>
                 <tr>
-                    <th style='text-align:left; padding:0.5rem 0.25rem; border-bottom:2px solid #333;'>#</th>
-                    <th style='text-align:left; padding:0.5rem 0.25rem; border-bottom:2px solid #333;'>Item</th>
-                    <th style='text-align:right; padding:0.5rem 0.25rem; border-bottom:2px solid #333;'>Qty</th>
-                    <th style='text-align:right; padding:0.5rem 0.25rem; border-bottom:2px solid #333;'>Price</th>
-                    <th style='text-align:right; padding:0.5rem 0.25rem; border-bottom:2px solid #333;'>Total</th>
+                    <th style='text-align:left; padding:0.35rem 0.2rem; border-bottom:2px solid #333;'>Item</th>
+                    <th style='text-align:center; padding:0.35rem 0.2rem; border-bottom:2px solid #333;'>Qty</th>
+                    <th style='text-align:right; padding:0.35rem 0.2rem; border-bottom:2px solid #333;'>Unit</th>
+                    <th style='text-align:right; padding:0.35rem 0.2rem; border-bottom:2px solid #333;'>Total</th>
                 </tr>
             </thead>
             <tbody>
                 {''.join(rows)}
             </tbody>
         </table>
-        <div style='text-align:right; font-size:1rem; font-weight:bold; margin-bottom:1rem;'>TOTAL: {format_currency(total_amount)}</div>
+        <div style='border-top:1px dashed #999; padding-top:0.6rem; font-size:0.85rem;'>
+            <div style='display:flex; justify-content:space-between;'><span>Subtotal</span><strong>{format_currency(float(receipt_data.get("subtotal") or 0.0))}</strong></div>
+            <div style='display:flex; justify-content:space-between;'><span>Discount</span><strong>{format_currency(float(receipt_data.get("discount_total") or 0.0))}</strong></div>
+            <div style='display:flex; justify-content:space-between;'><span>Tax</span><strong>{format_currency(float(receipt_data.get("tax_total") or 0.0))}</strong></div>
+            <div style='display:flex; justify-content:space-between; font-size:1rem; margin-top:0.35rem;'><span>Grand Total</span><strong>{format_currency(float(receipt_data.get("grand_total") or 0.0))}</strong></div>
+            <div style='margin-top:0.5rem; font-size:0.8rem;'>Payment Method: {receipt_data.get("payment_method") or ""}</div>
+            {payment_reference_html}
+            {amount_tendered_html}
+            {change_due_html}
+        </div>
     </div>
     """
 
@@ -6340,6 +6380,7 @@ def show_company_setup(company_key, company_name, role):
 def show_pos(company_key, company_name, role):
     st.header("🛒 Point of Sale")
     receipt_key = f"pos_receipt_{company_key}"
+    last_receipt_data_key = f"pos_last_receipt_data_{company_key}"
     checkout_complete_key = f"pos_checkout_complete_{company_key}"
     pos_success_key = f"pos_sale_success_{company_key}"
     void_success_key = f"pos_void_success_{company_key}"
@@ -6371,6 +6412,13 @@ def show_pos(company_key, company_name, role):
     try:
         conn = get_connection()
         company_row = conn.execute("SELECT name, barcode_input_source FROM companies WHERE key = ?", (company_key,)).fetchone()
+        active_branch_id = st.session_state.get("active_branch_id")
+        branch_row = None
+        if active_branch_id:
+            branch_row = conn.execute(
+                "SELECT branch_name FROM branches WHERE company_key = ? AND branch_id = ?",
+                (company_key, active_branch_id),
+            ).fetchone()
         items = conn.execute(
             "SELECT id, item_name, item_code, barcode, price, cost_price, tax_rate, qty FROM inventory WHERE company_key = ? AND qty > 0",
             (company_key,),
@@ -6379,6 +6427,7 @@ def show_pos(company_key, company_name, role):
         conn.close()
 
         company_label = company_row[0] if company_row else company_name
+        branch_label = branch_row["branch_name"] if branch_row and "branch_name" in branch_row.keys() else ""
         barcode_input_source = company_row[1] if company_row and company_row[1] else "Keyboard Entry"
         items_df = (
             pd.DataFrame(items, columns=["ID", "Item Name", "Item Code", "Barcode", "Price", "Cost Price", "Tax Rate", "Qty"])
@@ -6800,11 +6849,12 @@ def show_pos(company_key, company_name, role):
                     narration=f"POS Sale: {narration}",
                     payment_method=payment_method,
                 )
+                sale_reference = f"POS-{legacy_sale_id or datetime.now().strftime('%Y%m%d%H%M%S')}"
                 post_journal_entry(
                     company_key=company_key,
                     date=sale_date,
                     description="POS sale",
-                    reference=f"POS-{legacy_sale_id or datetime.now().strftime('%Y%m%d%H%M%S')}",
+                    reference=sale_reference,
                     lines=[
                         {"account_id": get_account_id(conn, receipt_account, receipt_category), "debit": total, "credit": 0},
                         {"account_id": get_account_id(conn, "Sales Revenue", "Income"), "debit": 0, "credit": total},
@@ -6827,7 +6877,7 @@ def show_pos(company_key, company_name, role):
                         f"POS sale on credit: {narration}",
                         role,
                         branch_id=branch_id,
-                        reference=f"POS-{legacy_sale_id or datetime.now().strftime('%Y%m%d%H%M%S')}",
+                        reference=sale_reference,
                         transaction_date=sale_date,
                     )
                     _ensure_counterparty(
@@ -6872,18 +6922,38 @@ def show_pos(company_key, company_name, role):
                 )
                 conn.close()
                 if print_receipt:
-                    st.session_state[receipt_key] = _build_receipt(
-                        company_label,
-                        line_items,
-                        total,
-                        f"{sale_date.isoformat()} {datetime.now().strftime('%H:%M')}",
-                    )
-                    st.session_state[receipt_html_key] = _build_receipt_html(
-                        company_label,
-                        line_items,
-                        total,
-                        f"{sale_date.isoformat()} {datetime.now().strftime('%H:%M')}",
-                    )
+                    sale_datetime = f"{sale_date.isoformat()} {datetime.now().strftime('%H:%M:%S')}"
+                    receipt_data = {
+                        "company_key": company_key,
+                        "company_name": company_label,
+                        "branch_name": branch_label,
+                        "receipt_number": sale_reference,
+                        "sale_datetime": sale_datetime,
+                        "cashier": role,
+                        "payment_method": payment_method,
+                        "payment_reference": payment_reference,
+                        "subtotal": float(current_summary["subtotal"] or 0.0),
+                        "discount_total": float(current_summary["discount_total"] or 0.0),
+                        "tax_total": float(current_summary["tax_total"] or 0.0),
+                        "grand_total": float(current_summary["grand_total"] or 0.0),
+                        "amount_tendered": float(cash_tendered or 0.0) if payment_method == "Cash" else None,
+                        "change_due": max(float(cash_tendered or 0.0) - float(current_summary["grand_total"] or 0.0), 0.0)
+                        if payment_method == "Cash"
+                        else 0.0,
+                        "items": [
+                            {
+                                "name": sale_line["name"],
+                                "qty": int(sale_line["qty"]),
+                                "price": float(sale_line["price"] or 0.0),
+                                "line_total": float(sale_line.get("line_total") or 0.0),
+                            }
+                            for sale_line in sale_cart
+                        ],
+                    }
+                    st.session_state["last_receipt_data"] = receipt_data
+                    st.session_state[last_receipt_data_key] = receipt_data
+                    st.session_state[receipt_key] = _build_receipt(receipt_data)
+                    st.session_state[receipt_html_key] = _build_receipt_html(receipt_data)
                 st.session_state[checkout_complete_key] = True
                 st.session_state[cart_key] = []
                 st.session_state[pos_success_key] = True
@@ -6931,10 +7001,53 @@ def show_pos(company_key, company_name, role):
 
         if st.session_state.get(checkout_complete_key) and st.session_state.get(receipt_html_key):
             _inject_print_styles()
+            receipt_data = st.session_state.get(last_receipt_data_key) or st.session_state.get("last_receipt_data") or {}
+            st.success("SALE COMPLETED SUCCESSFULLY")
+            summary_col1, summary_col2, summary_col3 = st.columns(3)
+            summary_col1.caption(f"Receipt No: {receipt_data.get('receipt_number') or 'N/A'}")
+            summary_col2.caption(f"Date / Time: {receipt_data.get('sale_datetime') or 'N/A'}")
+            summary_col3.caption(f"Cashier: {receipt_data.get('cashier') or role}")
+            st.caption(
+                "Payment: {payment} | Total: {total}".format(
+                    payment=receipt_data.get("payment_method") or "N/A",
+                    total=format_currency(float(receipt_data.get("grand_total") or 0.0)),
+                )
+            )
+            if receipt_data.get("payment_method") == "Cash":
+                st.caption(
+                    "Amount Tendered: {tendered} | Change Due: {change}".format(
+                        tendered=format_currency(float(receipt_data.get("amount_tendered") or 0.0)),
+                        change=format_currency(float(receipt_data.get("change_due") or 0.0)),
+                    )
+                )
             st.subheader("Receipt Preview")
             st.markdown(st.session_state[receipt_html_key], unsafe_allow_html=True)
-            if st.button("Print Receipt", key=f"receipt_print_btn_{company_key}"):
+            receipt_action_col1, receipt_action_col2, receipt_action_col3 = st.columns(3)
+            if receipt_action_col1.button("Print Receipt", key=f"receipt_print_btn_{company_key}", use_container_width=True):
                 st.session_state[do_print_key] = True
+            if receipt_action_col2.button("Reprint Last Receipt", key=f"receipt_reprint_btn_{company_key}", use_container_width=True):
+                last_receipt_data = st.session_state.get(last_receipt_data_key) or st.session_state.get("last_receipt_data")
+                if last_receipt_data:
+                    st.session_state[receipt_key] = _build_receipt(last_receipt_data)
+                    st.session_state[receipt_html_key] = _build_receipt_html(last_receipt_data)
+                    st.session_state[checkout_complete_key] = True
+                    st.session_state[do_print_key] = True
+                    st.rerun()
+                st.warning("No previous receipt is available for reprint.")
+            if receipt_action_col3.button("New Sale", key=f"receipt_new_sale_btn_{company_key}", use_container_width=True):
+                st.session_state[cart_key] = []
+                st.session_state[checkout_complete_key] = False
+                st.session_state.pop(receipt_key, None)
+                st.session_state.pop(receipt_html_key, None)
+                _clear_streamlit_state(
+                    f"pos_item_{company_key}",
+                    f"pos_qty_{company_key}",
+                    f"manual_pos_item_{company_key}",
+                    f"manual_pos_price_{company_key}",
+                    f"manual_pos_qty_{company_key}",
+                    pos_scan_input_key,
+                )
+                st.rerun()
             st.download_button(
                 "Download Receipt",
                 data=st.session_state.get(receipt_key, ""),
