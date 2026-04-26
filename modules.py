@@ -3990,34 +3990,73 @@ def _add_item_to_pos_cart(company_key, item_row):
     cart_key = f"pos_cart_{company_key}"
     cart = st.session_state.setdefault(cart_key, [])
     item_id = int(item_row["id"])
+    item_code = item_row["item_code"] if hasattr(item_row, "keys") and "item_code" in item_row.keys() else item_row.get("item_code", "")
+    tax_rate = item_row["tax_rate"] if hasattr(item_row, "keys") and "tax_rate" in item_row.keys() else item_row.get("tax_rate", 0.0)
     for existing_line in cart:
         if int(existing_line["inventory_item_id"]) == item_id:
             existing_line["qty"] += 1
-            existing_line["line_total"] = existing_line["qty"] * existing_line["price"]
+            existing_line["line_total"] = max(
+                (existing_line["qty"] * existing_line["price"]) - float(existing_line.get("line_discount") or 0.0),
+                0.0,
+            )
             return existing_line
 
     new_line = {
         "inventory_item_id": item_id,
         "name": item_row["item_name"],
+        "item_code": item_code or "",
         "barcode": item_row["barcode"] or "",
         "price": float(item_row["price"] or 0.0),
         "cost_price": float(item_row["cost_price"] or 0.0),
+        "tax_rate": float(tax_rate or 0.0),
         "available_qty": float(item_row["qty"] or 0.0),
         "qty": 1,
+        "line_discount": 0.0,
         "line_total": float(item_row["price"] or 0.0),
     }
     cart.append(new_line)
     return new_line
 
 
+def _recalculate_pos_line(line):
+    qty = max(int(line.get("qty") or 0), 1)
+    price = max(float(line.get("price") or 0.0), 0.0)
+    gross = qty * price
+    discount = max(float(line.get("line_discount") or 0.0), 0.0)
+    if discount > gross:
+        discount = gross
+    line["qty"] = qty
+    line["price"] = price
+    line["line_discount"] = discount
+    line["line_total"] = gross - discount
+    return line
+
+
 def _get_pos_cart_summary(company_key):
     cart = st.session_state.setdefault(f"pos_cart_{company_key}", [])
     item_count = int(sum(int(line.get("qty") or 0) for line in cart))
-    grand_total = round(
-        sum(float(line.get("qty") or 0) * float(line.get("price") or 0) for line in cart),
-        2,
-    )
-    return {"item_count": item_count, "grand_total": grand_total, "line_count": len(cart)}
+    subtotal = 0.0
+    discount_total = 0.0
+    tax_total = 0.0
+    for line in cart:
+        qty = max(float(line.get("qty") or 0.0), 0.0)
+        price = max(float(line.get("price") or 0.0), 0.0)
+        gross = qty * price
+        discount = max(float(line.get("line_discount") or 0.0), 0.0)
+        discount = min(discount, gross)
+        taxable_base = gross - discount
+        subtotal += gross
+        discount_total += discount
+        tax_total += taxable_base * (max(float(line.get("tax_rate") or 0.0), 0.0) / 100.0)
+    grand_total = round((subtotal - discount_total) + tax_total, 2)
+    return {
+        "item_count": item_count,
+        "line_count": len(cart),
+        "subtotal": round(subtotal, 2),
+        "discount_total": round(discount_total, 2),
+        "tax_total": round(tax_total, 2),
+        "grand_total": grand_total,
+    }
 
 
 def _import_sales_from_excel(conn, company_key, doc_type, file_obj, created_by):
@@ -6333,7 +6372,7 @@ def show_pos(company_key, company_name, role):
         conn = get_connection()
         company_row = conn.execute("SELECT name, barcode_input_source FROM companies WHERE key = ?", (company_key,)).fetchone()
         items = conn.execute(
-            "SELECT id, item_name, item_code, barcode, price, cost_price, qty FROM inventory WHERE company_key = ? AND qty > 0",
+            "SELECT id, item_name, item_code, barcode, price, cost_price, tax_rate, qty FROM inventory WHERE company_key = ? AND qty > 0",
             (company_key,),
         ).fetchall()
         customers = get_customer_balances(company_key, conn=conn)
@@ -6342,7 +6381,7 @@ def show_pos(company_key, company_name, role):
         company_label = company_row[0] if company_row else company_name
         barcode_input_source = company_row[1] if company_row and company_row[1] else "Keyboard Entry"
         items_df = (
-            pd.DataFrame(items, columns=["ID", "Item Name", "Item Code", "Barcode", "Price", "Cost Price", "Qty"])
+            pd.DataFrame(items, columns=["ID", "Item Name", "Item Code", "Barcode", "Price", "Cost Price", "Tax Rate", "Qty"])
             if items
             else pd.DataFrame()
         )
@@ -6475,10 +6514,14 @@ def show_pos(company_key, company_name, role):
                     {
                         "inventory_item_id": None,
                         "name": manual_item_name.strip(),
+                        "item_code": "",
                         "barcode": "",
                         "price": float(manual_price),
+                        "cost_price": 0.0,
+                        "tax_rate": 0.0,
                         "available_qty": None,
                         "qty": int(manual_qty),
+                        "line_discount": 0.0,
                         "line_total": int(manual_qty) * float(manual_price),
                     }
                 )
@@ -6565,6 +6608,7 @@ def show_pos(company_key, company_name, role):
                                     "barcode": item_row["Barcode"],
                                     "price": float(item_row["Price"] or 0.0),
                                     "cost_price": float(item_row["Cost Price"] or 0.0),
+                                    "tax_rate": float(item_row["Tax Rate"] or 0.0),
                                     "qty": float(item_row["Qty"] or 0.0),
                                 },
                             )
@@ -6573,7 +6617,7 @@ def show_pos(company_key, company_name, role):
             else:
                 st.info("No stock available for sale. Switch to Manual Entry to continue.")
 
-        payment_method = st.selectbox("Payment Method", ["Cash", "Mobile Money", "Bank Transfer", "Cheque", "On Credit"])
+        payment_method = st.selectbox("Payment Method", ["Cash", "Mobile Money", "Card", "Bank Transfer", "On Credit"])
         selected_credit_customer_id = None
         selected_credit_customer_label = None
         if payment_method == "On Credit":
@@ -6588,79 +6632,97 @@ def show_pos(company_key, company_name, role):
                 st.warning("Register a customer in Accounts Receivable before using On Credit.")
         sale_date = st.date_input("Transaction Date", value=datetime.now().date(), key=f"pos_sale_date_{company_key}")
         cart = st.session_state.setdefault(cart_key, [])
+        cart_summary = _get_pos_cart_summary(company_key)
+        cash_tendered = 0.0
+        payment_reference = ""
         if cart:
             st.subheader("Active Sale Cart")
-            cart_rows = []
-            for index, line in enumerate(cart, start=1):
-                cart_rows.append(
-                    {
-                        "No.": index,
-                        "Item": line["name"],
-                        "Barcode": line.get("barcode", ""),
-                        "Qty": int(line["qty"]),
-                        "Unit Price": float(line["price"]),
-                        "Line Total": float(line["qty"]) * float(line["price"]),
-                    }
+            header_cols = st.columns([3, 2, 1, 1, 1, 1, 1, 1, 1])
+            header_cols[0].markdown("**Item**")
+            header_cols[1].markdown("**Barcode / Code**")
+            header_cols[2].markdown("**Qty**")
+            header_cols[3].markdown("**Unit Price**")
+            header_cols[4].markdown("**Discount**")
+            header_cols[5].markdown("**Line Total**")
+            header_cols[6].markdown("**+**")
+            header_cols[7].markdown("**-**")
+            header_cols[8].markdown("**Remove**")
+
+            for index, line in enumerate(list(cart)):
+                _recalculate_pos_line(line)
+                identifier = line.get("barcode") or line.get("item_code") or "Manual"
+                row_cols = st.columns([3, 2, 1, 1, 1, 1, 1, 1, 1])
+                row_cols[0].write(str(line.get("name") or ""))
+                row_cols[1].caption(str(identifier))
+                updated_qty = row_cols[2].number_input(
+                    "Qty",
+                    min_value=1,
+                    value=int(line.get("qty") or 1),
+                    step=1,
+                    key=f"pos_line_qty_{company_key}_{index}",
+                    label_visibility="collapsed",
                 )
-            cart_df = pd.DataFrame(cart_rows)
-            edited_cart_df = st.data_editor(
-                cart_df,
-                hide_index=True,
-                num_rows="fixed",
-                use_container_width=True,
-                column_config={
-                    "No.": st.column_config.NumberColumn("No.", disabled=True),
-                    "Item": st.column_config.TextColumn("Item", disabled=True),
-                    "Barcode": st.column_config.TextColumn("Barcode", disabled=True),
-                    "Qty": st.column_config.NumberColumn("Qty", min_value=1, step=1, required=True),
-                    "Unit Price": st.column_config.NumberColumn("Unit Price", disabled=True, format="%.2f"),
-                    "Line Total": st.column_config.NumberColumn("Line Total", disabled=True, format="%.2f"),
-                },
-                on_change=_sync_data_editor_to_session,
-                args=(f"pos_cart_editor_{company_key}", cart_key),
-                key=f"pos_cart_editor_{company_key}",
-            )
-            if edited_cart_df is not None:
-                updated_cart = []
-                for row_index, row in edited_cart_df.reset_index(drop=True).iterrows():
-                    if not str(row["Item"]).strip():
-                        continue
-                    if not row.get("Unit Price") or not row.get("Qty"):
-                        continue
-                    try:
-                        qty_val = row["Qty"]
-                        price_val = row["Unit Price"]
-                        if qty_val is None or price_val is None:
-                            continue
-                        original = cart[row_index] if row_index < len(cart) else {}
-                        updated_cart.append(
-                            {
-                                "inventory_item_id": original.get("inventory_item_id"),
-                                "name": row["Item"],
-                                "barcode": row["Barcode"] if str(row["Barcode"]).strip() else original.get("barcode", ""),
-                                "price": float(price_val),
-                                "available_qty": original.get("available_qty"),
-                                "qty": int(qty_val),
-                                "line_total": int(qty_val) * float(price_val),
-                            }
-                        )
-                    except (ValueError, TypeError) as e:
-                        st.warning(build_user_safe_error(e, role))
-                        continue
-                if updated_cart != cart:
-                    st.session_state[cart_key] = updated_cart
-                    cart = updated_cart
-            total_amount = sum(float(line.get("qty", 0)) * float(line.get("price", 0)) for line in cart if line.get("qty") is not None and line.get("price") is not None)
-            st.markdown(
-                f"<div style='text-align:right; margin-top:1rem; font-size:1.1rem; font-weight:bold;'>Cart Total: {format_currency(total_amount)}</div>",
-                unsafe_allow_html=True,
-            )
+                updated_discount = row_cols[4].number_input(
+                    "Discount",
+                    min_value=0.0,
+                    value=float(line.get("line_discount") or 0.0),
+                    step=0.01,
+                    key=f"pos_line_discount_{company_key}_{index}",
+                    label_visibility="collapsed",
+                )
+                line["qty"] = int(updated_qty)
+                line["line_discount"] = float(updated_discount)
+                _recalculate_pos_line(line)
+                row_cols[3].write(format_currency(float(line.get("price") or 0.0)))
+                row_cols[5].write(format_currency(float(line.get("line_total") or 0.0)))
+                if row_cols[6].button("+", key=f"pos_line_inc_{company_key}_{index}", use_container_width=True):
+                    line["qty"] = int(line.get("qty") or 1) + 1
+                    _recalculate_pos_line(line)
+                    st.rerun()
+                if row_cols[7].button("-", key=f"pos_line_dec_{company_key}_{index}", use_container_width=True):
+                    line["qty"] = max(int(line.get("qty") or 1) - 1, 1)
+                    _recalculate_pos_line(line)
+                    st.rerun()
+                if row_cols[8].button("Remove", key=f"pos_line_remove_{company_key}_{index}", use_container_width=True):
+                    cart.pop(index)
+                    st.session_state[cart_key] = cart
+                    st.rerun()
+
+            st.session_state[cart_key] = cart
+            cart_summary = _get_pos_cart_summary(company_key)
+            totals_col1, totals_col2 = st.columns([1, 1])
+            with totals_col1:
+                st.markdown("### Totals")
+                st.caption(f"Item Count: {cart_summary['item_count']}")
+                st.caption(f"Subtotal: {format_currency(cart_summary['subtotal'])}")
+                st.caption(f"Discount Total: {format_currency(cart_summary['discount_total'])}")
+                st.caption(f"Tax / VAT Total: {format_currency(cart_summary['tax_total'])}")
+                st.markdown(f"**Grand Total: {format_currency(cart_summary['grand_total'])}**")
+            with totals_col2:
+                st.markdown("### Payment")
+                if payment_method == "Cash":
+                    cash_tendered = st.number_input(
+                        f"Amount Tendered ({st.session_state.currency_symbol})",
+                        min_value=0.0,
+                        value=float(cart_summary["grand_total"] or 0.0),
+                        step=0.01,
+                        key=f"pos_cash_tendered_{company_key}",
+                    )
+                    change_due = round(float(cash_tendered or 0.0) - float(cart_summary["grand_total"] or 0.0), 2)
+                    st.caption(f"Change Due: {format_currency(change_due if change_due > 0 else 0.0)}")
+                elif payment_method in {"Mobile Money", "Card", "Bank Transfer"}:
+                    payment_reference = st.text_input(
+                        "Transaction / Reference",
+                        key=f"pos_payment_reference_{company_key}",
+                        placeholder="Optional reference",
+                    ).strip()
+
             clear_col, checkout_col = st.columns([1, 1])
-            if clear_col.button("Clear Cart", key=f"pos_clear_cart_{company_key}"):
+            if clear_col.button("Clear Cart", key=f"pos_clear_cart_{company_key}", use_container_width=True):
                 st.session_state[cart_key] = []
                 st.session_state[checkout_complete_key] = False
                 st.rerun()
-            if checkout_col.button("Final Checkout", key=f"pos_final_checkout_{company_key}"):
+            if checkout_col.button("Final Checkout", key=f"pos_final_checkout_{company_key}", use_container_width=True):
                 st.session_state[checkout_complete_key] = True
                 process_pos_sale(print_receipt=True)
         else:
@@ -6676,6 +6738,11 @@ def show_pos(company_key, company_name, role):
                 st.session_state[checkout_complete_key] = False
                 st.warning("Select a customer before processing an on-credit sale.")
                 return
+            current_summary = _get_pos_cart_summary(company_key)
+            if payment_method == "Cash" and float(cash_tendered or 0.0) < float(current_summary["grand_total"] or 0.0):
+                st.session_state[checkout_complete_key] = False
+                st.warning("Cash tendered cannot be less than the grand total.")
+                return
 
             try:
                 conn = get_connection()
@@ -6683,6 +6750,7 @@ def show_pos(company_key, company_name, role):
                 total = 0.0
                 cost_of_goods_sold = 0.0
                 for sale_line in sale_cart:
+                    _recalculate_pos_line(sale_line)
                     line_items.append(
                         {
                             "name": sale_line["name"],
@@ -6690,7 +6758,11 @@ def show_pos(company_key, company_name, role):
                             "price": sale_line["price"],
                         }
                     )
-                    total += float(sale_line["qty"]) * float(sale_line["price"])
+                    gross_line_total = float(sale_line["qty"]) * float(sale_line["price"])
+                    discount_amount = float(sale_line.get("line_discount") or 0.0)
+                    taxable_base = max(gross_line_total - discount_amount, 0.0)
+                    line_tax = taxable_base * (float(sale_line.get("tax_rate") or 0.0) / 100.0)
+                    total += taxable_base + line_tax
                     cost_of_goods_sold += float(sale_line["qty"]) * float(sale_line.get("cost_price") or 0.0)
                     if sale_line["inventory_item_id"] is not None:
                         current_item = conn.execute(
@@ -6710,7 +6782,7 @@ def show_pos(company_key, company_name, role):
                     "Cash": ("Cash", "Asset"),
                     "Mobile Money": ("Mobile Money", "Asset"),
                     "Bank Transfer": ("Bank", "Asset"),
-                    "Cheque": ("Bank", "Asset"),
+                    "Card": ("Bank", "Asset"),
                     "On Credit": ("Accounts Receivable", "Asset"),
                 }
                 receipt_account, receipt_category = payment_account_map.get(payment_method, ("Cash", "Asset"))
