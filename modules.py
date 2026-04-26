@@ -99,6 +99,9 @@ ALL_ENTERPRISE_PERMISSIONS = {
     "manage_integrations",
     "use_ai_assistant",
     "manual_license_override",
+    "close_cash_drawer",
+    "view_cashier_closings",
+    "manage_cashier_closings",
 }
 ROLE_NAME_ALIASES = {
     "Gatekeeper": "Dev",
@@ -144,6 +147,9 @@ ENTERPRISE_ROLE_PERMISSIONS = {
         "restore_backup",
         "manage_integrations",
         "use_ai_assistant",
+        "close_cash_drawer",
+        "view_cashier_closings",
+        "manage_cashier_closings",
     },
     "Sub-Admin": {
         "view_dashboard",
@@ -162,6 +168,9 @@ ENTERPRISE_ROLE_PERMISSIONS = {
         "view_reports",
         "view_audit_trail",
         "use_ai_assistant",
+        "close_cash_drawer",
+        "view_cashier_closings",
+        "manage_cashier_closings",
     },
     "Bookkeeper": {
         "view_dashboard",
@@ -175,6 +184,9 @@ ENTERPRISE_ROLE_PERMISSIONS = {
         "post_accounting_document",
         "view_reports",
         "use_ai_assistant",
+        "close_cash_drawer",
+        "view_cashier_closings",
+        "manage_cashier_closings",
     },
     "Branch_Bookkeeper": {
         "view_dashboard",
@@ -187,6 +199,7 @@ ENTERPRISE_ROLE_PERMISSIONS = {
         "post_accounting_document",
         "view_reports",
         "use_ai_assistant",
+        "close_cash_drawer",
     },
     "Staff": {
         "view_dashboard",
@@ -195,6 +208,7 @@ ENTERPRISE_ROLE_PERMISSIONS = {
         "create_invoice",
         "receive_customer_payment",
         "view_reports",
+        "close_cash_drawer",
     },
     "Demo": {"view_dashboard"},
 }
@@ -207,6 +221,7 @@ from database import (
     activate_company_subscription,
     create_company_record,
     ensure_company_trial_subscription,
+    ensure_cashier_closings_schema,
     ensure_inventory_schema_integrity,
     force_backup_after_company_creation,
     get_firebase_service_account_info,
@@ -3052,6 +3067,82 @@ def _build_receipt_html(receipt_data):
         </div>
     </div>
     """
+
+
+def _get_pos_cashier_identity(role):
+    current_user = st.session_state.get("user", {}) if isinstance(st.session_state.get("user", {}), dict) else {}
+    return (
+        str(current_user.get("role") or role or "").strip()
+        or str(current_user.get("login_key") or "").strip()
+        or str(current_user.get("full_name") or "").strip()
+        or "Unknown"
+    )
+
+
+def _get_pos_cashier_summary(conn, company_key, sale_date, cashier=None, branch_id=None):
+    params = [company_key, str(sale_date)]
+    query = """
+        SELECT
+            COUNT(*) AS receipt_count,
+            COALESCE(SUM(credit), 0) AS total_revenue,
+            COALESCE(SUM(CASE WHEN COALESCE(payment_method, 'Cash') = 'Cash' THEN credit ELSE 0 END), 0) AS cash_sales,
+            COALESCE(SUM(CASE WHEN COALESCE(payment_method, '') = 'Mobile Money' THEN credit ELSE 0 END), 0) AS mobile_money_sales,
+            COALESCE(SUM(CASE WHEN COALESCE(payment_method, '') = 'Card' THEN credit ELSE 0 END), 0) AS card_sales,
+            COALESCE(SUM(CASE WHEN COALESCE(payment_method, '') = 'Bank Transfer' THEN credit ELSE 0 END), 0) AS bank_transfer_sales,
+            COALESCE(SUM(CASE WHEN COALESCE(payment_method, '') = 'On Credit' THEN credit ELSE 0 END), 0) AS credit_sales
+        FROM vouchers
+        WHERE company_key = ?
+          AND v_type = 'Sales'
+          AND date = ?
+          AND COALESCE(status, 'Posted') != 'Void'
+    """
+    if branch_id:
+        query += " AND COALESCE(branch_id, '') = ?"
+        params.append(str(branch_id))
+    if cashier:
+        query += " AND COALESCE(created_by, '') = ?"
+        params.append(str(cashier))
+    row = conn.execute(query, tuple(params)).fetchone()
+    row = dict(row) if row else {}
+    total_revenue = float(row.get("total_revenue") or 0.0)
+    return {
+        "receipt_count": int(row.get("receipt_count") or 0),
+        "total_completed_sales": int(row.get("receipt_count") or 0),
+        "total_revenue": total_revenue,
+        "cash_sales": float(row.get("cash_sales") or 0.0),
+        "mobile_money_sales": float(row.get("mobile_money_sales") or 0.0),
+        "card_sales": float(row.get("card_sales") or 0.0),
+        "bank_transfer_sales": float(row.get("bank_transfer_sales") or 0.0),
+        "credit_sales": float(row.get("credit_sales") or 0.0),
+    }
+
+
+def _get_pos_cashier_options(conn, company_key, branch_id=None):
+    params = [company_key]
+    voucher_query = """
+        SELECT DISTINCT COALESCE(created_by, '') AS cashier
+        FROM vouchers
+        WHERE company_key = ?
+          AND v_type = 'Sales'
+          AND COALESCE(created_by, '') != ''
+    """
+    if branch_id:
+        voucher_query += " AND COALESCE(branch_id, '') = ?"
+        params.append(str(branch_id))
+    voucher_rows = conn.execute(voucher_query, tuple(params)).fetchall()
+    closing_params = [company_key]
+    closing_query = """
+        SELECT DISTINCT COALESCE(cashier, '') AS cashier
+        FROM cashier_closings
+        WHERE company_key = ?
+          AND COALESCE(cashier, '') != ''
+    """
+    if branch_id:
+        closing_query += " AND COALESCE(branch_id, '') = ?"
+        closing_params.append(str(branch_id))
+    closing_rows = conn.execute(closing_query, tuple(closing_params)).fetchall()
+    options = {str(row["cashier"]).strip() for row in voucher_rows + closing_rows if str(row["cashier"]).strip()}
+    return sorted(options)
 
 
 def _build_payslip_html(payroll_row):
@@ -6411,6 +6502,7 @@ def show_pos(company_key, company_name, role):
 
     try:
         conn = get_connection()
+        ensure_cashier_closings_schema(conn)
         company_row = conn.execute("SELECT name, barcode_input_source FROM companies WHERE key = ?", (company_key,)).fetchone()
         active_branch_id = st.session_state.get("active_branch_id")
         branch_row = None
@@ -6980,6 +7072,7 @@ def show_pos(company_key, company_name, role):
 
         st.subheader("Recent POS Transactions")
         conn = get_connection()
+        ensure_cashier_closings_schema(conn)
         sales_rows = get_recent_accounting_activity(company_key, branch_id=st.session_state.get("active_branch_id"), limit=20, conn=conn)
         conn.close()
         if sales_rows:
@@ -6998,6 +7091,209 @@ def show_pos(company_key, company_name, role):
             st.dataframe(format_currency_dataframe(sales_df), use_container_width=True)
             if role in ("Master Admin", "Bookkeeper", "Branch_Bookkeeper", "Sub-Admin"):
                 st.caption("Legacy voucher-based POS void is disabled while Phase 2 journal posting is the operational source of truth.")
+
+        st.subheader("Daily Sales Summary")
+        cashier_identity = _get_pos_cashier_identity(role)
+        can_view_all_closings = user_has_permission(role, "view_cashier_closings") or user_has_permission(role, "manage_cashier_closings")
+        can_manage_closings = user_has_permission(role, "manage_cashier_closings")
+        summary_conn = None
+        try:
+            summary_conn = get_connection()
+            ensure_cashier_closings_schema(summary_conn)
+            summary_date = st.date_input(
+                "Summary Date",
+                value=datetime.now().date(),
+                key=f"pos_summary_date_{company_key}",
+            )
+            cashier_options = _get_pos_cashier_options(summary_conn, company_key, active_branch_id)
+            if cashier_identity and cashier_identity not in cashier_options:
+                cashier_options = [cashier_identity] + cashier_options
+            if can_view_all_closings:
+                cashier_filter_options = ["All Cashiers"] + cashier_options
+                selected_cashier = st.selectbox(
+                    "Cashier / User",
+                    cashier_filter_options,
+                    key=f"pos_summary_cashier_{company_key}",
+                )
+                summary_cashier = None if selected_cashier == "All Cashiers" else selected_cashier
+            else:
+                summary_cashier = cashier_identity
+                st.caption(f"Cashier / User: {summary_cashier}")
+
+            sales_summary = _get_pos_cashier_summary(
+                summary_conn,
+                company_key,
+                summary_date.isoformat(),
+                cashier=summary_cashier,
+                branch_id=active_branch_id,
+            )
+            summary_cols = st.columns(4)
+            summary_cols[0].metric("Completed Sales", sales_summary["total_completed_sales"])
+            summary_cols[1].metric("Total Revenue", format_currency(sales_summary["total_revenue"]))
+            summary_cols[2].metric("Cash Sales", format_currency(sales_summary["cash_sales"]))
+            summary_cols[3].metric("Receipts", sales_summary["receipt_count"])
+
+            payment_cols = st.columns(4)
+            payment_cols[0].caption(f"Mobile Money: {format_currency(sales_summary['mobile_money_sales'])}")
+            payment_cols[1].caption(f"Card: {format_currency(sales_summary['card_sales'])}")
+            payment_cols[2].caption(f"Bank Transfer: {format_currency(sales_summary['bank_transfer_sales'])}")
+            payment_cols[3].caption(f"Credit Sales: {format_currency(sales_summary['credit_sales'])}")
+
+            st.subheader("Cashier Closing")
+            if user_has_permission(role, "close_cash_drawer"):
+                default_closing_cashier = summary_cashier or cashier_identity
+                closing_cashier_options = cashier_options or [cashier_identity]
+                if default_closing_cashier and default_closing_cashier not in closing_cashier_options:
+                    closing_cashier_options = [default_closing_cashier] + closing_cashier_options
+                with st.form(f"cashier_closing_form_{company_key}"):
+                    closing_date = st.date_input(
+                        "Closing Date",
+                        value=summary_date,
+                        key=f"cashier_closing_date_{company_key}",
+                    )
+                    if can_manage_closings:
+                        closing_cashier = st.selectbox(
+                            "Cashier to Close",
+                            closing_cashier_options,
+                            index=max(closing_cashier_options.index(default_closing_cashier), 0) if default_closing_cashier in closing_cashier_options else 0,
+                            key=f"cashier_closing_cashier_{company_key}",
+                        )
+                    else:
+                        closing_cashier = default_closing_cashier
+                        st.caption(f"Closing Cashier: {closing_cashier}")
+                    expected_cash_total = _get_pos_cashier_summary(
+                        summary_conn,
+                        company_key,
+                        closing_date.isoformat(),
+                        cashier=closing_cashier,
+                        branch_id=active_branch_id,
+                    )["cash_sales"]
+                    st.caption(f"Expected Cash Total: {format_currency(expected_cash_total)}")
+                    counted_cash = st.number_input(
+                        "Counted Cash",
+                        min_value=0.0,
+                        value=float(expected_cash_total or 0.0),
+                        step=0.01,
+                        key=f"cashier_closing_counted_cash_{company_key}",
+                    )
+                    closing_difference = round(float(counted_cash or 0.0) - float(expected_cash_total or 0.0), 2)
+                    st.caption(f"Shortage / Overage: {format_currency(closing_difference)}")
+                    closing_notes = st.text_area(
+                        "Notes / Reason",
+                        key=f"cashier_closing_notes_{company_key}",
+                        placeholder="Optional drawer notes or explanation for shortage/overage",
+                    ).strip()
+                    closing_submitted = st.form_submit_button("Close Cashier Drawer")
+                    if closing_submitted:
+                        if not require_permission(
+                            role,
+                            "close_cash_drawer",
+                            action_label="close cashier drawer",
+                            company_key=company_key,
+                            branch_id=active_branch_id,
+                        ):
+                            st.stop()
+                        duplicate_row = summary_conn.execute(
+                            """
+                            SELECT id
+                            FROM cashier_closings
+                            WHERE company_key = ?
+                              AND COALESCE(branch_id, '') = ?
+                              AND cashier = ?
+                              AND closing_date = ?
+                            """,
+                            (company_key, str(active_branch_id or ""), str(closing_cashier), closing_date.isoformat()),
+                        ).fetchone()
+                        if duplicate_row:
+                            st.warning("This cashier has already been closed for the selected date.")
+                        else:
+                            summary_conn.execute(
+                                """
+                                INSERT INTO cashier_closings (
+                                    company_key, branch_id, cashier, closing_date,
+                                    expected_cash, counted_cash, difference, notes,
+                                    closed_by, closed_at
+                                )
+                                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                                """,
+                                (
+                                    company_key,
+                                    str(active_branch_id or ""),
+                                    str(closing_cashier),
+                                    closing_date.isoformat(),
+                                    float(expected_cash_total or 0.0),
+                                    float(counted_cash or 0.0),
+                                    float(closing_difference or 0.0),
+                                    closing_notes,
+                                    cashier_identity,
+                                ),
+                            )
+                            log_audit_action(
+                                summary_conn,
+                                company_key,
+                                role,
+                                "Cashier closing recorded",
+                                "POS Closing",
+                                details=(
+                                    f"cashier={closing_cashier} date={closing_date.isoformat()} "
+                                    f"expected_cash={expected_cash_total:.2f} counted_cash={float(counted_cash or 0.0):.2f} "
+                                    f"difference={closing_difference:.2f}"
+                                ),
+                                branch_id=active_branch_id,
+                                action_type="admin",
+                                document_ref=closing_date.isoformat(),
+                            )
+                            summary_conn.commit()
+                            log_system_event(
+                                "INFO",
+                                "POS Closing",
+                                (
+                                    f"Cashier closing recorded company_key={company_key} branch_id={active_branch_id or ''} "
+                                    f"cashier={closing_cashier} closing_date={closing_date.isoformat()} "
+                                    f"expected_cash={expected_cash_total:.2f} counted_cash={float(counted_cash or 0.0):.2f}"
+                                ),
+                            )
+                            st.success("Cashier closing saved successfully.")
+                            st.rerun()
+
+            st.subheader("Recent Cashier Closings")
+            closing_query = """
+                SELECT closing_date, cashier, expected_cash, counted_cash, difference, closed_by, notes, closed_at
+                FROM cashier_closings
+                WHERE company_key = ?
+            """
+            closing_params = [company_key]
+            if active_branch_id:
+                closing_query += " AND COALESCE(branch_id, '') = ?"
+                closing_params.append(str(active_branch_id))
+            if not can_view_all_closings and not can_manage_closings:
+                closing_query += " AND cashier = ?"
+                closing_params.append(cashier_identity)
+            closing_query += " ORDER BY closing_date DESC, closed_at DESC LIMIT 20"
+            recent_closings = summary_conn.execute(closing_query, tuple(closing_params)).fetchall()
+            if recent_closings:
+                closings_df = pd.DataFrame(
+                    [
+                        {
+                            "Date": row["closing_date"],
+                            "Cashier": row["cashier"],
+                            "Expected Cash": float(row["expected_cash"] or 0.0),
+                            "Counted Cash": float(row["counted_cash"] or 0.0),
+                            "Shortage / Overage": float(row["difference"] or 0.0),
+                            "Closed By": row["closed_by"],
+                            "Notes": row["notes"] or "",
+                        }
+                        for row in recent_closings
+                    ]
+                )
+                st.dataframe(format_currency_dataframe(closings_df), use_container_width=True)
+            else:
+                st.info("No cashier closings recorded yet.")
+        except Exception as exc:
+            st.error(build_user_safe_error(exc, role))
+        finally:
+            if summary_conn:
+                summary_conn.close()
 
         if st.session_state.get(checkout_complete_key) and st.session_state.get(receipt_html_key):
             _inject_print_styles()

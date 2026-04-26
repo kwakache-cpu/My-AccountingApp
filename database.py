@@ -3629,6 +3629,7 @@ def ensure_schema_integrity(conn):
     cursor.execute(
         "INSERT OR IGNORE INTO system_settings (id, master_price_per_month, base_currency, display_currency, exchange_rate) VALUES (1, 500, 'GHS', 'GHS', 1.0)"
     )
+    ensure_cashier_closings_schema(conn)
 
 
 def ensure_inventory_schema_integrity(conn):
@@ -3747,6 +3748,58 @@ def ensure_inventory_schema_integrity(conn):
             cursor.execute(f"ALTER TABLE inventory_import_batches ADD COLUMN {column_name} {column_def}")
     cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_inventory_import_batches_reference ON inventory_import_batches(import_reference)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_inventory_import_batches_company ON inventory_import_batches(company_key, created_at)")
+
+
+def ensure_cashier_closings_schema(conn):
+    """
+    Ensure cashier closing control tables exist before POS closing queries run.
+    This helper is additive only and never mutates sales, stock, or accounting history.
+    """
+    if conn is None:
+        raise RuntimeError("Database connection is required for cashier closing schema integrity checks.")
+
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS cashier_closings (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            company_key TEXT NOT NULL,
+            branch_id TEXT DEFAULT '',
+            cashier TEXT NOT NULL,
+            closing_date TEXT NOT NULL,
+            expected_cash REAL DEFAULT 0,
+            counted_cash REAL DEFAULT 0,
+            difference REAL DEFAULT 0,
+            notes TEXT,
+            closed_by TEXT,
+            closed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (company_key) REFERENCES companies (key) ON DELETE CASCADE
+        )
+        """
+    )
+    cursor.execute("PRAGMA table_info(cashier_closings)")
+    closing_columns = {row[1] for row in cursor.fetchall()}
+    closing_column_defs = {
+        "company_key": "TEXT",
+        "branch_id": "TEXT DEFAULT ''",
+        "cashier": "TEXT",
+        "closing_date": "TEXT",
+        "expected_cash": "REAL DEFAULT 0",
+        "counted_cash": "REAL DEFAULT 0",
+        "difference": "REAL DEFAULT 0",
+        "notes": "TEXT",
+        "closed_by": "TEXT",
+        "closed_at": "TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
+    }
+    for column_name, column_def in closing_column_defs.items():
+        if column_name not in closing_columns:
+            cursor.execute(f"ALTER TABLE cashier_closings ADD COLUMN {column_name} {column_def}")
+    cursor.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_cashier_closings_unique_drawer ON cashier_closings(company_key, branch_id, cashier, closing_date)"
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_cashier_closings_company_date ON cashier_closings(company_key, closing_date, closed_at)"
+    )
 
 
 def _ensure_app_compatibility_tables(conn):
