@@ -7900,6 +7900,10 @@ def show_pos(company_key, company_name, role):
                 st.warning("Select a customer before processing an on-credit sale.")
                 return
             current_summary = _get_pos_cart_summary(company_key)
+            if float(current_summary["grand_total"] or 0.0) <= 0.0:
+                st.session_state[checkout_complete_key] = False
+                st.warning("Total amount must be greater than zero. Reduce discount or remove item.")
+                return
             if payment_method == "Cash" and float(cash_tendered or 0.0) < float(current_summary["grand_total"] or 0.0):
                 st.session_state[checkout_complete_key] = False
                 st.warning("Cash tendered cannot be less than the grand total.")
