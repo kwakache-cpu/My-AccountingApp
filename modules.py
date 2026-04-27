@@ -3018,6 +3018,8 @@ def _build_receipt(receipt_data):
             f"Grand Total: {format_currency(float(receipt_data.get('grand_total') or 0.0))}",
         ]
     )
+    if receipt_data.get("discount_approved_by"):
+        lines.append(f"Discount Approved By: {receipt_data['discount_approved_by']}")
     if receipt_data.get("payment_method") == "Cash":
         lines.append(f"Amount Tendered: {format_currency(float(receipt_data.get('amount_tendered') or 0.0))}")
         lines.append(f"Change Due: {format_currency(float(receipt_data.get('change_due') or 0.0))}")
@@ -3041,6 +3043,11 @@ def _build_receipt_html(receipt_data):
     if receipt_data.get("payment_reference"):
         payment_reference_html = (
             f"<div style='font-size:0.8rem; color:#444;'>Reference: {receipt_data['payment_reference']}</div>"
+        )
+    discount_approval_html = ""
+    if receipt_data.get("discount_approved_by"):
+        discount_approval_html = (
+            f"<div style='font-size:0.8rem; color:#444;'>Discount Approved By: {receipt_data['discount_approved_by']}</div>"
         )
     amount_tendered_html = ""
     change_due_html = ""
@@ -3079,6 +3086,7 @@ def _build_receipt_html(receipt_data):
             <div style='display:flex; justify-content:space-between;'><span>Tax</span><strong>{format_currency(float(receipt_data.get("tax_total") or 0.0))}</strong></div>
             <div style='display:flex; justify-content:space-between; font-size:1rem; margin-top:0.35rem;'><span>Grand Total</span><strong>{format_currency(float(receipt_data.get("grand_total") or 0.0))}</strong></div>
             <div style='margin-top:0.5rem; font-size:0.8rem;'>Payment Method: {receipt_data.get("payment_method") or ""}</div>
+            {discount_approval_html}
             {payment_reference_html}
             {amount_tendered_html}
             {change_due_html}
@@ -3115,6 +3123,62 @@ def _get_pos_discount_authority(role, subtotal, line_discount_total, cart_discou
         "can_approve": can_approve,
         "approved": (not requires_approval and can_apply) or can_approve or total_discount <= 0,
     }
+
+
+def _get_pos_discount_approval_state(company_key):
+    return st.session_state.setdefault(
+        f"pos_discount_approval_{company_key}",
+        {
+            "approved": False,
+            "approver_identifier": "",
+            "approver_name": "",
+            "reason": "",
+            "discount_amount": 0.0,
+            "cart_signature": "",
+            "approved_at": "",
+        },
+    )
+
+
+def _clear_pos_discount_approval_state(company_key):
+    st.session_state[f"pos_discount_approval_{company_key}"] = {
+        "approved": False,
+        "approver_identifier": "",
+        "approver_name": "",
+        "reason": "",
+        "discount_amount": 0.0,
+        "cart_signature": "",
+        "approved_at": "",
+    }
+
+
+def _get_pos_cart_signature(company_key):
+    cart = st.session_state.setdefault(f"pos_cart_{company_key}", [])
+    discount_state = _get_pos_cart_discount_state(company_key)
+    normalized_lines = []
+    for line in cart:
+        _recalculate_pos_line(line)
+        normalized_lines.append(
+            {
+                "inventory_item_id": line.get("inventory_item_id"),
+                "item_id": line.get("item_id"),
+                "name": str(line.get("item_name") or line.get("name") or ""),
+                "item_code": str(line.get("item_code") or ""),
+                "barcode": str(line.get("barcode") or ""),
+                "qty": int(line.get("qty") or 0),
+                "price": round(float(line.get("price") or 0.0), 2),
+                "line_discount_type": str(line.get("line_discount_type") or "amount"),
+                "line_discount_value": round(float(line.get("line_discount_value", line.get("line_discount") or 0.0) or 0.0), 2),
+                "tax_rate": round(float(line.get("tax_rate") or 0.0), 4),
+                "is_manual": bool(line.get("is_manual")),
+            }
+        )
+    payload = {
+        "cart": normalized_lines,
+        "cart_discount_type": str(discount_state.get("type") or "amount"),
+        "cart_discount_value": round(float(discount_state.get("value") or 0.0), 2),
+    }
+    return json.dumps(payload, sort_keys=True)
 
 
 def _generate_suspended_sale_reference():
@@ -3161,6 +3225,7 @@ def _clear_pos_cart_state(company_key):
         "computed": 0.0,
         "threshold_requires_approval": False,
     }
+    _clear_pos_discount_approval_state(company_key)
 
 
 def _get_pos_cashier_summary(conn, company_key, sale_date, cashier=None, branch_id=None):
@@ -7076,6 +7141,8 @@ def show_pos(company_key, company_name, role):
     pos_product_search_key = f"pos_product_search_{company_key}"
     pos_product_select_key = f"pos_product_select_{company_key}"
     pos_return_lookup_result_key = f"pos_return_lookup_result_{company_key}"
+    pos_manager_approval_identifier_key = f"pos_manager_approval_identifier_{company_key}"
+    pos_manager_approval_reason_key = f"pos_manager_approval_reason_{company_key}"
     cart_key = f"pos_cart_{company_key}"
     if role == "Demo":
         _demo_notice()
@@ -7391,6 +7458,7 @@ def show_pos(company_key, company_name, role):
         cart = st.session_state.setdefault(cart_key, [])
         cart_summary = _get_pos_cart_summary(company_key)
         discount_state = _get_pos_cart_discount_state(company_key)
+        discount_approval_state = _get_pos_discount_approval_state(company_key)
         cash_tendered = 0.0
         payment_reference = ""
         if cart:
@@ -7487,6 +7555,10 @@ def show_pos(company_key, company_name, role):
                 cart_summary["line_discount_total"],
                 cart_summary["cart_discount_total"],
             )
+            current_cart_signature = _get_pos_cart_signature(company_key)
+            if discount_approval_state.get("approved") and discount_approval_state.get("cart_signature") != current_cart_signature:
+                _clear_pos_discount_approval_state(company_key)
+                discount_approval_state = _get_pos_discount_approval_state(company_key)
             discount_state["threshold_requires_approval"] = bool(discount_authority["requires_approval"])
             totals_col1, totals_col2 = st.columns([1, 1])
             with totals_col1:
@@ -7500,7 +7572,14 @@ def show_pos(company_key, company_name, role):
                 st.markdown(f"**Grand Total: {format_currency(cart_summary['grand_total'])}**")
                 if discount_authority["total_discount"] > 0 and not discount_authority["can_apply"]:
                     st.warning("You do not have permission to apply POS discounts.")
-                elif discount_authority["requires_approval"] and not discount_authority["can_approve"]:
+                elif (
+                    discount_authority["requires_approval"]
+                    and not discount_authority["can_approve"]
+                    and not (
+                        discount_approval_state.get("approved")
+                        and discount_approval_state.get("cart_signature") == current_cart_signature
+                    )
+                ):
                     st.warning("Manager approval required for this discount.")
                 elif discount_authority["total_discount"] > 0:
                     st.caption(
@@ -7509,6 +7588,17 @@ def show_pos(company_key, company_name, role):
                             percent=discount_authority["discount_percent"],
                         )
                     )
+                if (
+                    discount_approval_state.get("approved")
+                    and discount_approval_state.get("cart_signature") == current_cart_signature
+                ):
+                    st.success(
+                        "Manager discount approval recorded: {approver}".format(
+                            approver=discount_approval_state.get("approver_name") or discount_approval_state.get("approver_identifier") or "Approved",
+                        )
+                    )
+                    if discount_approval_state.get("reason"):
+                        st.caption(f"Approval reason: {discount_approval_state['reason']}")
             with totals_col2:
                 st.markdown("### Payment")
                 if payment_method == "Cash":
@@ -7527,6 +7617,101 @@ def show_pos(company_key, company_name, role):
                         key=f"pos_payment_reference_{company_key}",
                         placeholder="Optional reference",
                     ).strip()
+
+            if discount_authority["requires_approval"] and not discount_authority["can_approve"]:
+                st.markdown("### Manager Approval Required")
+                approval_col1, approval_col2 = st.columns([1, 2])
+                manager_identifier = approval_col1.text_input(
+                    "Manager Username / Code",
+                    key=pos_manager_approval_identifier_key,
+                    placeholder="Login key, user ID, or full name",
+                ).strip()
+                approval_reason = approval_col2.text_input(
+                    "Approval Reason",
+                    key=pos_manager_approval_reason_key,
+                    placeholder="Reason for high discount approval",
+                ).strip()
+                if st.button("Approve Discount", key=f"pos_discount_approve_btn_{company_key}", use_container_width=True):
+                    if not manager_identifier:
+                        st.warning("Enter the manager username or code for approval.")
+                    elif not approval_reason:
+                        st.warning("Enter an approval reason before continuing.")
+                    else:
+                        approval_conn = None
+                        try:
+                            approval_conn = get_connection()
+                            approver_row = approval_conn.execute(
+                                """
+                                SELECT full_name, login_key, user_id, role, status
+                                FROM users
+                                WHERE company_key = ?
+                                  AND COALESCE(status, 'Active') = 'Active'
+                                  AND (
+                                      login_key = ?
+                                      OR user_id = ?
+                                      OR LOWER(full_name) = LOWER(?)
+                                  )
+                                LIMIT 1
+                                """,
+                                (company_key, manager_identifier, manager_identifier, manager_identifier),
+                            ).fetchone()
+                            if not approver_row:
+                                st.warning("Manager approver could not be found.")
+                            elif not user_has_permission(str(approver_row["role"] or ""), "approve_pos_discount"):
+                                st.warning("The selected approver does not have POS discount approval permission.")
+                            else:
+                                approved_at = datetime.now().isoformat()
+                                approval_state = _get_pos_discount_approval_state(company_key)
+                                approval_state.update(
+                                    {
+                                        "approved": True,
+                                        "approver_identifier": str(approver_row["login_key"] or approver_row["user_id"] or manager_identifier),
+                                        "approver_name": str(approver_row["full_name"] or approver_row["login_key"] or manager_identifier),
+                                        "reason": approval_reason,
+                                        "discount_amount": float(discount_authority["total_discount"] or 0.0),
+                                        "cart_signature": current_cart_signature,
+                                        "approved_at": approved_at,
+                                    }
+                                )
+                                cashier_identity = _get_pos_cashier_identity(role)
+                                audit_details = (
+                                    "cashier={cashier}; approver={approver}; discount_amount={amount}; reason={reason}; approved_at={approved_at}".format(
+                                        cashier=cashier_identity,
+                                        approver=approval_state["approver_name"],
+                                        amount=format_currency(discount_authority["total_discount"]),
+                                        reason=approval_reason,
+                                        approved_at=approved_at,
+                                    )
+                                )
+                                log_audit_action(
+                                    approval_conn,
+                                    company_key,
+                                    role,
+                                    "POS Discount Manager Override",
+                                    "POS",
+                                    details=audit_details,
+                                    branch_id=active_branch_id,
+                                    action_type="admin",
+                                )
+                                approval_conn.commit()
+                                log_system_event(
+                                    "INFO",
+                                    "POS",
+                                    "Manager discount override approved for company_key={company_key} cashier={cashier} approver={approver}".format(
+                                        company_key=company_key,
+                                        cashier=cashier_identity,
+                                        approver=approval_state["approver_name"],
+                                    ),
+                                )
+                                st.success("Manager discount approval recorded for this sale.")
+                                st.rerun()
+                        except Exception as exc:
+                            if approval_conn:
+                                approval_conn.rollback()
+                            st.error(build_user_safe_error(exc, role))
+                        finally:
+                            if approval_conn:
+                                approval_conn.close()
 
             clear_col, checkout_col = st.columns([1, 1])
             if clear_col.button("Clear Cart", key=f"pos_clear_cart_{company_key}", use_container_width=True):
@@ -7719,6 +7904,8 @@ def show_pos(company_key, company_name, role):
                 st.session_state[checkout_complete_key] = False
                 st.warning("Cash tendered cannot be less than the grand total.")
                 return
+            current_cart_signature = _get_pos_cart_signature(company_key)
+            approval_state = _get_pos_discount_approval_state(company_key)
             discount_authority = _get_pos_discount_authority(
                 role,
                 current_summary["subtotal"],
@@ -7730,9 +7917,18 @@ def show_pos(company_key, company_name, role):
                 st.warning("You do not have permission to apply POS discounts.")
                 return
             if discount_authority["requires_approval"] and not discount_authority["can_approve"]:
-                st.session_state[checkout_complete_key] = False
-                st.warning("Manager approval required for this discount.")
-                return
+                if not (
+                    approval_state.get("approved")
+                    and approval_state.get("cart_signature") == current_cart_signature
+                ):
+                    st.session_state[checkout_complete_key] = False
+                    st.warning("Manager approval required for this discount.")
+                    return
+            discount_approved_by = None
+            discount_approval_reason = None
+            if approval_state.get("approved") and approval_state.get("cart_signature") == current_cart_signature:
+                discount_approved_by = approval_state.get("approver_name") or approval_state.get("approver_identifier")
+                discount_approval_reason = approval_state.get("reason")
 
             try:
                 conn = get_connection()
@@ -7890,6 +8086,27 @@ def show_pos(company_key, company_name, role):
                             action_type="admin",
                             document_ref=sale_reference,
                         )
+                    elif discount_approved_by:
+                        override_details = (
+                            "cashier={cashier}; approver={approver}; discount_amount={amount}; reason={reason}".format(
+                                cashier=_get_pos_cashier_identity(role),
+                                approver=discount_approved_by,
+                                amount=format_currency(discount_authority["total_discount"]),
+                                reason=discount_approval_reason or "No reason provided",
+                            )
+                        )
+                        log_system_event("INFO", "POS", f"Manager-approved POS discount completed on sale {sale_reference} company_key={company_key}")
+                        log_audit_action(
+                            conn,
+                            company_key,
+                            role,
+                            "POS Discount Approved",
+                            "POS",
+                            details=override_details,
+                            branch_id=branch_id,
+                            action_type="admin",
+                            document_ref=sale_reference,
+                        )
                 if print_receipt:
                     sale_datetime = f"{sale_date.isoformat()} {datetime.now().strftime('%H:%M:%S')}"
                     receipt_data = {
@@ -7907,6 +8124,7 @@ def show_pos(company_key, company_name, role):
                         "discount_total": float(current_summary["discount_total"] or 0.0),
                         "tax_total": float(current_summary["tax_total"] or 0.0),
                         "grand_total": float(current_summary["grand_total"] or 0.0),
+                        "discount_approved_by": discount_approved_by,
                         "amount_tendered": float(cash_tendered or 0.0) if payment_method == "Cash" else None,
                         "change_due": max(float(cash_tendered or 0.0) - float(current_summary["grand_total"] or 0.0), 0.0)
                         if payment_method == "Cash"
@@ -8367,6 +8585,8 @@ def show_pos(company_key, company_name, role):
                         change=format_currency(float(receipt_data.get("change_due") or 0.0)),
                     )
                 )
+            if receipt_data.get("discount_approved_by"):
+                st.caption(f"Discount approved by manager: {receipt_data['discount_approved_by']}")
             st.subheader("Receipt Preview")
             st.markdown(st.session_state[receipt_html_key], unsafe_allow_html=True)
             receipt_action_col1, receipt_action_col2, receipt_action_col3 = st.columns(3)
