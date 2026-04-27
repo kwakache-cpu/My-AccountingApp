@@ -3992,7 +3992,7 @@ def _render_camera_scanner(module_key, pending_key):
 def _lookup_inventory_by_barcode(conn, company_key, barcode_value):
     return conn.execute(
         """
-        SELECT id, item_name, item_code, category, qty, price, cost_price, barcode
+        SELECT id, item_name, item_code, category, brand, qty, price, cost_price, barcode, min_stock_level
         FROM inventory
         WHERE company_key = ? AND barcode = ?
         """,
@@ -4007,18 +4007,20 @@ def _lookup_inventory_for_pos(conn, company_key, search_value):
 
     exact_match = conn.execute(
         """
-        SELECT id, item_name, item_code, category, qty, price, cost_price, barcode
+        SELECT id, item_name, item_code, category, brand, qty, price, cost_price, barcode, min_stock_level
         FROM inventory
         WHERE company_key = ?
           AND (
               barcode = ?
               OR item_code = ?
               OR LOWER(item_name) = LOWER(?)
+              OR LOWER(COALESCE(category, '')) = LOWER(?)
+              OR LOWER(COALESCE(brand, '')) = LOWER(?)
           )
         ORDER BY item_name
         LIMIT 1
         """,
-        (company_key, normalized_value, normalized_value, normalized_value),
+        (company_key, normalized_value, normalized_value, normalized_value, normalized_value, normalized_value),
     ).fetchone()
     if exact_match:
         if str(exact_match["barcode"] or "").strip() == normalized_value:
@@ -4029,25 +4031,34 @@ def _lookup_inventory_for_pos(conn, company_key, search_value):
 
     fallback_match = conn.execute(
         """
-        SELECT id, item_name, item_code, category, qty, price, cost_price, barcode
+        SELECT id, item_name, item_code, category, brand, qty, price, cost_price, barcode, min_stock_level
         FROM inventory
         WHERE company_key = ?
           AND (
               LOWER(item_name) LIKE LOWER(?)
               OR LOWER(COALESCE(item_code, '')) LIKE LOWER(?)
               OR COALESCE(barcode, '') LIKE ?
+              OR LOWER(COALESCE(category, '')) LIKE LOWER(?)
+              OR LOWER(COALESCE(brand, '')) LIKE LOWER(?)
           )
         ORDER BY item_name
         LIMIT 1
         """,
-        (company_key, f"%{normalized_value}%", f"%{normalized_value}%", f"%{normalized_value}%"),
+        (
+            company_key,
+            f"%{normalized_value}%",
+            f"%{normalized_value}%",
+            f"%{normalized_value}%",
+            f"%{normalized_value}%",
+            f"%{normalized_value}%",
+        ),
     ).fetchone()
     if fallback_match:
         return fallback_match, "manual_search", "in_company"
 
     other_company_match = conn.execute(
         """
-        SELECT id, item_name, item_code, category, qty, price, cost_price, barcode, company_key
+        SELECT id, item_name, item_code, category, brand, qty, price, cost_price, barcode, min_stock_level, company_key
         FROM inventory
         WHERE company_key <> ?
           AND (
@@ -4057,6 +4068,8 @@ def _lookup_inventory_for_pos(conn, company_key, search_value):
               OR LOWER(item_name) LIKE LOWER(?)
               OR LOWER(COALESCE(item_code, '')) LIKE LOWER(?)
               OR COALESCE(barcode, '') LIKE ?
+              OR LOWER(COALESCE(category, '')) LIKE LOWER(?)
+              OR LOWER(COALESCE(brand, '')) LIKE LOWER(?)
           )
         ORDER BY item_name
         LIMIT 1
@@ -4066,6 +4079,8 @@ def _lookup_inventory_for_pos(conn, company_key, search_value):
             normalized_value,
             normalized_value,
             normalized_value,
+            f"%{normalized_value}%",
+            f"%{normalized_value}%",
             f"%{normalized_value}%",
             f"%{normalized_value}%",
             f"%{normalized_value}%",
@@ -4082,7 +4097,7 @@ def _search_inventory_for_pos(conn, company_key, search_value):
         return []
     return conn.execute(
         """
-        SELECT id, item_name, item_code, category, qty, price, cost_price, barcode
+        SELECT id, item_name, item_code, category, brand, qty, price, cost_price, barcode, min_stock_level
         FROM inventory
         WHERE company_key = ?
           AND qty > 0
@@ -4090,11 +4105,30 @@ def _search_inventory_for_pos(conn, company_key, search_value):
               LOWER(item_name) LIKE LOWER(?)
               OR LOWER(COALESCE(item_code, '')) LIKE LOWER(?)
               OR COALESCE(barcode, '') LIKE ?
+              OR LOWER(COALESCE(category, '')) LIKE LOWER(?)
+              OR LOWER(COALESCE(brand, '')) LIKE LOWER(?)
           )
-        ORDER BY item_name
-        LIMIT 25
+        ORDER BY
+            CASE
+                WHEN LOWER(item_name) = LOWER(?) THEN 0
+                WHEN COALESCE(barcode, '') = ? THEN 1
+                WHEN LOWER(COALESCE(item_code, '')) = LOWER(?) THEN 2
+                ELSE 3
+            END,
+            item_name
+        LIMIT 15
         """,
-        (company_key, f"%{normalized_value}%", f"%{normalized_value}%", f"%{normalized_value}%"),
+        (
+            company_key,
+            f"%{normalized_value}%",
+            f"%{normalized_value}%",
+            f"%{normalized_value}%",
+            f"%{normalized_value}%",
+            f"%{normalized_value}%",
+            normalized_value,
+            normalized_value,
+            normalized_value,
+        ),
     ).fetchall()
 
 
@@ -4604,6 +4638,7 @@ def _add_item_to_pos_cart(company_key, item_row):
     item_id = int(item_row["id"])
     item_code = item_row["item_code"] if hasattr(item_row, "keys") and "item_code" in item_row.keys() else item_row.get("item_code", "")
     tax_rate = item_row["tax_rate"] if hasattr(item_row, "keys") and "tax_rate" in item_row.keys() else item_row.get("tax_rate", 0.0)
+    min_stock_level = item_row["min_stock_level"] if hasattr(item_row, "keys") and "min_stock_level" in item_row.keys() else item_row.get("min_stock_level", 0.0)
     for existing_line in cart:
         if int(existing_line["inventory_item_id"]) == item_id:
             existing_line["qty"] += 1
@@ -4624,6 +4659,7 @@ def _add_item_to_pos_cart(company_key, item_row):
         "cost_price": float(item_row["cost_price"] or 0.0),
         "tax_rate": float(tax_rate or 0.0),
         "available_qty": float(item_row["qty"] or 0.0),
+        "min_stock_level": float(min_stock_level or 0.0),
         "qty": 1,
         "is_manual": False,
         "line_discount_type": "amount",
@@ -4633,6 +4669,20 @@ def _add_item_to_pos_cart(company_key, item_row):
     }
     cart.append(new_line)
     return new_line
+
+
+def _get_pos_low_stock_warning(cart_line):
+    if not cart_line or bool(cart_line.get("is_manual")) or cart_line.get("inventory_item_id") is None:
+        return None
+    available_qty = float(cart_line.get("available_qty") or 0.0)
+    min_stock_level = max(float(cart_line.get("min_stock_level") or 0.0), 0.0)
+    remaining_qty = round(available_qty - float(cart_line.get("qty") or 0.0), 2)
+    if remaining_qty <= min_stock_level:
+        return "Low stock warning: {item} remaining stock will be {qty:,.2f}.".format(
+            item=str(cart_line.get("item_name") or cart_line.get("name") or "Item"),
+            qty=remaining_qty,
+        )
+    return None
 
 
 def _get_pos_cart_discount_state(company_key):
@@ -7058,7 +7108,7 @@ def show_pos(company_key, company_name, role):
                 (company_key, active_branch_id),
             ).fetchone()
         items = conn.execute(
-            "SELECT id, item_name, item_code, barcode, price, cost_price, tax_rate, qty FROM inventory WHERE company_key = ? AND qty > 0",
+            "SELECT id, item_name, item_code, barcode, category, brand, price, cost_price, tax_rate, qty, min_stock_level FROM inventory WHERE company_key = ? AND qty > 0",
             (company_key,),
         ).fetchall()
         customers = get_customer_balances(company_key, conn=conn)
@@ -7068,7 +7118,7 @@ def show_pos(company_key, company_name, role):
         branch_label = branch_row["branch_name"] if branch_row and "branch_name" in branch_row.keys() else ""
         barcode_input_source = company_row[1] if company_row and company_row[1] else "Keyboard Entry"
         items_df = (
-            pd.DataFrame(items, columns=["ID", "Item Name", "Item Code", "Barcode", "Price", "Cost Price", "Tax Rate", "Qty"])
+            pd.DataFrame(items, columns=["ID", "Item Name", "Item Code", "Barcode", "Category", "Brand", "Price", "Cost Price", "Tax Rate", "Qty", "Min Stock Level"])
             if items
             else pd.DataFrame()
         )
@@ -7105,6 +7155,7 @@ def show_pos(company_key, company_name, role):
             horizontal=True,
             key=f"pos_item_mode_{company_key}",
         )
+        st.caption("Cashier shortcuts: Scan + Enter = add item | Ctrl/Cmd + K = focus search | F2 = manual entry mode | F4 = checkout")
 
         scanner_cart_summary = _get_pos_cart_summary(company_key)
         scan_summary_col1, scan_summary_col2, scan_summary_col3 = st.columns([1, 1, 1])
@@ -7156,6 +7207,9 @@ def show_pos(company_key, company_name, role):
                                     "success",
                                     pos_scan_beep_key,
                                 )
+                                low_stock_warning = _get_pos_low_stock_warning(cart_line)
+                                if low_stock_warning:
+                                    st.warning(low_stock_warning)
                             elif matched_item and match_scope == "in_company":
                                 logger.info(
                                     "POS scanner found item '%s' with zero stock for company %s",
@@ -7218,10 +7272,10 @@ def show_pos(company_key, company_name, role):
                         st.info("No matching stock items found for that search.")
                 if manual_search_options:
                     manual_option_labels = [
-                        "{name} | Code {item_code} | Barcode {barcode} | Qty {qty:,.2f}".format(
+                        "{name} | {identifier} | {price} | Stock {qty:,.2f}".format(
                             name=row["item_name"],
-                            item_code=row["item_code"] or "N/A",
-                            barcode=row["barcode"] or "N/A",
+                            identifier=row["barcode"] or row["item_code"] or "N/A",
+                            price=format_currency(float(row["price"] or 0.0)),
                             qty=float(row["qty"] or 0.0),
                         )
                         for row in manual_search_options
@@ -7236,7 +7290,7 @@ def show_pos(company_key, company_name, role):
                         st.session_state[checkout_complete_key] = False
                         st.session_state.pop(receipt_key, None)
                         st.session_state.pop(receipt_html_key, None)
-                        _add_item_to_pos_cart(company_key, selected_search_row)
+                        cart_line = _add_item_to_pos_cart(company_key, selected_search_row)
                         logger.info(
                             "POS manual search added item '%s' for company %s",
                             selected_search_row["item_name"],
@@ -7247,6 +7301,9 @@ def show_pos(company_key, company_name, role):
                             f"Added {selected_search_row['item_name']} to the active sale.",
                             "success",
                         )
+                        low_stock_warning = _get_pos_low_stock_warning(cart_line)
+                        if low_stock_warning:
+                            st.warning(low_stock_warning)
                         st.rerun()
                 selected_item = st.selectbox("Select Item", items_df["Item Name"].tolist(), key=f"pos_item_{company_key}")
                 qty_to_sell = st.number_input("Quantity", min_value=1, value=1, key=f"pos_qty_{company_key}")
@@ -7267,9 +7324,14 @@ def show_pos(company_key, company_name, role):
                                 "cost_price": float(item_row["Cost Price"] or 0.0),
                                 "tax_rate": float(item_row["Tax Rate"] or 0.0),
                                 "qty": float(item_row["Qty"] or 0.0),
+                                "min_stock_level": float(item_row["Min Stock Level"] or 0.0),
                             },
                         )
+                    added_line = next((line for line in st.session_state.get(cart_key, []) if str(line.get("item_name") or line.get("name")) == str(selected_item)), None)
                     _trigger_scan_feedback(pos_message_key, f"Added {selected_item} x{int(qty_to_sell)} to the cart.")
+                    low_stock_warning = _get_pos_low_stock_warning(added_line)
+                    if low_stock_warning:
+                        st.warning(low_stock_warning)
                     st.rerun()
         else:
             st.subheader("Manual Item Entry")
