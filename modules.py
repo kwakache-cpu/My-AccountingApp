@@ -48,6 +48,8 @@ AI_RATE_LIMIT_MESSAGE = "Too many AI requests. Please wait a moment."
 AI_RATE_LIMIT_MAX_CALLS = 5
 AI_RATE_LIMIT_WINDOW_SECONDS = 60
 DOCUMENT_WORKFLOW_STATUSES = ["Draft", "Submitted", "Approved", "Posted", "Cancelled", "Voided"]
+POS_DISCOUNT_APPROVAL_PERCENT_THRESHOLD = 10.0
+POS_DISCOUNT_APPROVAL_AMOUNT_THRESHOLD = 50.0
 SUBSCRIPTION_PLANS = {
     "Basic": {
         "plan_name": "Basic",
@@ -103,6 +105,8 @@ ALL_ENTERPRISE_PERMISSIONS = {
     "view_cashier_closings",
     "manage_cashier_closings",
     "process_pos_return",
+    "apply_pos_discount",
+    "approve_pos_discount",
 }
 ROLE_NAME_ALIASES = {
     "Gatekeeper": "Dev",
@@ -152,6 +156,8 @@ ENTERPRISE_ROLE_PERMISSIONS = {
         "view_cashier_closings",
         "manage_cashier_closings",
         "process_pos_return",
+        "apply_pos_discount",
+        "approve_pos_discount",
     },
     "Sub-Admin": {
         "view_dashboard",
@@ -174,6 +180,8 @@ ENTERPRISE_ROLE_PERMISSIONS = {
         "view_cashier_closings",
         "manage_cashier_closings",
         "process_pos_return",
+        "apply_pos_discount",
+        "approve_pos_discount",
     },
     "Bookkeeper": {
         "view_dashboard",
@@ -191,6 +199,8 @@ ENTERPRISE_ROLE_PERMISSIONS = {
         "view_cashier_closings",
         "manage_cashier_closings",
         "process_pos_return",
+        "apply_pos_discount",
+        "approve_pos_discount",
     },
     "Branch_Bookkeeper": {
         "view_dashboard",
@@ -205,6 +215,7 @@ ENTERPRISE_ROLE_PERMISSIONS = {
         "use_ai_assistant",
         "close_cash_drawer",
         "process_pos_return",
+        "apply_pos_discount",
     },
     "Staff": {
         "view_dashboard",
@@ -214,6 +225,7 @@ ENTERPRISE_ROLE_PERMISSIONS = {
         "receive_customer_payment",
         "view_reports",
         "close_cash_drawer",
+        "apply_pos_discount",
     },
     "Demo": {"view_dashboard"},
 }
@@ -3085,6 +3097,72 @@ def _get_pos_cashier_identity(role):
     )
 
 
+def _get_pos_discount_authority(role, subtotal, line_discount_total, cart_discount_total):
+    total_discount = round(float(line_discount_total or 0.0) + float(cart_discount_total or 0.0), 2)
+    subtotal = max(float(subtotal or 0.0), 0.0)
+    discount_percent = (total_discount / subtotal * 100.0) if subtotal > 0 else 0.0
+    requires_approval = (
+        total_discount > POS_DISCOUNT_APPROVAL_AMOUNT_THRESHOLD
+        or discount_percent > POS_DISCOUNT_APPROVAL_PERCENT_THRESHOLD
+    )
+    can_apply = user_has_permission(role, "apply_pos_discount") or user_has_permission(role, "approve_pos_discount")
+    can_approve = user_has_permission(role, "approve_pos_discount")
+    return {
+        "total_discount": total_discount,
+        "discount_percent": round(discount_percent, 2),
+        "requires_approval": requires_approval,
+        "can_apply": can_apply,
+        "can_approve": can_approve,
+        "approved": (not requires_approval and can_apply) or can_approve or total_discount <= 0,
+    }
+
+
+def _generate_suspended_sale_reference():
+    return f"SUS-{datetime.now().strftime('%Y%m%d%H%M%S')}-{uuid.uuid4().hex[:6].upper()}"
+
+
+def _serialize_pos_cart_payload(company_key, cashier, note=""):
+    cart = st.session_state.setdefault(f"pos_cart_{company_key}", [])
+    discount_state = dict(_get_pos_cart_discount_state(company_key))
+    return json.dumps(
+        {
+            "cart": cart,
+            "discount_state": discount_state,
+            "cashier": cashier,
+            "note": note,
+            "sale_date": str(st.session_state.get(f"pos_sale_date_{company_key}") or datetime.now().date()),
+        }
+    )
+
+
+def _restore_pos_cart_payload(company_key, payload_json):
+    payload = json.loads(str(payload_json or "{}") or "{}")
+    restored_cart = payload.get("cart") or []
+    for line in restored_cart:
+        line.setdefault("line_discount_type", "amount")
+        line.setdefault("line_discount_value", float(line.get("line_discount") or 0.0))
+        _recalculate_pos_line(line)
+    st.session_state[f"pos_cart_{company_key}"] = restored_cart
+    discount_state = payload.get("discount_state") or {"type": "amount", "value": 0.0, "computed": 0.0}
+    st.session_state[f"pos_cart_discount_{company_key}"] = {
+        "type": str(discount_state.get("type") or "amount"),
+        "value": float(discount_state.get("value") or 0.0),
+        "computed": float(discount_state.get("computed") or 0.0),
+        "threshold_requires_approval": bool(discount_state.get("threshold_requires_approval", False)),
+    }
+    return payload
+
+
+def _clear_pos_cart_state(company_key):
+    st.session_state[f"pos_cart_{company_key}"] = []
+    st.session_state[f"pos_cart_discount_{company_key}"] = {
+        "type": "amount",
+        "value": 0.0,
+        "computed": 0.0,
+        "threshold_requires_approval": False,
+    }
+
+
 def _get_pos_cashier_summary(conn, company_key, sale_date, cashier=None, branch_id=None):
     params = [company_key, str(sale_date)]
     query = """
@@ -4545,6 +4623,8 @@ def _add_item_to_pos_cart(company_key, item_row):
         "tax_rate": float(tax_rate or 0.0),
         "available_qty": float(item_row["qty"] or 0.0),
         "qty": 1,
+        "line_discount_type": "amount",
+        "line_discount_value": 0.0,
         "line_discount": 0.0,
         "line_total": float(item_row["price"] or 0.0),
     }
@@ -4552,13 +4632,45 @@ def _add_item_to_pos_cart(company_key, item_row):
     return new_line
 
 
+def _get_pos_cart_discount_state(company_key):
+    state_key = f"pos_cart_discount_{company_key}"
+    return st.session_state.setdefault(
+        state_key,
+        {
+            "type": "amount",
+            "value": 0.0,
+            "computed": 0.0,
+            "threshold_requires_approval": False,
+        },
+    )
+
+
+def _normalize_pos_discount(value, maximum):
+    discount = max(float(value or 0.0), 0.0)
+    return min(discount, max(float(maximum or 0.0), 0.0))
+
+
+def _resolve_line_discount_amount(line):
+    qty = max(int(line.get("qty") or 0), 1)
+    price = max(float(line.get("price") or 0.0), 0.0)
+    gross = qty * price
+    discount_type = str(line.get("line_discount_type") or "amount").strip().lower()
+    discount_value = max(float(line.get("line_discount_value", line.get("line_discount") or 0.0) or 0.0), 0.0)
+    if discount_type == "percent":
+        discount = gross * (discount_value / 100.0)
+    else:
+        discount = discount_value
+    return _normalize_pos_discount(discount, gross)
+
+
 def _recalculate_pos_line(line):
     qty = max(int(line.get("qty") or 0), 1)
     price = max(float(line.get("price") or 0.0), 0.0)
     gross = qty * price
-    discount = max(float(line.get("line_discount") or 0.0), 0.0)
-    if discount > gross:
-        discount = gross
+    line.setdefault("line_discount_type", "amount")
+    if "line_discount_value" not in line:
+        line["line_discount_value"] = float(line.get("line_discount") or 0.0)
+    discount = _resolve_line_discount_amount(line)
     line["qty"] = qty
     line["price"] = price
     line["line_discount"] = discount
@@ -4568,25 +4680,50 @@ def _recalculate_pos_line(line):
 
 def _get_pos_cart_summary(company_key):
     cart = st.session_state.setdefault(f"pos_cart_{company_key}", [])
+    discount_state = _get_pos_cart_discount_state(company_key)
     item_count = int(sum(int(line.get("qty") or 0) for line in cart))
     subtotal = 0.0
-    discount_total = 0.0
+    line_discount_total = 0.0
     tax_total = 0.0
+    taxable_bases = []
     for line in cart:
         qty = max(float(line.get("qty") or 0.0), 0.0)
         price = max(float(line.get("price") or 0.0), 0.0)
         gross = qty * price
-        discount = max(float(line.get("line_discount") or 0.0), 0.0)
-        discount = min(discount, gross)
+        discount = _normalize_pos_discount(_resolve_line_discount_amount(line), gross)
         taxable_base = gross - discount
         subtotal += gross
-        discount_total += discount
-        tax_total += taxable_base * (max(float(line.get("tax_rate") or 0.0), 0.0) / 100.0)
+        line_discount_total += discount
+        taxable_bases.append(
+            {
+                "taxable_base": taxable_base,
+                "tax_rate": max(float(line.get("tax_rate") or 0.0), 0.0),
+            }
+        )
+    subtotal_after_line_discounts = max(subtotal - line_discount_total, 0.0)
+    cart_discount_type = str(discount_state.get("type") or "amount").strip().lower()
+    cart_discount_value = max(float(discount_state.get("value") or 0.0), 0.0)
+    if cart_discount_type == "percent":
+        cart_discount_amount = subtotal_after_line_discounts * (cart_discount_value / 100.0)
+    else:
+        cart_discount_amount = cart_discount_value
+    cart_discount_amount = _normalize_pos_discount(cart_discount_amount, subtotal_after_line_discounts)
+    discount_state["computed"] = round(cart_discount_amount, 2)
+    total_taxable_base = sum(item["taxable_base"] for item in taxable_bases)
+    for item in taxable_bases:
+        allocated_cart_discount = 0.0
+        if total_taxable_base > 0 and cart_discount_amount > 0:
+            allocated_cart_discount = cart_discount_amount * (item["taxable_base"] / total_taxable_base)
+        effective_taxable_base = max(item["taxable_base"] - allocated_cart_discount, 0.0)
+        tax_total += effective_taxable_base * (item["tax_rate"] / 100.0)
+    discount_total = line_discount_total + cart_discount_amount
     grand_total = round((subtotal - discount_total) + tax_total, 2)
     return {
         "item_count": item_count,
         "line_count": len(cart),
         "subtotal": round(subtotal, 2),
+        "line_discount_total": round(line_discount_total, 2),
+        "cart_discount_total": round(cart_discount_amount, 2),
         "discount_total": round(discount_total, 2),
         "tax_total": round(tax_total, 2),
         "grand_total": grand_total,
@@ -6876,6 +7013,7 @@ def show_pos(company_key, company_name, role):
     receipt_key = f"pos_receipt_{company_key}"
     last_receipt_data_key = f"pos_last_receipt_data_{company_key}"
     checkout_complete_key = f"pos_checkout_complete_{company_key}"
+    checkout_request_key = f"pos_checkout_request_{company_key}"
     pos_success_key = f"pos_sale_success_{company_key}"
     void_success_key = f"pos_void_success_{company_key}"
     pos_message_key = f"pos_message_{company_key}"
@@ -6964,7 +7102,7 @@ def show_pos(company_key, company_name, role):
         scan_summary_col1.metric("Cart Items", scanner_cart_summary["item_count"])
         scan_summary_col2.metric("Cart Total", format_currency(scanner_cart_summary["grand_total"]))
         if scan_summary_col3.button("Quick Clear Cart", key=f"pos_quick_clear_cart_{company_key}", use_container_width=True):
-            st.session_state[cart_key] = []
+            _clear_pos_cart_state(company_key)
             st.session_state[checkout_complete_key] = False
             _trigger_scan_feedback(pos_message_key, "Cart cleared.", "info")
             st.rerun()
@@ -7067,6 +7205,8 @@ def show_pos(company_key, company_name, role):
                         "tax_rate": 0.0,
                         "available_qty": None,
                         "qty": int(manual_qty),
+                        "line_discount_type": "amount",
+                        "line_discount_value": 0.0,
                         "line_discount": 0.0,
                         "line_total": int(manual_qty) * float(manual_price),
                     }
@@ -7179,25 +7319,27 @@ def show_pos(company_key, company_name, role):
         sale_date = st.date_input("Transaction Date", value=datetime.now().date(), key=f"pos_sale_date_{company_key}")
         cart = st.session_state.setdefault(cart_key, [])
         cart_summary = _get_pos_cart_summary(company_key)
+        discount_state = _get_pos_cart_discount_state(company_key)
         cash_tendered = 0.0
         payment_reference = ""
         if cart:
             st.subheader("Active Sale Cart")
-            header_cols = st.columns([3, 2, 1, 1, 1, 1, 1, 1, 1])
+            header_cols = st.columns([3, 2, 1, 1, 1, 1, 1, 1, 1, 1])
             header_cols[0].markdown("**Item**")
             header_cols[1].markdown("**Barcode / Code**")
             header_cols[2].markdown("**Qty**")
             header_cols[3].markdown("**Unit Price**")
-            header_cols[4].markdown("**Discount**")
-            header_cols[5].markdown("**Line Total**")
-            header_cols[6].markdown("**+**")
-            header_cols[7].markdown("**-**")
-            header_cols[8].markdown("**Remove**")
+            header_cols[4].markdown("**Disc Type**")
+            header_cols[5].markdown("**Discount**")
+            header_cols[6].markdown("**Line Total**")
+            header_cols[7].markdown("**+**")
+            header_cols[8].markdown("**-**")
+            header_cols[9].markdown("**Remove**")
 
             for index, line in enumerate(list(cart)):
                 _recalculate_pos_line(line)
                 identifier = line.get("barcode") or line.get("item_code") or "Manual"
-                row_cols = st.columns([3, 2, 1, 1, 1, 1, 1, 1, 1])
+                row_cols = st.columns([3, 2, 1, 1, 1, 1, 1, 1, 1, 1])
                 row_cols[0].write(str(line.get("name") or ""))
                 row_cols[1].caption(str(identifier))
                 updated_qty = row_cols[2].number_input(
@@ -7208,42 +7350,94 @@ def show_pos(company_key, company_name, role):
                     key=f"pos_line_qty_{company_key}_{index}",
                     label_visibility="collapsed",
                 )
-                updated_discount = row_cols[4].number_input(
+                updated_discount_type = row_cols[4].selectbox(
+                    "Disc Type",
+                    ["Amount", "Percent"],
+                    index=0 if str(line.get("line_discount_type") or "amount").lower() == "amount" else 1,
+                    key=f"pos_line_discount_type_{company_key}_{index}",
+                    label_visibility="collapsed",
+                )
+                updated_discount = row_cols[5].number_input(
                     "Discount",
                     min_value=0.0,
-                    value=float(line.get("line_discount") or 0.0),
+                    value=float(line.get("line_discount_value", line.get("line_discount") or 0.0) or 0.0),
                     step=0.01,
-                    key=f"pos_line_discount_{company_key}_{index}",
+                    key=f"pos_line_discount_value_{company_key}_{index}",
                     label_visibility="collapsed",
                 )
                 line["qty"] = int(updated_qty)
-                line["line_discount"] = float(updated_discount)
+                line["line_discount_type"] = str(updated_discount_type or "Amount").lower()
+                line["line_discount_value"] = float(updated_discount)
                 _recalculate_pos_line(line)
                 row_cols[3].write(format_currency(float(line.get("price") or 0.0)))
-                row_cols[5].write(format_currency(float(line.get("line_total") or 0.0)))
-                if row_cols[6].button("+", key=f"pos_line_inc_{company_key}_{index}", use_container_width=True):
+                row_cols[6].write(format_currency(float(line.get("line_total") or 0.0)))
+                if row_cols[7].button("+", key=f"pos_line_inc_{company_key}_{index}", use_container_width=True):
                     line["qty"] = int(line.get("qty") or 1) + 1
                     _recalculate_pos_line(line)
                     st.rerun()
-                if row_cols[7].button("-", key=f"pos_line_dec_{company_key}_{index}", use_container_width=True):
+                if row_cols[8].button("-", key=f"pos_line_dec_{company_key}_{index}", use_container_width=True):
                     line["qty"] = max(int(line.get("qty") or 1) - 1, 1)
                     _recalculate_pos_line(line)
                     st.rerun()
-                if row_cols[8].button("Remove", key=f"pos_line_remove_{company_key}_{index}", use_container_width=True):
+                if row_cols[9].button("Remove", key=f"pos_line_remove_{company_key}_{index}", use_container_width=True):
                     cart.pop(index)
                     st.session_state[cart_key] = cart
                     st.rerun()
 
             st.session_state[cart_key] = cart
             cart_summary = _get_pos_cart_summary(company_key)
+            discount_cfg_col1, discount_cfg_col2, discount_cfg_col3 = st.columns([1, 1, 2])
+            discount_state["type"] = str(
+                discount_cfg_col1.selectbox(
+                    "Cart Discount Type",
+                    ["Amount", "Percent"],
+                    index=0 if str(discount_state.get("type") or "amount").lower() == "amount" else 1,
+                    key=f"pos_cart_discount_type_selector_{company_key}",
+                )
+            ).lower()
+            discount_state["value"] = float(
+                discount_cfg_col2.number_input(
+                    "Cart Discount Value",
+                    min_value=0.0,
+                    value=float(discount_state.get("value") or 0.0),
+                    step=0.01,
+                    key=f"pos_cart_discount_value_input_{company_key}",
+                )
+            )
+            suspend_note = discount_cfg_col3.text_input(
+                "Suspend Sale Note",
+                key=f"pos_suspend_note_{company_key}",
+                placeholder="Optional note for suspended sale",
+            ).strip()
+            cart_summary = _get_pos_cart_summary(company_key)
+            discount_authority = _get_pos_discount_authority(
+                role,
+                cart_summary["subtotal"],
+                cart_summary["line_discount_total"],
+                cart_summary["cart_discount_total"],
+            )
+            discount_state["threshold_requires_approval"] = bool(discount_authority["requires_approval"])
             totals_col1, totals_col2 = st.columns([1, 1])
             with totals_col1:
                 st.markdown("### Totals")
                 st.caption(f"Item Count: {cart_summary['item_count']}")
                 st.caption(f"Subtotal: {format_currency(cart_summary['subtotal'])}")
+                st.caption(f"Line Discount Total: {format_currency(cart_summary['line_discount_total'])}")
+                st.caption(f"Cart Discount Total: {format_currency(cart_summary['cart_discount_total'])}")
                 st.caption(f"Discount Total: {format_currency(cart_summary['discount_total'])}")
                 st.caption(f"Tax / VAT Total: {format_currency(cart_summary['tax_total'])}")
                 st.markdown(f"**Grand Total: {format_currency(cart_summary['grand_total'])}**")
+                if discount_authority["total_discount"] > 0 and not discount_authority["can_apply"]:
+                    st.warning("You do not have permission to apply POS discounts.")
+                elif discount_authority["requires_approval"] and not discount_authority["can_approve"]:
+                    st.warning("Manager approval required for this discount.")
+                elif discount_authority["total_discount"] > 0:
+                    st.caption(
+                        "Discount applied: {amount} ({percent:.2f}% of subtotal)".format(
+                            amount=format_currency(discount_authority["total_discount"]),
+                            percent=discount_authority["discount_percent"],
+                        )
+                    )
             with totals_col2:
                 st.markdown("### Payment")
                 if payment_method == "Cash":
@@ -7265,12 +7459,177 @@ def show_pos(company_key, company_name, role):
 
             clear_col, checkout_col = st.columns([1, 1])
             if clear_col.button("Clear Cart", key=f"pos_clear_cart_{company_key}", use_container_width=True):
-                st.session_state[cart_key] = []
+                _clear_pos_cart_state(company_key)
                 st.session_state[checkout_complete_key] = False
                 st.rerun()
+            suspend_col, resume_col, cancel_suspend_col = st.columns([1, 1, 1])
+            if suspend_col.button("Suspend Sale", key=f"pos_suspend_sale_{company_key}", use_container_width=True):
+                suspend_conn = None
+                try:
+                    suspend_conn = get_connection()
+                    ensure_pos_sales_schema(suspend_conn)
+                    cashier_identity = _get_pos_cashier_identity(role)
+                    suspend_reference = _generate_suspended_sale_reference()
+                    suspend_payload = _serialize_pos_cart_payload(company_key, cashier_identity, suspend_note)
+                    suspend_conn.execute(
+                        """
+                        INSERT INTO pos_suspended_sales (
+                            company_key, branch_id, suspend_reference, cashier, cart_json, note, status, created_at
+                        )
+                        VALUES (?, ?, ?, ?, ?, ?, 'suspended', CURRENT_TIMESTAMP)
+                        """,
+                        (
+                            company_key,
+                            str(active_branch_id or ""),
+                            suspend_reference,
+                            cashier_identity,
+                            suspend_payload,
+                            suspend_note,
+                        ),
+                    )
+                    log_audit_action(
+                        suspend_conn,
+                        company_key,
+                        role,
+                        "POS Sale Suspended",
+                        "POS",
+                        details=f"suspend_reference={suspend_reference} note={suspend_note or 'none'}",
+                        branch_id=active_branch_id,
+                        action_type="admin",
+                        document_ref=suspend_reference,
+                    )
+                    suspend_conn.commit()
+                    log_system_event("INFO", "POS", f"Suspended sale {suspend_reference} for company_key={company_key} cashier={cashier_identity}")
+                    _clear_pos_cart_state(company_key)
+                    st.session_state[checkout_complete_key] = False
+                    st.success(f"Sale suspended successfully. Reference: {suspend_reference}")
+                    st.rerun()
+                except Exception as exc:
+                    if suspend_conn:
+                        suspend_conn.rollback()
+                    st.error(build_user_safe_error(exc, role))
+                finally:
+                    if suspend_conn:
+                        suspend_conn.close()
+            suspended_rows = []
+            suspended_conn = None
+            try:
+                suspended_conn = get_connection()
+                ensure_pos_sales_schema(suspended_conn)
+                cashier_identity = _get_pos_cashier_identity(role)
+                suspend_query = """
+                    SELECT id, suspend_reference, cashier, note, created_at
+                    FROM pos_suspended_sales
+                    WHERE company_key = ?
+                      AND status = 'suspended'
+                """
+                suspend_params = [company_key]
+                if active_branch_id:
+                    suspend_query += " AND COALESCE(branch_id, '') = ?"
+                    suspend_params.append(str(active_branch_id))
+                suspend_query += " AND cashier = ? ORDER BY created_at DESC"
+                suspend_params.append(cashier_identity)
+                suspended_rows = suspended_conn.execute(suspend_query, tuple(suspend_params)).fetchall()
+            except Exception as exc:
+                st.warning(build_user_safe_error(exc, role))
+            finally:
+                if suspended_conn:
+                    suspended_conn.close()
+            if suspended_rows:
+                suspended_options = [
+                    "{ref} | {cashier} | {created} | {note}".format(
+                        ref=row["suspend_reference"],
+                        cashier=row["cashier"] or "Unknown",
+                        created=row["created_at"],
+                        note=(row["note"] or "No note")[:40],
+                    )
+                    for row in suspended_rows
+                ]
+                selected_suspended_label = resume_col.selectbox(
+                    "Resume Suspended Sale",
+                    suspended_options,
+                    key=f"pos_suspended_select_{company_key}",
+                )
+                selected_suspended_row = suspended_rows[suspended_options.index(selected_suspended_label)]
+                if resume_col.button("Resume Sale", key=f"pos_resume_sale_{company_key}", use_container_width=True):
+                    resume_conn = None
+                    try:
+                        resume_conn = get_connection()
+                        ensure_pos_sales_schema(resume_conn)
+                        payload_row = resume_conn.execute(
+                            "SELECT cart_json FROM pos_suspended_sales WHERE id = ? AND company_key = ? AND status = 'suspended' LIMIT 1",
+                            (int(selected_suspended_row["id"]), company_key),
+                        ).fetchone()
+                        if not payload_row:
+                            st.warning("This suspended sale is no longer available.")
+                        else:
+                            _restore_pos_cart_payload(company_key, payload_row["cart_json"])
+                            resume_conn.execute(
+                                "UPDATE pos_suspended_sales SET status = 'resumed', resumed_at = CURRENT_TIMESTAMP WHERE id = ?",
+                                (int(selected_suspended_row["id"]),),
+                            )
+                            log_audit_action(
+                                resume_conn,
+                                company_key,
+                                role,
+                                "POS Sale Resumed",
+                                "POS",
+                                details=f"suspend_reference={selected_suspended_row['suspend_reference']}",
+                                branch_id=active_branch_id,
+                                action_type="admin",
+                                document_ref=selected_suspended_row["suspend_reference"],
+                            )
+                            resume_conn.commit()
+                            log_system_event("INFO", "POS", f"Resumed suspended sale {selected_suspended_row['suspend_reference']} for company_key={company_key}")
+                            st.session_state[checkout_complete_key] = False
+                            st.rerun()
+                    except Exception as exc:
+                        if resume_conn:
+                            resume_conn.rollback()
+                        st.error(build_user_safe_error(exc, role))
+                    finally:
+                        if resume_conn:
+                            resume_conn.close()
+                cancel_confirm = cancel_suspend_col.checkbox(
+                    "Confirm Cancel",
+                    key=f"pos_cancel_suspend_confirm_{company_key}",
+                )
+                if cancel_suspend_col.button("Cancel Suspended", key=f"pos_cancel_suspend_{company_key}", use_container_width=True):
+                    if not cancel_confirm:
+                        st.warning("Confirm the suspended sale cancellation first.")
+                    else:
+                        cancel_conn = None
+                        try:
+                            cancel_conn = get_connection()
+                            ensure_pos_sales_schema(cancel_conn)
+                            cancel_conn.execute(
+                                "UPDATE pos_suspended_sales SET status = 'cancelled', cancelled_at = CURRENT_TIMESTAMP WHERE id = ? AND company_key = ? AND status = 'suspended'",
+                                (int(selected_suspended_row["id"]), company_key),
+                            )
+                            log_audit_action(
+                                cancel_conn,
+                                company_key,
+                                role,
+                                "POS Suspended Sale Cancelled",
+                                "POS",
+                                details=f"suspend_reference={selected_suspended_row['suspend_reference']}",
+                                branch_id=active_branch_id,
+                                action_type="admin",
+                                document_ref=selected_suspended_row["suspend_reference"],
+                            )
+                            cancel_conn.commit()
+                            log_system_event("INFO", "POS", f"Cancelled suspended sale {selected_suspended_row['suspend_reference']} for company_key={company_key}")
+                            st.rerun()
+                        except Exception as exc:
+                            if cancel_conn:
+                                cancel_conn.rollback()
+                            st.error(build_user_safe_error(exc, role))
+                        finally:
+                            if cancel_conn:
+                                cancel_conn.close()
             if checkout_col.button("Final Checkout", key=f"pos_final_checkout_{company_key}", use_container_width=True):
-                st.session_state[checkout_complete_key] = True
-                process_pos_sale(print_receipt=True)
+                st.session_state[checkout_request_key] = True
+                st.rerun()
         else:
             st.info("Scan a barcode or add an item manually to start the sale.")
 
@@ -7289,12 +7648,26 @@ def show_pos(company_key, company_name, role):
                 st.session_state[checkout_complete_key] = False
                 st.warning("Cash tendered cannot be less than the grand total.")
                 return
+            discount_authority = _get_pos_discount_authority(
+                role,
+                current_summary["subtotal"],
+                current_summary["line_discount_total"],
+                current_summary["cart_discount_total"],
+            )
+            if float(discount_authority["total_discount"] or 0.0) > 0.0 and not discount_authority["can_apply"]:
+                st.session_state[checkout_complete_key] = False
+                st.warning("You do not have permission to apply POS discounts.")
+                return
+            if discount_authority["requires_approval"] and not discount_authority["can_approve"]:
+                st.session_state[checkout_complete_key] = False
+                st.warning("Manager approval required for this discount.")
+                return
 
             try:
                 conn = get_connection()
                 ensure_pos_sales_schema(conn)
                 line_items = []
-                total = 0.0
+                total = float(current_summary["grand_total"] or 0.0)
                 cost_of_goods_sold = 0.0
                 for sale_line in sale_cart:
                     _recalculate_pos_line(sale_line)
@@ -7305,11 +7678,6 @@ def show_pos(company_key, company_name, role):
                             "price": sale_line["price"],
                         }
                     )
-                    gross_line_total = float(sale_line["qty"]) * float(sale_line["price"])
-                    discount_amount = float(sale_line.get("line_discount") or 0.0)
-                    taxable_base = max(gross_line_total - discount_amount, 0.0)
-                    line_tax = taxable_base * (float(sale_line.get("tax_rate") or 0.0) / 100.0)
-                    total += taxable_base + line_tax
                     cost_of_goods_sold += float(sale_line["qty"]) * float(sale_line.get("cost_price") or 0.0)
                     if sale_line["inventory_item_id"] is not None:
                         current_item = conn.execute(
@@ -7318,7 +7686,7 @@ def show_pos(company_key, company_name, role):
                         ).fetchone()
                         current_qty = float(current_item["qty"] or 0) if current_item else 0.0
                         if float(sale_line["qty"]) > current_qty:
-                            st.error(f"Insufficient stock for {sale_line['name']}.")
+                            st.warning(f"Insufficient stock for {sale_line['name']}.")
                             conn.close()
                             return
                         conn.execute(
@@ -7418,6 +7786,39 @@ def show_pos(company_key, company_name, role):
                     ),
                     branch_id=branch_id,
                 )
+                if discount_authority["total_discount"] > 0:
+                    discount_log_message = (
+                        "Applied POS discount of {amount} ({percent:.2f}% of subtotal) on sale {reference}".format(
+                            amount=format_currency(discount_authority["total_discount"]),
+                            percent=discount_authority["discount_percent"],
+                            reference=sale_reference,
+                        )
+                    )
+                    log_system_event("INFO", "POS", f"{discount_log_message} for company_key={company_key}")
+                    log_audit_action(
+                        conn,
+                        company_key,
+                        role,
+                        "POS Discount Applied",
+                        "POS",
+                        details=discount_log_message,
+                        branch_id=branch_id,
+                        action_type="admin",
+                        document_ref=sale_reference,
+                    )
+                    if discount_authority["requires_approval"] and discount_authority["can_approve"]:
+                        log_system_event("INFO", "POS", f"Manager-approved POS discount for sale {sale_reference} company_key={company_key}")
+                        log_audit_action(
+                            conn,
+                            company_key,
+                            role,
+                            "POS Discount Approved",
+                            "POS",
+                            details=f"Manager-approved discount for sale {sale_reference}",
+                            branch_id=branch_id,
+                            action_type="admin",
+                            document_ref=sale_reference,
+                        )
                 if print_receipt:
                     sale_datetime = f"{sale_date.isoformat()} {datetime.now().strftime('%H:%M:%S')}"
                     receipt_data = {
@@ -7465,7 +7866,7 @@ def show_pos(company_key, company_name, role):
                     st.session_state[receipt_html_key] = _build_receipt_html(receipt_data)
                 conn.close()
                 st.session_state[checkout_complete_key] = True
-                st.session_state[cart_key] = []
+                _clear_pos_cart_state(company_key)
                 st.session_state[pos_success_key] = True
                 _clear_streamlit_state(
                     f"pos_item_{company_key}",
@@ -7479,12 +7880,16 @@ def show_pos(company_key, company_name, role):
             except Exception as e:
                 st.error(build_user_safe_error(e, role))
 
-        action_col1, action_col2 = st.columns(2)
-        if action_col1.button("Final Checkout", key=f"final_checkout_{company_key}"):
+        if st.session_state.pop(checkout_request_key, False):
             st.session_state[checkout_complete_key] = True
             process_pos_sale(print_receipt=True)
+
+        action_col1, action_col2 = st.columns(2)
+        if action_col1.button("Final Checkout", key=f"final_checkout_{company_key}"):
+            st.session_state[checkout_request_key] = True
+            st.rerun()
         if action_col2.button("Clear Cart", key=f"clear_cart_post_{company_key}"):
-            st.session_state[cart_key] = []
+            _clear_pos_cart_state(company_key)
             st.session_state[checkout_complete_key] = False
             st.rerun()
 
@@ -7906,7 +8311,7 @@ def show_pos(company_key, company_name, role):
                     st.rerun()
                 st.warning("No previous receipt is available for reprint.")
             if receipt_action_col3.button("New Sale", key=f"receipt_new_sale_btn_{company_key}", use_container_width=True):
-                st.session_state[cart_key] = []
+                _clear_pos_cart_state(company_key)
                 st.session_state[checkout_complete_key] = False
                 st.session_state.pop(receipt_key, None)
                 st.session_state.pop(receipt_html_key, None)

@@ -3973,6 +3973,47 @@ def ensure_pos_sales_schema(conn):
     cursor.execute(
         "CREATE INDEX IF NOT EXISTS idx_pos_returns_sale_line ON pos_returns(company_key, original_sale_reference, pos_sale_line_id)"
     )
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS pos_suspended_sales (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            company_key TEXT NOT NULL,
+            branch_id TEXT DEFAULT '',
+            suspend_reference TEXT NOT NULL,
+            cashier TEXT,
+            cart_json TEXT NOT NULL,
+            note TEXT,
+            status TEXT DEFAULT 'suspended',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            resumed_at TIMESTAMP,
+            cancelled_at TIMESTAMP,
+            FOREIGN KEY (company_key) REFERENCES companies (key) ON DELETE CASCADE
+        )
+        """
+    )
+    cursor.execute("PRAGMA table_info(pos_suspended_sales)")
+    suspended_columns = {row[1] for row in cursor.fetchall()}
+    suspended_defs = {
+        "company_key": "TEXT",
+        "branch_id": "TEXT DEFAULT ''",
+        "suspend_reference": "TEXT",
+        "cashier": "TEXT",
+        "cart_json": "TEXT",
+        "note": "TEXT",
+        "status": "TEXT DEFAULT 'suspended'",
+        "created_at": "TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
+        "resumed_at": "TIMESTAMP",
+        "cancelled_at": "TIMESTAMP",
+    }
+    for column_name, column_def in suspended_defs.items():
+        if column_name not in suspended_columns:
+            cursor.execute(f"ALTER TABLE pos_suspended_sales ADD COLUMN {column_name} {column_def}")
+    cursor.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_pos_suspended_sales_reference ON pos_suspended_sales(company_key, suspend_reference)"
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_pos_suspended_sales_status ON pos_suspended_sales(company_key, status, created_at)"
+    )
 
 
 def _ensure_app_compatibility_tables(conn):
