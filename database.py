@@ -3630,6 +3630,7 @@ def ensure_schema_integrity(conn):
         "INSERT OR IGNORE INTO system_settings (id, master_price_per_month, base_currency, display_currency, exchange_rate) VALUES (1, 500, 'GHS', 'GHS', 1.0)"
     )
     ensure_cashier_closings_schema(conn)
+    ensure_pos_sales_schema(conn)
 
 
 def ensure_inventory_schema_integrity(conn):
@@ -3799,6 +3800,178 @@ def ensure_cashier_closings_schema(conn):
     )
     cursor.execute(
         "CREATE INDEX IF NOT EXISTS idx_cashier_closings_company_date ON cashier_closings(company_key, closing_date, closed_at)"
+    )
+
+
+def ensure_pos_sales_schema(conn):
+    """
+    Ensure additive POS sale and return control tables exist.
+    This helper never rewrites original sales and only adds lookup/audit structures.
+    """
+    if conn is None:
+        raise RuntimeError("Database connection is required for POS sale schema integrity checks.")
+
+    cursor = conn.cursor()
+    cursor.execute("PRAGMA table_info(stock_movements)")
+    stock_movement_columns = {row[1] for row in cursor.fetchall()}
+    if stock_movement_columns and "reference" not in stock_movement_columns:
+        cursor.execute("ALTER TABLE stock_movements ADD COLUMN reference TEXT")
+
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS pos_sales (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            company_key TEXT NOT NULL,
+            branch_id TEXT DEFAULT '',
+            sale_reference TEXT NOT NULL,
+            receipt_number TEXT NOT NULL,
+            sale_date TEXT NOT NULL,
+            sale_datetime TEXT,
+            cashier TEXT,
+            payment_method TEXT,
+            customer_id INTEGER,
+            subtotal REAL DEFAULT 0,
+            discount_total REAL DEFAULT 0,
+            tax_total REAL DEFAULT 0,
+            grand_total REAL DEFAULT 0,
+            amount_tendered REAL DEFAULT 0,
+            change_due REAL DEFAULT 0,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (company_key) REFERENCES companies (key) ON DELETE CASCADE
+        )
+        """
+    )
+    cursor.execute("PRAGMA table_info(pos_sales)")
+    pos_sale_columns = {row[1] for row in cursor.fetchall()}
+    pos_sale_column_defs = {
+        "company_key": "TEXT",
+        "branch_id": "TEXT DEFAULT ''",
+        "sale_reference": "TEXT",
+        "receipt_number": "TEXT",
+        "sale_date": "TEXT",
+        "sale_datetime": "TEXT",
+        "cashier": "TEXT",
+        "payment_method": "TEXT",
+        "customer_id": "INTEGER",
+        "subtotal": "REAL DEFAULT 0",
+        "discount_total": "REAL DEFAULT 0",
+        "tax_total": "REAL DEFAULT 0",
+        "grand_total": "REAL DEFAULT 0",
+        "amount_tendered": "REAL DEFAULT 0",
+        "change_due": "REAL DEFAULT 0",
+        "created_at": "TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
+    }
+    for column_name, column_def in pos_sale_column_defs.items():
+        if column_name not in pos_sale_columns:
+            cursor.execute(f"ALTER TABLE pos_sales ADD COLUMN {column_name} {column_def}")
+    cursor.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_pos_sales_reference ON pos_sales(company_key, sale_reference)"
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_pos_sales_cashier_date ON pos_sales(company_key, sale_date, cashier)"
+    )
+
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS pos_sale_lines (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            pos_sale_id INTEGER NOT NULL,
+            company_key TEXT NOT NULL,
+            inventory_item_id INTEGER,
+            item_name TEXT NOT NULL,
+            item_code TEXT,
+            barcode TEXT,
+            qty_sold REAL DEFAULT 0,
+            unit_price REAL DEFAULT 0,
+            line_discount REAL DEFAULT 0,
+            tax_rate REAL DEFAULT 0,
+            line_total REAL DEFAULT 0,
+            cost_price REAL DEFAULT 0,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (pos_sale_id) REFERENCES pos_sales (id) ON DELETE CASCADE,
+            FOREIGN KEY (company_key) REFERENCES companies (key) ON DELETE CASCADE
+        )
+        """
+    )
+    cursor.execute("PRAGMA table_info(pos_sale_lines)")
+    pos_sale_line_columns = {row[1] for row in cursor.fetchall()}
+    pos_sale_line_defs = {
+        "pos_sale_id": "INTEGER",
+        "company_key": "TEXT",
+        "inventory_item_id": "INTEGER",
+        "item_name": "TEXT",
+        "item_code": "TEXT",
+        "barcode": "TEXT",
+        "qty_sold": "REAL DEFAULT 0",
+        "unit_price": "REAL DEFAULT 0",
+        "line_discount": "REAL DEFAULT 0",
+        "tax_rate": "REAL DEFAULT 0",
+        "line_total": "REAL DEFAULT 0",
+        "cost_price": "REAL DEFAULT 0",
+        "created_at": "TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
+    }
+    for column_name, column_def in pos_sale_line_defs.items():
+        if column_name not in pos_sale_line_columns:
+            cursor.execute(f"ALTER TABLE pos_sale_lines ADD COLUMN {column_name} {column_def}")
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_pos_sale_lines_sale ON pos_sale_lines(pos_sale_id)"
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_pos_sale_lines_item ON pos_sale_lines(company_key, inventory_item_id, barcode, item_code)"
+    )
+
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS pos_returns (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            company_key TEXT NOT NULL,
+            branch_id TEXT DEFAULT '',
+            original_sale_reference TEXT NOT NULL,
+            return_reference TEXT NOT NULL,
+            pos_sale_line_id INTEGER,
+            item_id INTEGER,
+            item_name TEXT NOT NULL,
+            qty_returned REAL DEFAULT 0,
+            unit_price REAL DEFAULT 0,
+            refund_amount REAL DEFAULT 0,
+            reason TEXT,
+            refund_method TEXT,
+            returned_by TEXT,
+            returned_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            posted_entry_id INTEGER,
+            status TEXT DEFAULT 'Posted',
+            FOREIGN KEY (company_key) REFERENCES companies (key) ON DELETE CASCADE
+        )
+        """
+    )
+    cursor.execute("PRAGMA table_info(pos_returns)")
+    pos_return_columns = {row[1] for row in cursor.fetchall()}
+    pos_return_defs = {
+        "company_key": "TEXT",
+        "branch_id": "TEXT DEFAULT ''",
+        "original_sale_reference": "TEXT",
+        "return_reference": "TEXT",
+        "pos_sale_line_id": "INTEGER",
+        "item_id": "INTEGER",
+        "item_name": "TEXT",
+        "qty_returned": "REAL DEFAULT 0",
+        "unit_price": "REAL DEFAULT 0",
+        "refund_amount": "REAL DEFAULT 0",
+        "reason": "TEXT",
+        "refund_method": "TEXT",
+        "returned_by": "TEXT",
+        "returned_at": "TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
+        "posted_entry_id": "INTEGER",
+        "status": "TEXT DEFAULT 'Posted'",
+    }
+    for column_name, column_def in pos_return_defs.items():
+        if column_name not in pos_return_columns:
+            cursor.execute(f"ALTER TABLE pos_returns ADD COLUMN {column_name} {column_def}")
+    cursor.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_pos_returns_reference_line ON pos_returns(company_key, return_reference, pos_sale_line_id)"
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_pos_returns_sale_line ON pos_returns(company_key, original_sale_reference, pos_sale_line_id)"
     )
 
 

@@ -102,6 +102,7 @@ ALL_ENTERPRISE_PERMISSIONS = {
     "close_cash_drawer",
     "view_cashier_closings",
     "manage_cashier_closings",
+    "process_pos_return",
 }
 ROLE_NAME_ALIASES = {
     "Gatekeeper": "Dev",
@@ -150,6 +151,7 @@ ENTERPRISE_ROLE_PERMISSIONS = {
         "close_cash_drawer",
         "view_cashier_closings",
         "manage_cashier_closings",
+        "process_pos_return",
     },
     "Sub-Admin": {
         "view_dashboard",
@@ -171,6 +173,7 @@ ENTERPRISE_ROLE_PERMISSIONS = {
         "close_cash_drawer",
         "view_cashier_closings",
         "manage_cashier_closings",
+        "process_pos_return",
     },
     "Bookkeeper": {
         "view_dashboard",
@@ -187,6 +190,7 @@ ENTERPRISE_ROLE_PERMISSIONS = {
         "close_cash_drawer",
         "view_cashier_closings",
         "manage_cashier_closings",
+        "process_pos_return",
     },
     "Branch_Bookkeeper": {
         "view_dashboard",
@@ -200,6 +204,7 @@ ENTERPRISE_ROLE_PERMISSIONS = {
         "view_reports",
         "use_ai_assistant",
         "close_cash_drawer",
+        "process_pos_return",
     },
     "Staff": {
         "view_dashboard",
@@ -223,6 +228,7 @@ from database import (
     ensure_company_trial_subscription,
     ensure_cashier_closings_schema,
     ensure_inventory_schema_integrity,
+    ensure_pos_sales_schema,
     force_backup_after_company_creation,
     get_firebase_service_account_info,
     get_connection,
@@ -3143,6 +3149,403 @@ def _get_pos_cashier_options(conn, company_key, branch_id=None):
     closing_rows = conn.execute(closing_query, tuple(closing_params)).fetchall()
     options = {str(row["cashier"]).strip() for row in voucher_rows + closing_rows if str(row["cashier"]).strip()}
     return sorted(options)
+
+
+def _persist_pos_sale(conn, company_key, branch_id, sale_reference, receipt_data, sale_cart, customer_id=None):
+    existing = conn.execute(
+        "SELECT id FROM pos_sales WHERE company_key = ? AND sale_reference = ? LIMIT 1",
+        (company_key, sale_reference),
+    ).fetchone()
+    if existing:
+        return int(existing["id"])
+
+    cursor = conn.execute(
+        """
+        INSERT INTO pos_sales (
+            company_key, branch_id, sale_reference, receipt_number, sale_date, sale_datetime,
+            cashier, payment_method, customer_id, subtotal, discount_total, tax_total,
+            grand_total, amount_tendered, change_due
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            company_key,
+            str(branch_id or ""),
+            sale_reference,
+            receipt_data.get("receipt_number") or sale_reference,
+            str(receipt_data.get("sale_date") or ""),
+            str(receipt_data.get("sale_datetime") or ""),
+            str(receipt_data.get("cashier") or ""),
+            str(receipt_data.get("payment_method") or ""),
+            int(customer_id) if customer_id else None,
+            float(receipt_data.get("subtotal") or 0.0),
+            float(receipt_data.get("discount_total") or 0.0),
+            float(receipt_data.get("tax_total") or 0.0),
+            float(receipt_data.get("grand_total") or 0.0),
+            float(receipt_data.get("amount_tendered") or 0.0),
+            float(receipt_data.get("change_due") or 0.0),
+        ),
+    )
+    pos_sale_id = int(cursor.lastrowid)
+    for sale_line in sale_cart:
+        _recalculate_pos_line(sale_line)
+        conn.execute(
+            """
+            INSERT INTO pos_sale_lines (
+                pos_sale_id, company_key, inventory_item_id, item_name, item_code, barcode,
+                qty_sold, unit_price, line_discount, tax_rate, line_total, cost_price
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                pos_sale_id,
+                company_key,
+                int(sale_line["inventory_item_id"]) if sale_line.get("inventory_item_id") is not None else None,
+                str(sale_line.get("name") or ""),
+                str(sale_line.get("item_code") or ""),
+                str(sale_line.get("barcode") or ""),
+                float(sale_line.get("qty") or 0.0),
+                float(sale_line.get("price") or 0.0),
+                float(sale_line.get("line_discount") or 0.0),
+                float(sale_line.get("tax_rate") or 0.0),
+                float(sale_line.get("line_total") or 0.0),
+                float(sale_line.get("cost_price") or 0.0),
+            ),
+        )
+    return pos_sale_id
+
+
+def _lookup_pos_sale_for_return(conn, company_key, sale_reference, branch_id=None):
+    normalized_reference = str(sale_reference or "").strip()
+    if not normalized_reference:
+        return None
+    params = [company_key, normalized_reference, normalized_reference]
+    query = """
+        SELECT *
+        FROM pos_sales
+        WHERE company_key = ?
+          AND (sale_reference = ? OR receipt_number = ?)
+    """
+    if branch_id:
+        query += " AND COALESCE(branch_id, '') = ?"
+        params.append(str(branch_id))
+    query += " ORDER BY id DESC LIMIT 1"
+    sale_row = conn.execute(query, tuple(params)).fetchone()
+    if sale_row:
+        sale_data = dict(sale_row)
+        return_rows = conn.execute(
+            """
+            SELECT
+                psl.*,
+                COALESCE(SUM(CASE WHEN COALESCE(pr.status, 'Posted') != 'Voided' THEN pr.qty_returned ELSE 0 END), 0) AS qty_returned
+            FROM pos_sale_lines psl
+            LEFT JOIN pos_returns pr
+              ON pr.company_key = psl.company_key
+             AND pr.pos_sale_line_id = psl.id
+            WHERE psl.pos_sale_id = ?
+            GROUP BY psl.id
+            ORDER BY psl.id ASC
+            """,
+            (int(sale_row["id"]),),
+        ).fetchall()
+        items = []
+        for row in return_rows:
+            sold_qty = float(row["qty_sold"] or 0.0)
+            already_returned = float(row["qty_returned"] or 0.0)
+            refundable_qty = max(sold_qty - already_returned, 0.0)
+            items.append(
+                {
+                    "pos_sale_line_id": int(row["id"]),
+                    "item_id": int(row["inventory_item_id"]) if row["inventory_item_id"] is not None else None,
+                    "item_name": row["item_name"],
+                    "item_code": row["item_code"] or "",
+                    "barcode": row["barcode"] or "",
+                    "qty_sold": sold_qty,
+                    "qty_returned": already_returned,
+                    "refundable_qty": refundable_qty,
+                    "unit_price": float(row["unit_price"] or 0.0),
+                    "line_discount": float(row["line_discount"] or 0.0),
+                    "tax_rate": float(row["tax_rate"] or 0.0),
+                    "cost_price": float(row["cost_price"] or 0.0),
+                }
+            )
+        sale_data["items"] = items
+        sale_data["line_items_available"] = True
+        return sale_data
+
+    voucher_row = conn.execute(
+        """
+        SELECT id, company_key, branch_id, reference_no, date, created_by, payment_method, credit
+        FROM vouchers
+        WHERE company_key = ?
+          AND v_type = 'Sales'
+          AND (reference_no = ? OR narration LIKE ?)
+        ORDER BY id DESC
+        LIMIT 1
+        """,
+        (company_key, normalized_reference, f"%{normalized_reference}%"),
+    ).fetchone()
+    if not voucher_row:
+        return None
+    return {
+        "id": None,
+        "company_key": voucher_row["company_key"],
+        "branch_id": voucher_row["branch_id"] or "",
+        "sale_reference": voucher_row["reference_no"] or normalized_reference,
+        "receipt_number": voucher_row["reference_no"] or normalized_reference,
+        "sale_date": voucher_row["date"],
+        "sale_datetime": voucher_row["date"],
+        "cashier": voucher_row["created_by"] or "",
+        "payment_method": voucher_row["payment_method"] or "",
+        "grand_total": float(voucher_row["credit"] or 0.0),
+        "subtotal": float(voucher_row["credit"] or 0.0),
+        "discount_total": 0.0,
+        "tax_total": 0.0,
+        "items": [],
+        "line_items_available": False,
+    }
+
+
+def _generate_pos_return_reference():
+    return f"RET-{datetime.now().strftime('%Y%m%d%H%M%S')}-{uuid.uuid4().hex[:6].upper()}"
+
+
+def _payment_account_for_refund_method(refund_method):
+    mapping = {
+        "Cash": ("Cash", "Asset"),
+        "Mobile Money": ("Mobile Money", "Asset"),
+        "Card": ("Bank", "Asset"),
+        "Bank Transfer": ("Bank", "Asset"),
+        "Store Credit": ("Customer Store Credit", "Liability"),
+    }
+    return mapping.get(str(refund_method or "").strip(), ("Cash", "Asset"))
+
+
+def _process_pos_return(
+    conn,
+    *,
+    company_key,
+    branch_id,
+    role,
+    original_sale,
+    return_items,
+    refund_method,
+    reason,
+    return_reference,
+):
+    if not return_items:
+        raise ValueError("Select at least one item to return.")
+    if not reason:
+        raise ValueError("Return reason is required.")
+
+    sale_reference = str(original_sale.get("sale_reference") or original_sale.get("receipt_number") or "").strip()
+    if not sale_reference:
+        raise ValueError("Original sale reference is required.")
+
+    refund_method = str(refund_method or "").strip()
+    if refund_method not in {"Cash", "Mobile Money", "Card", "Bank Transfer", "Store Credit"}:
+        raise ValueError("Choose a valid refund method.")
+
+    if conn.execute(
+        "SELECT id FROM pos_returns WHERE company_key = ? AND return_reference = ? LIMIT 1",
+        (company_key, return_reference),
+    ).fetchone():
+        raise ValueError("This return reference has already been processed.")
+
+    total_refund_amount = 0.0
+    total_inventory_cost = 0.0
+    recorded_rows = []
+    refund_customer_id = original_sale.get("customer_id")
+    refund_account_name, refund_account_type = _payment_account_for_refund_method(refund_method)
+    refund_account_id = engine_get_or_create_account(conn, refund_account_name, refund_account_type)
+    sales_returns_account_id = engine_get_or_create_account(conn, "Sales Returns and Refunds", "Expense")
+    inventory_account_id = engine_get_or_create_account(conn, "Inventory", "Asset")
+    cogs_account_id = engine_get_or_create_account(conn, "Cost of Goods Sold", "Expense")
+
+    for selected_item in return_items:
+        pos_sale_line_id = int(selected_item["pos_sale_line_id"])
+        qty_requested = float(selected_item["qty_returned"])
+        if qty_requested <= 0:
+            raise ValueError("Return quantity must be greater than zero.")
+        line_row = conn.execute(
+            """
+            SELECT *
+            FROM pos_sale_lines
+            WHERE id = ? AND company_key = ?
+            LIMIT 1
+            """,
+            (pos_sale_line_id, company_key),
+        ).fetchone()
+        if not line_row:
+            raise ValueError("One of the selected sale lines could not be found.")
+        already_returned_row = conn.execute(
+            """
+            SELECT COALESCE(SUM(qty_returned), 0) AS qty_returned
+            FROM pos_returns
+            WHERE company_key = ?
+              AND pos_sale_line_id = ?
+              AND COALESCE(status, 'Posted') != 'Voided'
+            """,
+            (company_key, pos_sale_line_id),
+        ).fetchone()
+        sold_qty = float(line_row["qty_sold"] or 0.0)
+        already_returned = float(already_returned_row["qty_returned"] or 0.0) if already_returned_row else 0.0
+        refundable_qty = max(sold_qty - already_returned, 0.0)
+        if qty_requested > refundable_qty:
+            raise ValueError(f"Return quantity for {line_row['item_name']} exceeds refundable quantity.")
+
+        unit_price = float(line_row["unit_price"] or 0.0)
+        cost_price = float(line_row["cost_price"] or 0.0)
+        refund_amount = round(qty_requested * unit_price, 2)
+        inventory_cost = round(qty_requested * cost_price, 2)
+        inventory_item_id = int(line_row["inventory_item_id"]) if line_row["inventory_item_id"] is not None else None
+
+        if inventory_item_id is not None:
+            current_item = conn.execute(
+                "SELECT qty, item_name FROM inventory WHERE id = ? AND company_key = ? LIMIT 1",
+                (inventory_item_id, company_key),
+            ).fetchone()
+            if not current_item:
+                raise ValueError(f"Inventory item for {line_row['item_name']} could not be found.")
+            previous_qty = float(current_item["qty"] or 0.0)
+            new_qty = previous_qty + qty_requested
+            conn.execute(
+                "UPDATE inventory SET qty = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND company_key = ?",
+                (new_qty, inventory_item_id, company_key),
+            )
+            conn.execute(
+                """
+                INSERT INTO stock_movements (
+                    company_key, branch_id, inventory_item_id, item_name, movement_type,
+                    quantity, reason, previous_qty, new_qty, created_by, created_at, reference
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?)
+                """,
+                (
+                    company_key,
+                    branch_id,
+                    inventory_item_id,
+                    line_row["item_name"],
+                    "Return / Refund Restock",
+                    qty_requested,
+                    reason,
+                    previous_qty,
+                    new_qty,
+                    role,
+                    return_reference,
+                ),
+            )
+
+        cursor = conn.execute(
+            """
+            INSERT INTO pos_returns (
+                company_key, branch_id, original_sale_reference, return_reference,
+                pos_sale_line_id, item_id, item_name, qty_returned, unit_price,
+                refund_amount, reason, refund_method, returned_by, returned_at, status
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, 'Posted')
+            """,
+            (
+                company_key,
+                str(branch_id or ""),
+                sale_reference,
+                return_reference,
+                pos_sale_line_id,
+                inventory_item_id,
+                line_row["item_name"],
+                qty_requested,
+                unit_price,
+                refund_amount,
+                reason,
+                refund_method,
+                role,
+            ),
+        )
+        pos_return_id = int(cursor.lastrowid)
+        line_description = f"POS return for {line_row['item_name']} from {sale_reference}"
+        accounting_lines = [
+            {"account_id": sales_returns_account_id, "debit": refund_amount, "credit": 0},
+            {"account_id": refund_account_id, "debit": 0, "credit": refund_amount},
+        ]
+        if inventory_cost > 0:
+            accounting_lines.extend(
+                [
+                    {"account_id": inventory_account_id, "debit": inventory_cost, "credit": 0},
+                    {"account_id": cogs_account_id, "debit": 0, "credit": inventory_cost},
+                ]
+            )
+
+        posted_entry_id = post_journal_entry(
+            company_key=company_key,
+            date=datetime.now().date(),
+            description=line_description,
+            reference=return_reference,
+            lines=accounting_lines,
+            created_by=role,
+            branch_id=branch_id,
+            customer_id=int(refund_customer_id) if refund_customer_id else None,
+            source_module="POS Return",
+            source_table="pos_returns",
+            source_type="pos_return_refund",
+            source_id=pos_return_id,
+            approval_status="Posted",
+            user_role=role,
+            conn=conn,
+        )
+        conn.execute(
+            "UPDATE pos_returns SET posted_entry_id = ? WHERE id = ?",
+            (int(posted_entry_id), pos_return_id),
+        )
+        if refund_method == "Store Credit" and refund_customer_id:
+            _record_customer_ledger_transaction(
+                conn,
+                company_key,
+                int(refund_customer_id),
+                "Credit",
+                refund_amount,
+                f"Store credit issued for POS return {return_reference}",
+                role,
+                branch_id=branch_id,
+                reference=return_reference,
+                transaction_date=datetime.now().date(),
+                post_to_gl=False,
+                source_module="POS Return",
+            )
+
+        total_refund_amount += refund_amount
+        total_inventory_cost += inventory_cost
+        recorded_rows.append(
+            {
+                "item_name": line_row["item_name"],
+                "qty_returned": qty_requested,
+                "refund_amount": refund_amount,
+                "posted_entry_id": int(posted_entry_id),
+            }
+        )
+
+    log_audit_action(
+        conn,
+        company_key,
+        role,
+        "POS Return Processed",
+        "POS Return",
+        details=f"return_reference={return_reference} original_sale_reference={sale_reference} refund_total={total_refund_amount:.2f}",
+        branch_id=branch_id,
+        action_type="return",
+        document_ref=return_reference,
+    )
+    log_system_event(
+        "INFO",
+        "POS Return",
+        f"Processed POS return company_key={company_key} branch_id={branch_id or ''} original_sale_reference={sale_reference} return_reference={return_reference} refund_total={total_refund_amount:.2f} user={role}",
+    )
+    return {
+        "return_reference": return_reference,
+        "original_sale_reference": sale_reference,
+        "refund_total": round(total_refund_amount, 2),
+        "inventory_cost_total": round(total_inventory_cost, 2),
+        "items": recorded_rows,
+    }
 
 
 def _build_payslip_html(payroll_row):
@@ -6481,6 +6884,7 @@ def show_pos(company_key, company_name, role):
     pos_pending_scan_key = f"pos_pending_scan_{company_key}"
     pos_product_search_key = f"pos_product_search_{company_key}"
     pos_product_select_key = f"pos_product_select_{company_key}"
+    pos_return_lookup_result_key = f"pos_return_lookup_result_{company_key}"
     cart_key = f"pos_cart_{company_key}"
     if role == "Demo":
         _demo_notice()
@@ -6503,6 +6907,7 @@ def show_pos(company_key, company_name, role):
     try:
         conn = get_connection()
         ensure_cashier_closings_schema(conn)
+        ensure_pos_sales_schema(conn)
         company_row = conn.execute("SELECT name, barcode_input_source FROM companies WHERE key = ?", (company_key,)).fetchone()
         active_branch_id = st.session_state.get("active_branch_id")
         branch_row = None
@@ -6887,6 +7292,7 @@ def show_pos(company_key, company_name, role):
 
             try:
                 conn = get_connection()
+                ensure_pos_sales_schema(conn)
                 line_items = []
                 total = 0.0
                 cost_of_goods_sold = 0.0
@@ -7012,7 +7418,6 @@ def show_pos(company_key, company_name, role):
                     ),
                     branch_id=branch_id,
                 )
-                conn.close()
                 if print_receipt:
                     sale_datetime = f"{sale_date.isoformat()} {datetime.now().strftime('%H:%M:%S')}"
                     receipt_data = {
@@ -7020,6 +7425,8 @@ def show_pos(company_key, company_name, role):
                         "company_name": company_label,
                         "branch_name": branch_label,
                         "receipt_number": sale_reference,
+                        "sale_reference": sale_reference,
+                        "sale_date": sale_date.isoformat(),
                         "sale_datetime": sale_datetime,
                         "cashier": role,
                         "payment_method": payment_method,
@@ -7042,10 +7449,21 @@ def show_pos(company_key, company_name, role):
                             for sale_line in sale_cart
                         ],
                     }
+                    _persist_pos_sale(
+                        conn,
+                        company_key,
+                        branch_id,
+                        sale_reference,
+                        receipt_data,
+                        sale_cart,
+                        customer_id=selected_credit_customer_id if payment_method == "On Credit" else None,
+                    )
+                    conn.commit()
                     st.session_state["last_receipt_data"] = receipt_data
                     st.session_state[last_receipt_data_key] = receipt_data
                     st.session_state[receipt_key] = _build_receipt(receipt_data)
                     st.session_state[receipt_html_key] = _build_receipt_html(receipt_data)
+                conn.close()
                 st.session_state[checkout_complete_key] = True
                 st.session_state[cart_key] = []
                 st.session_state[pos_success_key] = True
@@ -7091,6 +7509,163 @@ def show_pos(company_key, company_name, role):
             st.dataframe(format_currency_dataframe(sales_df), use_container_width=True)
             if role in ("Master Admin", "Bookkeeper", "Branch_Bookkeeper", "Sub-Admin"):
                 st.caption("Legacy voucher-based POS void is disabled while Phase 2 journal posting is the operational source of truth.")
+
+        if user_has_permission(role, "process_pos_return"):
+            st.subheader("Returns / Refunds")
+            lookup_col1, lookup_col2 = st.columns([3, 1])
+            return_lookup_reference = lookup_col1.text_input(
+                "Receipt Number / Sale Reference",
+                key=f"pos_return_lookup_reference_{company_key}",
+                placeholder="Enter receipt number or sale reference",
+            ).strip()
+            if lookup_col2.button("Lookup Receipt", key=f"pos_return_lookup_btn_{company_key}", use_container_width=True):
+                lookup_conn = None
+                try:
+                    lookup_conn = get_connection()
+                    ensure_pos_sales_schema(lookup_conn)
+                    lookup_result = _lookup_pos_sale_for_return(
+                        lookup_conn,
+                        company_key,
+                        return_lookup_reference,
+                        branch_id=active_branch_id,
+                    )
+                    if not lookup_result:
+                        st.session_state.pop(pos_return_lookup_result_key, None)
+                        st.warning("Receipt or sale reference was not found.")
+                    else:
+                        st.session_state[pos_return_lookup_result_key] = lookup_result
+                        st.success("Receipt lookup completed.")
+                except Exception as exc:
+                    st.error(build_user_safe_error(exc, role))
+                finally:
+                    if lookup_conn:
+                        lookup_conn.close()
+
+            lookup_result = st.session_state.get(pos_return_lookup_result_key)
+            if lookup_result:
+                st.caption(
+                    "Sale Date: {date} | Cashier: {cashier} | Payment Method: {payment} | Total: {total}".format(
+                        date=lookup_result.get("sale_datetime") or lookup_result.get("sale_date") or "N/A",
+                        cashier=lookup_result.get("cashier") or "N/A",
+                        payment=lookup_result.get("payment_method") or "N/A",
+                        total=format_currency(float(lookup_result.get("grand_total") or 0.0)),
+                    )
+                )
+                if lookup_result.get("line_items_available"):
+                    st.markdown("**Sold Items**")
+                    item_header = st.columns([3, 1, 1, 1, 1, 2])
+                    item_header[0].markdown("**Item**")
+                    item_header[1].markdown("**Qty Sold**")
+                    item_header[2].markdown("**Returned**")
+                    item_header[3].markdown("**Refundable**")
+                    item_header[4].markdown("**Return Qty**")
+                    item_header[5].markdown("**Select**")
+
+                    refund_preview_total = 0.0
+                    for item in lookup_result.get("items", []):
+                        row_cols = st.columns([3, 1, 1, 1, 1, 2])
+                        identifier = item.get("barcode") or item.get("item_code") or "Manual"
+                        row_cols[0].write(f"{item['item_name']} ({identifier})")
+                        row_cols[1].write(f"{float(item['qty_sold']):,.2f}")
+                        row_cols[2].write(f"{float(item['qty_returned']):,.2f}")
+                        row_cols[3].write(f"{float(item['refundable_qty']):,.2f}")
+                        max_refundable = float(item.get("refundable_qty") or 0.0)
+                        qty_key = f"pos_return_qty_{company_key}_{item['pos_sale_line_id']}"
+                        select_key = f"pos_return_select_{company_key}_{item['pos_sale_line_id']}"
+                        selected_for_return = row_cols[5].checkbox(
+                            "Return",
+                            key=select_key,
+                            value=False,
+                            label_visibility="collapsed",
+                            disabled=max_refundable <= 0,
+                        )
+                        requested_qty = row_cols[4].number_input(
+                            "Return Qty",
+                            min_value=0.0,
+                            max_value=max_refundable,
+                            value=0.0,
+                            step=1.0,
+                            key=qty_key,
+                            label_visibility="collapsed",
+                            disabled=max_refundable <= 0,
+                        )
+                        if selected_for_return and requested_qty > 0:
+                            refund_preview_total += float(requested_qty or 0.0) * float(item.get("unit_price") or 0.0)
+
+                    refund_method = st.selectbox(
+                        "Refund Method",
+                        ["Cash", "Mobile Money", "Card", "Bank Transfer", "Store Credit"],
+                        key=f"pos_refund_method_{company_key}",
+                    )
+                    return_reason = st.text_area(
+                        "Return Reason",
+                        key=f"pos_return_reason_{company_key}",
+                        placeholder="Reason for the return/refund",
+                    ).strip()
+                    st.caption(f"Refund Total: {format_currency(refund_preview_total)}")
+                    return_confirmed = st.checkbox(
+                        "I confirm this return/refund is correct.",
+                        key=f"pos_return_confirm_{company_key}",
+                    )
+                    if st.button("Process Return / Refund", key=f"pos_process_return_{company_key}", use_container_width=True):
+                        return_conn = None
+                        try:
+                            if not require_permission(
+                                role,
+                                "process_pos_return",
+                                action_label="process POS return",
+                                company_key=company_key,
+                                branch_id=active_branch_id,
+                            ):
+                                st.stop()
+                            if not return_confirmed:
+                                st.warning("Confirm the return/refund before processing it.")
+                                st.stop()
+                            selected_returns = []
+                            for item in lookup_result.get("items", []):
+                                selected_flag = bool(st.session_state.get(f"pos_return_select_{company_key}_{item['pos_sale_line_id']}", False))
+                                selected_qty = float(st.session_state.get(f"pos_return_qty_{company_key}_{item['pos_sale_line_id']}", 0.0) or 0.0)
+                                if selected_flag and selected_qty > 0:
+                                    selected_returns.append(
+                                        {
+                                            "pos_sale_line_id": item["pos_sale_line_id"],
+                                            "qty_returned": selected_qty,
+                                        }
+                                    )
+                            if not selected_returns:
+                                st.warning("Select at least one sale line and return quantity.")
+                                st.stop()
+                            if not return_reason:
+                                st.warning("Return reason is required.")
+                                st.stop()
+                            return_conn = get_connection()
+                            ensure_pos_sales_schema(return_conn)
+                            return_result = _process_pos_return(
+                                return_conn,
+                                company_key=company_key,
+                                branch_id=active_branch_id,
+                                role=role,
+                                original_sale=lookup_result,
+                                return_items=selected_returns,
+                                refund_method=refund_method,
+                                reason=return_reason,
+                                return_reference=_generate_pos_return_reference(),
+                            )
+                            return_conn.commit()
+                            st.success(
+                                f"Return processed successfully. Return Reference: {return_result['return_reference']} | Refund Total: {format_currency(return_result['refund_total'])}"
+                            )
+                            st.session_state.pop(pos_return_lookup_result_key, None)
+                            st.rerun()
+                        except Exception as exc:
+                            if return_conn:
+                                return_conn.rollback()
+                            st.error(build_user_safe_error(exc, role))
+                        finally:
+                            if return_conn:
+                                return_conn.close()
+                else:
+                    st.info("Receipt found, but line-item return details are unavailable for this older sale record.")
 
         st.subheader("Daily Sales Summary")
         cashier_identity = _get_pos_cashier_identity(role)
