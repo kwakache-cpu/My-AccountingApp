@@ -4615,7 +4615,9 @@ def _add_item_to_pos_cart(company_key, item_row):
 
     new_line = {
         "inventory_item_id": item_id,
+        "item_id": item_id,
         "name": item_row["item_name"],
+        "item_name": item_row["item_name"],
         "item_code": item_code or "",
         "barcode": item_row["barcode"] or "",
         "price": float(item_row["price"] or 0.0),
@@ -4623,6 +4625,7 @@ def _add_item_to_pos_cart(company_key, item_row):
         "tax_rate": float(tax_rate or 0.0),
         "available_qty": float(item_row["qty"] or 0.0),
         "qty": 1,
+        "is_manual": False,
         "line_discount_type": "amount",
         "line_discount_value": 0.0,
         "line_discount": 0.0,
@@ -7096,7 +7099,13 @@ def show_pos(company_key, company_name, role):
                     conn.close()
             barcode_input_source = selected_barcode_source
 
-        st.caption(f"Barcode input mode: {barcode_input_source}")
+        item_mode = st.radio(
+            "Item Entry Mode",
+            ["From Stock", "Manual Entry"],
+            horizontal=True,
+            key=f"pos_item_mode_{company_key}",
+        )
+
         scanner_cart_summary = _get_pos_cart_summary(company_key)
         scan_summary_col1, scan_summary_col2, scan_summary_col3 = st.columns([1, 1, 1])
         scan_summary_col1.metric("Cart Items", scanner_cart_summary["item_count"])
@@ -7107,201 +7116,201 @@ def show_pos(company_key, company_name, role):
             _trigger_scan_feedback(pos_message_key, "Cart cleared.", "info")
             st.rerun()
 
-        with st.form(key=f"pos_form_{company_key}", clear_on_submit=True):
-            st.text_input(
-                "Scan Barcode",
-                key=pos_scan_input_key,
-                placeholder="Scan barcode and press Enter",
-            )
-            _focus_text_input("Scan Barcode")
-            if barcode_input_source == "Camera Scanner":
-                _render_camera_scanner(f"pos_{company_key}", pos_pending_scan_key)
-            submitted = st.form_submit_button("Scan Barcode")
-            if submitted:
-                pending_pos_barcode = str(st.session_state.get(pos_scan_input_key, "") or "").strip()
-                if pending_pos_barcode:
-                    conn = None
-                    try:
-                        conn = get_connection()
-                        matched_item, lookup_source, match_scope = _lookup_inventory_for_pos(conn, company_key, pending_pos_barcode)
-                        if matched_item and match_scope == "in_company" and float(matched_item["qty"] or 0) > 0:
-                            st.session_state[checkout_complete_key] = False
-                            st.session_state.pop(receipt_key, None)
-                            st.session_state.pop(receipt_html_key, None)
-                            cart_line = _add_item_to_pos_cart(company_key, matched_item)
-                            logger.info(
-                                "POS scanner input matched item '%s' via %s for company %s",
-                                matched_item["item_name"],
-                                lookup_source or "unknown",
-                                company_key,
-                            )
-                            _trigger_scan_feedback(
-                                pos_message_key,
-                                "{item_name} added at {price}. Qty in cart: {qty}.".format(
-                                    item_name=matched_item["item_name"],
-                                    price=format_currency(float(cart_line.get("price") or 0.0)),
-                                    qty=int(cart_line.get("qty") or 0),
-                                ),
-                                "success",
-                                pos_scan_beep_key,
-                            )
-                        elif matched_item and match_scope == "in_company":
-                            logger.info(
-                                "POS scanner found item '%s' with zero stock for company %s",
-                                matched_item["item_name"],
-                                company_key,
-                            )
-                            _trigger_scan_feedback(
-                                pos_message_key,
-                                "Product found but stock is zero. Please add stock before sale.",
-                                "warning",
-                            )
-                        elif matched_item and match_scope == "other_company":
-                            logger.info(
-                                "POS scanner found matching item under another company context while active company is %s",
-                                company_key,
-                            )
-                            _trigger_scan_feedback(
-                                pos_message_key,
-                                "Product exists under another company context and is unavailable in this POS.",
-                                "warning",
-                            )
-                        else:
-                            logger.info(
-                                "POS scanner input '%s' did not match any product for active company %s",
-                                pending_pos_barcode,
-                                company_key,
-                            )
-                            _trigger_scan_feedback(
-                                pos_message_key,
-                                "Product not found",
-                                "warning",
-                            )
-                    except Exception as exc:
-                        st.error(build_user_safe_error(exc, role))
-                    finally:
-                        if conn:
-                            conn.close()
-                        st.rerun()
-
-        st.subheader("Manual Item Entry")
-        manual_item_name = st.text_input("New Item Name", key=f"manual_pos_item_{company_key}")
-        manual_price = st.number_input(f"Manual Price ({st.session_state.currency_symbol})", min_value=0.0, value=0.0, key=f"manual_pos_price_{company_key}")
-        manual_qty = st.number_input("Quantity", min_value=1, value=1, key=f"manual_pos_qty_{company_key}")
-        if st.button("Add Manual Item", key=f"pos_add_manual_{company_key}"):
-            if manual_item_name and float(manual_price) > 0:
-                st.session_state[checkout_complete_key] = False
-                st.session_state.pop(receipt_key, None)
-                st.session_state.pop(receipt_html_key, None)
-                cart = st.session_state.setdefault(cart_key, [])
-                cart.append(
-                    {
-                        "inventory_item_id": None,
-                        "name": manual_item_name.strip(),
-                        "item_code": "",
-                        "barcode": "",
-                        "price": float(manual_price),
-                        "cost_price": 0.0,
-                        "tax_rate": 0.0,
-                        "available_qty": None,
-                        "qty": int(manual_qty),
-                        "line_discount_type": "amount",
-                        "line_discount_value": 0.0,
-                        "line_discount": 0.0,
-                        "line_total": int(manual_qty) * float(manual_price),
-                    }
+        if item_mode == "From Stock":
+            st.caption(f"Barcode input mode: {barcode_input_source}")
+            with st.form(key=f"pos_form_{company_key}", clear_on_submit=True):
+                st.text_input(
+                    "Scan Barcode",
+                    key=pos_scan_input_key,
+                    placeholder="Scan barcode and press Enter",
                 )
-                _trigger_scan_feedback(pos_message_key, f"Added manual item {manual_item_name.strip()} to the cart.")
-                st.rerun()
-            else:
-                st.warning("Enter a valid manual item and price before adding it.")
-
-        with st.container():
-            item_mode = st.radio(
-                "Item Entry Mode",
-                ["From Stock", "Manual Entry"],
-                horizontal=True,
-                key=f"pos_item_mode_{company_key}",
-            )
-            if item_mode == "From Stock":
-                if items_df.empty:
-                    st.info("No stock available for sale. Switch to Manual Entry to continue.")
-                else:
-                    product_search_term = st.text_input(
-                        "Search Product",
-                        key=pos_product_search_key,
-                        placeholder="Search by name, barcode, or item code",
-                    ).strip()
-                    manual_search_options = []
-                    if product_search_term:
+                _focus_text_input("Scan Barcode")
+                if barcode_input_source == "Camera Scanner":
+                    _render_camera_scanner(f"pos_{company_key}", pos_pending_scan_key)
+                submitted = st.form_submit_button("Scan Barcode")
+                if submitted:
+                    pending_pos_barcode = str(st.session_state.get(pos_scan_input_key, "") or "").strip()
+                    if pending_pos_barcode:
                         conn = None
                         try:
                             conn = get_connection()
-                            manual_search_options = _search_inventory_for_pos(conn, company_key, product_search_term)
+                            matched_item, lookup_source, match_scope = _lookup_inventory_for_pos(conn, company_key, pending_pos_barcode)
+                            if matched_item and match_scope == "in_company" and float(matched_item["qty"] or 0) > 0:
+                                st.session_state[checkout_complete_key] = False
+                                st.session_state.pop(receipt_key, None)
+                                st.session_state.pop(receipt_html_key, None)
+                                cart_line = _add_item_to_pos_cart(company_key, matched_item)
+                                logger.info(
+                                    "POS scanner input matched item '%s' via %s for company %s",
+                                    matched_item["item_name"],
+                                    lookup_source or "unknown",
+                                    company_key,
+                                )
+                                _trigger_scan_feedback(
+                                    pos_message_key,
+                                    "{item_name} added at {price}. Qty in cart: {qty}.".format(
+                                        item_name=matched_item["item_name"],
+                                        price=format_currency(float(cart_line.get("price") or 0.0)),
+                                        qty=int(cart_line.get("qty") or 0),
+                                    ),
+                                    "success",
+                                    pos_scan_beep_key,
+                                )
+                            elif matched_item and match_scope == "in_company":
+                                logger.info(
+                                    "POS scanner found item '%s' with zero stock for company %s",
+                                    matched_item["item_name"],
+                                    company_key,
+                                )
+                                _trigger_scan_feedback(
+                                    pos_message_key,
+                                    "Product found but stock is zero. Please add stock before sale.",
+                                    "warning",
+                                )
+                            elif matched_item and match_scope == "other_company":
+                                logger.info(
+                                    "POS scanner found matching item under another company context while active company is %s",
+                                    company_key,
+                                )
+                                _trigger_scan_feedback(
+                                    pos_message_key,
+                                    "Product exists under another company context and is unavailable in this POS.",
+                                    "warning",
+                                )
+                            else:
+                                logger.info(
+                                    "POS scanner input '%s' did not match any product for active company %s",
+                                    pending_pos_barcode,
+                                    company_key,
+                                )
+                                _trigger_scan_feedback(
+                                    pos_message_key,
+                                    "Product not found",
+                                    "warning",
+                                )
                         except Exception as exc:
-                            st.warning(build_user_safe_error(exc, role))
+                            st.error(build_user_safe_error(exc, role))
                         finally:
                             if conn:
                                 conn.close()
-                        if not manual_search_options:
-                            st.info("No matching stock items found for that search.")
-                    if manual_search_options:
-                        manual_option_labels = [
-                            "{name} | Code {item_code} | Barcode {barcode} | Qty {qty:,.2f}".format(
-                                name=row["item_name"],
-                                item_code=row["item_code"] or "N/A",
-                                barcode=row["barcode"] or "N/A",
-                                qty=float(row["qty"] or 0.0),
-                            )
-                            for row in manual_search_options
-                        ]
-                        selected_search_label = st.selectbox(
-                            "Manual Product Search Results",
-                            manual_option_labels,
-                            key=pos_product_select_key,
-                        )
-                        if st.button("Add Search Result", key=f"pos_add_search_result_{company_key}"):
-                            selected_search_row = manual_search_options[manual_option_labels.index(selected_search_label)]
-                            st.session_state[checkout_complete_key] = False
-                            st.session_state.pop(receipt_key, None)
-                            st.session_state.pop(receipt_html_key, None)
-                            _add_item_to_pos_cart(company_key, selected_search_row)
-                            logger.info(
-                                "POS manual search added item '%s' for company %s",
-                                selected_search_row["item_name"],
-                                company_key,
-                            )
-                            _trigger_scan_feedback(
-                                pos_message_key,
-                                f"Added {selected_search_row['item_name']} to the active sale.",
-                                "success",
-                            )
                             st.rerun()
-                    selected_item = st.selectbox("Select Item", items_df["Item Name"].tolist(), key=f"pos_item_{company_key}")
-                    qty_to_sell = st.number_input("Quantity", min_value=1, value=1, key=f"pos_qty_{company_key}")
-                    if st.button("Add Selected Item", key=f"pos_add_selected_{company_key}"):
+
+            if items_df.empty:
+                st.info("No stock available for sale. Switch to Manual Entry to continue.")
+            else:
+                product_search_term = st.text_input(
+                    "Search Product",
+                    key=pos_product_search_key,
+                    placeholder="Search by name, barcode, or item code",
+                ).strip()
+                manual_search_options = []
+                if product_search_term:
+                    conn = None
+                    try:
+                        conn = get_connection()
+                        manual_search_options = _search_inventory_for_pos(conn, company_key, product_search_term)
+                    except Exception as exc:
+                        st.warning(build_user_safe_error(exc, role))
+                    finally:
+                        if conn:
+                            conn.close()
+                    if not manual_search_options:
+                        st.info("No matching stock items found for that search.")
+                if manual_search_options:
+                    manual_option_labels = [
+                        "{name} | Code {item_code} | Barcode {barcode} | Qty {qty:,.2f}".format(
+                            name=row["item_name"],
+                            item_code=row["item_code"] or "N/A",
+                            barcode=row["barcode"] or "N/A",
+                            qty=float(row["qty"] or 0.0),
+                        )
+                        for row in manual_search_options
+                    ]
+                    selected_search_label = st.selectbox(
+                        "Manual Product Search Results",
+                        manual_option_labels,
+                        key=pos_product_select_key,
+                    )
+                    if st.button("Add Search Result", key=f"pos_add_search_result_{company_key}"):
+                        selected_search_row = manual_search_options[manual_option_labels.index(selected_search_label)]
                         st.session_state[checkout_complete_key] = False
                         st.session_state.pop(receipt_key, None)
                         st.session_state.pop(receipt_html_key, None)
-                        item_row = items_df.loc[items_df["Item Name"] == selected_item].iloc[0]
-                        for _ in range(int(qty_to_sell)):
-                            _add_item_to_pos_cart(
-                                company_key,
-                                {
-                                    "id": int(item_row["ID"]),
-                                    "item_name": item_row["Item Name"],
-                                    "item_code": item_row["Item Code"],
-                                    "barcode": item_row["Barcode"],
-                                    "price": float(item_row["Price"] or 0.0),
-                                    "cost_price": float(item_row["Cost Price"] or 0.0),
-                                    "tax_rate": float(item_row["Tax Rate"] or 0.0),
-                                    "qty": float(item_row["Qty"] or 0.0),
-                                },
-                            )
-                        _trigger_scan_feedback(pos_message_key, f"Added {selected_item} x{int(qty_to_sell)} to the cart.")
+                        _add_item_to_pos_cart(company_key, selected_search_row)
+                        logger.info(
+                            "POS manual search added item '%s' for company %s",
+                            selected_search_row["item_name"],
+                            company_key,
+                        )
+                        _trigger_scan_feedback(
+                            pos_message_key,
+                            f"Added {selected_search_row['item_name']} to the active sale.",
+                            "success",
+                        )
                         st.rerun()
-            else:
-                st.info("No stock available for sale. Switch to Manual Entry to continue.")
+                selected_item = st.selectbox("Select Item", items_df["Item Name"].tolist(), key=f"pos_item_{company_key}")
+                qty_to_sell = st.number_input("Quantity", min_value=1, value=1, key=f"pos_qty_{company_key}")
+                if st.button("Add Selected Item", key=f"pos_add_selected_{company_key}"):
+                    st.session_state[checkout_complete_key] = False
+                    st.session_state.pop(receipt_key, None)
+                    st.session_state.pop(receipt_html_key, None)
+                    item_row = items_df.loc[items_df["Item Name"] == selected_item].iloc[0]
+                    for _ in range(int(qty_to_sell)):
+                        _add_item_to_pos_cart(
+                            company_key,
+                            {
+                                "id": int(item_row["ID"]),
+                                "item_name": item_row["Item Name"],
+                                "item_code": item_row["Item Code"],
+                                "barcode": item_row["Barcode"],
+                                "price": float(item_row["Price"] or 0.0),
+                                "cost_price": float(item_row["Cost Price"] or 0.0),
+                                "tax_rate": float(item_row["Tax Rate"] or 0.0),
+                                "qty": float(item_row["Qty"] or 0.0),
+                            },
+                        )
+                    _trigger_scan_feedback(pos_message_key, f"Added {selected_item} x{int(qty_to_sell)} to the cart.")
+                    st.rerun()
+        else:
+            st.subheader("Manual Item Entry")
+            manual_item_name = st.text_input("New Item Name", key=f"manual_pos_item_{company_key}")
+            manual_price = st.number_input(
+                f"Manual Price ({st.session_state.currency_symbol})",
+                min_value=0.0,
+                value=0.0,
+                key=f"manual_pos_price_{company_key}",
+            )
+            manual_qty = st.number_input("Quantity", min_value=1, value=1, key=f"manual_pos_qty_{company_key}")
+            if st.button("Add Manual Item", key=f"pos_add_manual_{company_key}"):
+                if manual_item_name and float(manual_price) > 0:
+                    st.session_state[checkout_complete_key] = False
+                    st.session_state.pop(receipt_key, None)
+                    st.session_state.pop(receipt_html_key, None)
+                    cart = st.session_state.setdefault(cart_key, [])
+                    cart.append(
+                        {
+                            "inventory_item_id": None,
+                            "item_id": None,
+                            "name": manual_item_name.strip(),
+                            "item_name": manual_item_name.strip(),
+                            "item_code": "",
+                            "barcode": "",
+                            "price": float(manual_price),
+                            "cost_price": 0.0,
+                            "tax_rate": 0.0,
+                            "available_qty": None,
+                            "qty": int(manual_qty),
+                            "is_manual": True,
+                            "line_discount_type": "amount",
+                            "line_discount_value": 0.0,
+                            "line_discount": 0.0,
+                            "line_total": int(manual_qty) * float(manual_price),
+                        }
+                    )
+                    _trigger_scan_feedback(pos_message_key, f"Added manual item {manual_item_name.strip()} to the cart.")
+                    st.rerun()
+                else:
+                    st.warning("Enter a valid manual item and price before adding it.")
 
         payment_method = st.selectbox("Payment Method", ["Cash", "Mobile Money", "Card", "Bank Transfer", "On Credit"])
         selected_credit_customer_id = None
