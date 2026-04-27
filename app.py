@@ -106,6 +106,9 @@ get_openai_client_status = get_ai_service_status
 request_ai_chat_completion = eka_modules.request_ai_chat_completion
 call_ai_assistant = eka_modules.call_ai_assistant
 initialize_paystack_payment = eka_modules.initialize_paystack_payment
+get_subscription_plans = eka_modules.get_subscription_plans
+save_subscription_plan_pricing_settings = eka_modules.save_subscription_plan_pricing_settings
+SUBSCRIPTION_PRICING_NOT_CONFIGURED_MESSAGE = eka_modules.SUBSCRIPTION_PRICING_NOT_CONFIGURED_MESSAGE
 test_paystack_connection = eka_modules.test_paystack_connection
 log_audit_action = eka_modules.log_audit_action
 render_accounting_assistant_sidebar = eka_modules.render_accounting_assistant_sidebar
@@ -2173,6 +2176,32 @@ else:
                             failed=int(billing_diag.get("failed_payment_count") or 0),
                         )
                     )
+                    pricing_diag = billing_diag.get("plan_pricing", {})
+                    active_plan_prices = pricing_diag.get("active_plan_prices") or []
+                    for plan_price in active_plan_prices:
+                        amount_value = plan_price.get("configured_amount")
+                        duration_months = int(plan_price.get("duration_months") or 0)
+                        duration_days = int(plan_price.get("duration_days") or 0)
+                        duration_label = (
+                            f"{duration_months} month(s)"
+                            if duration_months > 0
+                            else f"{duration_days} day(s)"
+                        )
+                        amount_label = (
+                            f"{plan_price.get('currency') or 'GHS'} {float(amount_value):,.2f}"
+                            if amount_value not in (None, "")
+                            else "Missing"
+                        )
+                        st.caption(
+                            "Plan Price - {plan}: {amount} | Duration: {duration} | Configured: {configured}".format(
+                                plan=plan_price.get("plan_name") or "Unknown",
+                                amount=amount_label,
+                                duration=duration_label,
+                                configured="Yes" if plan_price.get("configured") else "No",
+                            )
+                        )
+                    for missing_warning in pricing_diag.get("missing_price_warnings") or []:
+                        st.warning(missing_warning)
                     latest_successful_payment = billing_diag.get("latest_successful_payment") or {}
                     if latest_successful_payment:
                         st.caption(
@@ -2565,6 +2594,75 @@ else:
                             st.success(f"Master monthly price updated to {format_currency(master_price)}.")
                         except Exception as price_error:
                             st.error(build_user_safe_error(price_error, u["role"]))
+
+                st.markdown("---")
+                st.subheader("Subscription Plan Pricing")
+                configured_plans = get_subscription_plans()
+                with st.form("subscription_plan_pricing_form"):
+                    pricing_rows = []
+                    for plan_name, plan_data in configured_plans.items():
+                        st.markdown(f"**{plan_name}**")
+                        plan_col1, plan_col2, plan_col3, plan_col4 = st.columns(4)
+                        configured_amount = plan_col1.number_input(
+                            f"{plan_name} Amount",
+                            min_value=0.0,
+                            value=float(plan_data.get("amount") or 0.0),
+                            step=10.0,
+                            key=f"{plan_name}_configured_amount",
+                        )
+                        currency_value = plan_col2.text_input(
+                            f"{plan_name} Currency",
+                            value=str(plan_data.get("currency") or "GHS"),
+                            key=f"{plan_name}_configured_currency",
+                        )
+                        duration_months = plan_col3.number_input(
+                            f"{plan_name} Duration Months",
+                            min_value=0,
+                            value=int(plan_data.get("duration_months") or 0),
+                            step=1,
+                            key=f"{plan_name}_duration_months",
+                        )
+                        duration_days = plan_col4.number_input(
+                            f"{plan_name} Duration Days",
+                            min_value=0,
+                            value=int(plan_data.get("duration_days") or 0),
+                            step=1,
+                            key=f"{plan_name}_duration_days",
+                        )
+                        pricing_rows.append(
+                            {
+                                "plan_name": plan_name,
+                                "configured_amount": configured_amount,
+                                "currency": currency_value,
+                                "duration_months": duration_months,
+                                "duration_days": duration_days,
+                                "features": plan_data.get("features", []),
+                            }
+                        )
+                    if st.form_submit_button("Save Subscription Plan Pricing"):
+                        invalid_rows = [
+                            row["plan_name"]
+                            for row in pricing_rows
+                            if float(row.get("configured_amount") or 0) <= 0
+                            or (
+                                int(row.get("duration_months") or 0) <= 0
+                                and int(row.get("duration_days") or 0) <= 0
+                            )
+                        ]
+                        if invalid_rows:
+                            st.warning(
+                                "Each plan must have a positive amount and a duration in months or days. Check: "
+                                + ", ".join(invalid_rows)
+                            )
+                        else:
+                            pricing_save_result = save_subscription_plan_pricing_settings(
+                                pricing_rows,
+                                actor=u.get("name") or u.get("role"),
+                            )
+                            if pricing_save_result.get("ok"):
+                                st.success("Subscription plan pricing updated successfully.")
+                            else:
+                                st.error(build_user_safe_error(pricing_save_result.get("reason") or "Subscription pricing could not be saved.", u["role"]))
                 
                 # Global Forensic Trail (Dev only) - Enhanced with error handling
                 st.markdown("---")

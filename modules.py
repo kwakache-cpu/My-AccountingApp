@@ -50,29 +50,18 @@ AI_RATE_LIMIT_WINDOW_SECONDS = 60
 DOCUMENT_WORKFLOW_STATUSES = ["Draft", "Submitted", "Approved", "Posted", "Cancelled", "Voided"]
 POS_DISCOUNT_APPROVAL_PERCENT_THRESHOLD = 10.0
 POS_DISCOUNT_APPROVAL_AMOUNT_THRESHOLD = 50.0
+SUBSCRIPTION_PRICING_NOT_CONFIGURED_MESSAGE = "Subscription pricing has not been configured. Please contact administrator."
 SUBSCRIPTION_PLANS = {
     "Basic": {
         "plan_name": "Basic",
-        "amount": 50.0,
-        "currency": "GHS",
-        "duration_months": 1,
-        "duration_days": None,
         "features": ["Core ERP access", "Single-company subscription", "Standard support"],
     },
     "Pro": {
         "plan_name": "Pro",
-        "amount": 120.0,
-        "currency": "GHS",
-        "duration_months": 1,
-        "duration_days": None,
         "features": ["Advanced accounting workflows", "Priority support", "Enhanced admin visibility"],
     },
     "Enterprise": {
         "plan_name": "Enterprise",
-        "amount": 500.0,
-        "currency": "GHS",
-        "duration_months": 12,
-        "duration_days": None,
         "features": ["Annual enterprise plan", "Multi-branch scaling", "Premium support"],
     },
 }
@@ -244,10 +233,13 @@ from database import (
     force_backup_after_company_creation,
     get_firebase_service_account_info,
     get_connection,
+    get_subscription_plan_setting,
+    get_subscription_plan_settings,
     get_company_subscription_snapshot,
     get_recovery_source_diagnostics,
     get_subscription_billing_diagnostics,
     get_subscription_billing_summary,
+    upsert_subscription_plan_setting,
     log_audit_action as database_log_audit_action,
 )
 from accounting_engine import (
@@ -591,14 +583,107 @@ def get_paystack_diagnostics():
 
 
 def get_subscription_plans():
-    return {plan_name: dict(plan_data) for plan_name, plan_data in SUBSCRIPTION_PLANS.items()}
+    configured_plans = get_subscription_plan_settings()
+    plans = {}
+    for plan_name, plan_data in SUBSCRIPTION_PLANS.items():
+        configured = configured_plans.get(plan_name) or {}
+        amount = configured.get("configured_amount")
+        duration_months = max(int(configured.get("duration_months") or 0), 0)
+        duration_days = max(int(configured.get("duration_days") or 0), 0)
+        normalized_amount = float(amount) if amount not in (None, "") else None
+        plans[plan_name] = {
+            "plan_name": plan_name,
+            "amount": normalized_amount,
+            "currency": str(configured.get("currency") or "GHS").strip().upper() or "GHS",
+            "duration_months": duration_months,
+            "duration_days": duration_days,
+            "features": list(plan_data.get("features", [])),
+            "configured": bool(
+                normalized_amount is not None
+                and normalized_amount > 0
+                and ((duration_months > 0) or (duration_days > 0))
+            ),
+            "updated_at": configured.get("updated_at"),
+            "updated_by": configured.get("updated_by"),
+        }
+    return plans
 
 
 def get_subscription_plan(plan_name):
     normalized = str(plan_name or "").strip()
-    if normalized in SUBSCRIPTION_PLANS:
-        return dict(SUBSCRIPTION_PLANS[normalized])
-    return dict(SUBSCRIPTION_PLANS["Basic"])
+    plans = get_subscription_plans()
+    if normalized and normalized in plans:
+        return dict(plans[normalized])
+    first_plan_name = next(iter(plans.keys()), "Basic")
+    return dict(
+        plans.get(
+            first_plan_name,
+            {
+                "plan_name": normalized or first_plan_name,
+                "amount": None,
+                "currency": "GHS",
+                "duration_months": 0,
+                "duration_days": 0,
+                "features": [],
+                "configured": False,
+            },
+        )
+    )
+
+
+def get_subscription_plan_pricing_snapshot():
+    plans = get_subscription_plans()
+    active_plan_prices = []
+    missing_price_warnings = []
+    for plan_name, plan_data in plans.items():
+        active_plan_prices.append(
+            {
+                "plan_name": plan_name,
+                "configured_amount": plan_data.get("amount"),
+                "currency": plan_data.get("currency") or "GHS",
+                "duration_months": int(plan_data.get("duration_months") or 0),
+                "duration_days": int(plan_data.get("duration_days") or 0),
+                "configured": bool(plan_data.get("configured")),
+                "updated_at": plan_data.get("updated_at"),
+                "updated_by": plan_data.get("updated_by"),
+            }
+        )
+        if not plan_data.get("configured"):
+            missing_price_warnings.append(f"{plan_name} pricing is incomplete or missing.")
+    return {
+        "active_plan_prices": active_plan_prices,
+        "missing_price_warnings": missing_price_warnings,
+    }
+
+
+def save_subscription_plan_pricing_settings(plan_rows, actor=None):
+    conn = None
+    try:
+        conn = get_connection()
+        for row in plan_rows or []:
+            upsert_subscription_plan_setting(
+                conn,
+                plan_name=row.get("plan_name"),
+                configured_amount=row.get("configured_amount"),
+                currency=row.get("currency") or "GHS",
+                duration_months=row.get("duration_months"),
+                duration_days=row.get("duration_days"),
+                features_json=json.dumps(row.get("features", []), default=str) if row.get("features") is not None else None,
+                updated_by=actor,
+            )
+        conn.commit()
+        return {"ok": True}
+    except Exception as exc:
+        if conn:
+            conn.rollback()
+        logger.warning("Subscription pricing save failed: %s", sanitize_error_message(exc))
+        return {
+            "ok": False,
+            "reason": "Subscription pricing could not be saved right now.",
+        }
+    finally:
+        if conn:
+            conn.close()
 
 
 def create_trial_company_registration(company_name, contact_email=None, company_key=None, trial_days=7):
@@ -703,8 +788,6 @@ def _generate_company_key():
         f"{''.join(random.choices(string.ascii_uppercase, k=4))}-"
         f"{''.join(random.choices(string.digits, k=4))}"
     )
-
-
 def _serialize_paystack_gateway_summary(response_payload):
     response_data = response_payload.get("data") if isinstance(response_payload, dict) else {}
     summary = {
@@ -717,6 +800,24 @@ def _serialize_paystack_gateway_summary(response_payload):
     return json.dumps(summary, default=str)
 
 
+def _resolve_subscription_plan_payment_snapshot(plan_name):
+    normalized_plan_name = str(plan_name or "").strip()
+    if not normalized_plan_name:
+        return {"ok": False, "reason": SUBSCRIPTION_PRICING_NOT_CONFIGURED_MESSAGE}
+    configured_plan = get_subscription_plan(normalized_plan_name)
+    if not configured_plan.get("configured"):
+        return {"ok": False, "reason": SUBSCRIPTION_PRICING_NOT_CONFIGURED_MESSAGE}
+    return {
+        "ok": True,
+        "plan_name": normalized_plan_name,
+        "configured_amount": float(configured_plan.get("amount") or 0),
+        "currency": str(configured_plan.get("currency") or "GHS").strip().upper() or "GHS",
+        "duration_months": max(int(configured_plan.get("duration_months") or 0), 0),
+        "duration_days": max(int(configured_plan.get("duration_days") or 0), 0),
+        "features": list(configured_plan.get("features", [])),
+    }
+
+
 def _upsert_license_payment_transaction(
     conn,
     *,
@@ -726,6 +827,9 @@ def _upsert_license_payment_transaction(
     payer_email,
     payment_context,
     plan_name=None,
+    configured_amount=None,
+    configured_duration_months=None,
+    configured_duration_days=None,
     expected_amount,
     currency,
     status,
@@ -746,6 +850,9 @@ def _upsert_license_payment_transaction(
             payer_email,
             payment_context,
             plan_name,
+            configured_amount,
+            configured_duration_months,
+            configured_duration_days,
             expected_amount,
             currency,
             status,
@@ -758,13 +865,16 @@ def _upsert_license_payment_transaction(
             activated_at,
             updated_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
         ON CONFLICT(reference) DO UPDATE SET
             company_key = excluded.company_key,
             company_name = excluded.company_name,
             payer_email = excluded.payer_email,
             payment_context = excluded.payment_context,
             plan_name = COALESCE(excluded.plan_name, license_payment_transactions.plan_name),
+            configured_amount = COALESCE(excluded.configured_amount, license_payment_transactions.configured_amount),
+            configured_duration_months = COALESCE(excluded.configured_duration_months, license_payment_transactions.configured_duration_months),
+            configured_duration_days = COALESCE(excluded.configured_duration_days, license_payment_transactions.configured_duration_days),
             expected_amount = excluded.expected_amount,
             currency = excluded.currency,
             status = excluded.status,
@@ -784,6 +894,9 @@ def _upsert_license_payment_transaction(
             payer_email,
             payment_context,
             str(plan_name or "").strip() or None,
+            float(configured_amount) if configured_amount not in (None, "") else None,
+            max(int(configured_duration_months or 0), 0),
+            max(int(configured_duration_days or 0), 0),
             int(expected_amount or 0),
             currency,
             status,
@@ -818,8 +931,8 @@ def _activate_verified_license_payment(conn, transaction_row):
     company_key = str(transaction_row["company_key"] or metadata.get("company_key") or "").strip()
     company_name = str(transaction_row["company_name"] or metadata.get("company_name") or "").strip()
     payer_email = str(transaction_row["payer_email"] or metadata.get("user_email") or metadata.get("admin_email") or "").strip() or None
-    subscription_months = max(int(metadata.get("subscription_months") or 0), 0)
-    subscription_days = max(int(metadata.get("subscription_days") or 0), 0)
+    subscription_months = max(int(transaction_row["configured_duration_months"] or metadata.get("subscription_months") or 0), 0)
+    subscription_days = max(int(transaction_row["configured_duration_days"] or metadata.get("subscription_days") or 0), 0)
     plan_name = str(transaction_row["plan_name"] or metadata.get("plan_name") or "Basic").strip() or "Basic"
     payment_context = str(transaction_row["payment_context"] or metadata.get("license_context") or "license_activation").strip().lower()
     if not company_key or not company_name:
@@ -936,20 +1049,39 @@ def initialize_paystack_payment(
     if not config["callback_url_configured"]:
         return {"ok": False, "reason": "Paystack callback URL is not configured yet."}
 
-    expected_amount = int(round(float(amount or 0) * 100))
+    resolved_amount = float(amount or 0)
+    resolved_currency = str(config["currency"] or "GHS").strip().upper() or "GHS"
+    resolved_duration_months = max(int(subscription_months or 0), 0)
+    resolved_duration_days = max(int(subscription_days or 0), 0)
+    plan_snapshot = None
+    normalized_plan_name = str(plan_name or "").strip() or None
+    if normalized_plan_name:
+        plan_snapshot = _resolve_subscription_plan_payment_snapshot(normalized_plan_name)
+        if not plan_snapshot.get("ok"):
+            return {"ok": False, "reason": plan_snapshot.get("reason") or SUBSCRIPTION_PRICING_NOT_CONFIGURED_MESSAGE}
+        resolved_amount = float(plan_snapshot["configured_amount"])
+        resolved_currency = plan_snapshot["currency"]
+        resolved_duration_months = int(plan_snapshot["duration_months"] or 0)
+        resolved_duration_days = int(plan_snapshot["duration_days"] or 0)
+
+    expected_amount = int(round(float(resolved_amount or 0) * 100))
     if expected_amount <= 0:
         return {"ok": False, "reason": "Payment amount must be greater than zero."}
 
     metadata = {
         "company_key": company_key,
         "company_name": company_name,
-        "plan_name": str(plan_name or "").strip() or None,
+        "plan_name": normalized_plan_name,
         "license_context": payment_context,
-        "subscription_months": int(subscription_months or 0),
-        "subscription_days": int(subscription_days or 0),
+        "subscription_months": resolved_duration_months,
+        "subscription_days": resolved_duration_days,
+        "configured_amount": float(resolved_amount or 0),
+        "configured_currency": resolved_currency,
         "user_id": user_id,
         "user_email": user_email or email,
     }
+    if plan_snapshot and plan_snapshot.get("features"):
+        metadata["plan_features"] = list(plan_snapshot.get("features") or [])
     if phone_number:
         metadata["phone_number"] = phone_number
     if metadata_extra:
@@ -958,7 +1090,7 @@ def initialize_paystack_payment(
     payload = {
         "email": str(email or "").strip(),
         "amount": expected_amount,
-        "currency": config["currency"],
+        "currency": resolved_currency,
         "reference": str(reference or "").strip(),
         "callback_url": config["callback_url"],
         "channels": ["card", "mobile_money"],
@@ -996,8 +1128,11 @@ def initialize_paystack_payment(
             payer_email=payload["email"],
             payment_context=payment_context,
             plan_name=metadata.get("plan_name"),
+            configured_amount=resolved_amount,
+            configured_duration_months=resolved_duration_months,
+            configured_duration_days=resolved_duration_days,
             expected_amount=expected_amount,
-            currency=config["currency"],
+            currency=resolved_currency,
             status="initialized",
             authorization_url=authorization_url,
             callback_url=config["callback_url"],
@@ -1010,7 +1145,7 @@ def initialize_paystack_payment(
             "ok": True,
             "reference": payload["reference"],
             "authorization_url": authorization_url,
-            "currency": config["currency"],
+            "currency": resolved_currency,
             "expected_amount": expected_amount,
         }
     except Exception as exc:
@@ -1054,7 +1189,7 @@ def verify_paystack_payment(reference, activate_license=True):
         gateway_ok = bool(response_data.get("status")) and str(data.get("status") or "").lower() == "success"
         reference_ok = str(data.get("reference") or "").strip() == normalized_reference
         amount_ok = int(data.get("amount") or 0) == int(transaction_row["expected_amount"] or 0)
-        currency_ok = str(data.get("currency") or "").upper() == str(transaction_row["currency"] or config["currency"]).upper() == "GHS"
+        currency_ok = str(data.get("currency") or "").upper() == str(transaction_row["currency"] or config["currency"]).upper()
         metadata_company_ok = (
             not metadata.get("company_key")
             or str(metadata.get("company_key") or "").strip() == str(transaction_row["company_key"] or "").strip()
@@ -1068,6 +1203,9 @@ def verify_paystack_payment(reference, activate_license=True):
                 payer_email=transaction_row["payer_email"],
                 payment_context=transaction_row["payment_context"],
                 plan_name=transaction_row["plan_name"],
+                configured_amount=transaction_row["configured_amount"],
+                configured_duration_months=transaction_row["configured_duration_months"],
+                configured_duration_days=transaction_row["configured_duration_days"],
                 expected_amount=transaction_row["expected_amount"],
                 currency=transaction_row["currency"],
                 status="failed",
@@ -1099,6 +1237,9 @@ def verify_paystack_payment(reference, activate_license=True):
             payer_email=transaction_row["payer_email"],
             payment_context=transaction_row["payment_context"],
             plan_name=transaction_row["plan_name"],
+            configured_amount=transaction_row["configured_amount"],
+            configured_duration_months=transaction_row["configured_duration_months"],
+            configured_duration_days=transaction_row["configured_duration_days"],
             expected_amount=transaction_row["expected_amount"],
             currency=transaction_row["currency"],
             status="success",
@@ -5631,6 +5772,7 @@ def get_subscription_billing_health_snapshot():
         conn = get_connection()
         paystack = get_paystack_diagnostics()
         billing = get_subscription_billing_diagnostics(conn=conn)
+        billing["plan_pricing"] = get_subscription_plan_pricing_snapshot()
         return {
             "ok": True,
             "paystack": paystack,
@@ -5665,19 +5807,24 @@ def show_subscription_renewal_page(company_key, role="Master Admin"):
             )
         )
 
-    plan_labels = list(SUBSCRIPTION_PLANS.keys())
+    available_plans = get_subscription_plans()
+    plan_labels = list(available_plans.keys())
     selected_plan_name = st.selectbox("Choose Subscription Plan", plan_labels, key=f"subscription_plan_{company_key}")
     selected_plan = get_subscription_plan(selected_plan_name)
-    st.caption(
-        "Plan amount: GH₵ {amount:,.2f} | Duration: {duration}".format(
-            amount=float(selected_plan["amount"]),
-            duration=(
-                f"{selected_plan['duration_months']} month(s)"
-                if selected_plan.get("duration_months")
-                else f"{selected_plan.get('duration_days', 0)} day(s)"
-            ),
+    if selected_plan.get("configured"):
+        st.caption(
+            "Plan amount: {currency} {amount:,.2f} | Duration: {duration}".format(
+                currency=selected_plan.get("currency") or "GHS",
+                amount=float(selected_plan["amount"]),
+                duration=(
+                    f"{selected_plan['duration_months']} month(s)"
+                    if selected_plan.get("duration_months")
+                    else f"{selected_plan.get('duration_days', 0)} day(s)"
+                ),
+            )
         )
-    )
+    else:
+        st.warning(SUBSCRIPTION_PRICING_NOT_CONFIGURED_MESSAGE)
     if selected_plan.get("features"):
         st.caption("Features: " + ", ".join(selected_plan["features"]))
 
@@ -5695,13 +5842,15 @@ def show_subscription_renewal_page(company_key, role="Master Admin"):
 
     button_label = "Start Payment"
     if st.button(button_label, key=f"subscription_start_payment_{company_key}"):
-        if not company_email:
+        if not selected_plan.get("configured"):
+            st.warning(SUBSCRIPTION_PRICING_NOT_CONFIGURED_MESSAGE)
+        elif not company_email:
             st.warning("A contact email is required on the company profile before starting subscription payment.")
         else:
             reference = _generate_paystack_reference("SUB")
             payment_result = initialize_paystack_payment(
                 company_email,
-                selected_plan["amount"],
+                selected_plan.get("amount"),
                 reference,
                 company_key=company_key,
                 company_name=snapshot.get("company_name"),
@@ -5759,17 +5908,22 @@ def show_onboarding_payment():
             admin_phone = st.text_input("Admin Phone Number (Optional)")
         with col2:
             sector = st.selectbox("Business Sector", ["Retail", "Manufacturing", "Services", "Construction", "Other"])
-            selected_plan_name = st.selectbox("Subscription Plan", list(SUBSCRIPTION_PLANS.keys()), index=0)
+            available_plans = get_subscription_plans()
+            selected_plan_name = st.selectbox("Subscription Plan", list(available_plans.keys()), index=0)
 
         selected_plan = get_subscription_plan(selected_plan_name)
-        amount = float(selected_plan["amount"])
+        amount = float(selected_plan["amount"] or 0) if selected_plan.get("configured") else 0.0
 
-        st.caption(
-            "7-day trial is created immediately. Selected plan: {plan} | Amount Due: GH₵ {amount:,.2f}".format(
-                plan=selected_plan_name,
-                amount=amount,
+        if selected_plan.get("configured"):
+            st.caption(
+                "7-day trial is created immediately. Selected plan: {plan} | Amount Due: {currency} {amount:,.2f}".format(
+                    plan=selected_plan_name,
+                    currency=selected_plan.get("currency") or "GHS",
+                    amount=amount,
+                )
             )
-        )
+        else:
+            st.warning(SUBSCRIPTION_PRICING_NOT_CONFIGURED_MESSAGE)
         submit = st.form_submit_button("Create Trial Company & Proceed to Payment")
 
         if submit:
@@ -5795,50 +5949,62 @@ def show_onboarding_payment():
                             trial_days=7,
                         )
                         conn.commit()
-                        reference = _generate_paystack_reference("ONB")
-                        payment_result = initialize_paystack_payment(
-                            admin_email,
-                            amount,
-                            reference,
-                            company_key=company_key,
-                            company_name=company_name.strip(),
-                            payment_context="onboarding",
-                            plan_name=selected_plan_name,
-                            subscription_months=selected_plan.get("duration_months"),
-                            subscription_days=selected_plan.get("duration_days"),
-                            user_email=admin_email.strip(),
-                            phone_number=admin_phone.strip(),
-                            metadata_extra={"sector": sector, "trial_end_date": trial_result["end_date"]},
-                        )
-                        if payment_result.get("ok"):
+                        if not selected_plan.get("configured"):
                             st.success(
-                                "Trial company created successfully. Trial ends on {trial_end}. You can continue to Paystack now or use the trial first.".format(
+                                "Trial company created successfully. Trial ends on {trial_end}.".format(
                                     trial_end=trial_result["end_date"],
                                 )
                             )
-                            st.session_state.pending_reg = {
-                                'company_name': company_name.strip(),
-                                'company_key': company_key,
-                                'email': admin_email.strip(),
-                                'phone_number': admin_phone.strip(),
-                                'amount': amount,
-                                'plan_name': selected_plan_name,
-                                'months': int(selected_plan.get("duration_months") or 0),
-                                'reference': reference,
-                                'authorization_url': payment_result.get("authorization_url"),
-                                'trial_end_date': trial_result["end_date"],
-                            }
-                            st.caption(f"Company Key: {company_key}")
-                            st.link_button(
-                                "Continue to Secure Paystack Checkout",
-                                payment_result["authorization_url"],
-                            )
-                            st.caption("Supported checkout channels: Card and Ghana Mobile Money.")
-                        else:
                             st.warning(
-                                (payment_result.get("reason") or "Payment could not be initialized yet.")
+                                SUBSCRIPTION_PRICING_NOT_CONFIGURED_MESSAGE
                                 + f" Trial access remains active until {trial_result['end_date']}."
                             )
+                            st.caption(f"Company Key: {company_key}")
+                        else:
+                            reference = _generate_paystack_reference("ONB")
+                            payment_result = initialize_paystack_payment(
+                                admin_email,
+                                amount,
+                                reference,
+                                company_key=company_key,
+                                company_name=company_name.strip(),
+                                payment_context="onboarding",
+                                plan_name=selected_plan_name,
+                                subscription_months=selected_plan.get("duration_months"),
+                                subscription_days=selected_plan.get("duration_days"),
+                                user_email=admin_email.strip(),
+                                phone_number=admin_phone.strip(),
+                                metadata_extra={"sector": sector, "trial_end_date": trial_result["end_date"]},
+                            )
+                            if payment_result.get("ok"):
+                                st.success(
+                                    "Trial company created successfully. Trial ends on {trial_end}. You can continue to Paystack now or use the trial first.".format(
+                                        trial_end=trial_result["end_date"],
+                                    )
+                                )
+                                st.session_state.pending_reg = {
+                                    'company_name': company_name.strip(),
+                                    'company_key': company_key,
+                                    'email': admin_email.strip(),
+                                    'phone_number': admin_phone.strip(),
+                                    'amount': amount,
+                                    'plan_name': selected_plan_name,
+                                    'months': int(selected_plan.get("duration_months") or 0),
+                                    'reference': reference,
+                                    'authorization_url': payment_result.get("authorization_url"),
+                                    'trial_end_date': trial_result["end_date"],
+                                }
+                                st.caption(f"Company Key: {company_key}")
+                                st.link_button(
+                                    "Continue to Secure Paystack Checkout",
+                                    payment_result["authorization_url"],
+                                )
+                                st.caption("Supported checkout channels: Card and Ghana Mobile Money.")
+                            else:
+                                st.warning(
+                                    (payment_result.get("reason") or "Payment could not be initialized yet.")
+                                    + f" Trial access remains active until {trial_result['end_date']}."
+                                )
                 except Exception as exc:
                     if conn:
                         conn.rollback()

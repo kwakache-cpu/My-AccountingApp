@@ -1691,6 +1691,42 @@ def _ensure_subscription_billing_schema(cursor):
 
     cursor.execute(
         """
+        CREATE TABLE IF NOT EXISTS subscription_plan_settings (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            plan_name TEXT UNIQUE,
+            configured_amount REAL,
+            currency TEXT DEFAULT 'GHS',
+            duration_months INTEGER DEFAULT 0,
+            duration_days INTEGER DEFAULT 0,
+            features_json TEXT,
+            updated_by TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+    cursor.execute("PRAGMA table_info(subscription_plan_settings)")
+    plan_settings_columns = {row[1] for row in cursor.fetchall()}
+    plan_settings_column_defs = {
+        "plan_name": "TEXT",
+        "configured_amount": "REAL",
+        "currency": "TEXT DEFAULT 'GHS'",
+        "duration_months": "INTEGER DEFAULT 0",
+        "duration_days": "INTEGER DEFAULT 0",
+        "features_json": "TEXT",
+        "updated_by": "TEXT",
+        "created_at": "TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
+        "updated_at": "TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
+    }
+    for column_name, column_def in plan_settings_column_defs.items():
+        if column_name not in plan_settings_columns:
+            cursor.execute(f"ALTER TABLE subscription_plan_settings ADD COLUMN {column_name} {column_def}")
+    cursor.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_subscription_plan_settings_plan_name ON subscription_plan_settings(plan_name)"
+    )
+
+    cursor.execute(
+        """
         CREATE TABLE IF NOT EXISTS license_payment_transactions (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             reference TEXT UNIQUE,
@@ -1699,6 +1735,9 @@ def _ensure_subscription_billing_schema(cursor):
             payer_email TEXT,
             payment_context TEXT DEFAULT 'license_activation',
             plan_name TEXT,
+            configured_amount REAL DEFAULT 0,
+            configured_duration_months INTEGER DEFAULT 0,
+            configured_duration_days INTEGER DEFAULT 0,
             expected_amount INTEGER DEFAULT 0,
             currency TEXT DEFAULT 'GHS',
             status TEXT DEFAULT 'initialized',
@@ -1722,6 +1761,9 @@ def _ensure_subscription_billing_schema(cursor):
         "payer_email": "TEXT",
         "payment_context": "TEXT DEFAULT 'license_activation'",
         "plan_name": "TEXT",
+        "configured_amount": "REAL DEFAULT 0",
+        "configured_duration_months": "INTEGER DEFAULT 0",
+        "configured_duration_days": "INTEGER DEFAULT 0",
         "expected_amount": "INTEGER DEFAULT 0",
         "currency": "TEXT DEFAULT 'GHS'",
         "status": "TEXT DEFAULT 'initialized'",
@@ -1747,6 +1789,108 @@ def _ensure_subscription_billing_schema(cursor):
     cursor.execute(
         "CREATE INDEX IF NOT EXISTS idx_license_payment_transactions_plan_status ON license_payment_transactions(plan_name, status)"
     )
+
+
+def upsert_subscription_plan_setting(
+    conn,
+    *,
+    plan_name,
+    configured_amount,
+    currency="GHS",
+    duration_months=None,
+    duration_days=None,
+    features_json=None,
+    updated_by=None,
+):
+    if conn is None:
+        raise RuntimeError("Database connection is required to save subscription pricing.")
+    normalized_plan_name = str(plan_name or "").strip()
+    if not normalized_plan_name:
+        raise ValueError("plan_name is required")
+    amount_value = float(configured_amount) if configured_amount not in (None, "") else None
+    currency_value = str(currency or "GHS").strip().upper() or "GHS"
+    months_value = max(int(duration_months or 0), 0)
+    days_value = max(int(duration_days or 0), 0)
+    cursor = conn.cursor()
+    _ensure_subscription_billing_schema(cursor)
+    conn.execute(
+        """
+        INSERT INTO subscription_plan_settings (
+            plan_name,
+            configured_amount,
+            currency,
+            duration_months,
+            duration_days,
+            features_json,
+            updated_by,
+            updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+        ON CONFLICT(plan_name) DO UPDATE SET
+            configured_amount = excluded.configured_amount,
+            currency = excluded.currency,
+            duration_months = excluded.duration_months,
+            duration_days = excluded.duration_days,
+            features_json = COALESCE(excluded.features_json, subscription_plan_settings.features_json),
+            updated_by = excluded.updated_by,
+            updated_at = CURRENT_TIMESTAMP
+        """,
+        (
+            normalized_plan_name,
+            amount_value,
+            currency_value,
+            months_value,
+            days_value,
+            features_json,
+            str(updated_by or "").strip() or None,
+        ),
+    )
+
+
+def get_subscription_plan_settings(conn=None):
+    owns_connection = conn is None
+    conn = conn or _open_sqlite_connection()
+    try:
+        cursor = conn.cursor()
+        _ensure_subscription_billing_schema(cursor)
+        rows = conn.execute(
+            """
+            SELECT plan_name, configured_amount, currency, duration_months, duration_days, features_json, updated_by, updated_at
+            FROM subscription_plan_settings
+            ORDER BY plan_name
+            """
+        ).fetchall()
+        settings = {}
+        for row in rows:
+            settings[str(row["plan_name"] or "").strip()] = dict(row)
+        return settings
+    finally:
+        if owns_connection and conn:
+            conn.close()
+
+
+def get_subscription_plan_setting(plan_name, conn=None):
+    normalized_plan_name = str(plan_name or "").strip()
+    if not normalized_plan_name:
+        return None
+    owns_connection = conn is None
+    conn = conn or _open_sqlite_connection()
+    try:
+        cursor = conn.cursor()
+        _ensure_subscription_billing_schema(cursor)
+        row = conn.execute(
+            """
+            SELECT plan_name, configured_amount, currency, duration_months, duration_days, features_json, updated_by, updated_at
+            FROM subscription_plan_settings
+            WHERE plan_name = ?
+            LIMIT 1
+            """,
+            (normalized_plan_name,),
+        ).fetchone()
+        return dict(row) if row else None
+    finally:
+        if owns_connection and conn:
+            conn.close()
 
 
 def upsert_company_subscription(
@@ -2010,6 +2154,7 @@ def get_subscription_billing_summary(conn=None):
     owns_connection = conn is None
     conn = conn or _open_sqlite_connection()
     try:
+        configured_plans = get_subscription_plan_settings(conn=conn)
         totals_row = conn.execute(
             """
             SELECT
@@ -2076,6 +2221,7 @@ def get_subscription_billing_summary(conn=None):
             "recent_payments": [dict(row) for row in recent_payments],
             "next_expiries": [dict(row) for row in next_expiries],
             "latest_successful_payment": dict(latest_success) if latest_success else None,
+            "configured_plan_prices": configured_plans,
         }
     finally:
         if owns_connection and conn:
@@ -2089,7 +2235,7 @@ def get_subscription_billing_diagnostics(conn=None):
         table_rows = conn.execute(
             """
             SELECT name FROM sqlite_master
-            WHERE type = 'table' AND name IN ('company_subscriptions', 'license_payment_transactions')
+            WHERE type = 'table' AND name IN ('company_subscriptions', 'license_payment_transactions', 'subscription_plan_settings')
             """
         ).fetchall()
         table_names = {row[0] for row in table_rows}
@@ -2098,11 +2244,13 @@ def get_subscription_billing_diagnostics(conn=None):
             "ok": True,
             "subscription_table_present": "company_subscriptions" in table_names,
             "payment_table_present": "license_payment_transactions" in table_names,
+            "pricing_table_present": "subscription_plan_settings" in table_names,
             "active_count": summary.get("active_subscriptions", 0),
             "trial_count": summary.get("trial_subscriptions", 0),
             "expired_count": summary.get("expired_subscriptions", 0),
             "failed_payment_count": summary.get("failed_payment_count", 0),
             "latest_successful_payment": summary.get("latest_successful_payment"),
+            "configured_plan_prices": summary.get("configured_plan_prices", {}),
         }
     finally:
         if owns_connection and conn:
