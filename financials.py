@@ -69,12 +69,23 @@ set_period_lock = eka_modules.set_period_lock
 set_period_status = eka_modules.set_period_status
 show_journal_entries = eka_modules.show_journal_entries
 user_has_permission = eka_modules.user_has_permission
+log_audit_action = eka_modules.log_audit_action
+log_system_event = eka_modules.log_system_event
 
 
 def _resolve_date(value):
     if value is None:
         return None
     return value.isoformat() if hasattr(value, "isoformat") else str(value)
+
+
+def _payment_method_account_name(payment_method):
+    normalized_method = str(payment_method or "").strip()
+    if normalized_method == "Bank":
+        return "Bank"
+    if normalized_method == "Mobile Money":
+        return "Mobile Money"
+    return "Cash"
 
 
 def _journal_df(company_key, branch_id=None, start_date=None, end_date=None, account_name=None):
@@ -670,15 +681,27 @@ def show_invoice_manager(company_key, role):
                 )
                 payment_id = int(conn.execute("SELECT last_insert_rowid()").fetchone()[0])
                 if posting_state == "Posted":
+                    if not require_permission(
+                        role,
+                        "post_accounting_document",
+                        action_label="post accounting documents",
+                        company_key=company_key,
+                        conn=conn,
+                        branch_id=st.session_state.get("active_branch_id"),
+                    ):
+                        conn.rollback()
+                        conn.close()
+                        return
+                    payment_account = _payment_method_account_name(payment_method)
                     lines = (
                         [
-                            {"account_id": get_account_id(conn, "Cash", "Asset"), "debit": amount, "credit": 0},
+                            {"account_id": get_account_id(conn, payment_account, "Asset"), "debit": amount, "credit": 0},
                             {"account_id": get_account_id(conn, "Accounts Receivable", "Asset"), "debit": 0, "credit": amount},
                         ]
                         if payment_type == "Customer Receipt"
                         else [
                             {"account_id": get_account_id(conn, "Accounts Payable", "Liability"), "debit": amount, "credit": 0},
-                            {"account_id": get_account_id(conn, "Cash", "Asset"), "debit": 0, "credit": amount},
+                            {"account_id": get_account_id(conn, payment_account, "Asset"), "debit": 0, "credit": amount},
                         ]
                     )
                     post_journal_entry(
@@ -694,7 +717,30 @@ def show_invoice_manager(company_key, role):
                         source_table="payments",
                         source_id=payment_id,
                         approval_status="Posted",
+                        user_role=role,
                         conn=conn,
+                    )
+                    log_audit_action(
+                        conn,
+                        company_key,
+                        role,
+                        f"Payment Posted: {payment_type}",
+                        "Payments",
+                        details=f"type={payment_type}; amount={amount:.2f}; method={payment_method}; reference={payment_ref or ''}",
+                        branch_id=st.session_state.get("active_branch_id"),
+                        action_type="post",
+                        document_ref=str(payment_id),
+                    )
+                    log_system_event(
+                        "INFO",
+                        "Payments",
+                        "Posted payment type={payment_type} amount={amount:.2f} method={method} user={user} payment_id={payment_id}".format(
+                            payment_type=payment_type,
+                            amount=float(amount or 0.0),
+                            method=payment_method,
+                            user=role,
+                            payment_id=payment_id,
+                        ),
                     )
                 else:
                     st.warning("Payment saved without accounting impact. Move Posting State to Posted when it is approved.")
@@ -919,7 +965,7 @@ def show_receive_payment_page(company_key, role):
                     conn.close()
                     return
                 lines = [
-                    {"account_id": get_account_id(conn, "Cash", "Asset"), "debit": amount, "credit": 0},
+                    {"account_id": get_account_id(conn, _payment_method_account_name(payment_method), "Asset"), "debit": amount, "credit": 0},
                     {"account_id": get_account_id(conn, "Accounts Receivable", "Asset"), "debit": 0, "credit": amount},
                 ]
                 post_journal_entry(
@@ -937,7 +983,29 @@ def show_receive_payment_page(company_key, role):
                     source_id=payment_id,
                     customer_id=customer_id,
                     approval_status="Posted",
+                    user_role=role,
                     conn=conn,
+                )
+                log_audit_action(
+                    conn,
+                    company_key,
+                    role,
+                    "Customer Receipt Posted",
+                    "Payments",
+                    details=f"type=Customer Receipt; amount={amount:.2f}; method={payment_method}; user={role}; reference={payment_ref or ''}",
+                    branch_id=st.session_state.get("active_branch_id"),
+                    action_type="post",
+                    document_ref=str(payment_id),
+                )
+                log_system_event(
+                    "INFO",
+                    "Payments",
+                    "Posted customer receipt amount={amount:.2f} method={method} user={user} payment_id={payment_id}".format(
+                        amount=float(amount or 0.0),
+                        method=payment_method,
+                        user=role,
+                        payment_id=payment_id,
+                    ),
                 )
             else:
                 st.warning("Receipt saved without accounting impact. Move Posting State to Posted when it is approved.")
@@ -1009,7 +1077,7 @@ def show_supplier_payment_page(company_key, role):
                     return
                 lines = [
                     {"account_id": get_account_id(conn, "Accounts Payable", "Liability"), "debit": amount, "credit": 0},
-                    {"account_id": get_account_id(conn, "Cash", "Asset"), "debit": 0, "credit": amount},
+                    {"account_id": get_account_id(conn, _payment_method_account_name(payment_method), "Asset"), "debit": 0, "credit": amount},
                 ]
                 post_journal_entry(
                     company_key=company_key,
@@ -1026,7 +1094,29 @@ def show_supplier_payment_page(company_key, role):
                     source_id=payment_id,
                     supplier_id=supplier_id,
                     approval_status="Posted",
+                    user_role=role,
                     conn=conn,
+                )
+                log_audit_action(
+                    conn,
+                    company_key,
+                    role,
+                    "Supplier Payment Posted",
+                    "Payments",
+                    details=f"type=Supplier Payment; amount={amount:.2f}; method={payment_method}; user={role}; reference={payment_ref or ''}",
+                    branch_id=st.session_state.get("active_branch_id"),
+                    action_type="post",
+                    document_ref=str(payment_id),
+                )
+                log_system_event(
+                    "INFO",
+                    "Payments",
+                    "Posted supplier payment amount={amount:.2f} method={method} user={user} payment_id={payment_id}".format(
+                        amount=float(amount or 0.0),
+                        method=payment_method,
+                        user=role,
+                        payment_id=payment_id,
+                    ),
                 )
             else:
                 st.warning("Supplier payment saved without accounting impact. Move Posting State to Posted when it is approved.")

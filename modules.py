@@ -67,6 +67,7 @@ SUBSCRIPTION_PLANS = {
 }
 ALL_ENTERPRISE_PERMISSIONS = {
     "view_dashboard",
+    "view_banking",
     "manage_company",
     "manage_branches",
     "manage_users",
@@ -119,6 +120,7 @@ ENTERPRISE_ROLE_PERMISSIONS = {
     "Dev": set(ALL_ENTERPRISE_PERMISSIONS),
     "Master Admin": {
         "view_dashboard",
+        "view_banking",
         "manage_company",
         "manage_branches",
         "manage_users",
@@ -150,6 +152,7 @@ ENTERPRISE_ROLE_PERMISSIONS = {
     },
     "Sub-Admin": {
         "view_dashboard",
+        "view_banking",
         "manage_company",
         "manage_branches",
         "manage_users",
@@ -174,6 +177,7 @@ ENTERPRISE_ROLE_PERMISSIONS = {
     },
     "Bookkeeper": {
         "view_dashboard",
+        "view_banking",
         "manage_chart_of_accounts",
         "create_customer",
         "create_supplier",
@@ -193,6 +197,7 @@ ENTERPRISE_ROLE_PERMISSIONS = {
     },
     "Branch_Bookkeeper": {
         "view_dashboard",
+        "view_banking",
         "create_customer",
         "create_supplier",
         "create_invoice",
@@ -208,6 +213,7 @@ ENTERPRISE_ROLE_PERMISSIONS = {
     },
     "Staff": {
         "view_dashboard",
+        "view_banking",
         "create_customer",
         "create_supplier",
         "create_invoice",
@@ -216,7 +222,7 @@ ENTERPRISE_ROLE_PERMISSIONS = {
         "close_cash_drawer",
         "apply_pos_discount",
     },
-    "Demo": {"view_dashboard"},
+    "Demo": {"view_dashboard", "view_banking"},
 }
 
 # Setup Logger
@@ -8965,6 +8971,14 @@ def show_sales_purchase(company_key, role, doc_type="Sales"):
 # ==========================================
 def show_banking(company_key, role):
     st.header("🏦 Banking & Cash")
+    if not require_permission(
+        role,
+        "view_banking",
+        action_label="view banking",
+        company_key=company_key,
+        branch_id=st.session_state.get("active_branch_id"),
+    ):
+        return
     if role == "Demo":
         _demo_notice()
         st.metric(f"Cash Balance ({get_currency_symbol()})", format_currency(8300.0))
@@ -9006,6 +9020,16 @@ def show_banking(company_key, role):
                 elif payment_type == "Supplier Payment" and not suppliers:
                     st.warning("Create a supplier before posting a supplier payment.")
                 else:
+                    if not require_permission(
+                        role,
+                        "post_accounting_document",
+                        action_label="post banking transactions",
+                        company_key=company_key,
+                        conn=conn,
+                        branch_id=st.session_state.get("active_branch_id"),
+                    ):
+                        conn.close()
+                        return
                     cash_account = "Cash" if payment_method == "Cash" else ("Bank" if payment_method == "Bank" else "Mobile Money")
                     payment_cursor = conn.execute(
                         """
@@ -9043,6 +9067,7 @@ def show_banking(company_key, role):
                             source_module="Banking",
                             source_table="payments",
                             source_id=int(payment_cursor.lastrowid),
+                            user_role=role,
                             conn=conn,
                         )
                     else:
@@ -9064,8 +9089,31 @@ def show_banking(company_key, role):
                             source_module="Banking",
                             source_table="payments",
                             source_id=int(payment_cursor.lastrowid),
+                            user_role=role,
                             conn=conn,
                         )
+                    log_audit_action(
+                        conn,
+                        company_key,
+                        role,
+                        f"Banking Transaction Posted: {payment_type}",
+                        "Banking",
+                        details=f"type={payment_type}; amount={amount:.2f}; method={payment_method}; reference={reference or f'PAY-{int(payment_cursor.lastrowid)}'}",
+                        branch_id=st.session_state.get("active_branch_id"),
+                        action_type="post",
+                        document_ref=str(int(payment_cursor.lastrowid)),
+                    )
+                    log_system_event(
+                        "INFO",
+                        "Banking",
+                        "Posted banking transaction type={payment_type} amount={amount:.2f} method={method} user={user} payment_id={payment_id}".format(
+                            payment_type=payment_type,
+                            amount=float(amount or 0.0),
+                            method=payment_method,
+                            user=role,
+                            payment_id=int(payment_cursor.lastrowid),
+                        ),
+                    )
                     conn.commit()
                     st.success("Payment posted successfully.")
                     st.rerun()
