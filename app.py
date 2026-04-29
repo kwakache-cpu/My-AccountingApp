@@ -1930,7 +1930,7 @@ def _render_primary_page(user):
         show_aging(user["key"], "Payable")
     elif current_page == "Create Bill":
         show_create_bill_page(user["key"])
-    elif current_page == "Banking & Cash":
+    elif current_page in {"Banking & Cash", "Banking"}:
         show_banking(user["key"], user["role"])
     elif current_page == "Taxation (VAT/NHIL)":
         show_taxation(user["key"])

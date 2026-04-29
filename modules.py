@@ -9205,16 +9205,24 @@ def show_banking(company_key, role):
                 reference = st.text_input("Reference")
                 description = ""
                 owner_name = ""
-                customer_labels = [f"{row['name']} ({row['customer_id']})" for row in customers]
-                supplier_labels = [f"{row['name']}" for row in suppliers]
+                selected_party = None
                 if payment_type == "Customer Receipt":
-                    selected_party = st.selectbox("Customer", customer_labels if customer_labels else [""])
+                    customer_labels = [f"{row['name']} ({row['customer_id']})" for row in customers]
+                    selected_party = st.selectbox(
+                        "Customer",
+                        customer_labels if customer_labels else [""],
+                        key=f"banking_customer_{company_key}",
+                    )
                 elif payment_type == "Supplier Payment":
-                    selected_party = st.selectbox("Supplier", supplier_labels if supplier_labels else [""])
+                    supplier_labels = [f"{row['name']}" for row in suppliers]
+                    selected_party = st.selectbox(
+                        "Supplier",
+                        supplier_labels if supplier_labels else [""],
+                        key=f"banking_supplier_{company_key}",
+                    )
                 else:
-                    selected_party = None
                     description = st.text_area("Description")
-                    owner_name = st.text_input("Owner Name (Optional)")
+                    owner_name = st.text_input("Owner Name (Optional)", key=f"banking_owner_name_{company_key}")
                 submitted = st.form_submit_button("Post Payment")
 
             if submitted:
@@ -9229,6 +9237,8 @@ def show_banking(company_key, role):
                 elif payment_type == "Supplier Payment" and not suppliers:
                     st.warning("Create a supplier before posting a supplier payment.")
                 else:
+                    customer_labels = [f"{row['name']} ({row['customer_id']})" for row in customers]
+                    supplier_labels = [f"{row['name']}" for row in suppliers]
                     if not require_permission(
                         role,
                         "post_accounting_document",
