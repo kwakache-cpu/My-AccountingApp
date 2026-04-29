@@ -9189,16 +9189,33 @@ def show_banking(company_key, role):
         col2.metric(f"Bank Balance ({get_currency_symbol()})", format_currency(bank_total))
 
         with st.expander("Record Payment", expanded=True):
+            owner_payment_types = {
+                "Owner Capital / Owner Investment",
+                "Owner Drawings / Owner Withdrawal",
+            }
+            payment_type_key = f"banking_payment_type_{company_key}"
+            customer_widget_key = f"banking_customer_{company_key}"
+            supplier_widget_key = f"banking_supplier_{company_key}"
+            owner_name_widget_key = f"banking_owner_name_{company_key}"
+            owner_description_widget_key = f"banking_owner_description_{company_key}"
+            payment_type = st.selectbox(
+                "Payment Type",
+                [
+                    "Customer Receipt",
+                    "Supplier Payment",
+                    "Owner Capital / Owner Investment",
+                    "Owner Drawings / Owner Withdrawal",
+                ],
+                key=payment_type_key,
+            )
+            if payment_type != "Customer Receipt":
+                st.session_state.pop(customer_widget_key, None)
+            if payment_type != "Supplier Payment":
+                st.session_state.pop(supplier_widget_key, None)
+            if payment_type not in owner_payment_types:
+                st.session_state.pop(owner_name_widget_key, None)
+                st.session_state.pop(owner_description_widget_key, None)
             with st.form(f"banking_payment_form_{company_key}", clear_on_submit=True):
-                payment_type = st.selectbox(
-                    "Payment Type",
-                    [
-                        "Customer Receipt",
-                        "Supplier Payment",
-                        "Owner Capital / Owner Investment",
-                        "Owner Drawings / Owner Withdrawal",
-                    ],
-                )
                 payment_method = st.selectbox("Method", ["Cash", "Bank", "Mobile Money"])
                 amount = st.number_input("Amount (GHS)", min_value=0.0, step=0.01)
                 payment_date = st.date_input("Payment Date", value=datetime.now().date(), key=f"banking_payment_date_{company_key}")
@@ -9211,18 +9228,18 @@ def show_banking(company_key, role):
                     selected_party = st.selectbox(
                         "Customer",
                         customer_labels if customer_labels else [""],
-                        key=f"banking_customer_{company_key}",
+                        key=customer_widget_key,
                     )
                 elif payment_type == "Supplier Payment":
                     supplier_labels = [f"{row['name']}" for row in suppliers]
                     selected_party = st.selectbox(
                         "Supplier",
                         supplier_labels if supplier_labels else [""],
-                        key=f"banking_supplier_{company_key}",
+                        key=supplier_widget_key,
                     )
                 else:
-                    description = st.text_area("Description")
-                    owner_name = st.text_input("Owner Name (Optional)", key=f"banking_owner_name_{company_key}")
+                    description = st.text_area("Description", key=owner_description_widget_key)
+                    owner_name = st.text_input("Owner Name (Optional)", key=owner_name_widget_key)
                 submitted = st.form_submit_button("Post Payment")
 
             if submitted:
@@ -9234,8 +9251,12 @@ def show_banking(company_key, role):
                     st.warning("Select a payment date before posting.")
                 elif payment_type == "Customer Receipt" and not customers:
                     st.warning("Create a customer before posting a receipt.")
+                elif payment_type == "Customer Receipt" and not str(selected_party or "").strip():
+                    st.warning("Select a customer before posting a receipt.")
                 elif payment_type == "Supplier Payment" and not suppliers:
                     st.warning("Create a supplier before posting a supplier payment.")
+                elif payment_type == "Supplier Payment" and not str(selected_party or "").strip():
+                    st.warning("Select a supplier before posting a supplier payment.")
                 else:
                     customer_labels = [f"{row['name']} ({row['customer_id']})" for row in customers]
                     supplier_labels = [f"{row['name']}" for row in suppliers]
