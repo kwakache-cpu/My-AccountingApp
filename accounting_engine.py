@@ -43,6 +43,42 @@ HEADER_ACCOUNT_NAMES = {
 }
 
 
+def _normalize_account_lookup_name(value):
+    return " ".join(str(value or "").strip().lower().split())
+
+
+def _load_chart_account_rows(conn):
+    return conn.execute(
+        f"""
+        SELECT
+            id,
+            {_coa_name_expression()} AS account_name,
+            {_coa_type_expression()} AS account_type,
+            COALESCE(posting_allowed, 1) AS posting_allowed,
+            COALESCE(control_account, 0) AS control_account,
+            COALESCE(allow_manual_posting, 1) AS allow_manual_posting,
+            COALESCE(is_active, 1) AS is_active
+        FROM chart_of_accounts
+        """
+    ).fetchall()
+
+
+def _find_account_row_by_normalized_name(conn, account_name, aliases=None):
+    aliases = aliases or []
+    candidate_names = []
+    for value in [account_name, *aliases]:
+        normalized_value = _normalize_account_lookup_name(value)
+        if normalized_value and normalized_value not in candidate_names:
+            candidate_names.append(normalized_value)
+    if not candidate_names:
+        return None
+    for row in _load_chart_account_rows(conn):
+        normalized_existing = _normalize_account_lookup_name(row["account_name"])
+        if normalized_existing in candidate_names:
+            return row
+    return None
+
+
 def _log_posting_engine_event(conn, level, message):
     try:
         conn.execute(
@@ -919,24 +955,33 @@ def get_or_create_account(conn, account_name, account_type, parent_id=None, acco
                 f"Account code '{account_code}' is already assigned to {code_owner['account_name']}."
             )
 
-    row = conn.execute(
-        f"""
-        SELECT id
-        FROM chart_of_accounts
-        WHERE lower({_coa_name_expression()}) = lower(?)
-        LIMIT 1
-        """,
-        (account_name,),
-    ).fetchone()
+    row = _find_account_row_by_normalized_name(conn, account_name)
     if row:
+        existing_type = str(row["account_type"] or "").strip().title()
+        if existing_type and existing_type != account_type:
+            logger.warning(
+                "Chart of accounts type mismatch detected for account '%s': existing_type=%s requested_type=%s",
+                account_name,
+                existing_type,
+                account_type,
+            )
         conn.execute(
             """
             UPDATE chart_of_accounts
             SET name = COALESCE(NULLIF(name, ''), ?),
                 account_name = COALESCE(NULLIF(account_name, ''), ?),
-                type = COALESCE(NULLIF(type, ''), ?),
-                account_type = COALESCE(NULLIF(account_type, ''), ?),
-                category = COALESCE(NULLIF(category, ''), ?),
+                type = CASE
+                    WHEN NULLIF(type, '') IS NULL THEN ?
+                    ELSE type
+                END,
+                account_type = CASE
+                    WHEN NULLIF(account_type, '') IS NULL THEN ?
+                    ELSE account_type
+                END,
+                category = CASE
+                    WHEN NULLIF(category, '') IS NULL THEN ?
+                    ELSE category
+                END,
                 code = COALESCE(NULLIF(code, ''), NULLIF(?, ''), code),
                 account_code = COALESCE(NULLIF(account_code, ''), NULLIF(?, ''), account_code),
                 parent_id = COALESCE(parent_id, ?),
@@ -990,15 +1035,7 @@ def get_or_create_account(conn, account_name, account_type, parent_id=None, acco
 
 
 def get_account_id(conn, account_name, account_type=None):
-    row = conn.execute(
-        f"""
-        SELECT id, {_coa_type_expression()} AS account_type
-        FROM chart_of_accounts
-        WHERE lower({_coa_name_expression()}) = lower(?)
-        LIMIT 1
-        """,
-        (str(account_name or "").strip(),),
-    ).fetchone()
+    row = _find_account_row_by_normalized_name(conn, str(account_name or "").strip())
     if row:
         return int(row["id"])
     if account_type is None:

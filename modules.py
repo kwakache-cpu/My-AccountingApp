@@ -2418,6 +2418,197 @@ def _get_or_create_account(conn, account_name, category, parent_name=None):
     return engine_get_or_create_account(conn, normalized_name, normalized_category, parent_id=parent_id)
 
 
+def _normalize_account_name(value):
+    return " ".join(str(value or "").strip().lower().split())
+
+
+CORE_FINANCIAL_ACCOUNT_SPECS = [
+    {"canonical_name": "Cash", "account_type": "Asset", "aliases": ["Cash"], "require_posting_account": True},
+    {"canonical_name": "Bank", "account_type": "Asset", "aliases": ["Bank"], "require_posting_account": True},
+    {"canonical_name": "Mobile Money", "account_type": "Asset", "aliases": ["Mobile Money", "MoMo", "MobileMoney"], "require_posting_account": True},
+    {"canonical_name": "Owner Capital", "account_type": "Equity", "aliases": ["Owner Capital", "Capital Account", "Capital"], "require_posting_account": True},
+    {"canonical_name": "Owner Drawings", "account_type": "Equity", "aliases": ["Owner Drawings", "Drawings", "Owner Withdrawal", "Owner Withdrawals"], "require_posting_account": True},
+    {"canonical_name": "Opening Balance Equity", "account_type": "Equity", "aliases": ["Opening Balance Equity"], "require_posting_account": True},
+    {"canonical_name": "Loan Payable", "account_type": "Liability", "aliases": ["Loan Payable", "Loans Payable"], "require_posting_account": True},
+    {"canonical_name": "General Expenses", "account_type": "Expense", "aliases": ["General Expenses", "General Expense"], "require_posting_account": True},
+    {"canonical_name": "Fixed Assets", "account_type": "Asset", "aliases": ["Fixed Assets", "Fixed Asset", "Equipment"], "require_posting_account": True},
+]
+
+
+def _find_matching_account_row(conn, account_names, require_posting_account=False):
+    normalized_targets = {
+        _normalize_account_name(name)
+        for name in account_names
+        if _normalize_account_name(name)
+    }
+    if not normalized_targets:
+        return None
+    rows = conn.execute(
+        """
+        SELECT
+            id,
+            COALESCE(NULLIF(name, ''), NULLIF(account_name, ''), '') AS account_name,
+            COALESCE(NULLIF(type, ''), NULLIF(account_type, ''), NULLIF(category, ''), 'Asset') AS account_type,
+            COALESCE(posting_allowed, 1) AS posting_allowed
+        FROM chart_of_accounts
+        ORDER BY id
+        """
+    ).fetchall()
+    first_match = None
+    for row in rows:
+        normalized_existing = _normalize_account_name(row["account_name"])
+        if normalized_existing in normalized_targets:
+            if not first_match:
+                first_match = row
+            if require_posting_account and not bool(int(row["posting_allowed"] or 0)):
+                continue
+            return row
+    return first_match
+
+
+def get_or_create_account(company_key, account_name, account_type, conn=None):
+    normalized_name = " ".join(str(account_name or "").strip().split())
+    normalized_type = _normalize_account_category(account_type)
+    if not normalized_name or not normalized_type:
+        raise ValueError("Account name and type are required.")
+    owns_connection = conn is None
+    conn = conn or get_connection()
+    try:
+        existing_row = _find_matching_account_row(conn, [normalized_name], require_posting_account=False)
+        if existing_row:
+            existing_type = str(existing_row["account_type"] or "").strip().title()
+            if existing_type and existing_type != normalized_type:
+                logger.warning(
+                    "Account type mismatch detected for company_key=%s account=%s existing_type=%s requested_type=%s",
+                    company_key,
+                    normalized_name,
+                    existing_type,
+                    normalized_type,
+                )
+                log_system_event(
+                    "WARNING",
+                    "Chart of Accounts",
+                    "Account mismatch detected company_key={company_key} account={account} existing_type={existing_type} requested_type={requested_type}".format(
+                        company_key=company_key,
+                        account=normalized_name,
+                        existing_type=existing_type,
+                        requested_type=normalized_type,
+                    ),
+                )
+            logger.info("Reused chart account company_key=%s account=%s account_id=%s", company_key, normalized_name, int(existing_row["id"]))
+            log_system_event(
+                "INFO",
+                "Chart of Accounts",
+                "Reused chart account company_key={company_key} account={account} account_id={account_id}".format(
+                    company_key=company_key,
+                    account=normalized_name,
+                    account_id=int(existing_row["id"]),
+                ),
+            )
+            return int(existing_row["id"])
+        account_id = engine_get_or_create_account(conn, normalized_name, normalized_type)
+        logger.info("Created chart account company_key=%s account=%s account_id=%s", company_key, normalized_name, int(account_id))
+        log_system_event(
+            "INFO",
+            "Chart of Accounts",
+            "Created chart account company_key={company_key} account={account} account_id={account_id} type={account_type}".format(
+                company_key=company_key,
+                account=normalized_name,
+                account_id=int(account_id),
+                account_type=normalized_type,
+            ),
+        )
+        if owns_connection:
+            conn.commit()
+        return int(account_id)
+    finally:
+        if owns_connection and conn:
+            conn.close()
+
+
+def ensure_core_financial_accounts(company_key, conn=None):
+    owns_connection = conn is None
+    conn = conn or get_connection()
+    ensured_accounts = []
+    try:
+        for spec in CORE_FINANCIAL_ACCOUNT_SPECS:
+            canonical_name = spec["canonical_name"]
+            account_type = _normalize_account_category(spec["account_type"])
+            aliases = spec.get("aliases") or [canonical_name]
+            matched_row = _find_matching_account_row(
+                conn,
+                [canonical_name, *aliases],
+                require_posting_account=bool(spec.get("require_posting_account")),
+            )
+            if matched_row:
+                existing_name = str(matched_row["account_name"] or "").strip() or canonical_name
+                existing_type = str(matched_row["account_type"] or "").strip().title()
+                if existing_type and existing_type != account_type:
+                    logger.warning(
+                        "Core account type mismatch detected for company_key=%s canonical=%s existing_name=%s existing_type=%s expected_type=%s",
+                        company_key,
+                        canonical_name,
+                        existing_name,
+                        existing_type,
+                        account_type,
+                    )
+                    log_system_event(
+                        "WARNING",
+                        "Chart of Accounts",
+                        "Core account mismatch company_key={company_key} canonical={canonical} existing_name={existing_name} existing_type={existing_type} expected_type={expected_type}".format(
+                            company_key=company_key,
+                            canonical=canonical_name,
+                            existing_name=existing_name,
+                            existing_type=existing_type,
+                            expected_type=account_type,
+                        ),
+                    )
+                else:
+                    logger.info(
+                        "Reused core financial account company_key=%s canonical=%s existing_name=%s account_id=%s",
+                        company_key,
+                        canonical_name,
+                        existing_name,
+                        int(matched_row["id"]),
+                    )
+                    log_system_event(
+                        "INFO",
+                        "Chart of Accounts",
+                        "Reused core financial account company_key={company_key} canonical={canonical} existing_name={existing_name} account_id={account_id}".format(
+                            company_key=company_key,
+                            canonical=canonical_name,
+                            existing_name=existing_name,
+                            account_id=int(matched_row["id"]),
+                        ),
+                    )
+                ensured_accounts.append(
+                    {
+                        "canonical_name": canonical_name,
+                        "resolved_name": existing_name,
+                        "account_type": existing_type or account_type,
+                        "account_id": int(matched_row["id"]),
+                        "status": "reused",
+                    }
+                )
+                continue
+            created_account_id = get_or_create_account(company_key, canonical_name, account_type, conn=conn)
+            ensured_accounts.append(
+                {
+                    "canonical_name": canonical_name,
+                    "resolved_name": canonical_name,
+                    "account_type": account_type,
+                    "account_id": int(created_account_id),
+                    "status": "created",
+                }
+            )
+        if owns_connection:
+            conn.commit()
+        return ensured_accounts
+    finally:
+        if owns_connection and conn:
+            conn.close()
+
+
 def post_transaction(description, lines, company_key=None, reference=None, created_by=None, entry_date=None, branch_id=None, conn=None):
     if not lines:
         raise ValueError("Transaction lines are required.")

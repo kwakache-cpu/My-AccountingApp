@@ -116,6 +116,7 @@ show_accounts_payable = eka_modules.show_accounts_payable
 show_accounts_receivable = eka_modules.show_accounts_receivable
 show_create_bill_page = eka_modules.show_create_bill_page
 show_dashboard_module = eka_modules.show_dashboard
+ensure_core_financial_accounts = eka_modules.ensure_core_financial_accounts
 show_aging = eka_modules.show_aging
 show_ai_assistant = eka_modules.show_ai_assistant
 show_audit_trail = eka_modules.show_audit_trail
@@ -1889,6 +1890,19 @@ def _render_primary_sidebar(user, include_settings=True):
 
 
 def _render_primary_page(user):
+    company_key = user.get("key")
+    if company_key and user.get("role") != "Demo":
+        ensure_key = f"core_financial_accounts_ensured_{company_key}"
+        if not st.session_state.get(ensure_key):
+            try:
+                ensure_core_financial_accounts(company_key)
+                st.session_state[ensure_key] = True
+            except Exception as exc:
+                logger.warning(
+                    "Core financial account ensure failed for company %s: %s",
+                    company_key,
+                    sanitize_error_message(exc),
+                )
     current_page = _ensure_valid_page()
     if current_page == "Dashboard":
         if user["role"] == "Demo":
