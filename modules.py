@@ -9190,22 +9190,40 @@ def show_banking(company_key, role):
 
         with st.expander("Record Payment", expanded=True):
             with st.form(f"banking_payment_form_{company_key}", clear_on_submit=True):
-                payment_type = st.selectbox("Payment Type", ["Customer Receipt", "Supplier Payment"])
+                payment_type = st.selectbox(
+                    "Payment Type",
+                    [
+                        "Customer Receipt",
+                        "Supplier Payment",
+                        "Owner Capital / Owner Investment",
+                        "Owner Drawings / Owner Withdrawal",
+                    ],
+                )
                 payment_method = st.selectbox("Method", ["Cash", "Bank", "Mobile Money"])
                 amount = st.number_input("Amount (GHS)", min_value=0.0, step=0.01)
                 payment_date = st.date_input("Payment Date", value=datetime.now().date(), key=f"banking_payment_date_{company_key}")
                 reference = st.text_input("Reference")
+                description = ""
+                owner_name = ""
+                customer_labels = [f"{row['name']} ({row['customer_id']})" for row in customers]
+                supplier_labels = [f"{row['name']}" for row in suppliers]
                 if payment_type == "Customer Receipt":
-                    customer_labels = [f"{row['name']} ({row['customer_id']})" for row in customers]
                     selected_party = st.selectbox("Customer", customer_labels if customer_labels else [""])
-                else:
-                    supplier_labels = [f"{row['name']}" for row in suppliers]
+                elif payment_type == "Supplier Payment":
                     selected_party = st.selectbox("Supplier", supplier_labels if supplier_labels else [""])
+                else:
+                    selected_party = None
+                    description = st.text_area("Description")
+                    owner_name = st.text_input("Owner Name (Optional)")
                 submitted = st.form_submit_button("Post Payment")
 
             if submitted:
                 if amount <= 0:
                     st.warning("Enter an amount greater than zero.")
+                elif not payment_method:
+                    st.warning("Select a payment method before posting.")
+                elif not payment_date:
+                    st.warning("Select a payment date before posting.")
                 elif payment_type == "Customer Receipt" and not customers:
                     st.warning("Create a customer before posting a receipt.")
                 elif payment_type == "Supplier Payment" and not suppliers:
@@ -9221,7 +9239,13 @@ def show_banking(company_key, role):
                     ):
                         conn.close()
                         return
+                    normalized_reference = str(reference or "").strip()
+                    normalized_description = str(description or "").strip()
+                    normalized_owner_name = str(owner_name or "").strip()
                     cash_account = "Cash" if payment_method == "Cash" else ("Bank" if payment_method == "Bank" else "Mobile Money")
+                    if payment_type in {"Owner Capital / Owner Investment", "Owner Drawings / Owner Withdrawal"}:
+                        # Reuse the canonical account helpers to avoid duplicate equity or cash/bank accounts.
+                        ensure_core_financial_accounts(company_key, conn=conn)
                     payment_cursor = conn.execute(
                         """
                         INSERT INTO payments (company_key, payment_date, payment_type, customer_id, supplier_id, amount, currency, method, reference, status, approval_status, created_by)
@@ -9235,10 +9259,15 @@ def show_banking(company_key, role):
                             int(suppliers[supplier_labels.index(selected_party)]["id"]) if payment_type == "Supplier Payment" else None,
                             amount,
                             payment_method,
-                            reference,
+                            normalized_reference,
                             role,
                         ),
                     )
+                    payment_id = int(payment_cursor.lastrowid)
+                    document_reference = normalized_reference or f"PAY-{payment_id}"
+                    audit_transaction_type = payment_type
+                    audit_owner_name = normalized_owner_name
+                    audit_description = normalized_description
                     if payment_type == "Customer Receipt":
                         selected_customer = customers[[f"{row['name']} ({row['customer_id']})" for row in customers].index(selected_party)]
                         lines = [
@@ -9249,19 +9278,19 @@ def show_banking(company_key, role):
                             company_key=company_key,
                             date=payment_date,
                             description=f"Customer receipt - {selected_customer['name']}",
-                            reference=reference or f"PAY-{int(payment_cursor.lastrowid)}",
+                            reference=document_reference,
                             lines=lines,
                             created_by=role,
                             branch_id=st.session_state.get("active_branch_id"),
                             customer_id=int(selected_customer["id"]),
-                            payment_id=int(payment_cursor.lastrowid),
+                            payment_id=payment_id,
                             source_module="Banking",
                             source_table="payments",
-                            source_id=int(payment_cursor.lastrowid),
+                            source_id=payment_id,
                             user_role=role,
                             conn=conn,
                         )
-                    else:
+                    elif payment_type == "Supplier Payment":
                         selected_supplier = suppliers[supplier_labels.index(selected_party)]
                         lines = [
                             {"account_id": get_account_id(conn, "Accounts Payable", "Liability"), "debit": amount, "credit": 0},
@@ -9271,15 +9300,61 @@ def show_banking(company_key, role):
                             company_key=company_key,
                             date=payment_date,
                             description=f"Supplier payment - {selected_supplier['name']}",
-                            reference=reference or f"PAY-{int(payment_cursor.lastrowid)}",
+                            reference=document_reference,
                             lines=lines,
                             created_by=role,
                             branch_id=st.session_state.get("active_branch_id"),
                             supplier_id=int(selected_supplier["id"]),
-                            payment_id=int(payment_cursor.lastrowid),
+                            payment_id=payment_id,
                             source_module="Banking",
                             source_table="payments",
-                            source_id=int(payment_cursor.lastrowid),
+                            source_id=payment_id,
+                            user_role=role,
+                            conn=conn,
+                        )
+                    elif payment_type == "Owner Capital / Owner Investment":
+                        audit_transaction_type = "Owner Capital"
+                        cash_account_id = get_or_create_account(company_key, cash_account, "Asset", conn=conn)
+                        owner_capital_account_id = get_or_create_account(company_key, "Owner Capital", "Equity", conn=conn)
+                        lines = [
+                            {"account_id": cash_account_id, "debit": amount, "credit": 0},
+                            {"account_id": owner_capital_account_id, "debit": 0, "credit": amount},
+                        ]
+                        post_journal_entry(
+                            company_key=company_key,
+                            date=payment_date,
+                            description=normalized_description or f"Owner capital - {normalized_owner_name or 'Owner'}",
+                            reference=document_reference,
+                            lines=lines,
+                            created_by=role,
+                            branch_id=st.session_state.get("active_branch_id"),
+                            payment_id=payment_id,
+                            source_module="Banking",
+                            source_table="payments",
+                            source_id=payment_id,
+                            user_role=role,
+                            conn=conn,
+                        )
+                    else:
+                        audit_transaction_type = "Owner Drawings"
+                        owner_drawings_account_id = get_or_create_account(company_key, "Owner Drawings", "Equity", conn=conn)
+                        cash_account_id = get_or_create_account(company_key, cash_account, "Asset", conn=conn)
+                        lines = [
+                            {"account_id": owner_drawings_account_id, "debit": amount, "credit": 0},
+                            {"account_id": cash_account_id, "debit": 0, "credit": amount},
+                        ]
+                        post_journal_entry(
+                            company_key=company_key,
+                            date=payment_date,
+                            description=normalized_description or f"Owner drawings - {normalized_owner_name or 'Owner'}",
+                            reference=document_reference,
+                            lines=lines,
+                            created_by=role,
+                            branch_id=st.session_state.get("active_branch_id"),
+                            payment_id=payment_id,
+                            source_module="Banking",
+                            source_table="payments",
+                            source_id=payment_id,
                             user_role=role,
                             conn=conn,
                         )
@@ -9289,20 +9364,31 @@ def show_banking(company_key, role):
                         role,
                         f"Banking Transaction Posted: {payment_type}",
                         "Banking",
-                        details=f"type={payment_type}; amount={amount:.2f}; method={payment_method}; reference={reference or f'PAY-{int(payment_cursor.lastrowid)}'}",
+                        details=(
+                            f"transaction_type={audit_transaction_type}; amount={amount:.2f}; method={payment_method}; "
+                            f"owner_name={audit_owner_name or 'N/A'}; reference={document_reference}; "
+                            f"description={audit_description or 'N/A'}; user={role}"
+                        ),
                         branch_id=st.session_state.get("active_branch_id"),
                         action_type="post",
-                        document_ref=str(int(payment_cursor.lastrowid)),
+                        document_ref=str(payment_id),
                     )
                     log_system_event(
                         "INFO",
                         "Banking",
-                        "Posted banking transaction type={payment_type} amount={amount:.2f} method={method} user={user} payment_id={payment_id}".format(
-                            payment_type=payment_type,
+                        (
+                            "Posted banking transaction transaction_type={payment_type} amount={amount:.2f} "
+                            "method={method} owner_name={owner_name} reference={reference} description={description} "
+                            "user={user} payment_id={payment_id}"
+                        ).format(
+                            payment_type=audit_transaction_type,
                             amount=float(amount or 0.0),
                             method=payment_method,
+                            owner_name=audit_owner_name or "N/A",
+                            reference=document_reference,
+                            description=audit_description or "N/A",
                             user=role,
-                            payment_id=int(payment_cursor.lastrowid),
+                            payment_id=payment_id,
                         ),
                     )
                     conn.commit()
