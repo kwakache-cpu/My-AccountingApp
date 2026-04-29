@@ -107,7 +107,9 @@ request_ai_chat_completion = eka_modules.request_ai_chat_completion
 call_ai_assistant = eka_modules.call_ai_assistant
 initialize_paystack_payment = eka_modules.initialize_paystack_payment
 get_subscription_plans = eka_modules.get_subscription_plans
-save_subscription_plan_pricing_settings = eka_modules.save_subscription_plan_pricing_settings
+def save_subscription_plan_pricing_settings(*args, **kwargs):
+    return eka_modules.save_subscription_plan_pricing_settings(*args, **kwargs)
+
 SUBSCRIPTION_PRICING_NOT_CONFIGURED_MESSAGE = eka_modules.SUBSCRIPTION_PRICING_NOT_CONFIGURED_MESSAGE
 test_paystack_connection = eka_modules.test_paystack_connection
 log_audit_action = eka_modules.log_audit_action
@@ -116,7 +118,6 @@ show_accounts_payable = eka_modules.show_accounts_payable
 show_accounts_receivable = eka_modules.show_accounts_receivable
 show_create_bill_page = eka_modules.show_create_bill_page
 show_dashboard_module = eka_modules.show_dashboard
-ensure_core_financial_accounts = eka_modules.ensure_core_financial_accounts
 show_aging = eka_modules.show_aging
 show_ai_assistant = eka_modules.show_ai_assistant
 show_audit_trail = eka_modules.show_audit_trail
@@ -1890,19 +1891,6 @@ def _render_primary_sidebar(user, include_settings=True):
 
 
 def _render_primary_page(user):
-    company_key = user.get("key")
-    if company_key and user.get("role") != "Demo":
-        ensure_key = f"core_financial_accounts_ensured_{company_key}"
-        if not st.session_state.get(ensure_key):
-            try:
-                ensure_core_financial_accounts(company_key)
-                st.session_state[ensure_key] = True
-            except Exception as exc:
-                logger.warning(
-                    "Core financial account ensure failed for company %s: %s",
-                    company_key,
-                    sanitize_error_message(exc),
-                )
     current_page = _ensure_valid_page()
     if current_page == "Dashboard":
         if user["role"] == "Demo":
@@ -1942,7 +1930,7 @@ def _render_primary_page(user):
         show_aging(user["key"], "Payable")
     elif current_page == "Create Bill":
         show_create_bill_page(user["key"])
-    elif current_page in {"Banking", "Banking & Cash"}:
+    elif current_page == "Banking & Cash":
         show_banking(user["key"], user["role"])
     elif current_page == "Taxation (VAT/NHIL)":
         show_taxation(user["key"])
