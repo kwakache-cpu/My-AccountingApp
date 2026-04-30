@@ -9193,11 +9193,21 @@ def show_banking(company_key, role):
                 "Owner Capital / Owner Investment",
                 "Owner Drawings / Owner Withdrawal",
             }
+            loan_payment_types = {
+                "Loan Received",
+                "Loan Repayment",
+            }
+            transfer_payment_types = {
+                "Transfer Between Cash/Bank/Mobile Money",
+            }
             payment_type_key = f"banking_payment_type_{company_key}"
             customer_widget_key = f"banking_customer_{company_key}"
             supplier_widget_key = f"banking_supplier_{company_key}"
             owner_name_widget_key = f"banking_owner_name_{company_key}"
             owner_description_widget_key = f"banking_owner_description_{company_key}"
+            lender_name_widget_key = f"banking_lender_name_{company_key}"
+            transfer_from_widget_key = f"banking_transfer_from_{company_key}"
+            transfer_to_widget_key = f"banking_transfer_to_{company_key}"
             payment_type = st.selectbox(
                 "Payment Type",
                 [
@@ -9205,6 +9215,9 @@ def show_banking(company_key, role):
                     "Supplier Payment",
                     "Owner Capital / Owner Investment",
                     "Owner Drawings / Owner Withdrawal",
+                    "Loan Received",
+                    "Loan Repayment",
+                    "Transfer Between Cash/Bank/Mobile Money",
                 ],
                 key=payment_type_key,
             )
@@ -9215,13 +9228,31 @@ def show_banking(company_key, role):
             if payment_type not in owner_payment_types:
                 st.session_state.pop(owner_name_widget_key, None)
                 st.session_state.pop(owner_description_widget_key, None)
+            if payment_type not in loan_payment_types:
+                st.session_state.pop(lender_name_widget_key, None)
+            if payment_type not in transfer_payment_types:
+                st.session_state.pop(transfer_from_widget_key, None)
+                st.session_state.pop(transfer_to_widget_key, None)
             with st.form(f"banking_payment_form_{company_key}", clear_on_submit=True):
-                payment_method = st.selectbox("Method", ["Cash", "Bank", "Mobile Money"])
+                money_methods = ["Cash", "Bank", "Mobile Money"]
+                payment_method = None
+                transfer_from_account = ""
+                transfer_to_account = ""
+                if payment_type in transfer_payment_types:
+                    transfer_from_account = st.selectbox("From Account", money_methods, key=transfer_from_widget_key)
+                    transfer_to_account = st.selectbox("To Account", money_methods, key=transfer_to_widget_key)
+                elif payment_type == "Loan Received":
+                    payment_method = st.selectbox("Destination Method", money_methods)
+                elif payment_type == "Loan Repayment":
+                    payment_method = st.selectbox("Source Method", money_methods)
+                else:
+                    payment_method = st.selectbox("Method", money_methods)
                 amount = st.number_input("Amount (GHS)", min_value=0.0, step=0.01)
                 payment_date = st.date_input("Payment Date", value=datetime.now().date(), key=f"banking_payment_date_{company_key}")
                 reference = st.text_input("Reference")
                 description = ""
                 owner_name = ""
+                lender_name = ""
                 selected_party = None
                 if payment_type == "Customer Receipt":
                     customer_labels = [f"{row['name']} ({row['customer_id']})" for row in customers]
@@ -9237,15 +9268,25 @@ def show_banking(company_key, role):
                         supplier_labels if supplier_labels else [""],
                         key=supplier_widget_key,
                     )
+                elif payment_type in loan_payment_types:
+                    lender_name = st.text_input("Lender Name (Optional)", key=lender_name_widget_key)
+                    description = st.text_area("Description")
                 else:
                     description = st.text_area("Description", key=owner_description_widget_key)
-                    owner_name = st.text_input("Owner Name (Optional)", key=owner_name_widget_key)
-                submitted = st.form_submit_button("Post Payment")
+                    if payment_type in owner_payment_types:
+                        owner_name = st.text_input("Owner Name (Optional)", key=owner_name_widget_key)
+                submitted = st.form_submit_button("Post Transaction")
 
             if submitted:
                 if amount <= 0:
                     st.warning("Enter an amount greater than zero.")
-                elif not payment_method:
+                elif payment_type in transfer_payment_types and not transfer_from_account:
+                    st.warning("Select a source account before posting the transfer.")
+                elif payment_type in transfer_payment_types and not transfer_to_account:
+                    st.warning("Select a destination account before posting the transfer.")
+                elif payment_type in transfer_payment_types and transfer_from_account == transfer_to_account:
+                    st.warning("Transfer source and destination accounts must be different.")
+                elif payment_type not in transfer_payment_types and not payment_method:
                     st.warning("Select a payment method before posting.")
                 elif not payment_date:
                     st.warning("Select a payment date before posting.")
@@ -9273,8 +9314,14 @@ def show_banking(company_key, role):
                     normalized_reference = str(reference or "").strip()
                     normalized_description = str(description or "").strip()
                     normalized_owner_name = str(owner_name or "").strip()
-                    cash_account = "Cash" if payment_method == "Cash" else ("Bank" if payment_method == "Bank" else "Mobile Money")
-                    if payment_type in {"Owner Capital / Owner Investment", "Owner Drawings / Owner Withdrawal"}:
+                    normalized_lender_name = str(lender_name or "").strip()
+                    source_method = transfer_from_account if payment_type in transfer_payment_types else payment_method
+                    destination_method = transfer_to_account if payment_type in transfer_payment_types else payment_method
+                    cash_account = (
+                        "Cash" if payment_method == "Cash"
+                        else ("Bank" if payment_method == "Bank" else "Mobile Money")
+                    ) if payment_method else ""
+                    if payment_type in (owner_payment_types | loan_payment_types | transfer_payment_types):
                         # Reuse the canonical account helpers to avoid duplicate equity or cash/bank accounts.
                         ensure_core_financial_accounts(company_key, conn=conn)
                     payment_cursor = conn.execute(
@@ -9289,7 +9336,7 @@ def show_banking(company_key, role):
                             int(customers[[f"{row['name']} ({row['customer_id']})" for row in customers].index(selected_party)]["id"]) if payment_type == "Customer Receipt" else None,
                             int(suppliers[supplier_labels.index(selected_party)]["id"]) if payment_type == "Supplier Payment" else None,
                             amount,
-                            payment_method,
+                            f"{transfer_from_account} -> {transfer_to_account}" if payment_type in transfer_payment_types else payment_method,
                             normalized_reference,
                             role,
                         ),
@@ -9299,6 +9346,9 @@ def show_banking(company_key, role):
                     audit_transaction_type = payment_type
                     audit_owner_name = normalized_owner_name
                     audit_description = normalized_description
+                    audit_lender_name = normalized_lender_name
+                    audit_source_method = source_method or "N/A"
+                    audit_destination_method = destination_method or "N/A"
                     if payment_type == "Customer Receipt":
                         selected_customer = customers[[f"{row['name']} ({row['customer_id']})" for row in customers].index(selected_party)]
                         lines = [
@@ -9336,6 +9386,75 @@ def show_banking(company_key, role):
                             created_by=role,
                             branch_id=st.session_state.get("active_branch_id"),
                             supplier_id=int(selected_supplier["id"]),
+                            payment_id=payment_id,
+                            source_module="Banking",
+                            source_table="payments",
+                            source_id=payment_id,
+                            user_role=role,
+                            conn=conn,
+                        )
+                    elif payment_type == "Loan Received":
+                        audit_transaction_type = "Loan Received"
+                        destination_account_id = get_or_create_account(company_key, destination_method, "Asset", conn=conn)
+                        loan_payable_account_id = get_or_create_account(company_key, "Loan Payable", "Liability", conn=conn)
+                        lines = [
+                            {"account_id": destination_account_id, "debit": amount, "credit": 0},
+                            {"account_id": loan_payable_account_id, "debit": 0, "credit": amount},
+                        ]
+                        post_journal_entry(
+                            company_key=company_key,
+                            date=payment_date,
+                            description=normalized_description or f"Loan received - {normalized_lender_name or 'Lender'}",
+                            reference=document_reference,
+                            lines=lines,
+                            created_by=role,
+                            branch_id=st.session_state.get("active_branch_id"),
+                            payment_id=payment_id,
+                            source_module="Banking",
+                            source_table="payments",
+                            source_id=payment_id,
+                            user_role=role,
+                            conn=conn,
+                        )
+                    elif payment_type == "Loan Repayment":
+                        audit_transaction_type = "Loan Repayment"
+                        source_account_id = get_or_create_account(company_key, source_method, "Asset", conn=conn)
+                        loan_payable_account_id = get_or_create_account(company_key, "Loan Payable", "Liability", conn=conn)
+                        lines = [
+                            {"account_id": loan_payable_account_id, "debit": amount, "credit": 0},
+                            {"account_id": source_account_id, "debit": 0, "credit": amount},
+                        ]
+                        post_journal_entry(
+                            company_key=company_key,
+                            date=payment_date,
+                            description=normalized_description or f"Loan repayment - {normalized_lender_name or 'Lender'}",
+                            reference=document_reference,
+                            lines=lines,
+                            created_by=role,
+                            branch_id=st.session_state.get("active_branch_id"),
+                            payment_id=payment_id,
+                            source_module="Banking",
+                            source_table="payments",
+                            source_id=payment_id,
+                            user_role=role,
+                            conn=conn,
+                        )
+                    elif payment_type == "Transfer Between Cash/Bank/Mobile Money":
+                        audit_transaction_type = "Transfer"
+                        source_account_id = get_or_create_account(company_key, source_method, "Asset", conn=conn)
+                        destination_account_id = get_or_create_account(company_key, destination_method, "Asset", conn=conn)
+                        lines = [
+                            {"account_id": destination_account_id, "debit": amount, "credit": 0},
+                            {"account_id": source_account_id, "debit": 0, "credit": amount},
+                        ]
+                        post_journal_entry(
+                            company_key=company_key,
+                            date=payment_date,
+                            description=normalized_description or f"Transfer {source_method} to {destination_method}",
+                            reference=document_reference,
+                            lines=lines,
+                            created_by=role,
+                            branch_id=st.session_state.get("active_branch_id"),
                             payment_id=payment_id,
                             source_module="Banking",
                             source_table="payments",
@@ -9396,8 +9515,9 @@ def show_banking(company_key, role):
                         f"Banking Transaction Posted: {payment_type}",
                         "Banking",
                         details=(
-                            f"transaction_type={audit_transaction_type}; amount={amount:.2f}; method={payment_method}; "
-                            f"owner_name={audit_owner_name or 'N/A'}; reference={document_reference}; "
+                            f"transaction_type={audit_transaction_type}; amount={amount:.2f}; "
+                            f"source_method={audit_source_method}; destination_method={audit_destination_method}; "
+                            f"owner_name={audit_owner_name or 'N/A'}; lender_name={audit_lender_name or 'N/A'}; reference={document_reference}; "
                             f"description={audit_description or 'N/A'}; user={role}"
                         ),
                         branch_id=st.session_state.get("active_branch_id"),
@@ -9409,13 +9529,16 @@ def show_banking(company_key, role):
                         "Banking",
                         (
                             "Posted banking transaction transaction_type={payment_type} amount={amount:.2f} "
-                            "method={method} owner_name={owner_name} reference={reference} description={description} "
+                            "source_method={source_method} destination_method={destination_method} "
+                            "owner_name={owner_name} lender_name={lender_name} reference={reference} description={description} "
                             "user={user} payment_id={payment_id}"
                         ).format(
                             payment_type=audit_transaction_type,
                             amount=float(amount or 0.0),
-                            method=payment_method,
+                            source_method=audit_source_method,
+                            destination_method=audit_destination_method,
                             owner_name=audit_owner_name or "N/A",
+                            lender_name=audit_lender_name or "N/A",
                             reference=document_reference,
                             description=audit_description or "N/A",
                             user=role,
@@ -9423,7 +9546,7 @@ def show_banking(company_key, role):
                         ),
                     )
                     conn.commit()
-                    st.success("Payment posted successfully.")
+                    st.success("Transaction posted successfully.")
                     st.rerun()
 
         with st.expander("Bank Reconciliation", expanded=False):
