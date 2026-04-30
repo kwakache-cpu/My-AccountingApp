@@ -9178,6 +9178,8 @@ def show_banking(company_key, role):
 
     try:
         conn = get_connection()
+        feedback_key = f"banking_post_feedback_{company_key}"
+        pending_feedback = st.session_state.pop(feedback_key, None)
         trial_balance = engine_get_trial_balance(company_key)
         cash_total = sum(row["balance"] for row in trial_balance if row["account_name"] == "Cash")
         bank_total = sum(row["balance"] for row in trial_balance if row["account_name"] in ("Bank", "Mobile Money"))
@@ -9187,6 +9189,11 @@ def show_banking(company_key, role):
         col1, col2 = st.columns(2)
         col1.metric(f"Cash Balance ({get_currency_symbol()})", format_currency(cash_total))
         col2.metric(f"Bank Balance ({get_currency_symbol()})", format_currency(bank_total))
+        if pending_feedback:
+            if pending_feedback.get("status") == "success":
+                st.success(str(pending_feedback.get("message") or "Transaction posted successfully."))
+            elif pending_feedback.get("status") == "error":
+                st.error(str(pending_feedback.get("message") or "Banking transaction failed."))
 
         with st.expander("Record Payment", expanded=True):
             owner_payment_types = {
@@ -9233,7 +9240,7 @@ def show_banking(company_key, role):
             if payment_type not in transfer_payment_types:
                 st.session_state.pop(transfer_from_widget_key, None)
                 st.session_state.pop(transfer_to_widget_key, None)
-            with st.form(f"banking_payment_form_{company_key}", clear_on_submit=True):
+            with st.form(f"banking_payment_form_{company_key}", clear_on_submit=False):
                 money_methods = ["Cash", "Bank", "Mobile Money"]
                 payment_method = None
                 transfer_from_account = ""
@@ -9342,211 +9349,246 @@ def show_banking(company_key, role):
                         ),
                     )
                     payment_id = int(payment_cursor.lastrowid)
-                    document_reference = normalized_reference or f"PAY-{payment_id}"
+                    document_reference = normalized_reference or f"BANK-{payment_id}"
                     audit_transaction_type = payment_type
                     audit_owner_name = normalized_owner_name
                     audit_description = normalized_description
                     audit_lender_name = normalized_lender_name
                     audit_source_method = source_method or "N/A"
                     audit_destination_method = destination_method or "N/A"
-                    if payment_type == "Customer Receipt":
-                        selected_customer = customers[[f"{row['name']} ({row['customer_id']})" for row in customers].index(selected_party)]
-                        lines = [
-                            {"account_id": get_account_id(conn, cash_account, "Asset"), "debit": amount, "credit": 0},
-                            {"account_id": get_account_id(conn, "Accounts Receivable", "Asset"), "debit": 0, "credit": amount},
-                        ]
-                        post_journal_entry(
-                            company_key=company_key,
-                            date=payment_date,
-                            description=f"Customer receipt - {selected_customer['name']}",
-                            reference=document_reference,
-                            lines=lines,
-                            created_by=role,
+                    try:
+                        if payment_type == "Customer Receipt":
+                            selected_customer = customers[[f"{row['name']} ({row['customer_id']})" for row in customers].index(selected_party)]
+                            lines = [
+                                {"account_id": get_account_id(conn, cash_account, "Asset"), "debit": amount, "credit": 0},
+                                {"account_id": get_account_id(conn, "Accounts Receivable", "Asset"), "debit": 0, "credit": amount},
+                            ]
+                            post_journal_entry(
+                                company_key=company_key,
+                                date=payment_date,
+                                description=f"Customer receipt - {selected_customer['name']}",
+                                reference=document_reference,
+                                lines=lines,
+                                created_by=role,
+                                branch_id=st.session_state.get("active_branch_id"),
+                                customer_id=int(selected_customer["id"]),
+                                payment_id=payment_id,
+                                source_module="Banking",
+                                source_table="payments",
+                                source_type=payment_type,
+                                source_id=payment_id,
+                                user_role=role,
+                                conn=conn,
+                            )
+                        elif payment_type == "Supplier Payment":
+                            selected_supplier = suppliers[supplier_labels.index(selected_party)]
+                            lines = [
+                                {"account_id": get_account_id(conn, "Accounts Payable", "Liability"), "debit": amount, "credit": 0},
+                                {"account_id": get_account_id(conn, cash_account, "Asset"), "debit": 0, "credit": amount},
+                            ]
+                            post_journal_entry(
+                                company_key=company_key,
+                                date=payment_date,
+                                description=f"Supplier payment - {selected_supplier['name']}",
+                                reference=document_reference,
+                                lines=lines,
+                                created_by=role,
+                                branch_id=st.session_state.get("active_branch_id"),
+                                supplier_id=int(selected_supplier["id"]),
+                                payment_id=payment_id,
+                                source_module="Banking",
+                                source_table="payments",
+                                source_type=payment_type,
+                                source_id=payment_id,
+                                user_role=role,
+                                conn=conn,
+                            )
+                        elif payment_type == "Loan Received":
+                            audit_transaction_type = "Loan Received"
+                            destination_account_id = get_or_create_account(company_key, destination_method, "Asset", conn=conn)
+                            loan_payable_account_id = get_or_create_account(company_key, "Loan Payable", "Liability", conn=conn)
+                            lines = [
+                                {"account_id": destination_account_id, "debit": amount, "credit": 0},
+                                {"account_id": loan_payable_account_id, "debit": 0, "credit": amount},
+                            ]
+                            post_journal_entry(
+                                company_key=company_key,
+                                date=payment_date,
+                                description=normalized_description or f"Loan received - {normalized_lender_name or 'Lender'}",
+                                reference=document_reference,
+                                lines=lines,
+                                created_by=role,
+                                branch_id=st.session_state.get("active_branch_id"),
+                                payment_id=payment_id,
+                                source_module="Banking",
+                                source_table="payments",
+                                source_type=payment_type,
+                                source_id=payment_id,
+                                user_role=role,
+                                conn=conn,
+                            )
+                        elif payment_type == "Loan Repayment":
+                            audit_transaction_type = "Loan Repayment"
+                            source_account_id = get_or_create_account(company_key, source_method, "Asset", conn=conn)
+                            loan_payable_account_id = get_or_create_account(company_key, "Loan Payable", "Liability", conn=conn)
+                            lines = [
+                                {"account_id": loan_payable_account_id, "debit": amount, "credit": 0},
+                                {"account_id": source_account_id, "debit": 0, "credit": amount},
+                            ]
+                            post_journal_entry(
+                                company_key=company_key,
+                                date=payment_date,
+                                description=normalized_description or f"Loan repayment - {normalized_lender_name or 'Lender'}",
+                                reference=document_reference,
+                                lines=lines,
+                                created_by=role,
+                                branch_id=st.session_state.get("active_branch_id"),
+                                payment_id=payment_id,
+                                source_module="Banking",
+                                source_table="payments",
+                                source_type=payment_type,
+                                source_id=payment_id,
+                                user_role=role,
+                                conn=conn,
+                            )
+                        elif payment_type == "Transfer Between Cash/Bank/Mobile Money":
+                            audit_transaction_type = "Transfer"
+                            source_account_id = get_or_create_account(company_key, source_method, "Asset", conn=conn)
+                            destination_account_id = get_or_create_account(company_key, destination_method, "Asset", conn=conn)
+                            lines = [
+                                {"account_id": destination_account_id, "debit": amount, "credit": 0},
+                                {"account_id": source_account_id, "debit": 0, "credit": amount},
+                            ]
+                            post_journal_entry(
+                                company_key=company_key,
+                                date=payment_date,
+                                description=normalized_description or f"Transfer {source_method} to {destination_method}",
+                                reference=document_reference,
+                                lines=lines,
+                                created_by=role,
+                                branch_id=st.session_state.get("active_branch_id"),
+                                payment_id=payment_id,
+                                source_module="Banking",
+                                source_table="payments",
+                                source_type=payment_type,
+                                source_id=payment_id,
+                                user_role=role,
+                                conn=conn,
+                            )
+                        elif payment_type == "Owner Capital / Owner Investment":
+                            audit_transaction_type = "Owner Capital"
+                            cash_account_id = get_or_create_account(company_key, cash_account, "Asset", conn=conn)
+                            owner_capital_account_id = get_or_create_account(company_key, "Owner Capital", "Equity", conn=conn)
+                            lines = [
+                                {"account_id": cash_account_id, "debit": amount, "credit": 0},
+                                {"account_id": owner_capital_account_id, "debit": 0, "credit": amount},
+                            ]
+                            post_journal_entry(
+                                company_key=company_key,
+                                date=payment_date,
+                                description=normalized_description or f"Owner capital - {normalized_owner_name or 'Owner'}",
+                                reference=document_reference,
+                                lines=lines,
+                                created_by=role,
+                                branch_id=st.session_state.get("active_branch_id"),
+                                payment_id=payment_id,
+                                source_module="Banking",
+                                source_table="payments",
+                                source_type=payment_type,
+                                source_id=payment_id,
+                                user_role=role,
+                                conn=conn,
+                            )
+                        else:
+                            audit_transaction_type = "Owner Drawings"
+                            owner_drawings_account_id = get_or_create_account(company_key, "Owner Drawings", "Equity", conn=conn)
+                            cash_account_id = get_or_create_account(company_key, cash_account, "Asset", conn=conn)
+                            lines = [
+                                {"account_id": owner_drawings_account_id, "debit": amount, "credit": 0},
+                                {"account_id": cash_account_id, "debit": 0, "credit": amount},
+                            ]
+                            post_journal_entry(
+                                company_key=company_key,
+                                date=payment_date,
+                                description=normalized_description or f"Owner drawings - {normalized_owner_name or 'Owner'}",
+                                reference=document_reference,
+                                lines=lines,
+                                created_by=role,
+                                branch_id=st.session_state.get("active_branch_id"),
+                                payment_id=payment_id,
+                                source_module="Banking",
+                                source_table="payments",
+                                source_type=payment_type,
+                                source_id=payment_id,
+                                user_role=role,
+                                conn=conn,
+                            )
+                        log_audit_action(
+                            conn,
+                            company_key,
+                            role,
+                            f"Banking Transaction Posted: {payment_type}",
+                            "Banking",
+                            details=(
+                                f"transaction_type={audit_transaction_type}; amount={amount:.2f}; "
+                                f"source_method={audit_source_method}; destination_method={audit_destination_method}; "
+                                f"owner_name={audit_owner_name or 'N/A'}; lender_name={audit_lender_name or 'N/A'}; reference={document_reference}; "
+                                f"description={audit_description or 'N/A'}; user={role}"
+                            ),
                             branch_id=st.session_state.get("active_branch_id"),
-                            customer_id=int(selected_customer["id"]),
-                            payment_id=payment_id,
-                            source_module="Banking",
-                            source_table="payments",
-                            source_id=payment_id,
-                            user_role=role,
-                            conn=conn,
+                            action_type="post",
+                            document_ref=document_reference,
                         )
-                    elif payment_type == "Supplier Payment":
-                        selected_supplier = suppliers[supplier_labels.index(selected_party)]
-                        lines = [
-                            {"account_id": get_account_id(conn, "Accounts Payable", "Liability"), "debit": amount, "credit": 0},
-                            {"account_id": get_account_id(conn, cash_account, "Asset"), "debit": 0, "credit": amount},
-                        ]
-                        post_journal_entry(
-                            company_key=company_key,
-                            date=payment_date,
-                            description=f"Supplier payment - {selected_supplier['name']}",
-                            reference=document_reference,
-                            lines=lines,
-                            created_by=role,
-                            branch_id=st.session_state.get("active_branch_id"),
-                            supplier_id=int(selected_supplier["id"]),
-                            payment_id=payment_id,
-                            source_module="Banking",
-                            source_table="payments",
-                            source_id=payment_id,
-                            user_role=role,
-                            conn=conn,
+                        log_system_event(
+                            "INFO",
+                            "Banking",
+                            (
+                                "Posted banking transaction transaction_type={payment_type} amount={amount:.2f} "
+                                "source_method={source_method} destination_method={destination_method} "
+                                "owner_name={owner_name} lender_name={lender_name} reference={reference} description={description} "
+                                "posting_result=ok user={user} payment_id={payment_id}"
+                            ).format(
+                                payment_type=audit_transaction_type,
+                                amount=float(amount or 0.0),
+                                source_method=audit_source_method,
+                                destination_method=audit_destination_method,
+                                owner_name=audit_owner_name or "N/A",
+                                lender_name=audit_lender_name or "N/A",
+                                reference=document_reference,
+                                description=audit_description or "N/A",
+                                user=role,
+                                payment_id=payment_id,
+                            ),
                         )
-                    elif payment_type == "Loan Received":
-                        audit_transaction_type = "Loan Received"
-                        destination_account_id = get_or_create_account(company_key, destination_method, "Asset", conn=conn)
-                        loan_payable_account_id = get_or_create_account(company_key, "Loan Payable", "Liability", conn=conn)
-                        lines = [
-                            {"account_id": destination_account_id, "debit": amount, "credit": 0},
-                            {"account_id": loan_payable_account_id, "debit": 0, "credit": amount},
-                        ]
-                        post_journal_entry(
-                            company_key=company_key,
-                            date=payment_date,
-                            description=normalized_description or f"Loan received - {normalized_lender_name or 'Lender'}",
-                            reference=document_reference,
-                            lines=lines,
-                            created_by=role,
-                            branch_id=st.session_state.get("active_branch_id"),
-                            payment_id=payment_id,
-                            source_module="Banking",
-                            source_table="payments",
-                            source_id=payment_id,
-                            user_role=role,
-                            conn=conn,
+                        conn.commit()
+                    except Exception as post_error:
+                        conn.rollback()
+                        log_system_event(
+                            "WARNING",
+                            "Banking",
+                            (
+                                "Blocked banking transaction transaction_type={payment_type} amount={amount:.2f} "
+                                "source_method={source_method} destination_method={destination_method} "
+                                "lender_name={lender_name} reference={reference} posting_result=fail reason={reason}"
+                            ).format(
+                                payment_type=payment_type,
+                                amount=float(amount or 0.0),
+                                source_method=audit_source_method,
+                                destination_method=audit_destination_method,
+                                lender_name=audit_lender_name or "N/A",
+                                reference=document_reference,
+                                reason=sanitize_error_message(post_error),
+                            ),
                         )
-                    elif payment_type == "Loan Repayment":
-                        audit_transaction_type = "Loan Repayment"
-                        source_account_id = get_or_create_account(company_key, source_method, "Asset", conn=conn)
-                        loan_payable_account_id = get_or_create_account(company_key, "Loan Payable", "Liability", conn=conn)
-                        lines = [
-                            {"account_id": loan_payable_account_id, "debit": amount, "credit": 0},
-                            {"account_id": source_account_id, "debit": 0, "credit": amount},
-                        ]
-                        post_journal_entry(
-                            company_key=company_key,
-                            date=payment_date,
-                            description=normalized_description or f"Loan repayment - {normalized_lender_name or 'Lender'}",
-                            reference=document_reference,
-                            lines=lines,
-                            created_by=role,
-                            branch_id=st.session_state.get("active_branch_id"),
-                            payment_id=payment_id,
-                            source_module="Banking",
-                            source_table="payments",
-                            source_id=payment_id,
-                            user_role=role,
-                            conn=conn,
-                        )
-                    elif payment_type == "Transfer Between Cash/Bank/Mobile Money":
-                        audit_transaction_type = "Transfer"
-                        source_account_id = get_or_create_account(company_key, source_method, "Asset", conn=conn)
-                        destination_account_id = get_or_create_account(company_key, destination_method, "Asset", conn=conn)
-                        lines = [
-                            {"account_id": destination_account_id, "debit": amount, "credit": 0},
-                            {"account_id": source_account_id, "debit": 0, "credit": amount},
-                        ]
-                        post_journal_entry(
-                            company_key=company_key,
-                            date=payment_date,
-                            description=normalized_description or f"Transfer {source_method} to {destination_method}",
-                            reference=document_reference,
-                            lines=lines,
-                            created_by=role,
-                            branch_id=st.session_state.get("active_branch_id"),
-                            payment_id=payment_id,
-                            source_module="Banking",
-                            source_table="payments",
-                            source_id=payment_id,
-                            user_role=role,
-                            conn=conn,
-                        )
-                    elif payment_type == "Owner Capital / Owner Investment":
-                        audit_transaction_type = "Owner Capital"
-                        cash_account_id = get_or_create_account(company_key, cash_account, "Asset", conn=conn)
-                        owner_capital_account_id = get_or_create_account(company_key, "Owner Capital", "Equity", conn=conn)
-                        lines = [
-                            {"account_id": cash_account_id, "debit": amount, "credit": 0},
-                            {"account_id": owner_capital_account_id, "debit": 0, "credit": amount},
-                        ]
-                        post_journal_entry(
-                            company_key=company_key,
-                            date=payment_date,
-                            description=normalized_description or f"Owner capital - {normalized_owner_name or 'Owner'}",
-                            reference=document_reference,
-                            lines=lines,
-                            created_by=role,
-                            branch_id=st.session_state.get("active_branch_id"),
-                            payment_id=payment_id,
-                            source_module="Banking",
-                            source_table="payments",
-                            source_id=payment_id,
-                            user_role=role,
-                            conn=conn,
-                        )
-                    else:
-                        audit_transaction_type = "Owner Drawings"
-                        owner_drawings_account_id = get_or_create_account(company_key, "Owner Drawings", "Equity", conn=conn)
-                        cash_account_id = get_or_create_account(company_key, cash_account, "Asset", conn=conn)
-                        lines = [
-                            {"account_id": owner_drawings_account_id, "debit": amount, "credit": 0},
-                            {"account_id": cash_account_id, "debit": 0, "credit": amount},
-                        ]
-                        post_journal_entry(
-                            company_key=company_key,
-                            date=payment_date,
-                            description=normalized_description or f"Owner drawings - {normalized_owner_name or 'Owner'}",
-                            reference=document_reference,
-                            lines=lines,
-                            created_by=role,
-                            branch_id=st.session_state.get("active_branch_id"),
-                            payment_id=payment_id,
-                            source_module="Banking",
-                            source_table="payments",
-                            source_id=payment_id,
-                            user_role=role,
-                            conn=conn,
-                        )
-                    log_audit_action(
-                        conn,
-                        company_key,
-                        role,
-                        f"Banking Transaction Posted: {payment_type}",
-                        "Banking",
-                        details=(
-                            f"transaction_type={audit_transaction_type}; amount={amount:.2f}; "
-                            f"source_method={audit_source_method}; destination_method={audit_destination_method}; "
-                            f"owner_name={audit_owner_name or 'N/A'}; lender_name={audit_lender_name or 'N/A'}; reference={document_reference}; "
-                            f"description={audit_description or 'N/A'}; user={role}"
-                        ),
-                        branch_id=st.session_state.get("active_branch_id"),
-                        action_type="post",
-                        document_ref=str(payment_id),
-                    )
-                    log_system_event(
-                        "INFO",
-                        "Banking",
-                        (
-                            "Posted banking transaction transaction_type={payment_type} amount={amount:.2f} "
-                            "source_method={source_method} destination_method={destination_method} "
-                            "owner_name={owner_name} lender_name={lender_name} reference={reference} description={description} "
-                            "user={user} payment_id={payment_id}"
-                        ).format(
-                            payment_type=audit_transaction_type,
-                            amount=float(amount or 0.0),
-                            source_method=audit_source_method,
-                            destination_method=audit_destination_method,
-                            owner_name=audit_owner_name or "N/A",
-                            lender_name=audit_lender_name or "N/A",
-                            reference=document_reference,
-                            description=audit_description or "N/A",
-                            user=role,
-                            payment_id=payment_id,
-                        ),
-                    )
-                    conn.commit()
-                    st.success("Transaction posted successfully.")
+                        st.session_state[feedback_key] = {
+                            "status": "error",
+                            "message": build_user_safe_error(post_error, role),
+                        }
+                        st.rerun()
+                    st.session_state[feedback_key] = {
+                        "status": "success",
+                        "message": f"{audit_transaction_type} posted successfully. Reference: {document_reference}",
+                    }
                     st.rerun()
 
         with st.expander("Bank Reconciliation", expanded=False):
