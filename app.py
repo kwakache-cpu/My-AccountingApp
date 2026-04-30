@@ -11,6 +11,7 @@ from database import (
     get_company_subscription_snapshot,
     get_connection,
     get_recovery_source_diagnostics,
+    restore_latest_cloud_backup_to_local,
     startup_database,
 )
 import json
@@ -2438,8 +2439,10 @@ else:
                     st.markdown("---")
                     st.caption("Admin Backup Export")
                     export_state_key = "admin_backup_export_payload"
+                    restore_state_key = "admin_cloud_restore_payload"
                     export_result = st.session_state.get(export_state_key)
-                    export_col1, export_col2 = st.columns([1, 2])
+                    restore_result = st.session_state.get(restore_state_key)
+                    export_col1, export_col2 = st.columns([1, 1])
                     with export_col1:
                         if st.button("Prepare Backup Export", key="prepare_admin_backup_export_btn", use_container_width=True):
                             if require_role_permission(u["role"], "export_backup", action_label="export backups"):
@@ -2459,6 +2462,25 @@ else:
                                 except Exception:
                                     logger.debug("Backup export audit logging skipped.", exc_info=True)
                     with export_col2:
+                        if st.button("Restore Latest Cloud Backup", key="restore_latest_cloud_backup_btn", use_container_width=True):
+                            if require_role_permission(u["role"], "restore_backup", action_label="restore the latest cloud backup"):
+                                restore_result = restore_latest_cloud_backup_to_local(logger_instance=logger)
+                                st.session_state[restore_state_key] = restore_result
+                                try:
+                                    log_audit_action(
+                                        conn,
+                                        u.get("key", "SYSTEM"),
+                                        u["role"],
+                                        "Cloud Backup Restore Completed" if restore_result.get("ok") else "Cloud Backup Restore Attempt Failed",
+                                        "System Health",
+                                        details=restore_result.get("reason"),
+                                        action_type="backup_restore",
+                                        document_ref=restore_result.get("selected_object_path") or restore_result.get("object_name"),
+                                    )
+                                except Exception:
+                                    logger.debug("Cloud restore audit logging skipped.", exc_info=True)
+                                if restore_result.get("ok"):
+                                    st.rerun()
                         if export_result and export_result.get("ok") and export_result.get("data"):
                             st.download_button(
                                 "Download Latest ERP Backup",
@@ -2479,6 +2501,21 @@ else:
                             )
                         else:
                             st.warning(f"Backup export unavailable: {sanitize_error_message(export_result.get('reason'))}")
+                    if restore_result:
+                        if restore_result.get("ok"):
+                            st.success(
+                                "Cloud restore completed from {source_type}: {object_path} | Company Count Restored: {company_count}".format(
+                                    source_type=restore_result.get("selected_source_type") or "latest",
+                                    object_path=restore_result.get("selected_object_path") or restore_result.get("object_name") or "unknown",
+                                    company_count=restore_result.get("company_count"),
+                                )
+                            )
+                        else:
+                            st.warning(
+                                "Cloud restore unavailable: {reason}".format(
+                                    reason=sanitize_error_message(restore_result.get("reason"))
+                                )
+                            )
                     st.markdown("---")
                     st.caption("AI Assistant Health")
                     ai_health_key = "admin_ai_health_test_result"

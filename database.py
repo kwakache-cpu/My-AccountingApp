@@ -282,11 +282,17 @@ LAST_LOCAL_BACKUP_STATUS = {
 LAST_BACKUP_SIGNATURE = None
 LAST_BACKUP_AT = 0.0
 LAST_RESTORE_SOURCE = "local_runtime_database"
+EMPTY_DB_LOCKDOWN_MESSAGE = (
+    "No company data was loaded. A valid cloud backup could not be restored. "
+    "Do not register a new company until recovery is completed."
+)
 
 
 def get_firebase_runtime_config():
     return {
         "databaseURL": str(_read_runtime_secret("FIREBASE_DATABASE_URL", FIREBASE_DATABASE_URL) or "").strip(),
+        "storageBucket": str(_read_runtime_secret("FIREBASE_STORAGE_BUCKET", "") or "").strip(),
+        "backupObject": str(_read_runtime_secret("FIREBASE_DB_BACKUP_OBJECT", FIREBASE_OBJECT_NAME) or FIREBASE_OBJECT_NAME).strip(),
         "key_path": FIREBASE_KEY_PATH,
     }
 
@@ -726,6 +732,156 @@ def _build_local_history_backup_path(timestamp=None):
     )
 
 
+def _build_pre_cloud_restore_backup_path(timestamp=None):
+    timestamp = timestamp or datetime.utcnow()
+    return os.path.join(
+        DB_DIR,
+        f"eka_enterprise_v3_before_cloud_restore_{timestamp.strftime('%Y%m%d_%H%M%S')}.db",
+    )
+
+
+def _blob_sort_key(blob):
+    updated = getattr(blob, "updated", None)
+    normalized_updated = updated.replace(tzinfo=None) if hasattr(updated, "replace") else None
+    return (
+        normalized_updated or datetime.min,
+        str(getattr(blob, "name", "") or ""),
+    )
+
+
+def _candidate_is_valid_production_backup(health_snapshot):
+    health_snapshot = health_snapshot or {}
+    return bool(health_snapshot.get("production_ready")) and int(health_snapshot.get("company_count") or 0) >= 1
+
+
+def _download_blob_to_temp_path(blob, prefix, logger_instance=None):
+    logger_instance = logger_instance or logger
+    temp_fd, temp_path = tempfile.mkstemp(prefix=prefix, suffix=".db", dir=DB_DIR)
+    os.close(temp_fd)
+    try:
+        blob.download_to_filename(temp_path)
+        return temp_path
+    except Exception:
+        if os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except OSError:
+                pass
+        raise
+
+
+def _validate_cloud_backup_blob(blob, logger_instance=None):
+    logger_instance = logger_instance or logger
+    temp_path = None
+    try:
+        temp_path = _download_blob_to_temp_path(blob, "eka_cloud_restore_candidate_", logger_instance=logger_instance)
+        health = get_database_health_snapshot(temp_path, logger_instance=logger_instance)
+        logger_instance.info(
+            "Cloud backup candidate validated: object=%s production_ready=%s company_count=%s missing_tables=%s readiness_failures=%s",
+            getattr(blob, "name", "unknown"),
+            health.get("production_ready"),
+            health.get("company_count"),
+            ", ".join(health.get("missing_tables", [])) or "none",
+            "; ".join(health.get("readiness_failures", [])) or "none",
+        )
+        return {"ok": _candidate_is_valid_production_backup(health), "temp_path": temp_path, "health": health}
+    except Exception as exc:
+        logger_instance.warning(
+            "Cloud backup candidate validation failed for object=%s: %s",
+            getattr(blob, "name", "unknown"),
+            sanitize_error_message(exc),
+        )
+        return {
+            "ok": False,
+            "temp_path": temp_path,
+            "health": get_database_health_snapshot(temp_path, logger_instance=logger_instance) if temp_path and os.path.exists(temp_path) else None,
+            "reason": str(exc),
+        }
+
+
+def _select_valid_cloud_backup(bucket, latest_object, logger_instance=None):
+    logger_instance = logger_instance or logger
+    latest_blob = bucket.blob(latest_object)
+    candidates = []
+    if latest_blob.exists():
+        try:
+            latest_blob.reload()
+        except Exception:
+            pass
+        latest_validation = _validate_cloud_backup_blob(latest_blob, logger_instance=logger_instance)
+        candidates.append(
+            {
+                "object_path": latest_object,
+                "source_type": "latest",
+                **latest_validation,
+            }
+        )
+        if latest_validation.get("ok"):
+            return {
+                "ok": True,
+                "object_path": latest_object,
+                "source_type": "latest",
+                "temp_path": latest_validation.get("temp_path"),
+                "health": latest_validation.get("health"),
+                "validation_attempts": candidates,
+            }
+    else:
+        candidates.append(
+            {
+                "object_path": latest_object,
+                "source_type": "latest",
+                "ok": False,
+                "temp_path": None,
+                "health": None,
+                "reason": "latest object missing",
+            }
+        )
+
+    history_blobs = []
+    try:
+        history_blobs = list(bucket.list_blobs(prefix=f"{BACKUP_HISTORY_PREFIX}/"))
+    except Exception as exc:
+        logger_instance.warning("Cloud backup history listing failed: %s", sanitize_error_message(exc))
+        return {
+            "ok": False,
+            "reason": f"history listing failed: {exc}",
+            "validation_attempts": candidates,
+        }
+
+    for blob in sorted(history_blobs, key=_blob_sort_key, reverse=True):
+        blob_name = str(getattr(blob, "name", "") or "")
+        if not blob_name.endswith(".db"):
+            continue
+        validation = _validate_cloud_backup_blob(blob, logger_instance=logger_instance)
+        candidate = {
+            "object_path": blob_name,
+            "source_type": "history",
+            **validation,
+        }
+        candidates.append(candidate)
+        if validation.get("ok"):
+            return {
+                "ok": True,
+                "object_path": blob_name,
+                "source_type": "history",
+                "temp_path": validation.get("temp_path"),
+                "health": validation.get("health"),
+                "validation_attempts": candidates,
+            }
+        temp_path = validation.get("temp_path")
+        if temp_path and os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except OSError:
+                pass
+
+    return {
+        "ok": False,
+        "reason": "no valid latest or history cloud backup satisfied production-ready validation",
+        "validation_attempts": candidates,
+    }
+
+
 def _ensure_local_backup_directories():
     os.makedirs(LOCAL_LATEST_BACKUP_DIR, exist_ok=True)
     os.makedirs(LOCAL_HISTORY_BACKUP_DIR, exist_ok=True)
@@ -912,6 +1068,34 @@ def backup_runtime_database_to_cloud(force=False, trigger_tables=None, logger_in
         LOCAL_LATEST_BACKUP_PATH,
         latest_object,
     )
+    company_count = int(local_health.get("company_count") or 0)
+    missing_tables = list(local_health.get("missing_tables") or [])
+    if company_count <= 0:
+        reason = "companies table has no deployed company rows; empty databases cannot overwrite cloud backups"
+        logger_instance.warning("Backup skipped because canonical database is empty: %s", reason)
+        _update_local_backup_status("skipped", reason, latest_path=LOCAL_LATEST_BACKUP_PATH, history_path=None, trigger_tables=trigger_tables)
+        _update_backup_status("skipped", reason, latest_object=latest_object, history_object=None, trigger_tables=trigger_tables)
+        return {
+            "ok": False,
+            "reason": reason,
+            "latest_object": latest_object,
+            "history_object": None,
+            "latest_local_path": LOCAL_LATEST_BACKUP_PATH,
+            "history_local_path": None,
+        }
+    if missing_tables:
+        reason = "canonical runtime database is missing required tables: " + ", ".join(missing_tables)
+        logger_instance.warning("Backup skipped because canonical database is incomplete: %s", reason)
+        _update_local_backup_status("skipped", reason, latest_path=LOCAL_LATEST_BACKUP_PATH, history_path=None, trigger_tables=trigger_tables)
+        _update_backup_status("skipped", reason, latest_object=latest_object, history_object=None, trigger_tables=trigger_tables)
+        return {
+            "ok": False,
+            "reason": reason,
+            "latest_object": latest_object,
+            "history_object": None,
+            "latest_local_path": LOCAL_LATEST_BACKUP_PATH,
+            "history_local_path": None,
+        }
     if not local_health["production_ready"]:
         reason = "; ".join(local_health.get("readiness_failures", [])) or "canonical runtime database is not production-ready"
         logger_instance.warning("Backup skipped because canonical database is not production-ready; latest backups protected: %s", reason)
@@ -1283,6 +1467,148 @@ def get_downloadable_backup_export(logger_instance=None):
         if temp_download_path and os.path.exists(temp_download_path):
             try:
                 os.remove(temp_download_path)
+            except OSError:
+                pass
+
+
+def restore_latest_cloud_backup_to_local(logger_instance=None):
+    global LAST_RESTORE_SOURCE
+    logger_instance = logger_instance or logger
+    diagnostics = get_recovery_source_diagnostics()
+    bucket = _get_firebase_recovery_bucket()
+    local_health = get_database_health_snapshot(DB_PATH, logger_instance=logger_instance)
+    if bucket is None:
+        access_reason = diagnostics.get("credential_error") or "firebase backup bucket is not accessible"
+        logger_instance.error(
+            "Cloud restore unavailable because Firebase bucket is not accessible: bucket=%s object=%s reason=%s",
+            diagnostics.get("bucket_name") or "missing",
+            diagnostics.get("object_name") or "missing",
+            sanitize_error_message(access_reason),
+        )
+        return {
+            "ok": False,
+            "stage": "recovery_source",
+            "reason": access_reason,
+            "bucket_name": diagnostics.get("bucket_name"),
+            "object_name": diagnostics.get("object_name"),
+            "selected_source_type": None,
+            "selected_object_path": None,
+            "replacement_performed": False,
+            "temp_download_succeeded": False,
+            "health": local_health,
+        }
+
+    selected_candidate = None
+    pre_restore_path = None
+    try:
+        selected_candidate = _select_valid_cloud_backup(
+            bucket,
+            diagnostics.get("object_name") or FIREBASE_OBJECT_NAME,
+            logger_instance=logger_instance,
+        )
+        if not selected_candidate.get("ok"):
+            return {
+                "ok": False,
+                "stage": "recovery_validation",
+                "reason": selected_candidate.get("reason") or "no valid cloud backup candidate was found",
+                "bucket_name": diagnostics.get("bucket_name"),
+                "object_name": diagnostics.get("object_name"),
+                "selected_source_type": None,
+                "selected_object_path": None,
+                "replacement_performed": False,
+                "temp_download_succeeded": False,
+                "health": local_health,
+                "validation_attempts": selected_candidate.get("validation_attempts") or [],
+            }
+
+        temp_restore_path = selected_candidate.get("temp_path")
+        selected_health = selected_candidate.get("health") or {}
+        if not temp_restore_path or not os.path.exists(temp_restore_path) or not _candidate_is_valid_production_backup(selected_health):
+            return {
+                "ok": False,
+                "stage": "recovery_validation",
+                "reason": "selected cloud backup candidate did not pass production-ready validation",
+                "bucket_name": diagnostics.get("bucket_name"),
+                "object_name": diagnostics.get("object_name"),
+                "selected_source_type": selected_candidate.get("source_type"),
+                "selected_object_path": selected_candidate.get("object_path"),
+                "replacement_performed": False,
+                "temp_download_succeeded": bool(temp_restore_path and os.path.exists(temp_restore_path)),
+                "health": selected_health or local_health,
+                "validation_attempts": selected_candidate.get("validation_attempts") or [],
+            }
+
+        if os.path.exists(DB_PATH):
+            pre_restore_path = _build_pre_cloud_restore_backup_path()
+            shutil.copy2(DB_PATH, pre_restore_path)
+            logger_instance.info(
+                "Pre-cloud-restore local runtime database snapshot created: source=%s archive=%s",
+                DB_PATH,
+                pre_restore_path,
+            )
+            os.replace(temp_restore_path, DB_PATH)
+        else:
+            os.replace(temp_restore_path, DB_PATH)
+        LAST_RESTORE_SOURCE = "cloud_restore:{bucket}::{object_path}".format(
+            bucket=diagnostics.get("bucket_name") or "missing",
+            object_path=selected_candidate.get("object_path") or diagnostics.get("object_name") or "missing",
+        )
+        final_health = get_database_health_snapshot(DB_PATH, logger_instance=logger_instance)
+        _write_restore_guard_state(
+            {
+                "active": True,
+                "source_db_path": selected_candidate.get("object_path"),
+                "target_db_path": DB_PATH,
+                "restored_at": datetime.utcnow().isoformat(timespec="seconds"),
+                "restored_company_count": int(final_health.get("company_count") or 0),
+                "restored_production_ready": bool(final_health.get("production_ready")),
+                "pre_restore_backup_path": pre_restore_path,
+            },
+            logger_instance=logger_instance,
+        )
+        logger_instance.info(
+            "Cloud restore completed: source_type=%s bucket=%s object=%s restored_company_count=%s production_ready=%s",
+            selected_candidate.get("source_type"),
+            diagnostics.get("bucket_name") or "missing",
+            selected_candidate.get("object_path") or diagnostics.get("object_name") or "missing",
+            final_health.get("company_count"),
+            final_health.get("production_ready"),
+        )
+        return {
+            "ok": True,
+            "stage": "recovery_complete",
+            "reason": "validated cloud backup restored successfully",
+            "bucket_name": diagnostics.get("bucket_name"),
+            "object_name": diagnostics.get("object_name"),
+            "selected_source_type": selected_candidate.get("source_type"),
+            "selected_object_path": selected_candidate.get("object_path"),
+            "replacement_performed": True,
+            "temp_download_succeeded": True,
+            "health": final_health,
+            "company_count": int(final_health.get("company_count") or 0),
+            "pre_restore_backup_path": pre_restore_path,
+            "validation_attempts": selected_candidate.get("validation_attempts") or [],
+        }
+    except Exception as exc:
+        logger_instance.error("Cloud restore failed: %s", sanitize_error_message(exc))
+        return {
+            "ok": False,
+            "stage": "recovery_exception",
+            "reason": str(exc),
+            "bucket_name": diagnostics.get("bucket_name"),
+            "object_name": diagnostics.get("object_name"),
+            "selected_source_type": selected_candidate.get("source_type") if selected_candidate else None,
+            "selected_object_path": selected_candidate.get("object_path") if selected_candidate else None,
+            "replacement_performed": False,
+            "temp_download_succeeded": bool(selected_candidate and selected_candidate.get("temp_path") and os.path.exists(selected_candidate.get("temp_path"))),
+            "health": get_database_health_snapshot(DB_PATH, logger_instance=logger_instance),
+            "validation_attempts": selected_candidate.get("validation_attempts") if selected_candidate else [],
+        }
+    finally:
+        temp_path = selected_candidate.get("temp_path") if selected_candidate else None
+        if temp_path and os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
             except OSError:
                 pass
 
@@ -2587,7 +2913,6 @@ def _build_startup_result(
 
 
 def attempt_production_database_recovery(force_restore=True):
-    global LAST_RESTORE_SOURCE
     logger.info("Trusted backup recovery invoked: db_path=%s force_restore=%s", DB_PATH, force_restore)
     local_health = get_database_health_snapshot(DB_PATH, logger_instance=logger)
     diagnostics = get_recovery_source_diagnostics()
@@ -2615,231 +2940,28 @@ def attempt_production_database_recovery(force_restore=True):
             "replacement_performed": False,
             "health": local_health,
         }
-
-    bucket = _get_firebase_recovery_bucket()
-    if bucket is None:
-        access_reason = diagnostics["credential_error"] or "firebase bucket is not accessible"
-        logger.error("Trusted backup recovery unavailable because Firebase bucket is not accessible: %s", sanitize_error_message(access_reason))
-        return {
-            "ok": False,
-            "stage": "recovery_source",
-            "reason": access_reason,
-            "backend": diagnostics["backend"],
-            "bucket_name": diagnostics["bucket_name"],
-            "object_name": diagnostics["object_name"],
-            "recovery_source_found": False,
-            "temp_download_succeeded": False,
-            "replacement_performed": False,
-            "health": local_health,
-        }
-
-    temp_restore_path = f"{DB_PATH}.recovery_download"
-    try:
-        logger.info(
-            "Trusted backup bucket access confirmed: backend=%s bucket=%s object=%s bucket_accessible=%s",
-            diagnostics["backend"],
-            diagnostics["bucket_name"] or getattr(bucket, "name", "") or "missing",
-            diagnostics["object_name"] or "missing",
-            True,
-        )
-        blob = bucket.blob(diagnostics["object_name"])
-        try:
-            backup_exists = bool(blob.exists())
-        except Exception as exc:
-            logger.error(
-                "Trusted backup presence check failed: backend=%s bucket=%s object=%s error=%s",
-                diagnostics["backend"],
-                diagnostics["bucket_name"],
-                diagnostics["object_name"],
-                sanitize_error_message(exc),
-            )
-            return {
-                "ok": False,
-                "stage": "recovery_source",
-                "reason": f"network or storage permission failure while checking backup object: {exc}",
-                "backend": diagnostics["backend"],
-                "bucket_name": diagnostics["bucket_name"],
-                "object_name": diagnostics["object_name"],
-                "recovery_source_found": False,
-                "temp_download_succeeded": False,
-                "replacement_performed": False,
-                "health": local_health,
-            }
-        logger.info(
-            "Trusted backup presence check: backend=%s bucket=%s object=%s exists=%s",
-            diagnostics["backend"],
-            diagnostics["bucket_name"],
-            diagnostics["object_name"],
-            backup_exists,
-        )
-        if not backup_exists:
-            logger.error(
-                "Trusted backup recovery failed because the cloud backup object does not exist: bucket=%s object=%s",
-                diagnostics["bucket_name"],
-                diagnostics["object_name"],
-            )
-            return {
-                "ok": False,
-                "stage": "recovery_source",
-                "reason": (
-                    f"trusted cloud backup object was not found: "
-                    f"bucket={diagnostics['bucket_name'] or getattr(bucket, 'name', '') or 'missing'} "
-                    f"object={diagnostics['object_name'] or 'missing'}"
-                ),
-                "backend": diagnostics["backend"],
-                "bucket_name": diagnostics["bucket_name"],
-                "object_name": diagnostics["object_name"],
-                "recovery_source_found": False,
-                "temp_download_succeeded": False,
-                "replacement_performed": False,
-                "health": local_health,
-            }
-
-        try:
-            blob.reload()
-        except Exception:
-            pass
-        blob_updated = getattr(blob, "updated", None)
-        local_db_mtime = None
-        if os.path.exists(DB_PATH):
-            try:
-                local_db_mtime = datetime.utcfromtimestamp(os.path.getmtime(DB_PATH))
-            except Exception:
-                local_db_mtime = None
-        cloud_backup_newer_than_local = None
-        if blob_updated is not None and local_db_mtime is not None:
-            try:
-                cloud_backup_newer_than_local = blob_updated.replace(tzinfo=None) > local_db_mtime
-            except Exception:
-                cloud_backup_newer_than_local = None
-        logger.info(
-            "Trusted backup recency check: bucket=%s object=%s backup_last_modified=%s local_db_last_modified=%s cloud_backup_newer_than_local=%s",
-            diagnostics["bucket_name"],
-            diagnostics["object_name"],
-            blob_updated.isoformat() if hasattr(blob_updated, "isoformat") else str(blob_updated or "unknown"),
-            local_db_mtime.isoformat() if hasattr(local_db_mtime, "isoformat") else str(local_db_mtime or "unknown"),
-            cloud_backup_newer_than_local,
-        )
-
-        try:
-            blob.download_to_filename(temp_restore_path)
-        except Exception as exc:
-            logger.error(
-                "Trusted backup temp download failed: backend=%s bucket=%s object=%s error=%s",
-                diagnostics["backend"],
-                diagnostics["bucket_name"],
-                diagnostics["object_name"],
-                sanitize_error_message(exc),
-            )
-            return {
-                "ok": False,
-                "stage": "recovery_download",
-                "reason": f"backup object exists but download failed: {exc}",
-                "backend": diagnostics["backend"],
-                "bucket_name": diagnostics["bucket_name"],
-                "object_name": diagnostics["object_name"],
-                "recovery_source_found": True,
-                "temp_download_succeeded": False,
-                "replacement_performed": False,
-                "health": local_health,
-            }
-        logger.info(
-            "Trusted backup temp download succeeded: backend=%s bucket=%s object=%s temp_path=%s",
-            diagnostics["backend"],
-            diagnostics["bucket_name"],
-            diagnostics["object_name"],
-            temp_restore_path,
-        )
-
-        downloaded_health = get_database_health_snapshot(temp_restore_path, logger_instance=logger)
-        logger.info(
-            "Trusted backup validation: temp_path=%s db_exists=%s sqlite_open_success=%s db_valid=%s production_ready=%s required_tables_exist=%s missing_tables=%s companies_table_exists=%s company_count=%s database_identity_exists=%s schema_version_exists=%s backup_last_modified=%s cloud_backup_newer_than_local=%s readiness_failures=%s",
-            downloaded_health["db_path"],
-            downloaded_health["file_exists"],
-            downloaded_health["sqlite_open_success"],
-            downloaded_health["structural_valid"],
-            downloaded_health["production_ready"],
-            downloaded_health["required_tables_exist"],
-            ", ".join(downloaded_health.get("missing_tables", [])) or "none",
-            downloaded_health["companies_table_exists"],
-            downloaded_health["company_count"],
-            downloaded_health["database_identity_exists"],
-            downloaded_health["schema_version_exists"],
-            blob_updated.isoformat() if hasattr(blob_updated, "isoformat") else str(blob_updated or "unknown"),
-            cloud_backup_newer_than_local,
-            "; ".join(downloaded_health.get("readiness_failures", [])) or "none",
-        )
-        if not downloaded_health["production_ready"]:
-            failure_details = "; ".join(downloaded_health.get("readiness_failures", [])) or "unknown readiness failure"
-            logger.error(
-                "Trusted backup recovery aborted because downloaded database is not production-ready: %s",
-                failure_details,
-            )
-            return {
-                "ok": False,
-                "stage": "recovery_validation",
-                "reason": f"downloaded DB failed production-ready check: {failure_details}; company_count={downloaded_health['company_count']}",
-                "backend": diagnostics["backend"],
-                "bucket_name": diagnostics["bucket_name"],
-                "object_name": diagnostics["object_name"],
-                "recovery_source_found": True,
-                "temp_download_succeeded": True,
-                "replacement_performed": False,
-                "health": downloaded_health,
-            }
-
-        replacement_performed = False
-        if os.path.exists(DB_PATH):
-            backup_path = create_timestamped_backup(DB_PATH, logger=logger, reason="trusted_recovery")
-            logger.info("Created local backup before trusted recovery replacement: %s", backup_path)
-            os.replace(temp_restore_path, DB_PATH)
-            replacement_performed = True
-        else:
-            os.rename(temp_restore_path, DB_PATH)
-            replacement_performed = True
-        logger.info("Trusted backup recovery succeeded and promoted recovered database to %s", DB_PATH)
-        LAST_RESTORE_SOURCE = f"cloud_restore:{diagnostics['bucket_name']}::{diagnostics['object_name']}"
-        final_health = get_database_health_snapshot(DB_PATH, logger_instance=logger)
-        logger.info(
-            "Trusted backup replacement performed: replaced=%s final_db_exists=%s final_db_valid=%s final_production_ready=%s final_company_count=%s",
-            replacement_performed,
-            final_health["file_exists"],
-            final_health["structural_valid"],
-            final_health["production_ready"],
-            final_health["company_count"],
-        )
-        return {
-            "ok": True,
-            "stage": "recovery_complete",
-            "reason": "trusted cloud backup restored successfully",
-            "backend": diagnostics["backend"],
-            "bucket_name": diagnostics["bucket_name"],
-            "object_name": diagnostics["object_name"],
-            "recovery_source_found": True,
-            "temp_download_succeeded": True,
-            "replacement_performed": replacement_performed,
-            "health": final_health,
-        }
-    except Exception as exc:
-        logger.error("Trusted backup recovery failed: %s", sanitize_error_message(exc))
-        return {
-            "ok": False,
-            "stage": "recovery_exception",
-            "reason": str(exc),
-            "backend": diagnostics["backend"],
-            "bucket_name": diagnostics["bucket_name"],
-            "object_name": diagnostics["object_name"],
-            "recovery_source_found": True,
-            "temp_download_succeeded": os.path.exists(temp_restore_path),
-            "replacement_performed": False,
-            "health": get_database_health_snapshot(DB_PATH, logger_instance=logger),
-        }
-    finally:
-        if os.path.exists(temp_restore_path):
-            try:
-                os.remove(temp_restore_path)
-            except OSError:
-                pass
+    restore_result = restore_latest_cloud_backup_to_local(logger_instance=logger)
+    return {
+        "ok": bool(restore_result.get("ok")),
+        "stage": restore_result.get("stage") or "recovery_validation",
+        "reason": restore_result.get("reason") or "cloud restore did not complete",
+        "backend": diagnostics["backend"],
+        "bucket_name": restore_result.get("bucket_name", diagnostics["bucket_name"]),
+        "object_name": restore_result.get("object_name", diagnostics["object_name"]),
+        "recovery_source_found": bool(
+            restore_result.get("selected_object_path")
+            or restore_result.get("selected_source_type")
+            or restore_result.get("temp_download_succeeded")
+        ),
+        "temp_download_succeeded": bool(restore_result.get("temp_download_succeeded")),
+        "replacement_performed": bool(restore_result.get("replacement_performed")),
+        "health": restore_result.get("health") or local_health,
+        "selected_source_type": restore_result.get("selected_source_type"),
+        "selected_object_path": restore_result.get("selected_object_path"),
+        "validation_attempts": restore_result.get("validation_attempts") or [],
+        "pre_restore_backup_path": restore_result.get("pre_restore_backup_path"),
+        "company_count": restore_result.get("company_count"),
+    }
 
 
 def _get_schema_version(conn):
@@ -4951,7 +5073,7 @@ def startup_database():
             )
         else:
             logger.warning(
-                "Cloud restore did not replace bootstrap-empty database; bootstrap mode remains allowed only because no production-ready cloud backup was restored: local_company_count=%s cloud_backup_company_count=%s recovery_attempted=%s recovery_succeeded=%s recovery_stage=%s recovery_reason=%s restore_source=%s final_startup_mode=%s",
+                "Cloud restore did not replace bootstrap-empty database; startup will stop safely to prevent empty runtime activation: local_company_count=%s cloud_backup_company_count=%s recovery_attempted=%s recovery_succeeded=%s recovery_stage=%s recovery_reason=%s restore_source=%s final_startup_mode=%s",
                 local_bootstrap_company_count,
                 cloud_backup_company_count,
                 recovery_attempted,
@@ -4962,10 +5084,10 @@ def startup_database():
                 "bootstrap_mode",
             )
             return _build_startup_result(
-                ok=True,
-                stage="bootstrap_mode",
+                ok=False,
+                stage="empty_db_lockdown",
                 reason=(
-                    "no company has been created yet locally and no production-ready cloud backup was restored; "
+                    f"{EMPTY_DB_LOCKDOWN_MESSAGE} "
                     f"cloud_recovery_reason={recovery_result.get('reason', 'unknown')}"
                 ),
                 db_path=db_health_before_startup["db_path"],
@@ -4975,11 +5097,32 @@ def startup_database():
                 company_count=db_health_before_startup["company_count"],
                 recovery_attempted=recovery_attempted,
                 recovery_succeeded=cloud_restore_used,
-                bootstrap_needed=True,
-                startup_mode="bootstrap_mode",
+                bootstrap_needed=False,
+                startup_mode="locked_down",
                 cloud_backup_company_count=cloud_backup_company_count,
             )
     if _is_bootstrap_candidate(db_health_before_startup):
+        if ERP_PRODUCTION_MODE:
+            logger.error(
+                "Production startup blocked because the runtime database is empty after recovery evaluation: db_path=%s company_count=%s",
+                db_health_before_startup["db_path"],
+                db_health_before_startup["company_count"],
+            )
+            return _build_startup_result(
+                ok=False,
+                stage="empty_db_lockdown",
+                reason=EMPTY_DB_LOCKDOWN_MESSAGE,
+                db_path=db_health_before_startup["db_path"],
+                file_exists=db_health_before_startup["file_exists"],
+                structurally_valid=db_health_before_startup["structural_valid"],
+                production_ready=db_health_before_startup["production_ready"],
+                company_count=db_health_before_startup["company_count"],
+                recovery_attempted=recovery_attempted,
+                recovery_succeeded=cloud_restore_used,
+                bootstrap_needed=False,
+                startup_mode="locked_down",
+                cloud_backup_company_count=startup_cloud_backup_company_count,
+            )
         logger.info(
             "Database startup entering bootstrap mode: db_path=%s company_count=%s production_ready=%s recovery_attempted=%s",
             db_health_before_startup["db_path"],
@@ -5032,15 +5175,15 @@ def startup_database():
             cloud_restore_used,
         )
         if _is_bootstrap_candidate(db_health_before_startup):
-            logger.info(
-                "Database startup entered bootstrap mode after recovery evaluation: db_path=%s company_count=%s",
+            logger.error(
+                "Production startup remained empty after recovery evaluation; startup will stop safely: db_path=%s company_count=%s",
                 db_health_before_startup["db_path"],
                 db_health_before_startup["company_count"],
             )
             return _build_startup_result(
-                ok=True,
-                stage="bootstrap_mode",
-                reason="no company has been created yet; bootstrap mode is enabled",
+                ok=False,
+                stage="empty_db_lockdown",
+                reason=EMPTY_DB_LOCKDOWN_MESSAGE,
                 db_path=db_health_before_startup["db_path"],
                 file_exists=db_health_before_startup["file_exists"],
                 structurally_valid=db_health_before_startup["structural_valid"],
@@ -5048,8 +5191,8 @@ def startup_database():
                 company_count=db_health_before_startup["company_count"],
                 recovery_attempted=recovery_attempted,
                 recovery_succeeded=cloud_restore_used,
-                bootstrap_needed=True,
-                startup_mode="bootstrap_mode",
+                bootstrap_needed=False,
+                startup_mode="locked_down",
                 cloud_backup_company_count=startup_cloud_backup_company_count,
             )
         if not db_health_before_startup["production_ready"]:
