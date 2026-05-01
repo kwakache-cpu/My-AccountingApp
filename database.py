@@ -3694,6 +3694,11 @@ def ensure_schema_integrity(conn):
             amount REAL DEFAULT 0,
             input_vat REAL DEFAULT 0,
             output_vat REAL DEFAULT 0,
+            purchase_classification TEXT DEFAULT 'Inventory Purchase',
+            payment_method TEXT,
+            expense_account_name TEXT,
+            asset_name TEXT,
+            asset_category TEXT,
             currency TEXT DEFAULT 'GHS',
             description TEXT,
             created_by TEXT,
@@ -4345,6 +4350,18 @@ def _ensure_app_compatibility_tables(conn):
             cursor.execute(f"ALTER TABLE invoice_lines ADD COLUMN {column_name} {column_def}")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_invoice_lines_invoice_id ON invoice_lines(invoice_id)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_invoice_lines_inventory_item_id ON invoice_lines(inventory_item_id)")
+
+    cursor.execute("PRAGMA table_info(bills)")
+    bill_columns = {row[1] for row in cursor.fetchall()}
+    for column_name, column_def in {
+        "purchase_classification": "TEXT DEFAULT 'Inventory Purchase'",
+        "payment_method": "TEXT",
+        "expense_account_name": "TEXT",
+        "asset_name": "TEXT",
+        "asset_category": "TEXT",
+    }.items():
+        if column_name not in bill_columns:
+            cursor.execute(f"ALTER TABLE bills ADD COLUMN {column_name} {column_def}")
 
     cursor.execute(
         """

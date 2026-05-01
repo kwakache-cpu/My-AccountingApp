@@ -74,6 +74,10 @@ log_system_event = eka_modules.log_system_event
 render_invoice_line_editor = eka_modules.render_invoice_line_editor
 save_invoice_lines = eka_modules.save_invoice_lines
 apply_invoice_stock_effects = eka_modules.apply_invoice_stock_effects
+PURCHASE_CLASSIFICATION_OPTIONS = eka_modules.PURCHASE_CLASSIFICATION_OPTIONS
+FIXED_ASSET_PURCHASE_CATEGORIES = eka_modules.FIXED_ASSET_PURCHASE_CATEGORIES
+build_purchase_journal_lines = eka_modules.build_purchase_journal_lines
+get_purchase_expense_account_options = eka_modules.get_purchase_expense_account_options
 
 
 def _resolve_date(value):
@@ -639,14 +643,25 @@ def show_invoice_manager(company_key, role):
     with tabs[3]:
         conn = get_connection()
         suppliers = [row[0] for row in conn.execute("SELECT name FROM suppliers WHERE company_key = ? ORDER BY name", (company_key,)).fetchall()]
+        expense_account_options = get_purchase_expense_account_options(company_key, conn=conn)
         conn.close()
         with st.form(f"bill_form_{company_key}"):
             supplier_name = st.selectbox("Supplier", [""] + suppliers)
+            purchase_classification = st.selectbox("Purchase Classification", PURCHASE_CLASSIFICATION_OPTIONS, key=f"bill_classification_{company_key}")
             amount = st.number_input("Amount (GHS)", min_value=0.0, step=0.01, key=f"bill_amount_{company_key}")
             input_vat_rate = st.number_input("Input VAT Rate (%)", min_value=0.0, max_value=100.0, step=0.5, value=0.0, key=f"bill_vat_rate_{company_key}")
             status = st.selectbox("Status", ["Draft", "Pending", "Received"], key=f"bill_status_{company_key}")
+            payment_method = st.selectbox("Payment Method", ["Cash", "Bank", "Mobile Money"], key=f"bill_method_{company_key}", disabled=status != "Received")
             posting_state = st.selectbox("Posting State", DOCUMENT_WORKFLOW_STATUSES, index=1, key=f"bill_posting_state_{company_key}")
             bill_date = st.date_input("Bill Date", value=datetime.now().date(), key=f"bill_date_{company_key}")
+            expense_account_name = None
+            asset_name = ""
+            asset_category = ""
+            if purchase_classification == "Expense Purchase":
+                expense_account_name = st.selectbox("Expense Account", expense_account_options, key=f"bill_expense_account_{company_key}")
+            elif purchase_classification == "Fixed Asset Purchase":
+                asset_name = st.text_input("Asset Name", key=f"bill_asset_name_{company_key}")
+                asset_category = st.selectbox("Asset Category", FIXED_ASSET_PURCHASE_CATEGORIES, key=f"bill_asset_category_{company_key}")
             description = st.text_input("Description", key=f"bill_description_{company_key}")
             if st.form_submit_button("Save Bill") and supplier_name and amount > 0:
                 conn = get_connection()
@@ -655,10 +670,31 @@ def show_invoice_manager(company_key, role):
                 try:
                     cursor = conn.execute(
                         """
-                        INSERT INTO bills (company_key, supplier_id, bill_number, bill_date, due_date, status, approval_status, amount, input_vat, currency, description, created_by)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'GHS', ?, ?)
+                        INSERT INTO bills (
+                            company_key, supplier_id, bill_number, bill_date, due_date, status, approval_status,
+                            amount, input_vat, purchase_classification, payment_method, expense_account_name, asset_name,
+                            asset_category, currency, description, created_by
+                        )
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'GHS', ?, ?)
                         """,
-                        (company_key, supplier_id, f"BILL-{datetime.now().strftime('%Y%m%d%H%M%S')}", bill_date.isoformat(), bill_date.isoformat(), status, posting_state, amount, input_vat, description, role),
+                        (
+                            company_key,
+                            supplier_id,
+                            f"BILL-{datetime.now().strftime('%Y%m%d%H%M%S')}",
+                            bill_date.isoformat(),
+                            bill_date.isoformat(),
+                            status,
+                            posting_state,
+                            amount,
+                            input_vat,
+                            purchase_classification,
+                            payment_method if status == "Received" else None,
+                            expense_account_name if purchase_classification == "Expense Purchase" else None,
+                            asset_name.strip() or None,
+                            asset_category or None,
+                            description,
+                            role,
+                        ),
                     )
                 except sqlite3.IntegrityError as e:
                     conn.close()
@@ -666,15 +702,16 @@ def show_invoice_manager(company_key, role):
                     st.stop()
 
                 if posting_state == "Posted":
-                    due_amount = amount + input_vat
-                    credit_account = "Cash" if status == "Received" else "Accounts Payable"
-                    credit_type = "Asset" if credit_account == "Cash" else "Liability"
-                    journal_lines = [
-                        {"account_id": get_account_id(conn, "Inventory", "Asset"), "debit": amount, "credit": 0},
-                        {"account_id": get_account_id(conn, "VAT Receivable", "Asset"), "debit": input_vat, "credit": 0} if input_vat > 0 else None,
-                        {"account_id": get_account_id(conn, credit_account, credit_type), "debit": 0, "credit": due_amount},
-                    ]
-                    journal_lines = [line for line in journal_lines if line]
+                    journal_lines, _ = build_purchase_journal_lines(
+                        conn,
+                        company_key,
+                        classification=purchase_classification,
+                        amount=amount,
+                        input_vat=input_vat,
+                        status=status,
+                        payment_method=payment_method,
+                        expense_account_name=expense_account_name,
+                    )
                     post_journal_entry(
                         company_key=company_key,
                         date=bill_date,
@@ -689,6 +726,7 @@ def show_invoice_manager(company_key, role):
                         source_type="Bill",
                         source_id=int(cursor.lastrowid),
                         approval_status="Posted",
+                        user_role=role,
                         conn=conn,
                     )
                 elif posting_state != "Cancelled":

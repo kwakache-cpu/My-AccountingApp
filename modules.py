@@ -4524,6 +4524,128 @@ def _normalize_bill_items(raw_items):
     return normalized_items
 
 
+PURCHASE_CLASSIFICATION_OPTIONS = [
+    "Inventory Purchase",
+    "Expense Purchase",
+    "Fixed Asset Purchase",
+]
+
+FIXED_ASSET_PURCHASE_CATEGORIES = ["Vehicle", "Equipment", "Building", "Furniture", "Land", "Other"]
+
+
+def _normalize_purchase_classification(value):
+    normalized_value = " ".join(str(value or "").strip().split()).lower()
+    if normalized_value in {"inventory", "inventory purchase"}:
+        return "Inventory Purchase"
+    if normalized_value in {"expense", "expense purchase"}:
+        return "Expense Purchase"
+    if normalized_value in {"fixed asset", "fixed asset purchase", "asset purchase"}:
+        return "Fixed Asset Purchase"
+    return "Inventory Purchase"
+
+
+def _purchase_payment_account_name(payment_method):
+    normalized_method = str(payment_method or "").strip()
+    if normalized_method == "Bank":
+        return "Bank"
+    if normalized_method == "Mobile Money":
+        return "Mobile Money"
+    return "Cash"
+
+
+def get_purchase_expense_account_options(company_key, conn=None):
+    owns_connection = conn is None
+    conn = conn or get_connection()
+    try:
+        ensure_core_financial_accounts(company_key, conn=conn)
+        rows = conn.execute(
+            """
+            SELECT DISTINCT COALESCE(name, account_name) AS account_name
+            FROM chart_of_accounts
+            WHERE lower(COALESCE(type, account_type, category, '')) = 'expense'
+            ORDER BY COALESCE(name, account_name)
+            """
+        ).fetchall()
+        options = []
+        seen = set()
+        for row in rows:
+            account_name = " ".join(str(row["account_name"] or "").strip().split())
+            if not account_name:
+                continue
+            normalized_name = account_name.lower()
+            if normalized_name in seen:
+                continue
+            seen.add(normalized_name)
+            options.append(account_name)
+        if "general expenses" not in seen:
+            options.append("General Expenses")
+        return options or ["General Expenses"]
+    finally:
+        if owns_connection and conn:
+            conn.close()
+
+
+def build_purchase_journal_lines(
+    conn,
+    company_key,
+    *,
+    classification,
+    amount,
+    input_vat=0.0,
+    status="Pending",
+    payment_method="Cash",
+    expense_account_name=None,
+):
+    normalized_classification = _normalize_purchase_classification(classification)
+    purchase_amount = round(float(amount or 0.0), 2)
+    vat_amount = round(float(input_vat or 0.0), 2)
+    if purchase_amount <= 0:
+        raise ValueError("Purchase amount must be greater than 0.")
+
+    ensure_core_financial_accounts(company_key, conn=conn)
+
+    if normalized_classification == "Expense Purchase":
+        debit_account_name = " ".join(str(expense_account_name or "").strip().split()) or "General Expenses"
+        debit_account_type = "Expense"
+    elif normalized_classification == "Fixed Asset Purchase":
+        debit_account_name = "Fixed Assets"
+        debit_account_type = "Asset"
+    else:
+        debit_account_name = "Inventory"
+        debit_account_type = "Asset"
+
+    is_immediately_paid = str(status or "").strip() == "Received"
+    credit_account_name = _purchase_payment_account_name(payment_method) if is_immediately_paid else "Accounts Payable"
+    credit_account_type = "Asset" if is_immediately_paid else "Liability"
+    total_credit = round(purchase_amount + vat_amount, 2)
+
+    journal_lines = [
+        {
+            "account_id": get_or_create_account(company_key, debit_account_name, debit_account_type, conn=conn),
+            "debit": purchase_amount,
+            "credit": 0,
+        },
+        {
+            "account_id": get_or_create_account(company_key, "VAT Receivable", "Asset", conn=conn),
+            "debit": vat_amount,
+            "credit": 0,
+        } if vat_amount > 0 else None,
+        {
+            "account_id": get_or_create_account(company_key, credit_account_name, credit_account_type, conn=conn),
+            "debit": 0,
+            "credit": total_credit,
+        },
+    ]
+    return [line for line in journal_lines if line], {
+        "classification": normalized_classification,
+        "debit_account_name": debit_account_name,
+        "debit_account_type": debit_account_type,
+        "credit_account_name": credit_account_name,
+        "credit_account_type": credit_account_type,
+        "total_credit": total_credit,
+    }
+
+
 def _trigger_scan_feedback(message_key, message, level="success", beep_key=None):
     st.session_state[message_key] = {"level": level, "text": message}
     if beep_key:
@@ -5771,24 +5893,39 @@ def show_accounts_payable_page(conn, demo_on):
         st.warning("No active company was found for Accounts Payable.")
         return
 
+    expense_account_options = get_purchase_expense_account_options(company_key, conn=conn)
+
     with st.form("accounts_payable_form"):
         supplier_name = st.text_input("Supplier Name")
-        bill_category = st.selectbox("Bill Posting", ["Expense", "Inventory"])
+        purchase_classification = st.selectbox("Purchase Classification", PURCHASE_CLASSIFICATION_OPTIONS)
         amount = st.number_input("Amount (GH₵)", min_value=0.0, value=0.0)
+        input_vat_rate = st.number_input("Input VAT Rate (%)", min_value=0.0, max_value=100.0, step=0.5, value=0.0)
         status = st.selectbox("Bill Status", ["Pending", "Received"])
+        payment_method = st.selectbox("Payment Method", ["Cash", "Bank", "Mobile Money"], disabled=status != "Received")
         posting_state = st.selectbox("Posting State", DOCUMENT_WORKFLOW_STATUSES, index=3)
+        expense_account_name = None
+        asset_name = ""
+        asset_category = ""
+        if purchase_classification == "Expense Purchase":
+            expense_account_name = st.selectbox("Expense Account", expense_account_options)
+        elif purchase_classification == "Fixed Asset Purchase":
+            asset_name = st.text_input("Asset Name")
+            asset_category = st.selectbox("Asset Category", FIXED_ASSET_PURCHASE_CATEGORIES)
         description = st.text_input("Description")
         payable_date = st.date_input("Bill Date", value=datetime.now().date())
         submitted = st.form_submit_button("Create Bill")
         if submitted and supplier_name and amount > 0:
             supplier_id = _get_or_create_party(conn, "suppliers", company_key, supplier_name.strip())
             bill_number = f"BILL-{datetime.now().strftime('%Y%m%d%H%M%S')}"
-            posting_account_name = "Inventory" if bill_category == "Inventory" else "Purchases"
-            posting_account_type = "Asset" if bill_category == "Inventory" else "Expense"
+            input_vat = round(float(amount or 0.0) * float(input_vat_rate or 0.0) / 100.0, 2)
             cursor = conn.execute(
                 """
-                INSERT INTO bills (company_key, supplier_id, bill_number, bill_date, due_date, status, approval_status, amount, currency, description, created_by)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'GHS', ?, ?)
+                INSERT INTO bills (
+                    company_key, supplier_id, bill_number, bill_date, due_date, status, approval_status,
+                    amount, input_vat, purchase_classification, payment_method, expense_account_name, asset_name,
+                    asset_category, currency, description, created_by
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'GHS', ?, ?)
                 """,
                 (
                     company_key,
@@ -5799,29 +5936,34 @@ def show_accounts_payable_page(conn, demo_on):
                     status,
                     posting_state,
                     amount,
-                    description.strip() or f"{bill_category} bill",
+                    input_vat,
+                    _normalize_purchase_classification(purchase_classification),
+                    payment_method if status == "Received" else None,
+                    expense_account_name if purchase_classification == "Expense Purchase" else None,
+                    asset_name.strip() or None,
+                    asset_category or None,
+                    description.strip() or f"{purchase_classification} bill",
                     role,
                 ),
             )
             bill_id = int(cursor.lastrowid)
             if posting_state == "Posted":
+                journal_lines, _ = build_purchase_journal_lines(
+                    conn,
+                    company_key,
+                    classification=purchase_classification,
+                    amount=amount,
+                    input_vat=input_vat,
+                    status=status,
+                    payment_method=payment_method,
+                    expense_account_name=expense_account_name,
+                )
                 post_journal_entry(
                     company_key=company_key,
                     date=payable_date,
-                    description=description.strip() or f"{bill_category} bill for {supplier_name.strip()}",
+                    description=description.strip() or f"{purchase_classification} bill for {supplier_name.strip()}",
                     reference=bill_number,
-                    lines=[
-                        {
-                            "account_id": get_account_id(conn, posting_account_name, posting_account_type),
-                            "debit": float(amount),
-                            "credit": 0,
-                        },
-                        {
-                            "account_id": get_account_id(conn, "Accounts Payable", "Liability"),
-                            "debit": 0,
-                            "credit": float(amount),
-                        },
-                    ],
+                    lines=journal_lines,
                     created_by=role,
                     branch_id=branch_id,
                     supplier_id=supplier_id,
@@ -5830,6 +5972,7 @@ def show_accounts_payable_page(conn, demo_on):
                     source_type="Bill",
                     source_id=bill_id,
                     approval_status="Posted",
+                    user_role=role,
                     conn=conn,
                 )
             conn.commit()
@@ -5889,6 +6032,7 @@ def show_create_bill_page(company_key):
 
         suppliers = conn.execute("SELECT id, name FROM suppliers WHERE company_key = ? ORDER BY name", (company_key,)).fetchall()
         supplier_options = [""] + [row["name"] for row in suppliers]
+        expense_account_options = get_purchase_expense_account_options(company_key, conn=conn)
 
         # Initialize items in session state
         if "bill_items" not in st.session_state or not isinstance(st.session_state.bill_items, list):
@@ -5921,8 +6065,19 @@ def show_create_bill_page(company_key):
         with st.form("create_bill_form"):
             supplier_name = st.selectbox("Supplier", supplier_options)
             bill_date = st.date_input("Bill Date", value=datetime.now().date())
-            bill_category = st.selectbox("Bill Posting", ["Expense", "Inventory"])
+            purchase_classification = st.selectbox("Purchase Classification", PURCHASE_CLASSIFICATION_OPTIONS)
+            input_vat_rate = st.number_input("Input VAT Rate (%)", min_value=0.0, max_value=100.0, step=0.5, value=0.0)
+            status = st.selectbox("Payment Status", ["Pending", "Received"])
+            payment_method = st.selectbox("Payment Method", ["Cash", "Bank", "Mobile Money"], disabled=status != "Received")
             posting_state = st.selectbox("Posting State", DOCUMENT_WORKFLOW_STATUSES, index=1)
+            expense_account_name = None
+            asset_name = ""
+            asset_category = ""
+            if purchase_classification == "Expense Purchase":
+                expense_account_name = st.selectbox("Expense Account", expense_account_options)
+            elif purchase_classification == "Fixed Asset Purchase":
+                asset_name = st.text_input("Asset Name")
+                asset_category = st.selectbox("Asset Category", FIXED_ASSET_PURCHASE_CATEGORIES)
             description = st.text_input("Description")
 
             submitted = st.form_submit_button("Submit")
@@ -5956,13 +6111,16 @@ def show_create_bill_page(company_key):
                     return
 
                 bill_number = f"BILL-{datetime.now().strftime('%Y%m%d%H%M%S')}"
-                posting_account_name = "Inventory" if bill_category == "Inventory" else "Purchases"
-                posting_account_type = "Asset" if bill_category == "Inventory" else "Expense"
+                input_vat = round(total_amount * float(input_vat_rate or 0.0) / 100.0, 2)
 
                 cursor = conn.execute(
                     """
-                    INSERT INTO bills (company_key, supplier_id, bill_number, bill_date, due_date, status, approval_status, amount, currency, description, created_by)
-                    VALUES (?, ?, ?, ?, ?, 'Pending', ?, ?, 'GHS', ?, ?)
+                    INSERT INTO bills (
+                        company_key, supplier_id, bill_number, bill_date, due_date, status, approval_status,
+                        amount, input_vat, purchase_classification, payment_method, expense_account_name, asset_name,
+                        asset_category, currency, description, created_by
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'GHS', ?, ?)
                     """,
                     (
                         company_key,
@@ -5970,9 +6128,16 @@ def show_create_bill_page(company_key):
                         bill_number,
                         bill_date.isoformat(),
                         bill_date.isoformat(),
+                        status,
                         posting_state,
                         total_amount,
-                        description.strip() or f"{bill_category} bill",
+                        input_vat,
+                        _normalize_purchase_classification(purchase_classification),
+                        payment_method if status == "Received" else None,
+                        expense_account_name if purchase_classification == "Expense Purchase" else None,
+                        asset_name.strip() or None,
+                        asset_category or None,
+                        description.strip() or f"{purchase_classification} bill",
                         role,
                     ),
                 )
@@ -6000,23 +6165,22 @@ def show_create_bill_page(company_key):
                     ):
                         conn.rollback()
                         return
+                    journal_lines, _ = build_purchase_journal_lines(
+                        conn,
+                        company_key,
+                        classification=purchase_classification,
+                        amount=total_amount,
+                        input_vat=input_vat,
+                        status=status,
+                        payment_method=payment_method,
+                        expense_account_name=expense_account_name,
+                    )
                     post_journal_entry(
                         company_key=company_key,
                         date=bill_date,
-                        description=description.strip() or f"{bill_category} bill for {supplier_name}",
+                        description=description.strip() or f"{purchase_classification} bill for {supplier_name}",
                         reference=bill_number,
-                        lines=[
-                            {
-                                "account_id": get_account_id(conn, posting_account_name, posting_account_type),
-                                "debit": total_amount,
-                                "credit": 0,
-                            },
-                            {
-                                "account_id": get_account_id(conn, "Accounts Payable", "Liability"),
-                                "debit": 0,
-                                "credit": total_amount,
-                            },
-                        ],
+                        lines=journal_lines,
                         created_by=role,
                         branch_id=branch_id,
                         supplier_id=supplier_id,
@@ -6025,6 +6189,7 @@ def show_create_bill_page(company_key):
                         source_type="Bill",
                         source_id=bill_id,
                         approval_status="Posted",
+                        user_role=role,
                         conn=conn,
                     )
 
@@ -9241,6 +9406,15 @@ def show_sales_purchase(company_key, role, doc_type="Sales"):
     invoice_editor_conn = None
     invoice_items = []
     invoice_items_total = 0.0
+    purchase_render_conn = None
+    purchase_expense_account_options = ["General Expenses"]
+    if doc_type != "Sales":
+        purchase_render_conn = get_connection()
+        try:
+            purchase_expense_account_options = get_purchase_expense_account_options(company_key, conn=purchase_render_conn)
+        finally:
+            if purchase_render_conn:
+                purchase_render_conn.close()
     with st.form(f"{doc_type.lower()}_form"):
         col1, col2 = st.columns(2)
         with col1:
@@ -9264,6 +9438,18 @@ def show_sales_purchase(company_key, role, doc_type="Sales"):
             finally:
                 if invoice_editor_conn:
                     invoice_editor_conn.close()
+        else:
+            purchase_classification = st.selectbox("Purchase Classification", PURCHASE_CLASSIFICATION_OPTIONS)
+            input_vat_rate = st.number_input("Input VAT Rate (%)", min_value=0.0, max_value=100.0, step=0.5, value=0.0)
+            payment_method = st.selectbox("Payment Method", ["Cash", "Bank", "Mobile Money"], disabled=status != "Received")
+            expense_account_name = None
+            asset_name = ""
+            asset_category = ""
+            if purchase_classification == "Expense Purchase":
+                expense_account_name = st.selectbox("Expense Account", purchase_expense_account_options)
+            elif purchase_classification == "Fixed Asset Purchase":
+                asset_name = st.text_input("Asset Name")
+                asset_category = st.selectbox("Asset Category", FIXED_ASSET_PURCHASE_CATEGORIES)
         submitted = st.form_submit_button(f"Save {doc_type}")
 
         if submitted and party_name and amount > 0:
@@ -9325,25 +9511,52 @@ def show_sales_purchase(company_key, role, doc_type="Sales"):
                         )
                 else:
                     supplier_id = _get_or_create_party(conn, "suppliers", company_key, party_name)
+                    input_vat = round(float(amount or 0.0) * float(input_vat_rate or 0.0) / 100.0, 2)
                     bill_cursor = conn.execute(
                         """
-                        INSERT INTO bills (company_key, supplier_id, bill_number, bill_date, due_date, status, approval_status, amount, currency, description, created_by)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'GHS', ?, ?)
+                        INSERT INTO bills (
+                            company_key, supplier_id, bill_number, bill_date, due_date, status, approval_status,
+                            amount, input_vat, purchase_classification, payment_method, expense_account_name, asset_name,
+                            asset_category, currency, description, created_by
+                        )
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'GHS', ?, ?)
                         """,
-                        (company_key, supplier_id, tx_reference, doc_date.isoformat(), doc_date.isoformat(), status, posting_state, amount, narration, role),
+                        (
+                            company_key,
+                            supplier_id,
+                            tx_reference,
+                            doc_date.isoformat(),
+                            doc_date.isoformat(),
+                            status,
+                            posting_state,
+                            amount,
+                            input_vat,
+                            _normalize_purchase_classification(purchase_classification),
+                            payment_method if status == "Received" else None,
+                            expense_account_name if purchase_classification == "Expense Purchase" else None,
+                            asset_name.strip() or None,
+                            asset_category or None,
+                            narration,
+                            role,
+                        ),
                     )
-                    credit_account = "Cash" if status == "Received" else "Accounts Payable"
-                    credit_category = "Asset" if credit_account == "Cash" else "Liability"
                     if posting_state == "Posted":
+                        journal_lines, _ = build_purchase_journal_lines(
+                            conn,
+                            company_key,
+                            classification=purchase_classification,
+                            amount=amount,
+                            input_vat=input_vat,
+                            status=status,
+                            payment_method=payment_method,
+                            expense_account_name=expense_account_name,
+                        )
                         post_journal_entry(
                             company_key=company_key,
                             date=doc_date,
                             description="Purchase transaction",
                             reference=tx_reference,
-                            lines=[
-                                {"account_id": get_account_id(conn, "Inventory", "Asset"), "debit": amount, "credit": 0},
-                                {"account_id": get_account_id(conn, credit_account, credit_category), "debit": 0, "credit": amount},
-                            ],
+                            lines=journal_lines,
                             created_by=role,
                             branch_id=branch_id,
                             supplier_id=supplier_id,
@@ -9352,6 +9565,7 @@ def show_sales_purchase(company_key, role, doc_type="Sales"):
                             source_type="Bill",
                             source_id=int(bill_cursor.lastrowid),
                             approval_status="Posted",
+                            user_role=role,
                             conn=conn,
                         )
                 balance_delta = amount if status == "Pending" else 0.0
