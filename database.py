@@ -201,6 +201,7 @@ SCHEMA_MANIFEST = {
         "customers": ("id", "company_key", "name", "currency"),
         "suppliers": ("id", "company_key", "name", "currency"),
         "invoices": ("id", "company_key", "invoice_number", "invoice_date", "approval_status", "amount"),
+        "invoice_lines": ("id", "invoice_id", "item_name", "quantity", "unit_price", "line_total"),
         "bills": ("id", "company_key", "bill_number", "bill_date", "approval_status", "amount"),
         "payments": ("id", "company_key", "payment_date", "payment_type", "approval_status", "amount"),
         "payment_allocations": ("id", "company_key", "payment_id", "amount"),
@@ -3704,6 +3705,25 @@ def ensure_schema_integrity(conn):
     cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_bills_company_bill_number ON bills(company_key, bill_number)")
     cursor.execute(
         """
+        CREATE TABLE IF NOT EXISTS invoice_lines (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            invoice_id INTEGER NOT NULL,
+            inventory_item_id INTEGER,
+            item_name TEXT NOT NULL,
+            quantity REAL DEFAULT 1,
+            unit_price REAL DEFAULT 0,
+            line_total REAL DEFAULT 0,
+            cost_price REAL DEFAULT 0,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (invoice_id) REFERENCES invoices(id) ON DELETE CASCADE,
+            FOREIGN KEY (inventory_item_id) REFERENCES inventory(id) ON DELETE SET NULL
+        )
+        """
+    )
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_invoice_lines_invoice_id ON invoice_lines(invoice_id)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_invoice_lines_inventory_item_id ON invoice_lines(inventory_item_id)")
+    cursor.execute(
+        """
         CREATE TABLE IF NOT EXISTS bill_lines (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             bill_id INTEGER NOT NULL,
@@ -4292,6 +4312,40 @@ def _ensure_app_compatibility_tables(conn):
     These tables remain additive only and are not used to destroy or replace data.
     """
     cursor = conn.cursor()
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS invoice_lines (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            invoice_id INTEGER NOT NULL,
+            inventory_item_id INTEGER,
+            item_name TEXT NOT NULL,
+            quantity REAL DEFAULT 1,
+            unit_price REAL DEFAULT 0,
+            line_total REAL DEFAULT 0,
+            cost_price REAL DEFAULT 0,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (invoice_id) REFERENCES invoices(id) ON DELETE CASCADE,
+            FOREIGN KEY (inventory_item_id) REFERENCES inventory(id) ON DELETE SET NULL
+        )
+        """
+    )
+    cursor.execute("PRAGMA table_info(invoice_lines)")
+    invoice_line_columns = {row[1] for row in cursor.fetchall()}
+    for column_name, column_def in {
+        "invoice_id": "INTEGER",
+        "inventory_item_id": "INTEGER",
+        "item_name": "TEXT",
+        "quantity": "REAL DEFAULT 1",
+        "unit_price": "REAL DEFAULT 0",
+        "line_total": "REAL DEFAULT 0",
+        "cost_price": "REAL DEFAULT 0",
+        "created_at": "TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
+    }.items():
+        if column_name not in invoice_line_columns:
+            cursor.execute(f"ALTER TABLE invoice_lines ADD COLUMN {column_name} {column_def}")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_invoice_lines_invoice_id ON invoice_lines(invoice_id)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_invoice_lines_inventory_item_id ON invoice_lines(inventory_item_id)")
+
     cursor.execute(
         """
         CREATE TABLE IF NOT EXISTS accounts_payable (

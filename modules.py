@@ -3149,6 +3149,223 @@ def _register_customer(conn, company_key, name, phone="", email="", branch_id=No
     return customer_row_id
 
 
+def _get_invoice_inventory_items(conn, company_key):
+    rows = conn.execute(
+        """
+        SELECT id, item_name, item_code, barcode, qty, price, cost_price
+        FROM inventory
+        WHERE company_key = ?
+          AND COALESCE(is_active, 1) = 1
+        ORDER BY item_name
+        """,
+        (company_key,),
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def render_invoice_line_editor(company_key, editor_key_prefix, conn):
+    inventory_rows = _get_invoice_inventory_items(conn, company_key)
+    inventory_options = {
+        "{name} | Price {price} | Stock {qty:,.2f}".format(
+            name=str(row["item_name"] or "").strip(),
+            price=format_currency(float(row["price"] or 0.0)),
+            qty=float(row["qty"] or 0.0),
+        ): row
+        for row in inventory_rows
+    }
+    line_count = int(
+        st.number_input(
+            "Invoice Line Count",
+            min_value=0,
+            max_value=5,
+            value=int(st.session_state.get(f"{editor_key_prefix}_line_count", 1) or 1),
+            step=1,
+            key=f"{editor_key_prefix}_line_count",
+        )
+    )
+    st.caption("Optional: add stock-linked lines for inventory invoices. Manual/non-stock lines remain revenue-only.")
+    invoice_items = []
+    for line_index in range(line_count):
+        st.markdown(f"Line {line_index + 1}")
+        row_col1, row_col2, row_col3 = st.columns(3)
+        line_mode = row_col1.selectbox(
+            "Line Type",
+            ["Manual / Non-stock", "Stock Item"],
+            key=f"{editor_key_prefix}_mode_{line_index}",
+        )
+        quantity = float(
+            row_col2.number_input(
+                "Quantity",
+                min_value=0.0,
+                value=float(st.session_state.get(f"{editor_key_prefix}_qty_{line_index}", 1.0) or 1.0),
+                step=1.0,
+                key=f"{editor_key_prefix}_qty_{line_index}",
+            )
+        )
+        if line_mode == "Stock Item":
+            selected_label = row_col3.selectbox(
+                "Inventory Item",
+                [""] + list(inventory_options.keys()),
+                key=f"{editor_key_prefix}_stock_{line_index}",
+            )
+            selected_row = inventory_options.get(selected_label)
+            unit_price = float(
+                st.number_input(
+                    "Unit Price",
+                    min_value=0.0,
+                    value=float(selected_row["price"] or 0.0) if selected_row else 0.0,
+                    step=0.01,
+                    key=f"{editor_key_prefix}_price_{line_index}",
+                )
+            )
+            if selected_row and quantity > 0:
+                invoice_items.append(
+                    {
+                        "inventory_item_id": int(selected_row["id"]),
+                        "item_name": str(selected_row["item_name"] or "").strip(),
+                        "quantity": quantity,
+                        "unit_price": unit_price,
+                        "line_total": round(quantity * unit_price, 2),
+                        "cost_price": float(selected_row.get("cost_price") or 0.0),
+                    }
+                )
+        else:
+            item_name = row_col3.text_input("Item Name", key=f"{editor_key_prefix}_manual_{line_index}").strip()
+            unit_price = float(
+                st.number_input(
+                    "Unit Price",
+                    min_value=0.0,
+                    value=float(st.session_state.get(f"{editor_key_prefix}_price_{line_index}", 0.0) or 0.0),
+                    step=0.01,
+                    key=f"{editor_key_prefix}_price_{line_index}",
+                )
+            )
+            if item_name and quantity > 0:
+                invoice_items.append(
+                    {
+                        "inventory_item_id": None,
+                        "item_name": item_name,
+                        "quantity": quantity,
+                        "unit_price": unit_price,
+                        "line_total": round(quantity * unit_price, 2),
+                        "cost_price": 0.0,
+                    }
+                )
+    invoice_total = round(sum(float(item.get("line_total") or 0.0) for item in invoice_items), 2)
+    if invoice_items:
+        st.caption(f"Invoice items total: {format_currency(invoice_total)}")
+    return invoice_items, invoice_total
+
+
+def save_invoice_lines(conn, invoice_id, invoice_items):
+    conn.execute("DELETE FROM invoice_lines WHERE invoice_id = ?", (int(invoice_id),))
+    for item in invoice_items:
+        conn.execute(
+            """
+            INSERT INTO invoice_lines (
+                invoice_id, inventory_item_id, item_name, quantity, unit_price, line_total, cost_price
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                int(invoice_id),
+                int(item["inventory_item_id"]) if item.get("inventory_item_id") is not None else None,
+                str(item.get("item_name") or "").strip(),
+                float(item.get("quantity") or 0.0),
+                float(item.get("unit_price") or 0.0),
+                float(item.get("line_total") or 0.0),
+                float(item.get("cost_price") or 0.0),
+            ),
+        )
+
+
+def _inventory_has_average_cost(conn):
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(inventory)").fetchall()}
+    return "average_cost" in columns
+
+
+def apply_invoice_stock_effects(
+    conn,
+    *,
+    company_key,
+    invoice_reference,
+    invoice_items,
+    role,
+    branch_id=None,
+):
+    stock_linked_items = [item for item in (invoice_items or []) if item.get("inventory_item_id") is not None]
+    if not stock_linked_items:
+        return {"invoice_items": invoice_items or [], "cogs_total": 0.0, "stock_deduction_applied": False}
+
+    average_cost_available = _inventory_has_average_cost(conn)
+    enriched_items = []
+    cogs_total = 0.0
+    for item in stock_linked_items:
+        inventory_row = conn.execute(
+            """
+            SELECT id, item_name, qty, cost_price {average_cost_clause}
+            FROM inventory
+            WHERE id = ? AND company_key = ?
+            LIMIT 1
+            """.format(average_cost_clause=", average_cost" if average_cost_available else ""),
+            (int(item["inventory_item_id"]), company_key),
+        ).fetchone()
+        if not inventory_row:
+            raise ValueError(f"Inventory item for {item['item_name']} could not be found.")
+        quantity_sold = round(float(item.get("quantity") or 0.0), 4)
+        if quantity_sold <= 0:
+            continue
+        available_qty = float(inventory_row["qty"] or 0.0)
+        if quantity_sold > available_qty:
+            raise ValueError(f"Insufficient stock for invoice item {inventory_row['item_name']}.")
+        unit_cost = float(inventory_row["cost_price"] or 0.0)
+        if unit_cost <= 0 and average_cost_available:
+            unit_cost = float(inventory_row["average_cost"] or 0.0)
+        if unit_cost <= 0:
+            unit_cost = float(item.get("cost_price") or 0.0)
+        total_cost = round(quantity_sold * unit_cost, 2)
+        new_qty = round(available_qty - quantity_sold, 4)
+        conn.execute(
+            "UPDATE inventory SET qty = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND company_key = ?",
+            (new_qty, int(inventory_row["id"]), company_key),
+        )
+        conn.execute(
+            """
+            INSERT INTO stock_movements (
+                company_key, branch_id, inventory_item_id, item_name, movement_type,
+                quantity, reason, previous_qty, new_qty, created_by, created_at, reference
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?)
+            """,
+            (
+                company_key,
+                branch_id,
+                int(inventory_row["id"]),
+                str(inventory_row["item_name"] or item["item_name"]),
+                "Invoice Sale",
+                quantity_sold,
+                f"Invoice sale {invoice_reference}",
+                available_qty,
+                new_qty,
+                role,
+                invoice_reference,
+            ),
+        )
+        enriched_item = dict(item)
+        enriched_item["cost_price"] = unit_cost
+        enriched_item["inventory_total_cost"] = total_cost
+        enriched_items.append(enriched_item)
+        if total_cost > 0:
+            cogs_total = round(cogs_total + total_cost, 2)
+
+    non_stock_items = [dict(item) for item in (invoice_items or []) if item.get("inventory_item_id") is None]
+    return {
+        "invoice_items": non_stock_items + enriched_items,
+        "cogs_total": cogs_total,
+        "stock_deduction_applied": bool(stock_linked_items),
+    }
+
+
 def _record_customer_ledger_transaction(
     conn,
     company_key,
@@ -9021,6 +9238,9 @@ def show_sales_purchase(company_key, role, doc_type="Sales"):
         st.dataframe(format_currency_dataframe(demo_data), use_container_width=True)
         return
 
+    invoice_editor_conn = None
+    invoice_items = []
+    invoice_items_total = 0.0
     with st.form(f"{doc_type.lower()}_form"):
         col1, col2 = st.columns(2)
         with col1:
@@ -9032,6 +9252,18 @@ def show_sales_purchase(company_key, role, doc_type="Sales"):
             doc_date = st.date_input("Date", datetime.now().date())
         city_region = st.text_input("City / Region")
         narration = st.text_input("Description / Reference")
+        if doc_type == "Sales":
+            st.markdown("Optional Invoice Items")
+            invoice_editor_conn = get_connection()
+            try:
+                invoice_items, invoice_items_total = render_invoice_line_editor(
+                    company_key,
+                    f"sales_purchase_invoice_lines_{company_key}",
+                    invoice_editor_conn,
+                )
+            finally:
+                if invoice_editor_conn:
+                    invoice_editor_conn.close()
         submitted = st.form_submit_button(f"Save {doc_type}")
 
         if submitted and party_name and amount > 0:
@@ -9039,6 +9271,10 @@ def show_sales_purchase(company_key, role, doc_type="Sales"):
                 conn = get_connection()
                 tx_reference = f"{doc_type[:3].upper()}-{datetime.now().strftime('%Y%m%d%H%M%S')}"
                 if doc_type == "Sales":
+                    if invoice_items and abs(invoice_items_total - float(amount or 0.0)) >= 0.01:
+                        conn.close()
+                        st.warning("Invoice amount must match the total of the invoice items before posting.")
+                        return
                     customer_id = _register_customer(conn, company_key, party_name)
                     invoice_cursor = conn.execute(
                         """
@@ -9047,17 +9283,36 @@ def show_sales_purchase(company_key, role, doc_type="Sales"):
                         """,
                         (company_key, customer_id, tx_reference, doc_date.isoformat(), doc_date.isoformat(), status, posting_state, amount, narration, role),
                     )
+                    if invoice_items:
+                        save_invoice_lines(conn, int(invoice_cursor.lastrowid), invoice_items)
                     debit_account = "Cash" if status == "Paid" else "Accounts Receivable"
                     if posting_state == "Posted":
+                        stock_effects = apply_invoice_stock_effects(
+                            conn,
+                            company_key=company_key,
+                            invoice_reference=tx_reference,
+                            invoice_items=invoice_items,
+                            role=role,
+                            branch_id=branch_id,
+                        )
+                        cogs_total = round(float(stock_effects.get("cogs_total") or 0.0), 2)
+                        journal_lines = [
+                            {"account_id": get_account_id(conn, debit_account, "Asset"), "debit": amount, "credit": 0},
+                            {"account_id": get_account_id(conn, "Sales Revenue", "Income"), "debit": 0, "credit": amount},
+                        ]
+                        if cogs_total > 0:
+                            journal_lines.extend(
+                                [
+                                    {"account_id": get_account_id(conn, "Cost of Goods Sold", "Expense"), "debit": cogs_total, "credit": 0},
+                                    {"account_id": get_account_id(conn, "Inventory", "Asset"), "debit": 0, "credit": cogs_total},
+                                ]
+                            )
                         post_journal_entry(
                             company_key=company_key,
                             date=doc_date,
                             description="Sales transaction",
                             reference=tx_reference,
-                            lines=[
-                                {"account_id": get_account_id(conn, debit_account, "Asset"), "debit": amount, "credit": 0},
-                                {"account_id": get_account_id(conn, "Sales Revenue", "Income"), "debit": 0, "credit": amount},
-                            ],
+                            lines=journal_lines,
                             created_by=role,
                             branch_id=branch_id,
                             customer_id=customer_id,

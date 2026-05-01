@@ -71,6 +71,9 @@ show_journal_entries = eka_modules.show_journal_entries
 user_has_permission = eka_modules.user_has_permission
 log_audit_action = eka_modules.log_audit_action
 log_system_event = eka_modules.log_system_event
+render_invoice_line_editor = eka_modules.render_invoice_line_editor
+save_invoice_lines = eka_modules.save_invoice_lines
+apply_invoice_stock_effects = eka_modules.apply_invoice_stock_effects
 
 
 def _resolve_date(value):
@@ -540,6 +543,8 @@ def show_invoice_manager(company_key, role):
         conn = get_connection()
         customers = [row[0] for row in conn.execute("SELECT name FROM customers WHERE company_key = ? ORDER BY name", (company_key,)).fetchall()]
         conn.close()
+        invoice_items = []
+        invoice_items_total = 0.0
         with st.form(f"invoice_form_{company_key}"):
             customer_name = st.selectbox("Customer", [""] + customers)
             amount = st.number_input("Amount (GHS)", min_value=0.0, step=0.01)
@@ -548,8 +553,22 @@ def show_invoice_manager(company_key, role):
             posting_state = st.selectbox("Posting State", DOCUMENT_WORKFLOW_STATUSES, index=0, key=f"invoice_posting_state_{company_key}")
             invoice_date = st.date_input("Invoice Date", value=datetime.now().date(), key=f"invoice_date_{company_key}")
             description = st.text_input("Description", key=f"invoice_description_{company_key}")
+            editor_conn = get_connection()
+            try:
+                invoice_items, invoice_items_total = render_invoice_line_editor(
+                    company_key,
+                    f"financials_invoice_lines_{company_key}",
+                    editor_conn,
+                )
+            finally:
+                if editor_conn:
+                    editor_conn.close()
             if st.form_submit_button("Save Invoice") and customer_name and amount > 0:
                 conn = get_connection()
+                if invoice_items and abs(invoice_items_total - float(amount or 0.0)) >= 0.01:
+                    conn.close()
+                    st.warning("Invoice amount must match the total of the invoice items before posting.")
+                    return
                 customer_id = _party_id(conn, "customers", company_key, customer_name)
                 output_vat = round(amount * (output_vat_rate or 0.0) / 100.0, 2)
                 try:
@@ -565,13 +584,31 @@ def show_invoice_manager(company_key, role):
                     st.error(build_user_safe_error(e, role))
                     st.stop()
 
+                if invoice_items:
+                    save_invoice_lines(conn, int(cursor.lastrowid), invoice_items)
                 if posting_state == "Posted":
+                    stock_effects = apply_invoice_stock_effects(
+                        conn,
+                        company_key=company_key,
+                        invoice_reference=f"INV-{cursor.lastrowid}",
+                        invoice_items=invoice_items,
+                        role=role,
+                        branch_id=st.session_state.get("active_branch_id"),
+                    )
+                    cogs_total = round(float(stock_effects.get("cogs_total") or 0.0), 2)
                     journal_lines = [
                         {"account_id": get_account_id(conn, "Cash" if status == "Paid" else "Accounts Receivable", "Asset"), "debit": amount + output_vat, "credit": 0},
                         {"account_id": get_account_id(conn, "Sales Revenue", "Income"), "debit": 0, "credit": amount},
                     ]
                     if output_vat > 0:
                         journal_lines.append({"account_id": get_account_id(conn, "VAT Payable", "Liability"), "debit": 0, "credit": output_vat})
+                    if cogs_total > 0:
+                        journal_lines.extend(
+                            [
+                                {"account_id": get_account_id(conn, "Cost of Goods Sold", "Expense"), "debit": cogs_total, "credit": 0},
+                                {"account_id": get_account_id(conn, "Inventory", "Asset"), "debit": 0, "credit": cogs_total},
+                            ]
+                        )
                     post_journal_entry(
                         company_key=company_key,
                         date=invoice_date,
@@ -819,6 +856,8 @@ def show_create_invoice_page(company_key, role):
     conn = get_connection()
     customers = [row[0] for row in conn.execute("SELECT name FROM customers WHERE company_key = ? ORDER BY name", (company_key,)).fetchall()]
     conn.close()
+    invoice_items = []
+    invoice_items_total = 0.0
     with st.form(f"invoice_form_{company_key}"):
         customer_name = st.selectbox("Customer", [""] + customers)
         amount = st.number_input("Amount (GHS)", min_value=0.0, step=0.01)
@@ -827,10 +866,24 @@ def show_create_invoice_page(company_key, role):
         posting_state = st.selectbox("Posting State", DOCUMENT_WORKFLOW_STATUSES, index=0)
         invoice_date = st.date_input("Invoice Date", value=datetime.now().date(), key=f"invoice_date_{company_key}")
         description = st.text_input("Description", key=f"invoice_description_{company_key}")
+        editor_conn = get_connection()
+        try:
+            invoice_items, invoice_items_total = render_invoice_line_editor(
+                company_key,
+                f"create_invoice_lines_{company_key}",
+                editor_conn,
+            )
+        finally:
+            if editor_conn:
+                editor_conn.close()
         if st.form_submit_button("Save Invoice") and customer_name and amount > 0:
             conn = get_connection()
             if not require_permission(role, "create_invoice", action_label="create invoices", company_key=company_key, conn=conn):
                 conn.close()
+                return
+            if invoice_items and abs(invoice_items_total - float(amount or 0.0)) >= 0.01:
+                conn.close()
+                st.warning("Invoice amount must match the total of the invoice items before posting.")
                 return
             row = conn.execute(
                 "SELECT id FROM customers WHERE company_key = ? AND name = ? LIMIT 1",
@@ -863,6 +916,8 @@ def show_create_invoice_page(company_key, role):
                 st.error(build_user_safe_error(e, role))
                 st.stop()
 
+            if invoice_items:
+                save_invoice_lines(conn, int(cursor.lastrowid), invoice_items)
             if posting_state == "Posted":
                 if not require_permission(
                     role,
@@ -874,12 +929,28 @@ def show_create_invoice_page(company_key, role):
                     conn.rollback()
                     conn.close()
                     return
+                stock_effects = apply_invoice_stock_effects(
+                    conn,
+                    company_key=company_key,
+                    invoice_reference=f"INV-{cursor.lastrowid}",
+                    invoice_items=invoice_items,
+                    role=role,
+                    branch_id=st.session_state.get("active_branch_id"),
+                )
+                cogs_total = round(float(stock_effects.get("cogs_total") or 0.0), 2)
                 journal_lines = [
                     {"account_id": get_account_id(conn, "Cash" if status == "Paid" else "Accounts Receivable", "Asset"), "debit": amount + output_vat, "credit": 0},
                     {"account_id": get_account_id(conn, "Sales Revenue", "Income"), "debit": 0, "credit": amount},
                 ]
                 if output_vat > 0:
                     journal_lines.append({"account_id": get_account_id(conn, "VAT Payable", "Liability"), "debit": 0, "credit": output_vat})
+                if cogs_total > 0:
+                    journal_lines.extend(
+                        [
+                            {"account_id": get_account_id(conn, "Cost of Goods Sold", "Expense"), "debit": cogs_total, "credit": 0},
+                            {"account_id": get_account_id(conn, "Inventory", "Asset"), "debit": 0, "credit": cogs_total},
+                        ]
+                    )
                 post_journal_entry(
                     company_key=company_key,
                     date=invoice_date,
