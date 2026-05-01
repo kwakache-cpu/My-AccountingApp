@@ -1558,10 +1558,7 @@ PRIMARY_NAV_ITEMS = [
     ("Dashboard", "Dashboard"),
     ("Inventory Management", "Inventory Management"),
     ("Payroll & Salaries", "Payroll & Salaries"),
-    ("Sales/Purchase", "Sales/Purchase"),
-    ("Taxation", "Taxation"),
     ("Gatekeeper Admin", "Gatekeeper Admin"),
-    ("Audit Trail", "Audit Trail"),
     ("🏠 Dashboard", "Dashboard"),
 ]
 
@@ -1581,10 +1578,8 @@ SIDEBAR_NAV_GROUPS = [
             ("💸 Supplier Payment", "Supplier Payment"),
             ("🧾 Sales Invoicing", "Sales Invoicing"),
             ("🛍️ Purchase Orders", "Purchase Orders"),
-            ("🔁 Sales/Purchase", "Sales/Purchase"),
             ("🧮 Payroll & Salaries", "Payroll & Salaries"),
             ("🧾 Taxation (VAT/NHIL)", "Taxation (VAT/NHIL)"),
-            ("🧾 Taxation", "Taxation"),
         ],
     ),
     (
@@ -1612,7 +1607,6 @@ SIDEBAR_NAV_GROUPS = [
         [
             ("📊 Data Analytics", "Data Analytics"),
             ("🧾 Financial Reports", "Financial Reports"),
-            ("🛡️ Audit Trail", "Audit Trail"),
             ("🧭 System Audit Trail", "System Audit Trail"),
         ],
     ),
@@ -1632,6 +1626,12 @@ def _ensure_valid_page(default_page="Dashboard"):
     legacy_page = st.session_state.get("page")
     active_page = st.session_state.get("active_page")
     current_page = legacy_page if legacy_page and legacy_page != active_page else active_page or legacy_page or default_page
+    legacy_aliases = {
+        "Sales/Purchase": "Sales Invoicing",
+        "Taxation": "Taxation (VAT/NHIL)",
+        "Audit Trail": "System Audit Trail",
+    }
+    current_page = legacy_aliases.get(str(current_page), current_page)
     if current_page not in valid_pages and current_page != 'branch_management':
         label_to_key = {label: key for label, key in PRIMARY_NAV_ITEMS}
         current_page = label_to_key.get(str(current_page), default_page)
