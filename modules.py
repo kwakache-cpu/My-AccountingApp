@@ -9179,12 +9179,24 @@ def show_banking(company_key, role):
     try:
         conn = get_connection()
         feedback_key = f"banking_post_feedback_{company_key}"
+        accounts_ready_key = f"banking_core_accounts_ready_{company_key}"
+        branch_id = st.session_state.get("active_branch_id")
         pending_feedback = st.session_state.pop(feedback_key, None)
-        trial_balance = engine_get_trial_balance(company_key)
+        trial_balance = engine_get_trial_balance(company_key, branch_id=branch_id)
         cash_total = sum(row["balance"] for row in trial_balance if row["account_name"] == "Cash")
         bank_total = sum(row["balance"] for row in trial_balance if row["account_name"] in ("Bank", "Mobile Money"))
         customers = get_customer_balances(company_key, conn=conn)
         suppliers = conn.execute("SELECT id, name FROM suppliers WHERE company_key = ? ORDER BY name", (company_key,)).fetchall()
+
+        def _journal_method_balance(method_name):
+            normalized_method = str(method_name or "").strip()
+            if not normalized_method:
+                return 0.0
+            fresh_trial_balance = engine_get_trial_balance(company_key, branch_id=branch_id)
+            for row in fresh_trial_balance:
+                if str(row.get("account_name") or "").strip() == normalized_method:
+                    return round(float(row.get("balance") or 0.0), 2)
+            return 0.0
 
         col1, col2 = st.columns(2)
         col1.metric(f"Cash Balance ({get_currency_symbol()})", format_currency(cash_total))
@@ -9314,7 +9326,7 @@ def show_banking(company_key, role):
                         action_label="post banking transactions",
                         company_key=company_key,
                         conn=conn,
-                        branch_id=st.session_state.get("active_branch_id"),
+                        branch_id=branch_id,
                     ):
                         conn.close()
                         return
@@ -9328,9 +9340,22 @@ def show_banking(company_key, role):
                         "Cash" if payment_method == "Cash"
                         else ("Bank" if payment_method == "Bank" else "Mobile Money")
                     ) if payment_method else ""
-                    if payment_type in (owner_payment_types | loan_payment_types | transfer_payment_types):
+                    if payment_type in (owner_payment_types | loan_payment_types | transfer_payment_types) and not st.session_state.get(accounts_ready_key):
                         # Reuse the canonical account helpers to avoid duplicate equity or cash/bank accounts.
                         ensure_core_financial_accounts(company_key, conn=conn)
+                        st.session_state[accounts_ready_key] = True
+                    source_methods_requiring_balance = {
+                        "Supplier Payment",
+                        "Owner Drawings / Owner Withdrawal",
+                        "Loan Repayment",
+                        "Transfer Between Cash/Bank/Mobile Money",
+                    }
+                    if payment_type in source_methods_requiring_balance:
+                        available_balance = _journal_method_balance(source_method)
+                        if float(amount or 0.0) > float(available_balance or 0.0):
+                            st.warning("Insufficient Cash/Bank/Mobile Money balance for this transaction.")
+                            conn.rollback()
+                            return
                     payment_cursor = conn.execute(
                         """
                         INSERT INTO payments (company_key, payment_date, payment_type, customer_id, supplier_id, amount, currency, method, reference, status, approval_status, created_by)
@@ -9370,7 +9395,7 @@ def show_banking(company_key, role):
                                 reference=document_reference,
                                 lines=lines,
                                 created_by=role,
-                                branch_id=st.session_state.get("active_branch_id"),
+                                branch_id=branch_id,
                                 customer_id=int(selected_customer["id"]),
                                 payment_id=payment_id,
                                 source_module="Banking",
@@ -9393,7 +9418,7 @@ def show_banking(company_key, role):
                                 reference=document_reference,
                                 lines=lines,
                                 created_by=role,
-                                branch_id=st.session_state.get("active_branch_id"),
+                                branch_id=branch_id,
                                 supplier_id=int(selected_supplier["id"]),
                                 payment_id=payment_id,
                                 source_module="Banking",
@@ -9418,7 +9443,7 @@ def show_banking(company_key, role):
                                 reference=document_reference,
                                 lines=lines,
                                 created_by=role,
-                                branch_id=st.session_state.get("active_branch_id"),
+                                branch_id=branch_id,
                                 payment_id=payment_id,
                                 source_module="Banking",
                                 source_table="payments",
@@ -9442,7 +9467,7 @@ def show_banking(company_key, role):
                                 reference=document_reference,
                                 lines=lines,
                                 created_by=role,
-                                branch_id=st.session_state.get("active_branch_id"),
+                                branch_id=branch_id,
                                 payment_id=payment_id,
                                 source_module="Banking",
                                 source_table="payments",
@@ -9466,7 +9491,7 @@ def show_banking(company_key, role):
                                 reference=document_reference,
                                 lines=lines,
                                 created_by=role,
-                                branch_id=st.session_state.get("active_branch_id"),
+                                branch_id=branch_id,
                                 payment_id=payment_id,
                                 source_module="Banking",
                                 source_table="payments",
@@ -9490,7 +9515,7 @@ def show_banking(company_key, role):
                                 reference=document_reference,
                                 lines=lines,
                                 created_by=role,
-                                branch_id=st.session_state.get("active_branch_id"),
+                                branch_id=branch_id,
                                 payment_id=payment_id,
                                 source_module="Banking",
                                 source_table="payments",
@@ -9514,7 +9539,7 @@ def show_banking(company_key, role):
                                 reference=document_reference,
                                 lines=lines,
                                 created_by=role,
-                                branch_id=st.session_state.get("active_branch_id"),
+                                branch_id=branch_id,
                                 payment_id=payment_id,
                                 source_module="Banking",
                                 source_table="payments",
@@ -9535,7 +9560,7 @@ def show_banking(company_key, role):
                                 f"owner_name={audit_owner_name or 'N/A'}; lender_name={audit_lender_name or 'N/A'}; reference={document_reference}; "
                                 f"description={audit_description or 'N/A'}; user={role}"
                             ),
-                            branch_id=st.session_state.get("active_branch_id"),
+                            branch_id=branch_id,
                             action_type="post",
                             document_ref=document_reference,
                         )
@@ -9585,11 +9610,11 @@ def show_banking(company_key, role):
                             "message": build_user_safe_error(post_error, role),
                         }
                         st.rerun()
-                    st.session_state[feedback_key] = {
-                        "status": "success",
-                        "message": f"{audit_transaction_type} posted successfully. Reference: {document_reference}",
-                    }
-                    st.rerun()
+                        st.session_state[feedback_key] = {
+                            "status": "success",
+                            "message": "Banking transaction posted successfully.",
+                        }
+                        st.rerun()
 
         with st.expander("Bank Reconciliation", expanded=False):
             recon_start = st.date_input("Reconciliation Start", value=datetime.now().date().replace(day=1), key=f"bank_recon_start_{company_key}")
