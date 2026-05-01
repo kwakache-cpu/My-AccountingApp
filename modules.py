@@ -4347,6 +4347,136 @@ def _calculate_payroll_values(basic_salary, allowances, deductions=0.0):
     }
 
 
+def _payroll_payment_account_name(payment_method):
+    normalized_method = str(payment_method or "").strip()
+    if normalized_method == "Bank":
+        return "Bank"
+    if normalized_method == "Mobile Money":
+        return "Mobile Money"
+    return "Cash"
+
+
+def _get_payroll_posted_entry_id(conn, company_key, payroll_id, payroll_reference=None):
+    payroll_row = conn.execute(
+        """
+        SELECT posted_entry_id
+        FROM payroll
+        WHERE id = ? AND company_key = ?
+        LIMIT 1
+        """,
+        (int(payroll_id), company_key),
+    ).fetchone()
+    if not payroll_row:
+        return None
+    if payroll_row["posted_entry_id"] not in (None, "", 0):
+        return int(payroll_row["posted_entry_id"])
+    linked_row = conn.execute(
+        """
+        SELECT id
+        FROM journal_entries
+        WHERE company_key = ?
+          AND lower(COALESCE(source_table, '')) = 'payroll'
+          AND source_id = ?
+          AND COALESCE(is_voided, 0) = 0
+          AND COALESCE(approval_status, 'Posted') = 'Posted'
+        LIMIT 1
+        """,
+        (company_key, int(payroll_id)),
+    ).fetchone()
+    if linked_row:
+        return int(linked_row["id"])
+    if payroll_reference:
+        legacy_row = conn.execute(
+            """
+            SELECT id
+            FROM journal_entries
+            WHERE company_key = ?
+              AND reference = ?
+              AND COALESCE(is_voided, 0) = 0
+              AND COALESCE(approval_status, 'Posted') = 'Posted'
+            LIMIT 1
+            """,
+            (company_key, str(payroll_reference)),
+        ).fetchone()
+        if legacy_row:
+            return int(legacy_row["id"])
+    return None
+
+
+def _build_payroll_journal_lines(
+    conn,
+    company_key,
+    *,
+    gross_salary,
+    paye_amount,
+    ssnit_amount,
+    other_deductions,
+    net_salary,
+    payment_status,
+    payment_method=None,
+):
+    gross_amount = round(float(gross_salary or 0.0), 2)
+    paye_credit = round(float(paye_amount or 0.0), 2)
+    ssnit_credit = round(float(ssnit_amount or 0.0), 2)
+    other_credit = round(float(other_deductions or 0.0), 2)
+    net_credit = round(float(net_salary or 0.0), 2)
+    if gross_amount <= 0:
+        raise ValueError("Gross salary must be greater than 0.")
+    if any(value < 0 for value in (paye_credit, ssnit_credit, other_credit, net_credit)):
+        raise ValueError("Payroll components cannot be negative.")
+    credited_total = round(paye_credit + ssnit_credit + other_credit + net_credit, 2)
+    if abs(gross_amount - credited_total) > 0.01:
+        raise ValueError("Payroll journal is not balanced.")
+
+    ensure_core_financial_accounts(company_key, conn=conn)
+    lines = [
+        {
+            "account_id": get_or_create_account(company_key, "Salary Expense", "Expense", conn=conn),
+            "debit": gross_amount,
+            "credit": 0,
+        }
+    ]
+    if paye_credit > 0:
+        lines.append(
+            {
+                "account_id": get_or_create_account(company_key, "PAYE Payable", "Liability", conn=conn),
+                "debit": 0,
+                "credit": paye_credit,
+            }
+        )
+    if ssnit_credit > 0:
+        lines.append(
+            {
+                "account_id": get_or_create_account(company_key, "SSNIT Payable", "Liability", conn=conn),
+                "debit": 0,
+                "credit": ssnit_credit,
+            }
+        )
+    if other_credit > 0:
+        lines.append(
+            {
+                "account_id": get_or_create_account(company_key, "Other Payroll Deductions Payable", "Liability", conn=conn),
+                "debit": 0,
+                "credit": other_credit,
+            }
+        )
+    settlement_account_name = (
+        _payroll_payment_account_name(payment_method)
+        if str(payment_status or "").strip() == "Paid"
+        else "Payroll Payable"
+    )
+    settlement_account_type = "Asset" if str(payment_status or "").strip() == "Paid" else "Liability"
+    if net_credit > 0:
+        lines.append(
+            {
+                "account_id": get_or_create_account(company_key, settlement_account_name, settlement_account_type, conn=conn),
+                "debit": 0,
+                "credit": net_credit,
+            }
+        )
+    return lines
+
+
 def _import_inventory_from_excel(conn, company_key, file_obj):
     imported_df = pd.read_excel(file_obj)
     if imported_df.empty:
@@ -10740,24 +10870,39 @@ def show_payroll(company_key, role):
                 emp_name = st.text_input("Employee Name")
                 basic_salary = st.number_input(f"Basic Salary ({st.session_state.currency_symbol})", min_value=0.0, step=0.01)
                 allowances = st.number_input(f"Allowances ({st.session_state.currency_symbol})", min_value=0.0, step=0.01)
-                deductions = st.number_input(f"Deductions ({st.session_state.currency_symbol})", min_value=0.0, step=0.01)
+                deductions = st.number_input(f"Other Deductions ({st.session_state.currency_symbol})", min_value=0.0, step=0.01)
+                paye_override = st.number_input(f"PAYE Override ({st.session_state.currency_symbol})", min_value=0.0, step=0.01)
+                ssnit_override = st.number_input(f"SSNIT Employee Override ({st.session_state.currency_symbol})", min_value=0.0, step=0.01)
             with col2:
                 month = st.selectbox("Month", ["January","February","March","April","May","June",
                                                "July","August","September","October","November","December"])
                 year = st.selectbox("Year", [str(y) for y in range(2023, 2030)],
                                     index=[str(y) for y in range(2023, 2030)].index(str(datetime.now().year)))
                 payment_status = st.selectbox("Payment Status", ["Paid", "Unpaid"])
+                payment_method = st.selectbox("Payment Method", ["Cash", "Bank", "Mobile Money"], disabled=payment_status != "Paid")
 
             submitted = st.form_submit_button("Calculate & Save")
             if submitted and emp_name and basic_salary > 0:
                 payroll_values = _calculate_payroll_values(basic_salary, allowances, deductions)
+                if paye_override > 0:
+                    payroll_values["paye"] = float(paye_override)
+                if ssnit_override > 0:
+                    payroll_values["ssnit_t1"] = float(ssnit_override)
+                gross_salary = round(float(basic_salary or 0.0) + float(allowances or 0.0), 2)
+                total_ssnit = round(float(payroll_values["ssnit_t1"] or 0.0) + float(payroll_values["ssnit_t2"] or 0.0), 2)
+                other_deductions = round(float(deductions or 0.0), 2)
+                payroll_values["net_salary"] = round(gross_salary - float(payroll_values["paye"] or 0.0) - total_ssnit - other_deductions, 2)
+                if payroll_values["net_salary"] < 0:
+                    st.warning("Payroll net salary cannot be negative.")
+                    return
                 try:
                     conn = get_connection()
-                    conn.execute(
+                    payroll_cursor = conn.execute(
                         """INSERT INTO payroll
                            (company_key, emp_name, basic_salary, allowances, ssnit_t1, ssnit_t2,
-                            taxable_income, paye, net_salary, deductions, month, year, payment_status, status)
-                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Active')""",
+                            taxable_income, paye, net_salary, deductions, month, year, payment_status, payment_method,
+                            approval_status, created_by, status)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Posted', ?, 'Active')""",
                         (
                             company_key,
                             emp_name,
@@ -10772,8 +10917,11 @@ def show_payroll(company_key, role):
                             month,
                             year,
                             payment_status,
+                            payment_method if payment_status == "Paid" else None,
+                            role,
                         ),
                     )
+                    payroll_id = int(payroll_cursor.lastrowid)
                     conn.execute(
                         """
                         INSERT INTO payroll_records
@@ -10785,31 +10933,49 @@ def show_payroll(company_key, role):
                             f"{year}-{str(['January','February','March','April','May','June','July','August','September','October','November','December'].index(month)+1).zfill(2)}-01",
                             f"{year}-{str(['January','February','March','April','May','June','July','August','September','October','November','December'].index(month)+1).zfill(2)}-28",
                             emp_name,
-                            basic_salary + allowances,
+                            gross_salary,
                             deductions,
                             payroll_values["net_salary"],
                             payment_status,
                         ),
                     )
-                    salary_credit_account = "Cash" if payment_status == "Paid" else "Payroll Payable"
-                    salary_credit_type = "Asset" if salary_credit_account == "Cash" else "Liability"
+                    payroll_reference = f"PAY-{emp_name}-{month}-{year}"
+                    payroll_lines = _build_payroll_journal_lines(
+                        conn,
+                        company_key,
+                        gross_salary=gross_salary,
+                        paye_amount=payroll_values["paye"],
+                        ssnit_amount=total_ssnit,
+                        other_deductions=other_deductions,
+                        net_salary=payroll_values["net_salary"],
+                        payment_status=payment_status,
+                        payment_method=payment_method,
+                    )
                     post_journal_entry(
                         company_key=company_key,
                         date=datetime(int(year), ['January','February','March','April','May','June','July','August','September','October','November','December'].index(month)+1, 1).date(),
                         description="Payroll accrual",
-                        reference=f"PAY-{emp_name}-{month}-{year}",
-                        lines=[
-                            {"account_id": get_account_id(conn, "Salary Expense", "Expense"), "debit": payroll_values["net_salary"], "credit": 0},
-                            {"account_id": get_account_id(conn, salary_credit_account, salary_credit_type), "debit": 0, "credit": payroll_values["net_salary"]},
-                        ],
+                        reference=payroll_reference,
+                        lines=payroll_lines,
                         created_by=role,
                         branch_id=st.session_state.get("active_branch_id"),
                         source_module="Payroll",
                         source_table="payroll",
+                        source_type="Payroll",
+                        source_id=payroll_id,
+                        approval_status="Posted",
+                        user_role=role,
                         conn=conn,
                     )
                     conn.commit()
-                    log_audit_action(conn, company_key, role, "Payroll Entry Added", "Payroll", f"{emp_name} - {month} {year}")
+                    log_audit_action(
+                        conn,
+                        company_key,
+                        role,
+                        "Payroll Entry Added",
+                        "Payroll",
+                        f"{emp_name} - {month} {year} - gross={gross_salary:.2f} paye={float(payroll_values['paye'] or 0.0):.2f} ssnit={total_ssnit:.2f} net={float(payroll_values['net_salary'] or 0.0):.2f}",
+                    )
                     conn.close()
                     st.success("Entry Updated")
                     st.rerun()
@@ -10822,13 +10988,22 @@ def show_payroll(company_key, role):
         conn = get_connection()
         data = conn.execute(
             """SELECT id, emp_name, basic_salary, allowances, deductions, ssnit_t1, paye, net_salary, month, year,
-                      payment_status, COALESCE(status, 'Active')
+                      payment_status, payment_method, COALESCE(status, 'Active'), posted_entry_id
                FROM payroll WHERE company_key = ? ORDER BY year DESC, month DESC""",
             (company_key,),
         ).fetchall()
         if data:
             df = pd.DataFrame(data, columns=["ID", "Employee", "Basic Salary", "Allowances", "Deductions",
-                                              "SSNIT T1", "PAYE", "Net Salary", "Month", "Year", "Payment Status", "Status"])
+                                              "SSNIT T1", "PAYE", "Net Salary", "Month", "Year", "Payment Status", "Payment Method", "Status", "Posted Entry ID"])
+            payroll_posted_entry_map = {
+                int(row["ID"]): _get_payroll_posted_entry_id(
+                    conn,
+                    company_key,
+                    int(row["ID"]),
+                    payroll_reference=f"PAY-{row['Employee']}-{row['Month']}-{row['Year']}",
+                )
+                for _, row in df.iterrows()
+            }
             st.dataframe(format_currency_dataframe(df), use_container_width=True)
             if role == "Master Admin":
                 selected_payroll_key = f"payroll_edit_selected_{company_key}"
@@ -10836,43 +11011,94 @@ def show_payroll(company_key, role):
                 for _, payroll_list_row in df.iterrows():
                     info_cols = st.columns([3, 1, 1, 1])
                     name_col, edit_col, void_col, print_col = info_cols
+                    has_posted_payroll = payroll_posted_entry_map.get(int(payroll_list_row["ID"])) is not None
                     name_col.caption(
                         f"{payroll_list_row['Employee']} | Salary GH₵ {float(payroll_list_row['Basic Salary']):,.2f} | "
-                        f"Net GH₵ {float(payroll_list_row['Net Salary']):,.2f} | {payroll_list_row['Status']}"
+                        f"Net GH₵ {float(payroll_list_row['Net Salary']):,.2f} | {payroll_list_row['Status']} | "
+                        f"Method {payroll_list_row['Payment Method'] or 'N/A'}"
                     )
                     if edit_col.button("Edit", key=f"payroll_edit_btn_{company_key}_{int(payroll_list_row['ID'])}"):
                         st.session_state[selected_payroll_key] = int(payroll_list_row["ID"])
-                    if payroll_list_row["Status"] != "Void" and void_col.button("Void", key=f"payroll_void_btn_{company_key}_{int(payroll_list_row['ID'])}"):
+                    if payroll_list_row["Status"] not in {"Void", "Reversed"} and void_col.button("Void / Reverse", key=f"payroll_void_btn_{company_key}_{int(payroll_list_row['ID'])}"):
                         st.session_state[void_payroll_key] = int(payroll_list_row["ID"])
                     if print_col.button("Print", key=f"payroll_print_btn_{company_key}_{int(payroll_list_row['ID'])}"):
                         st.session_state[payroll_print_preview_key] = _build_payslip_html(payroll_list_row)
                         st.session_state[f"payroll_print_record_id_{company_key}"] = int(payroll_list_row['ID'])
                         st.rerun()
+                    if has_posted_payroll:
+                        st.caption("Posted payroll cannot be financially edited directly. Use reversal/void workflow.")
                 void_payroll_id = st.session_state.get(void_payroll_key)
                 if void_payroll_id is not None:
-                    st.warning("Are you sure you want to void this payroll entry?")
+                    st.warning("Posted payroll entries cannot be edited directly. Use reversal/void workflow for corrections.")
+                    reversal_reason = st.text_input("Reversal / Void Reason", key=f"payroll_void_reason_{company_key}_{void_payroll_id}")
                     confirm_col, cancel_col = st.columns(2)
-                    if confirm_col.button("Confirm Void", key=f"payroll_void_confirm_btn_{company_key}_{void_payroll_id}"):
-                        conn.execute(
-                            "UPDATE payroll SET status = 'Void' WHERE id = ? AND company_key = ?",
-                            (int(void_payroll_id), company_key),
-                        )
-                        conn.commit()
-                        log_audit_action(conn, company_key, role, "Payroll Voided", "Payroll", f"Voided payroll ID {int(void_payroll_id)}")
-                        _clear_streamlit_state(void_payroll_key, selected_payroll_key)
-                        st.success("Entry Updated")
-                        st.rerun()
+                    if confirm_col.button("Confirm Void / Reverse", key=f"payroll_void_confirm_btn_{company_key}_{void_payroll_id}"):
+                        if not reversal_reason.strip():
+                            st.warning("Enter a reversal reason before voiding payroll.")
+                        else:
+                            payroll_row = df.loc[df["ID"] == int(void_payroll_id)].iloc[0]
+                            posted_entry_id = payroll_posted_entry_map.get(int(void_payroll_id))
+                            if posted_entry_id is not None:
+                                reverse_journal_entry(
+                                    int(posted_entry_id),
+                                    created_by=role,
+                                    reversal_date=datetime.now().date(),
+                                    reason=reversal_reason.strip(),
+                                    branch_id=st.session_state.get("active_branch_id"),
+                                    conn=conn,
+                                )
+                                conn.execute(
+                                    "UPDATE payroll SET status = 'Reversed' WHERE id = ? AND company_key = ?",
+                                    (int(void_payroll_id), company_key),
+                                )
+                                log_audit_action(
+                                    conn,
+                                    company_key,
+                                    role,
+                                    "Payroll Reversed",
+                                    "Payroll",
+                                    f"Reversed payroll ID {int(void_payroll_id)} reason={reversal_reason.strip()}",
+                                )
+                            else:
+                                conn.execute(
+                                    "UPDATE payroll SET status = 'Void' WHERE id = ? AND company_key = ?",
+                                    (int(void_payroll_id), company_key),
+                                )
+                                log_audit_action(
+                                    conn,
+                                    company_key,
+                                    role,
+                                    "Payroll Voided",
+                                    "Payroll",
+                                    f"Voided payroll ID {int(void_payroll_id)} reason={reversal_reason.strip()}",
+                                )
+                            conn.commit()
+                            _clear_streamlit_state(void_payroll_key, selected_payroll_key, f"payroll_void_reason_{company_key}_{void_payroll_id}")
+                            st.success("Entry Updated")
+                            st.rerun()
                     if cancel_col.button("Cancel", key=f"payroll_void_cancel_btn_{company_key}_{void_payroll_id}"):
-                        _clear_streamlit_state(void_payroll_key)
+                        _clear_streamlit_state(void_payroll_key, f"payroll_void_reason_{company_key}_{void_payroll_id}")
                         st.rerun()
                 payroll_record_id = st.session_state.get(selected_payroll_key, int(df["ID"].iloc[0]))
                 edit_row = df.loc[df["ID"] == payroll_record_id].iloc[0]
+                payroll_is_posted = payroll_posted_entry_map.get(int(payroll_record_id)) is not None
                 with st.form(f"payroll_edit_form_{company_key}_{payroll_record_id}", clear_on_submit=True):
-                    edit_salary = st.number_input("Salary", min_value=0.0, value=float(edit_row["Basic Salary"] or 0.0))
-                    edit_bonus = st.number_input("Bonus", min_value=0.0, value=float(edit_row["Allowances"] or 0.0))
-                    edit_deductions = st.number_input("Deductions", min_value=0.0, value=float(edit_row["Deductions"] or 0.0))
-                    edit_status = st.selectbox("Payment Status", ["Paid", "Unpaid"], index=0 if edit_row["Payment Status"] == "Paid" else 1)
+                    if payroll_is_posted:
+                        st.warning("Posted payroll records cannot be financially edited directly. Use reversal/void workflow.")
+                    edit_salary = st.number_input("Salary", min_value=0.0, value=float(edit_row["Basic Salary"] or 0.0), disabled=payroll_is_posted)
+                    edit_bonus = st.number_input("Bonus", min_value=0.0, value=float(edit_row["Allowances"] or 0.0), disabled=payroll_is_posted)
+                    edit_deductions = st.number_input("Other Deductions", min_value=0.0, value=float(edit_row["Deductions"] or 0.0), disabled=payroll_is_posted)
+                    edit_status = st.selectbox("Payment Status", ["Paid", "Unpaid"], index=0 if edit_row["Payment Status"] == "Paid" else 1, disabled=payroll_is_posted)
+                    edit_payment_method = st.selectbox(
+                        "Payment Method",
+                        ["Cash", "Bank", "Mobile Money"],
+                        index=["Cash", "Bank", "Mobile Money"].index(edit_row["Payment Method"]) if edit_row["Payment Method"] in ["Cash", "Bank", "Mobile Money"] else 0,
+                        disabled=payroll_is_posted or edit_status != "Paid",
+                    )
                     if st.form_submit_button("Update Payroll"):
+                        if payroll_is_posted:
+                            st.warning("Posted payroll records cannot be financially edited directly. Use reversal/void workflow.")
+                            return
                         updated_values = _calculate_payroll_values(edit_salary, edit_bonus, edit_deductions)
                         details = (
                             f"{edit_row['Employee']} salary {float(edit_row['Basic Salary']):,.2f}->{edit_salary:,.2f}; "
@@ -10883,7 +11109,7 @@ def show_payroll(company_key, role):
                             """
                             UPDATE payroll
                             SET basic_salary = ?, allowances = ?, ssnit_t1 = ?, ssnit_t2 = ?,
-                                taxable_income = ?, paye = ?, net_salary = ?, deductions = ?, payment_status = ?
+                                taxable_income = ?, paye = ?, net_salary = ?, deductions = ?, payment_status = ?, payment_method = ?
                             WHERE id = ? AND company_key = ?
                             """,
                             (
@@ -10896,6 +11122,7 @@ def show_payroll(company_key, role):
                                 updated_values["net_salary"],
                                 edit_deductions,
                                 edit_status,
+                                edit_payment_method if edit_status == "Paid" else None,
                                 int(payroll_record_id),
                                 company_key,
                             ),
