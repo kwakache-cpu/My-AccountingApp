@@ -68,6 +68,9 @@ SUBSCRIPTION_PLANS = {
 ALL_ENTERPRISE_PERMISSIONS = {
     "view_dashboard",
     "view_banking",
+    "manage_owner_equity_transactions",
+    "manage_loan_transactions",
+    "manage_cash_bank_transfers",
     "manage_company",
     "manage_branches",
     "manage_users",
@@ -121,6 +124,9 @@ ENTERPRISE_ROLE_PERMISSIONS = {
     "Master Admin": {
         "view_dashboard",
         "view_banking",
+        "manage_owner_equity_transactions",
+        "manage_loan_transactions",
+        "manage_cash_bank_transfers",
         "manage_company",
         "manage_branches",
         "manage_users",
@@ -153,6 +159,9 @@ ENTERPRISE_ROLE_PERMISSIONS = {
     "Sub-Admin": {
         "view_dashboard",
         "view_banking",
+        "manage_owner_equity_transactions",
+        "manage_loan_transactions",
+        "manage_cash_bank_transfers",
         "manage_company",
         "manage_branches",
         "manage_users",
@@ -270,6 +279,7 @@ from accounting_engine import (
     get_trial_balance as engine_get_trial_balance,
     is_legacy_mirroring_enabled,
     post_accounting_impact as post_journal_entry,
+    reverse_journal_entry,
 )
 
 
@@ -9219,6 +9229,13 @@ def show_banking(company_key, role):
             transfer_payment_types = {
                 "Transfer Between Cash/Bank/Mobile Money",
             }
+            sensitive_permission_map = {
+                "Owner Capital / Owner Investment": "manage_owner_equity_transactions",
+                "Owner Drawings / Owner Withdrawal": "manage_owner_equity_transactions",
+                "Loan Received": "manage_loan_transactions",
+                "Loan Repayment": "manage_loan_transactions",
+                "Transfer Between Cash/Bank/Mobile Money": "manage_cash_bank_transfers",
+            }
             payment_type_key = f"banking_payment_type_{company_key}"
             customer_widget_key = f"banking_customer_{company_key}"
             supplier_widget_key = f"banking_supplier_{company_key}"
@@ -9334,6 +9351,17 @@ def show_banking(company_key, role):
                     normalized_description = str(description or "").strip()
                     normalized_owner_name = str(owner_name or "").strip()
                     normalized_lender_name = str(lender_name or "").strip()
+                    sensitive_permission = sensitive_permission_map.get(payment_type)
+                    if sensitive_permission and not require_permission(
+                        role,
+                        sensitive_permission,
+                        action_label=f"post {payment_type.lower()} transactions",
+                        company_key=company_key,
+                        conn=conn,
+                        branch_id=branch_id,
+                    ):
+                        conn.close()
+                        return
                     source_method = transfer_from_account if payment_type in transfer_payment_types else payment_method
                     destination_method = transfer_to_account if payment_type in transfer_payment_types else payment_method
                     cash_account = (
@@ -9381,6 +9409,7 @@ def show_banking(company_key, role):
                     audit_lender_name = normalized_lender_name
                     audit_source_method = source_method or "N/A"
                     audit_destination_method = destination_method or "N/A"
+                    posted_entry_id = None
                     try:
                         if payment_type == "Customer Receipt":
                             selected_customer = customers[[f"{row['name']} ({row['customer_id']})" for row in customers].index(selected_party)]
@@ -9388,7 +9417,7 @@ def show_banking(company_key, role):
                                 {"account_id": get_account_id(conn, cash_account, "Asset"), "debit": amount, "credit": 0},
                                 {"account_id": get_account_id(conn, "Accounts Receivable", "Asset"), "debit": 0, "credit": amount},
                             ]
-                            post_journal_entry(
+                            posted_entry_id = post_journal_entry(
                                 company_key=company_key,
                                 date=payment_date,
                                 description=f"Customer receipt - {selected_customer['name']}",
@@ -9411,7 +9440,7 @@ def show_banking(company_key, role):
                                 {"account_id": get_account_id(conn, "Accounts Payable", "Liability"), "debit": amount, "credit": 0},
                                 {"account_id": get_account_id(conn, cash_account, "Asset"), "debit": 0, "credit": amount},
                             ]
-                            post_journal_entry(
+                            posted_entry_id = post_journal_entry(
                                 company_key=company_key,
                                 date=payment_date,
                                 description=f"Supplier payment - {selected_supplier['name']}",
@@ -9436,7 +9465,7 @@ def show_banking(company_key, role):
                                 {"account_id": destination_account_id, "debit": amount, "credit": 0},
                                 {"account_id": loan_payable_account_id, "debit": 0, "credit": amount},
                             ]
-                            post_journal_entry(
+                            posted_entry_id = post_journal_entry(
                                 company_key=company_key,
                                 date=payment_date,
                                 description=normalized_description or f"Loan received - {normalized_lender_name or 'Lender'}",
@@ -9460,7 +9489,7 @@ def show_banking(company_key, role):
                                 {"account_id": loan_payable_account_id, "debit": amount, "credit": 0},
                                 {"account_id": source_account_id, "debit": 0, "credit": amount},
                             ]
-                            post_journal_entry(
+                            posted_entry_id = post_journal_entry(
                                 company_key=company_key,
                                 date=payment_date,
                                 description=normalized_description or f"Loan repayment - {normalized_lender_name or 'Lender'}",
@@ -9484,7 +9513,7 @@ def show_banking(company_key, role):
                                 {"account_id": destination_account_id, "debit": amount, "credit": 0},
                                 {"account_id": source_account_id, "debit": 0, "credit": amount},
                             ]
-                            post_journal_entry(
+                            posted_entry_id = post_journal_entry(
                                 company_key=company_key,
                                 date=payment_date,
                                 description=normalized_description or f"Transfer {source_method} to {destination_method}",
@@ -9508,7 +9537,7 @@ def show_banking(company_key, role):
                                 {"account_id": cash_account_id, "debit": amount, "credit": 0},
                                 {"account_id": owner_capital_account_id, "debit": 0, "credit": amount},
                             ]
-                            post_journal_entry(
+                            posted_entry_id = post_journal_entry(
                                 company_key=company_key,
                                 date=payment_date,
                                 description=normalized_description or f"Owner capital - {normalized_owner_name or 'Owner'}",
@@ -9532,7 +9561,7 @@ def show_banking(company_key, role):
                                 {"account_id": owner_drawings_account_id, "debit": amount, "credit": 0},
                                 {"account_id": cash_account_id, "debit": 0, "credit": amount},
                             ]
-                            post_journal_entry(
+                            posted_entry_id = post_journal_entry(
                                 company_key=company_key,
                                 date=payment_date,
                                 description=normalized_description or f"Owner drawings - {normalized_owner_name or 'Owner'}",
@@ -9612,9 +9641,110 @@ def show_banking(company_key, role):
                         st.rerun()
                         st.session_state[feedback_key] = {
                             "status": "success",
-                            "message": "Banking transaction posted successfully.",
+                            "message": (
+                                "Banking transaction posted successfully.\n\n"
+                                f"Transaction Type: {audit_transaction_type}\n"
+                                f"Amount: {format_currency(amount)}\n"
+                                f"Source Method: {audit_source_method}\n"
+                                f"Destination Method: {audit_destination_method}\n"
+                                f"Reference: {document_reference}\n"
+                                f"Journal Entry ID: {posted_entry_id or 'N/A'}"
+                            ),
                         }
                         st.rerun()
+
+        st.markdown("---")
+        st.subheader("Banking Journal Control")
+        st.warning("Posted journal entries cannot be edited directly. Use reversal or void workflows to correct accounting records.")
+        if require_permission(
+            role,
+            "void_or_reverse_document",
+            action_label="reverse banking journals",
+            company_key=company_key,
+            conn=conn,
+            branch_id=branch_id,
+        ):
+            banking_entries = conn.execute(
+                """
+                SELECT id, date, description, reference, created_by, approval_status
+                FROM journal_entries
+                WHERE company_key = ?
+                  AND lower(COALESCE(source_module, '')) = 'banking'
+                  AND COALESCE(is_voided, 0) = 0
+                  AND COALESCE(reversed_entry_id, 0) = 0
+                  AND COALESCE(approval_status, 'Posted') = 'Posted'
+                  {branch_filter}
+                ORDER BY date(date) DESC, id DESC
+                LIMIT 100
+                """.format(branch_filter="AND branch_id = ?" if branch_id else ""),
+                (company_key, branch_id) if branch_id else (company_key,),
+            ).fetchall()
+            if banking_entries:
+                entry_options = [
+                    (
+                        int(row["id"]),
+                        f"#{int(row['id'])} | {row['date']} | {str(row['reference'] or 'NO-REF')} | {str(row['description'] or '').strip()}",
+                    )
+                    for row in banking_entries
+                ]
+                selected_entry_id = st.selectbox(
+                    "Select Posted Banking Journal",
+                    options=[item[0] for item in entry_options],
+                    format_func=lambda value: next((label for item_id, label in entry_options if item_id == value), str(value)),
+                    key=f"banking_reversal_entry_{company_key}",
+                )
+                reversal_reason = st.text_input("Reversal Reason", key=f"banking_reversal_reason_{company_key}")
+                reversal_confirmed = st.checkbox(
+                    "I confirm this banking correction must be posted as a reversal entry.",
+                    key=f"banking_reversal_confirm_{company_key}",
+                )
+                if st.button("Reverse Selected Banking Journal", key=f"banking_reversal_btn_{company_key}", use_container_width=True):
+                    if not reversal_reason.strip():
+                        st.warning("Enter a reversal reason before posting the correction.")
+                    elif not reversal_confirmed:
+                        st.warning("Confirm the reversal before proceeding.")
+                    else:
+                        reversal_conn = None
+                        try:
+                            reversal_conn = get_connection()
+                            reversal_entry_id = reverse_journal_entry(
+                                selected_entry_id,
+                                created_by=role,
+                                reversal_date=datetime.now().date(),
+                                reason=reversal_reason.strip(),
+                                branch_id=branch_id,
+                                conn=reversal_conn,
+                            )
+                            log_audit_action(
+                                reversal_conn,
+                                company_key,
+                                role,
+                                "Banking Journal Reversed",
+                                "Banking",
+                                details=f"original_entry_id={selected_entry_id}; reversal_entry_id={reversal_entry_id}; reason={reversal_reason.strip()}",
+                                branch_id=branch_id,
+                                action_type="post",
+                                document_ref=str(selected_entry_id),
+                            )
+                            log_system_event(
+                                "INFO",
+                                "Banking",
+                                f"Reversed banking journal original_entry_id={selected_entry_id} reversal_entry_id={reversal_entry_id} user={role}",
+                            )
+                            reversal_conn.commit()
+                            st.success(f"Banking journal reversed successfully. Reversal entry ID: {reversal_entry_id}")
+                            st.rerun()
+                        except Exception as reversal_error:
+                            if reversal_conn:
+                                reversal_conn.rollback()
+                            st.error(build_user_safe_error(reversal_error, role))
+                        finally:
+                            if reversal_conn:
+                                reversal_conn.close()
+            else:
+                st.info("No posted banking journal entries are currently available for reversal.")
+        else:
+            st.caption("Reversal controls are restricted to authorized administrators.")
 
         with st.expander("Bank Reconciliation", expanded=False):
             recon_start = st.date_input("Reconciliation Start", value=datetime.now().date().replace(day=1), key=f"bank_recon_start_{company_key}")
@@ -11246,25 +11376,70 @@ def show_audit_trail(company_key, role="User", branch_id=None):
         return
     try:
         conn = get_connection()
+        audit_columns = {row[1] for row in conn.execute("PRAGMA table_info(audit_logs)").fetchall()}
+        action_type_expr = "COALESCE(NULLIF(action_type, ''), 'legacy')" if "action_type" in audit_columns else "'legacy'"
+        document_ref_expr = "COALESCE(document_ref, '')" if "document_ref" in audit_columns else "''"
         if company_key == "ADMIN" or company_key == "DEMO":
-            query = "SELECT timestamp, company_key, branch_id, user_role, action, module_name, details FROM audit_logs ORDER BY timestamp DESC LIMIT 100"
+            query = f"""
+                SELECT timestamp, company_key, branch_id, user_role, action, module_name,
+                       {action_type_expr} AS action_type,
+                       {document_ref_expr} AS document_ref,
+                       details
+                FROM audit_logs
+                ORDER BY timestamp DESC
+                LIMIT 100
+            """
             params = ()
         elif role == "Master Admin":
             if branch_id:
-                query = "SELECT timestamp, company_key, branch_id, user_role, action, module_name, details FROM audit_logs WHERE company_key = ? AND branch_id = ? ORDER BY timestamp DESC LIMIT 100"
+                query = f"""
+                    SELECT timestamp, company_key, branch_id, user_role, action, module_name,
+                           {action_type_expr} AS action_type,
+                           {document_ref_expr} AS document_ref,
+                           details
+                    FROM audit_logs
+                    WHERE company_key = ? AND branch_id = ?
+                    ORDER BY timestamp DESC
+                    LIMIT 100
+                """
                 params = (company_key, branch_id)
             else:
-                query = "SELECT timestamp, company_key, branch_id, user_role, action, module_name, details FROM audit_logs WHERE company_key = ? ORDER BY timestamp DESC LIMIT 100"
+                query = f"""
+                    SELECT timestamp, company_key, branch_id, user_role, action, module_name,
+                           {action_type_expr} AS action_type,
+                           {document_ref_expr} AS document_ref,
+                           details
+                    FROM audit_logs
+                    WHERE company_key = ?
+                    ORDER BY timestamp DESC
+                    LIMIT 100
+                """
                 params = (company_key,)
         else:
-            query = "SELECT timestamp, company_key, branch_id, user_role, action, module_name, details FROM audit_logs WHERE company_key = ? ORDER BY timestamp DESC LIMIT 100"
+            query = f"""
+                SELECT timestamp, company_key, branch_id, user_role, action, module_name,
+                       {action_type_expr} AS action_type,
+                       {document_ref_expr} AS document_ref,
+                       details
+                FROM audit_logs
+                WHERE company_key = ?
+                ORDER BY timestamp DESC
+                LIMIT 100
+            """
             params = (company_key,)
 
         data = conn.execute(query, params).fetchall()
         conn.close()
 
         if data:
-            df = pd.DataFrame(data, columns=["Timestamp", "Company", "Branch", "Role", "Action", "Module", "Details"])
+            df = pd.DataFrame(
+                data,
+                columns=["Timestamp", "Company", "Branch", "User", "Action", "Module", "Action Type", "Reference", "Details"],
+            )
+            if "Details" in df.columns:
+                extracted_amount = df["Details"].astype(str).str.extract(r"amount=([0-9]+(?:\.[0-9]+)?)", expand=False)
+                df["Amount"] = pd.to_numeric(extracted_amount, errors="coerce")
+                df["Source"] = df["Module"]
             st.dataframe(format_currency_dataframe(df), use_container_width=True)
             excel_bin = get_excel_bin(df)
             if excel_bin:
