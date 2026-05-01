@@ -9218,6 +9218,13 @@ def show_banking(company_key, role):
                 st.error(str(pending_feedback.get("message") or "Banking transaction failed."))
 
         with st.expander("Record Payment", expanded=True):
+            enhanced_term_labels = {
+                "Owner Capital": "Owner Capital (Equity Contribution)",
+                "Owner Drawings": "Owner Drawings (Owner Withdrawals)",
+                "Loan Payable": "Loan Payable (Outstanding Loans)",
+                "Accounts Receivable": "Accounts Receivable (Customer Balances)",
+                "Accounts Payable": "Accounts Payable (Supplier Balances)",
+            }
             owner_payment_types = {
                 "Owner Capital / Owner Investment",
                 "Owner Drawings / Owner Withdrawal",
@@ -9235,6 +9242,24 @@ def show_banking(company_key, role):
                 "Loan Received": "manage_loan_transactions",
                 "Loan Repayment": "manage_loan_transactions",
                 "Transfer Between Cash/Bank/Mobile Money": "manage_cash_bank_transfers",
+            }
+            payment_type_descriptions = {
+                "Customer Receipt": "Record payments received from customers",
+                "Supplier Payment": "Record payments made to suppliers",
+                "Owner Capital / Owner Investment": "Record funds introduced by the owner into the business",
+                "Owner Drawings / Owner Withdrawal": "Record funds withdrawn by the owner for personal use",
+                "Loan Received": "Record borrowed funds received by the business",
+                "Loan Repayment": "Record repayment of borrowed funds",
+                "Transfer Between Cash/Bank/Mobile Money": "Move funds between Cash, Bank, or Mobile Money accounts",
+            }
+            payment_type_labels = {
+                "Customer Receipt": "Customer Receipt",
+                "Supplier Payment": "Supplier Payment",
+                "Owner Capital / Owner Investment": "Owner Capital (Equity Contribution)",
+                "Owner Drawings / Owner Withdrawal": "Owner Drawings (Owner Withdrawals)",
+                "Loan Received": "Loan Received",
+                "Loan Repayment": "Loan Repayment",
+                "Transfer Between Cash/Bank/Mobile Money": "Transfer Between Cash/Bank/Mobile Money",
             }
             payment_type_key = f"banking_payment_type_{company_key}"
             customer_widget_key = f"banking_customer_{company_key}"
@@ -9255,8 +9280,10 @@ def show_banking(company_key, role):
                     "Loan Repayment",
                     "Transfer Between Cash/Bank/Mobile Money",
                 ],
+                format_func=lambda value: payment_type_labels.get(value, value),
                 key=payment_type_key,
             )
+            st.caption(payment_type_descriptions.get(payment_type, ""))
             if payment_type != "Customer Receipt":
                 st.session_state.pop(customer_widget_key, None)
             if payment_type != "Supplier Payment":
@@ -9276,16 +9303,24 @@ def show_banking(company_key, role):
                 transfer_to_account = ""
                 if payment_type in transfer_payment_types:
                     transfer_from_account = st.selectbox("From Account", money_methods, key=transfer_from_widget_key)
+                    st.caption("Select the source account to reduce.")
                     transfer_to_account = st.selectbox("To Account", money_methods, key=transfer_to_widget_key)
+                    st.caption("Select the destination account to increase.")
                 elif payment_type == "Loan Received":
                     payment_method = st.selectbox("Destination Method", money_methods)
+                    st.caption("Choose where the borrowed funds will be received.")
                 elif payment_type == "Loan Repayment":
                     payment_method = st.selectbox("Source Method", money_methods)
+                    st.caption("Choose which account will be used to repay the loan.")
                 else:
                     payment_method = st.selectbox("Method", money_methods)
+                    st.caption("Choose the cash-equivalent account affected by this transaction.")
                 amount = st.number_input("Amount (GHS)", min_value=0.0, step=0.01)
+                st.caption("Enter the transaction amount to be posted.")
                 payment_date = st.date_input("Payment Date", value=datetime.now().date(), key=f"banking_payment_date_{company_key}")
+                st.caption("This date determines the accounting period for the journal entry.")
                 reference = st.text_input("Reference")
+                st.caption("Optional external reference such as cheque number, transfer ID, or memo.")
                 description = ""
                 owner_name = ""
                 lender_name = ""
@@ -9297,6 +9332,7 @@ def show_banking(company_key, role):
                         customer_labels if customer_labels else [""],
                         key=customer_widget_key,
                     )
+                    st.caption(f"This posts against {enhanced_term_labels['Accounts Receivable']}.")
                 elif payment_type == "Supplier Payment":
                     supplier_labels = [f"{row['name']}" for row in suppliers]
                     selected_party = st.selectbox(
@@ -9304,13 +9340,21 @@ def show_banking(company_key, role):
                         supplier_labels if supplier_labels else [""],
                         key=supplier_widget_key,
                     )
+                    st.caption(f"This posts against {enhanced_term_labels['Accounts Payable']}.")
                 elif payment_type in loan_payment_types:
                     lender_name = st.text_input("Lender Name (Optional)", key=lender_name_widget_key)
+                    st.caption(f"Outstanding balances are tracked in {enhanced_term_labels['Loan Payable']}.")
                     description = st.text_area("Description")
+                    st.caption("Add a short note for the borrowing or repayment purpose.")
                 else:
                     description = st.text_area("Description", key=owner_description_widget_key)
+                    st.caption("Add a short note describing the transaction.")
                     if payment_type in owner_payment_types:
                         owner_name = st.text_input("Owner Name (Optional)", key=owner_name_widget_key)
+                        if payment_type == "Owner Capital / Owner Investment":
+                            st.caption(f"This posts to {enhanced_term_labels['Owner Capital']}.")
+                        else:
+                            st.caption(f"This posts to {enhanced_term_labels['Owner Drawings']}.")
                 submitted = st.form_submit_button("Post Transaction")
 
             if submitted:
