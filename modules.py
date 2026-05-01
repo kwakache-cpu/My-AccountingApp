@@ -4531,6 +4531,12 @@ PURCHASE_CLASSIFICATION_OPTIONS = [
 ]
 
 FIXED_ASSET_PURCHASE_CATEGORIES = ["Vehicle", "Equipment", "Building", "Furniture", "Land", "Other"]
+FIXED_ASSET_ACQUISITION_TYPES = [
+    "Opening Balance Asset",
+    "Purchased with Cash/Bank/Mobile Money",
+    "Purchased on Credit",
+    "Owner-Contributed Asset",
+]
 
 
 def _normalize_purchase_classification(value):
@@ -4643,6 +4649,105 @@ def build_purchase_journal_lines(
         "credit_account_name": credit_account_name,
         "credit_account_type": credit_account_type,
         "total_credit": total_credit,
+    }
+
+
+def _normalize_fixed_asset_acquisition_type(value):
+    normalized_value = " ".join(str(value or "").strip().split()).lower()
+    if normalized_value == "purchased on credit":
+        return "Purchased on Credit"
+    if normalized_value == "owner-contributed asset":
+        return "Owner-Contributed Asset"
+    if normalized_value == "purchased with cash/bank/mobile money":
+        return "Purchased with Cash/Bank/Mobile Money"
+    return "Opening Balance Asset"
+
+
+def _fixed_asset_has_posted_acquisition(conn, company_key, asset_id):
+    return _get_fixed_asset_posted_entry_id(conn, company_key, asset_id) is not None
+
+
+def _get_fixed_asset_posted_entry_id(conn, company_key, asset_id):
+    asset_row = conn.execute(
+        """
+        SELECT posted_entry_id
+        FROM fixed_assets
+        WHERE id = ? AND company_key = ?
+        LIMIT 1
+        """,
+        (int(asset_id), company_key),
+    ).fetchone()
+    if not asset_row:
+        return None
+    if asset_row["posted_entry_id"] not in (None, "", 0):
+        return int(asset_row["posted_entry_id"])
+    linked_row = conn.execute(
+        """
+        SELECT id
+        FROM journal_entries
+        WHERE company_key = ?
+          AND lower(COALESCE(source_table, '')) = 'fixed_assets'
+          AND source_id = ?
+          AND COALESCE(is_voided, 0) = 0
+          AND COALESCE(approval_status, 'Posted') = 'Posted'
+        LIMIT 1
+        """,
+        (company_key, int(asset_id)),
+    ).fetchone()
+    if linked_row:
+        return int(linked_row["id"])
+    legacy_reference_row = conn.execute(
+        """
+        SELECT id
+        FROM journal_entries
+        WHERE company_key = ?
+          AND reference = ?
+          AND COALESCE(is_voided, 0) = 0
+          AND COALESCE(approval_status, 'Posted') = 'Posted'
+        LIMIT 1
+        """,
+        (company_key, f"FA-{int(asset_id)}"),
+    ).fetchone()
+    return int(legacy_reference_row["id"]) if legacy_reference_row else None
+
+
+def _build_fixed_asset_acquisition_lines(
+    conn,
+    company_key,
+    *,
+    acquisition_type,
+    cost,
+    payment_method=None,
+):
+    normalized_type = _normalize_fixed_asset_acquisition_type(acquisition_type)
+    asset_cost = round(float(cost or 0.0), 2)
+    if asset_cost <= 0:
+        raise ValueError("Asset cost must be greater than 0.")
+    ensure_core_financial_accounts(company_key, conn=conn)
+    debit_account_id = get_or_create_account(company_key, "Fixed Assets", "Asset", conn=conn)
+    if normalized_type == "Purchased with Cash/Bank/Mobile Money":
+        credit_account_name = _purchase_payment_account_name(payment_method)
+        credit_account_type = "Asset"
+    elif normalized_type == "Purchased on Credit":
+        credit_account_name = "Accounts Payable"
+        credit_account_type = "Liability"
+    elif normalized_type == "Owner-Contributed Asset":
+        credit_account_name = "Owner Capital"
+        credit_account_type = "Equity"
+    else:
+        credit_account_name = "Opening Balance Equity"
+        credit_account_type = "Equity"
+    return [
+        {"account_id": debit_account_id, "debit": asset_cost, "credit": 0},
+        {
+            "account_id": get_or_create_account(company_key, credit_account_name, credit_account_type, conn=conn),
+            "debit": 0,
+            "credit": asset_cost,
+        },
+    ], {
+        "acquisition_type": normalized_type,
+        "credit_account_name": credit_account_name,
+        "credit_account_type": credit_account_type,
     }
 
 
@@ -11007,32 +11112,74 @@ def show_fixed_assets(company_key, role):
             st.error(build_user_safe_error(exc, st.session_state.get("user", {}).get("role")))
     action_col2.caption("Straight-line depreciation posts to Depreciation Expense and Accumulated Depreciation.")
 
+    supplier_options = [""]
+    supplier_lookup = {}
+    supplier_conn = None
+    try:
+        supplier_conn = get_connection()
+        supplier_rows = supplier_conn.execute(
+            "SELECT id, name FROM suppliers WHERE company_key = ? ORDER BY name",
+            (company_key,),
+        ).fetchall()
+        supplier_lookup = {
+            str(row["name"]).strip(): int(row["id"])
+            for row in supplier_rows
+            if str(row["name"] or "").strip()
+        }
+        supplier_options.extend(sorted(supplier_lookup.keys()))
+    finally:
+        if supplier_conn:
+            supplier_conn.close()
+
     with st.expander("Add Fixed Asset", expanded=True):
         with st.form("fixed_asset_form_override", clear_on_submit=True):
             col1, col2 = st.columns(2)
             with col1:
                 asset_name = st.text_input("Asset Name")
                 asset_category = st.selectbox("Category", ["Vehicle", "Equipment", "Building", "Furniture", "Land", "Other"])
-                purchase_date = st.date_input("Purchase Date", datetime.now().date())
+                purchase_date = st.date_input("Acquisition Date", datetime.now().date())
+                acquisition_type = st.selectbox("Acquisition Type / Source", FIXED_ASSET_ACQUISITION_TYPES)
+                payment_method = None
+                supplier_name = ""
+                owner_contributor_name = ""
+                if acquisition_type == "Purchased with Cash/Bank/Mobile Money":
+                    payment_method = st.selectbox("Payment Method", ["Cash", "Bank", "Mobile Money"])
+                elif acquisition_type == "Purchased on Credit":
+                    supplier_name = st.selectbox("Supplier", supplier_options)
+                elif acquisition_type == "Owner-Contributed Asset":
+                    owner_contributor_name = st.text_input("Owner / Investor Name")
             with col2:
                 cost = st.number_input(f"Cost ({st.session_state.currency_symbol})", min_value=0.0, step=0.01)
                 opening_book_value = st.number_input("Opening Book Value", min_value=0.0, step=0.01)
                 useful_life_years = st.number_input("Useful Life (Years)", min_value=0.0, step=1.0)
                 residual_value = st.number_input(f"Residual Value ({st.session_state.currency_symbol})", min_value=0.0, step=0.01)
                 location = st.text_input("Location")
+                custodian = st.text_input("Custodian")
+                asset_description = st.text_input("Description")
+                asset_notes = st.text_area("Notes")
 
             if st.form_submit_button("Add Asset") and asset_name and cost > 0:
                 book_value = opening_book_value if opening_book_value > 0 else cost
                 depreciation_rate = round((100.0 / useful_life_years), 4) if useful_life_years > 0 else 0.0
                 try:
                     conn = get_connection()
+                    normalized_acquisition_type = _normalize_fixed_asset_acquisition_type(acquisition_type)
+                    supplier_id = None
+                    if normalized_acquisition_type == "Purchased on Credit":
+                        supplier_id = supplier_lookup.get(str(supplier_name or "").strip())
+                        if not supplier_id:
+                            conn.close()
+                            st.warning("Select a supplier for a credit asset purchase.")
+                            return
                     asset_cursor = conn.execute(
                         """
                         INSERT INTO fixed_assets
                            (company_key, asset_name, asset_category, purchase_date, cost,
                             opening_book_value, useful_life_years, residual_value, depreciation_method,
-                            depreciation_rate, accumulated_depreciation, book_value, last_depreciation_date, location)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'Straight-line', ?, 0, ?, NULL, ?)
+                            depreciation_rate, accumulated_depreciation, book_value, last_depreciation_date, location,
+                            custodian, description, notes, acquisition_type, payment_method, supplier_id,
+                            owner_contributor_name, status, approval_status, created_by)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'Straight-line', ?, 0, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, 'Active', 'Posted', ?)
                         """,
                         (
                             company_key,
@@ -11046,21 +11193,49 @@ def show_fixed_assets(company_key, role):
                             depreciation_rate,
                             book_value,
                             location,
+                            custodian.strip() or None,
+                            asset_description.strip() or None,
+                            asset_notes.strip() or None,
+                            normalized_acquisition_type,
+                            payment_method if normalized_acquisition_type == "Purchased with Cash/Bank/Mobile Money" else None,
+                            supplier_id,
+                            owner_contributor_name.strip() or None,
+                            role,
                         ),
                     )
-                    create_journal_entry(
-                        "Fixed asset acquisition",
-                        [
-                            {"account_name": "Fixed Assets", "category": "Asset", "debit": cost, "credit": 0},
-                            {"account_name": "Opening Balance Equity", "category": "Equity", "debit": 0, "credit": cost},
-                        ],
+                    acquisition_lines, acquisition_meta = _build_fixed_asset_acquisition_lines(
+                        conn,
+                        company_key,
+                        acquisition_type=normalized_acquisition_type,
+                        cost=cost,
+                        payment_method=payment_method,
+                    )
+                    post_journal_entry(
                         company_key=company_key,
+                        date=purchase_date,
+                        description="Fixed asset acquisition",
                         reference=f"FA-{int(asset_cursor.lastrowid)}",
-                        entry_date=purchase_date,
+                        lines=acquisition_lines,
+                        created_by=role,
+                        branch_id=st.session_state.get("active_branch_id"),
+                        supplier_id=supplier_id,
+                        source_module="Fixed Assets",
+                        source_table="fixed_assets",
+                        source_type=acquisition_meta["acquisition_type"],
+                        source_id=int(asset_cursor.lastrowid),
+                        approval_status="Posted",
+                        user_role=role,
                         conn=conn,
                     )
                     conn.commit()
-                    log_audit_action(conn, company_key, role, "Fixed Asset Added", "Fixed Assets", f"{asset_name} - GHS{cost:,.2f}")
+                    log_audit_action(
+                        conn,
+                        company_key,
+                        role,
+                        "Fixed Asset Added",
+                        "Fixed Assets",
+                        f"{asset_name} - GHS{cost:,.2f} - acquisition_type={normalized_acquisition_type}",
+                    )
                     conn.close()
                     st.success("Entry Updated")
                     st.rerun()
@@ -11075,7 +11250,8 @@ def show_fixed_assets(company_key, role):
             """
             SELECT id, asset_name, asset_category, purchase_date, cost, opening_book_value,
                    useful_life_years, residual_value, depreciation_rate, accumulated_depreciation,
-                   book_value, location, status
+                   book_value, location, custodian, description, notes, acquisition_type,
+                   payment_method, owner_contributor_name, posted_entry_id, status
             FROM fixed_assets
             WHERE company_key = ?
             ORDER BY asset_name
@@ -11101,9 +11277,20 @@ def show_fixed_assets(company_key, role):
                 "Accum. Dep.",
                 "Current Value",
                 "Location",
+                "Custodian",
+                "Description",
+                "Notes",
+                "Acquisition Type",
+                "Payment Method",
+                "Owner / Investor",
+                "Posted Entry ID",
                 "Status",
             ],
         )
+        posted_asset_entry_map = {
+            int(asset_id): _get_fixed_asset_posted_entry_id(conn, company_key, int(asset_id))
+            for asset_id in df["ID"].tolist()
+        }
         st.dataframe(format_currency_dataframe(df), use_container_width=True)
 
         col1, col2, col3 = st.columns(3)
@@ -11116,20 +11303,80 @@ def show_fixed_assets(company_key, role):
             delete_asset_key = f"asset_delete_selected_{company_key}"
             for _, asset_row in df.iterrows():
                 name_col, edit_col, delete_col = st.columns([4, 1, 1])
+                has_posted_acquisition = posted_asset_entry_map.get(int(asset_row["ID"])) is not None
                 name_col.caption(
                     f"{asset_row['Asset Name']} | Current {format_currency(asset_row['Current Value'])} | "
-                    f"Purchase Date {asset_row['Purchase Date']}"
+                    f"Purchase Date {asset_row['Purchase Date']} | Acquisition {asset_row['Acquisition Type']}"
                 )
                 if edit_col.button("Edit", key=f"asset_edit_btn_override_{company_key}_{int(asset_row['ID'])}"):
                     st.session_state[selected_asset_key] = int(asset_row["ID"])
                 if delete_col.button("Delete Record", key=f"asset_delete_btn_override_{company_key}_{int(asset_row['ID'])}"):
-                    st.session_state[delete_asset_key] = int(asset_row["ID"])
+                    if has_posted_acquisition:
+                        st.warning("Posted asset records cannot be financially edited directly. Use reversal/correction workflow.")
+                    else:
+                        st.session_state[delete_asset_key] = int(asset_row["ID"])
+
+            st.warning("Posted asset records cannot be financially edited directly. Use reversal/correction workflow.")
+
+            if role in ("Master Admin", "Sub-Admin") and user_has_permission(role, "void_or_reverse_document"):
+                reversal_asset_options = [
+                    asset_id
+                    for asset_id, entry_id in posted_asset_entry_map.items()
+                    if entry_id is not None and str(df.loc[df["ID"] == asset_id, "Status"].iloc[0]) != "Reversed"
+                ]
+                if reversal_asset_options:
+                    reversal_asset_id = st.selectbox(
+                        "Reverse Posted Asset Acquisition",
+                        options=reversal_asset_options,
+                        format_func=lambda asset_id: f"Asset #{asset_id} - {df.loc[df['ID'] == asset_id, 'Asset Name'].iloc[0]}",
+                        key=f"asset_reversal_select_{company_key}",
+                    )
+                    reversal_reason = st.text_input("Reversal Reason", key=f"asset_reversal_reason_{company_key}")
+                    reversal_confirm = st.checkbox(
+                        "Confirm reversal of the posted acquisition journal",
+                        key=f"asset_reversal_confirm_{company_key}",
+                    )
+                    if st.button("Reverse Asset Acquisition", key=f"asset_reverse_btn_{company_key}_{reversal_asset_id}"):
+                        if not reversal_confirm or not reversal_reason.strip():
+                            st.warning("Enter a reversal reason and confirm before reversing an asset acquisition.")
+                        else:
+                            reversal_entry_id = posted_asset_entry_map.get(int(reversal_asset_id)) or 0
+                            if reversal_entry_id <= 0:
+                                st.warning("No posted acquisition journal was found for that asset.")
+                            else:
+                                reverse_journal_entry(
+                                    reversal_entry_id,
+                                    created_by=role,
+                                    reversal_date=datetime.now().date(),
+                                    reason=reversal_reason.strip(),
+                                    branch_id=st.session_state.get("active_branch_id"),
+                                    conn=conn,
+                                )
+                                conn.execute(
+                                    "UPDATE fixed_assets SET status = 'Reversed' WHERE id = ? AND company_key = ?",
+                                    (int(reversal_asset_id), company_key),
+                                )
+                                conn.commit()
+                                log_audit_action(
+                                    conn,
+                                    company_key,
+                                    role,
+                                    "Fixed Asset Acquisition Reversed",
+                                    "Fixed Assets",
+                                    f"Reversed asset acquisition for asset ID {int(reversal_asset_id)}",
+                                )
+                                st.success("Entry Updated")
+                                st.rerun()
 
             delete_asset_id = st.session_state.get(delete_asset_key)
             if delete_asset_id is not None:
                 st.warning("Are you sure you want to permanently delete this item?")
                 confirm_col, cancel_col = st.columns(2)
                 if confirm_col.button("Delete Record", key=f"asset_delete_confirm_override_{company_key}_{delete_asset_id}"):
+                    if _fixed_asset_has_posted_acquisition(conn, company_key, int(delete_asset_id)):
+                        _clear_streamlit_state(delete_asset_key)
+                        st.warning("Posted asset records cannot be deleted directly. Use reversal/correction workflow.")
+                        st.rerun()
                     conn.execute(
                         "DELETE FROM fixed_assets WHERE id = ? AND company_key = ?",
                         (int(delete_asset_id), company_key),
@@ -11145,38 +11392,64 @@ def show_fixed_assets(company_key, role):
 
             edit_asset_id = st.session_state.get(selected_asset_key, int(df["ID"].iloc[0]))
             edit_asset_row = df.loc[df["ID"] == edit_asset_id].iloc[0]
+            asset_is_posted = _fixed_asset_has_posted_acquisition(conn, company_key, int(edit_asset_id))
             with st.form(f"asset_edit_form_override_{company_key}_{edit_asset_id}", clear_on_submit=True):
-                edit_asset_name = st.text_input("Asset Name", value=str(edit_asset_row["Asset Name"] or ""))
-                edit_purchase_date = st.date_input("Purchase Date", value=pd.to_datetime(edit_asset_row["Purchase Date"]).date())
-                edit_cost = st.number_input("Cost (GHS)", min_value=0.0, value=float(edit_asset_row["Cost (GHS)"] or 0.0))
-                edit_opening_book = st.number_input("Opening Book Value", min_value=0.0, value=float(edit_asset_row["Opening Book Value"] or 0.0))
-                edit_useful_life = st.number_input("Useful Life (Years)", min_value=0.0, value=float(edit_asset_row["Useful Life (Years)"] or 0.0))
-                edit_residual_value = st.number_input("Residual Value (GHS)", min_value=0.0, value=float(edit_asset_row["Residual Value"] or 0.0))
+                if asset_is_posted:
+                    st.warning("Posted asset records cannot be financially edited directly. Use reversal/correction workflow.")
+                edit_asset_name = st.text_input("Asset Name", value=str(edit_asset_row["Asset Name"] or ""), disabled=asset_is_posted)
+                edit_purchase_date = st.date_input("Purchase Date", value=pd.to_datetime(edit_asset_row["Purchase Date"]).date(), disabled=asset_is_posted)
+                edit_cost = st.number_input("Cost (GHS)", min_value=0.0, value=float(edit_asset_row["Cost (GHS)"] or 0.0), disabled=asset_is_posted)
+                edit_opening_book = st.number_input("Opening Book Value", min_value=0.0, value=float(edit_asset_row["Opening Book Value"] or 0.0), disabled=asset_is_posted)
+                edit_useful_life = st.number_input("Useful Life (Years)", min_value=0.0, value=float(edit_asset_row["Useful Life (Years)"] or 0.0), disabled=asset_is_posted)
+                edit_residual_value = st.number_input("Residual Value (GHS)", min_value=0.0, value=float(edit_asset_row["Residual Value"] or 0.0), disabled=asset_is_posted)
                 edit_location = st.text_input("Location", value=str(edit_asset_row["Location"] or ""))
+                edit_custodian = st.text_input("Custodian", value=str(edit_asset_row["Custodian"] or ""))
+                edit_description = st.text_input("Description", value=str(edit_asset_row["Description"] or ""))
+                edit_notes = st.text_area("Notes", value=str(edit_asset_row["Notes"] or ""))
                 if st.form_submit_button("Update Asset"):
-                    edit_depr_rate = round((100.0 / edit_useful_life), 4) if edit_useful_life > 0 else 0.0
-                    conn.execute(
-                        """
-                        UPDATE fixed_assets
-                        SET asset_name = ?, purchase_date = ?, cost = ?, opening_book_value = ?,
-                            useful_life_years = ?, residual_value = ?, depreciation_method = 'Straight-line',
-                            depreciation_rate = ?, book_value = ?, location = ?
-                        WHERE id = ? AND company_key = ?
-                        """,
-                        (
-                            edit_asset_name,
-                            edit_purchase_date.isoformat(),
-                            edit_cost,
-                            edit_opening_book,
-                            edit_useful_life,
-                            edit_residual_value,
-                            edit_depr_rate,
-                            edit_opening_book if edit_opening_book > 0 else edit_cost,
-                            edit_location,
-                            int(edit_asset_id),
-                            company_key,
-                        ),
-                    )
+                    if asset_is_posted:
+                        conn.execute(
+                            """
+                            UPDATE fixed_assets
+                            SET location = ?, custodian = ?, description = ?, notes = ?
+                            WHERE id = ? AND company_key = ?
+                            """,
+                            (
+                                edit_location,
+                                edit_custodian,
+                                edit_description,
+                                edit_notes,
+                                int(edit_asset_id),
+                                company_key,
+                            ),
+                        )
+                    else:
+                        edit_depr_rate = round((100.0 / edit_useful_life), 4) if edit_useful_life > 0 else 0.0
+                        conn.execute(
+                            """
+                            UPDATE fixed_assets
+                            SET asset_name = ?, purchase_date = ?, cost = ?, opening_book_value = ?,
+                                useful_life_years = ?, residual_value = ?, depreciation_method = 'Straight-line',
+                                depreciation_rate = ?, book_value = ?, location = ?, custodian = ?, description = ?, notes = ?
+                            WHERE id = ? AND company_key = ?
+                            """,
+                            (
+                                edit_asset_name,
+                                edit_purchase_date.isoformat(),
+                                edit_cost,
+                                edit_opening_book,
+                                edit_useful_life,
+                                edit_residual_value,
+                                edit_depr_rate,
+                                edit_opening_book if edit_opening_book > 0 else edit_cost,
+                                edit_location,
+                                edit_custodian,
+                                edit_description,
+                                edit_notes,
+                                int(edit_asset_id),
+                                company_key,
+                            ),
+                        )
                     conn.commit()
                     log_audit_action(conn, company_key, role, "Fixed Asset Updated", "Fixed Assets", f"Updated asset ID {int(edit_asset_id)}")
                     _clear_streamlit_state(selected_asset_key, delete_asset_key)

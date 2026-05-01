@@ -28,7 +28,7 @@ def _normal_balance(account_type):
 
 VALID_ACCOUNT_TYPES = {"Asset", "Liability", "Equity", "Income", "Expense"}
 VALID_DOCUMENT_CONTROL_STATUSES = {"Draft", "Submitted", "Approved", "Posted", "Cancelled", "Voided", "Active"}
-CONTROLLED_SOURCE_TABLES = {"invoices", "bills", "payments", "stock_movements", "vouchers"}
+CONTROLLED_SOURCE_TABLES = {"invoices", "bills", "payments", "stock_movements", "vouchers", "fixed_assets"}
 CONTROL_ACCOUNT_NAMES = {"Accounts Receivable", "Accounts Payable", "Inventory"}
 UNIFIED_POSTING_ENGINE_VERSION = "phase7_unified_posting_engine_v1"
 HEADER_ACCOUNT_NAMES = {
@@ -522,7 +522,7 @@ def _source_document_duplicate_postings(conn, company_key, branch_id=None):
           AND COALESCE(is_voided, 0) = 0
           AND COALESCE(approval_status, 'Posted') = 'Posted'
           AND source_id IS NOT NULL
-          AND lower(COALESCE(source_table, '')) IN ('invoices', 'bills', 'payments', 'stock_movements', 'vouchers')
+          AND lower(COALESCE(source_table, '')) IN ('invoices', 'bills', 'payments', 'stock_movements', 'vouchers', 'fixed_assets')
           {branch_clause}
         GROUP BY lower(COALESCE(source_table, '')), source_id
         HAVING COUNT(*) > 1
