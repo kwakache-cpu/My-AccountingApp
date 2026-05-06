@@ -9105,7 +9105,9 @@ def show_pos(company_key, company_name, role):
                 conn = get_connection()
                 ensure_pos_sales_schema(conn)
                 line_items = []
-                total = float(current_summary["grand_total"] or 0.0)
+                total = round(float(current_summary["grand_total"] or 0.0), 2)
+                pos_tax_total = round(float(current_summary["tax_total"] or 0.0), 2)
+                pos_net_sales = round(total - pos_tax_total, 2)
                 cost_of_goods_sold = 0.0
                 for sale_line in sale_cart:
                     _recalculate_pos_line(sale_line)
@@ -9154,15 +9156,20 @@ def show_pos(company_key, company_name, role):
                     payment_method=payment_method,
                 )
                 sale_reference = f"POS-{legacy_sale_id or datetime.now().strftime('%Y%m%d%H%M%S')}"
+                journal_lines, _ = build_sales_tax_journal_lines(
+                    conn,
+                    company_key,
+                    receipt_account_name=receipt_account,
+                    receipt_account_type=receipt_category,
+                    amount=pos_net_sales,
+                    output_vat=pos_tax_total,
+                )
                 post_journal_entry(
                     company_key=company_key,
                     date=sale_date,
                     description="POS sale",
                     reference=sale_reference,
-                    lines=[
-                        {"account_id": get_account_id(conn, receipt_account, receipt_category), "debit": total, "credit": 0},
-                        {"account_id": get_account_id(conn, "Sales Revenue", "Income"), "debit": 0, "credit": total},
-                    ],
+                    lines=journal_lines,
                     created_by=role,
                     branch_id=branch_id,
                     customer_id=selected_credit_customer_id if payment_method == "On Credit" else None,

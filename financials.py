@@ -346,19 +346,34 @@ def _get_trial_balance_legacy(company_key, start_date=None, end_date=None, accou
 def _get_income_statement_legacy(company_key, start_date=None, end_date=None, account_name=None):
     tb = get_trial_balance(company_key, start_date, end_date, account_name)
     rows = []
-    income_total = 0.0
-    expense_total = 0.0
+    gross_revenue = 0.0
+    sales_returns = 0.0
+    cost_of_sales = 0.0
+    operating_expenses = 0.0
     for _, row in tb.iterrows():
         account_type = str(row["Type"]).title()
+        account = str(row["Account"] or "").strip()
+        normalized_account = account.lower()
         if account_type == "Income":
             amount = float(row["Credit (GHS)"] - row["Debit (GHS)"])
-            income_total += amount
-            rows.append({"Category": "Revenue", "Account Code": row["Account Code"], "Account": row["Account"], "Amount (GHS)": amount})
+            gross_revenue += amount
+            rows.append({"Category": "Revenue", "Account Code": row["Account Code"], "Account": account, "Amount (GHS)": amount})
         elif account_type == "Expense":
             amount = float(row["Debit (GHS)"] - row["Credit (GHS)"])
-            expense_total += amount
-            rows.append({"Category": "Operating Expenses", "Account Code": row["Account Code"], "Account": row["Account"], "Amount (GHS)": amount})
-    rows.append({"Category": "Profit for the Period", "Account Code": "", "Account": "Net Profit", "Amount (GHS)": income_total - expense_total})
+            if normalized_account == "sales returns and refunds":
+                sales_returns += amount
+                rows.append({"Category": "Sales Deductions", "Account Code": row["Account Code"], "Account": "Less: Sales Returns and Refunds", "Amount (GHS)": -amount})
+            elif normalized_account == "cost of goods sold":
+                cost_of_sales += amount
+                rows.append({"Category": "Cost of Sales", "Account Code": row["Account Code"], "Account": account, "Amount (GHS)": amount})
+            else:
+                operating_expenses += amount
+                rows.append({"Category": "Operating Expenses", "Account Code": row["Account Code"], "Account": account, "Amount (GHS)": amount})
+    net_sales = gross_revenue - sales_returns
+    gross_profit = net_sales - cost_of_sales
+    rows.append({"Category": "Revenue", "Account Code": "", "Account": "Net Sales", "Amount (GHS)": net_sales})
+    rows.append({"Category": "Profit for the Period", "Account Code": "", "Account": "Gross Profit", "Amount (GHS)": gross_profit})
+    rows.append({"Category": "Profit for the Period", "Account Code": "", "Account": "Net Profit", "Amount (GHS)": gross_profit - operating_expenses})
     return pd.DataFrame(rows)
 
 
@@ -1483,6 +1498,10 @@ def _account_bucket(account_code, account_name, account_type):
     if normalized_type == "Income":
         return "Revenue"
     if normalized_type == "Expense":
+        if name == "sales returns and refunds":
+            return "Sales Deductions"
+        if name == "cost of goods sold":
+            return "Cost of Sales"
         if "depreciation" in name:
             return "Operating Expenses"
         return "Operating Expenses"
@@ -1612,39 +1631,68 @@ def get_income_statement(company_key, start_date=None, end_date=None, account_na
         if tb.empty:
             return pd.DataFrame(columns=["Category", "Account Code", "Account", "Amount (GHS)"])
         rows = []
-        income_total = 0.0
-        expense_total = 0.0
+        gross_revenue = 0.0
+        sales_returns = 0.0
+        cost_of_sales = 0.0
+        operating_expenses = 0.0
         for _, row in tb.iterrows():
             account_type = str(row.get("Type", "")).title()
+            account = str(row.get("Account", "") or "").strip()
+            normalized_account = account.lower()
             if account_type == "Income":
                 amount = float(row.get("Credit (GHS)", 0.0) - row.get("Debit (GHS)", 0.0))
-                income_total += amount
+                gross_revenue += amount
                 rows.append(
                     {
                         "Category": "Revenue",
                         "Account Code": row.get("Account Code", ""),
-                        "Account": row.get("Account", ""),
+                        "Account": account,
                         "Amount (GHS)": amount,
                     }
                 )
             elif account_type == "Expense":
                 amount = float(row.get("Debit (GHS)", 0.0) - row.get("Credit (GHS)", 0.0))
-                expense_total += amount
                 category = _account_bucket(row.get("Account Code", ""), row.get("Account", ""), account_type)
+                if normalized_account == "sales returns and refunds":
+                    sales_returns += amount
+                    amount = -amount
+                    account = "Less: Sales Returns and Refunds"
+                elif normalized_account == "cost of goods sold":
+                    cost_of_sales += amount
+                else:
+                    operating_expenses += amount
                 rows.append(
                     {
                         "Category": category,
                         "Account Code": row.get("Account Code", ""),
-                        "Account": row.get("Account", ""),
+                        "Account": account,
                         "Amount (GHS)": amount,
                     }
                 )
+        net_sales = gross_revenue - sales_returns
+        gross_profit = net_sales - cost_of_sales
+        rows.append(
+            {
+                "Category": "Revenue",
+                "Account Code": "",
+                "Account": "Net Sales",
+                "Amount (GHS)": net_sales,
+            }
+        )
+        rows.append(
+            {
+                "Category": "Profit for the Period",
+                "Account Code": "",
+                "Account": "Gross Profit",
+                "Amount (GHS)": gross_profit,
+            }
+        )
         rows.append(
             {
                 "Category": "Profit for the Period",
                 "Account Code": "",
                 "Account": "Net Profit",
-                "Amount (GHS)": income_total - expense_total,
+                "Amount (GHS)": gross_profit - operating_expenses,
             }
         )
         return pd.DataFrame(rows)
@@ -1939,19 +1987,40 @@ def get_consolidated_pnl(company_key, start_date=None, end_date=None):
     if income_df.empty:
         return pd.DataFrame(columns=["Category", "Account Code", "Account", "Amount (GHS)"])
     
+    rows = []
+    gross_revenue = 0.0
+    sales_returns = 0.0
+    cost_of_sales = 0.0
+    operating_expenses = 0.0
     income_df["amount"] = income_df.apply(
         lambda row: (row["credit"] - row["debit"]) if row["account_type"] == "Income" else (row["debit"] - row["credit"]),
         axis=1,
     )
     grouped = income_df.groupby(["account_code", "account_name", "account_type"], as_index=False)["amount"].sum()
-    grouped["Category"] = grouped["account_type"].apply(lambda x: "Income" if x == "Income" else "Expenses")
-    grouped = grouped.rename(columns={"account_name": "Account", "account_code": "Account Code", "amount": "Amount (GHS)"})
-    grouped = grouped[["Category", "Account Code", "Account", "Amount (GHS)"]]
-    
-    # Add net profit
-    net_profit = grouped["Amount (GHS)"].sum()
-    net_row = pd.DataFrame([{"Category": "Net Profit", "Account Code": "", "Account": "Net Profit", "Amount (GHS)": net_profit}])
-    return pd.concat([grouped, net_row], ignore_index=True)
+    for _, row in grouped.iterrows():
+        account_type = str(row["account_type"] or "").title()
+        account_name = str(row["account_name"] or "").strip()
+        normalized_account = account_name.lower()
+        amount = float(row["amount"] or 0.0)
+        if account_type == "Income":
+            gross_revenue += amount
+            rows.append({"Category": "Revenue", "Account Code": row["account_code"], "Account": account_name, "Amount (GHS)": amount})
+        elif normalized_account == "sales returns and refunds":
+            sales_returns += amount
+            rows.append({"Category": "Sales Deductions", "Account Code": row["account_code"], "Account": "Less: Sales Returns and Refunds", "Amount (GHS)": -amount})
+        elif normalized_account == "cost of goods sold":
+            cost_of_sales += amount
+            rows.append({"Category": "Cost of Sales", "Account Code": row["account_code"], "Account": account_name, "Amount (GHS)": amount})
+        else:
+            operating_expenses += amount
+            rows.append({"Category": "Operating Expenses", "Account Code": row["account_code"], "Account": account_name, "Amount (GHS)": amount})
+
+    net_sales = gross_revenue - sales_returns
+    gross_profit = net_sales - cost_of_sales
+    rows.append({"Category": "Revenue", "Account Code": "", "Account": "Net Sales", "Amount (GHS)": net_sales})
+    rows.append({"Category": "Profit for the Period", "Account Code": "", "Account": "Gross Profit", "Amount (GHS)": gross_profit})
+    rows.append({"Category": "Profit for the Period", "Account Code": "", "Account": "Net Profit", "Amount (GHS)": gross_profit - operating_expenses})
+    return pd.DataFrame(rows)
 
 
 def get_consolidated_balance_sheet(company_key, start_date=None, end_date=None):

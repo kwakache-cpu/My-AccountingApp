@@ -2015,19 +2015,35 @@ def get_general_ledger(company_key, account_id, start_date, end_date):
 
 def generate_income_statement(company_key, start_date, end_date, branch_id=None):
     rows = []
-    total_income = 0.0
-    total_expenses = 0.0
+    gross_revenue = 0.0
+    sales_returns = 0.0
+    cost_of_sales = 0.0
+    operating_expenses = 0.0
     for row in get_trial_balance(company_key, start_date=start_date, end_date=end_date, branch_id=branch_id):
         account_type = str(row["account_type"]).title()
+        account_name = str(row["account_name"] or "").strip()
+        normalized_name = account_name.lower()
         if account_type == "Income":
             amount = round(row["credit_total"] - row["debit_total"], 2)
-            total_income += amount
-            rows.append({"category": "Income", "account_id": row["account_id"], "account_code": row["account_code"], "account_name": row["account_name"], "amount": amount})
+            gross_revenue += amount
+            rows.append({"category": "Revenue", "account_id": row["account_id"], "account_code": row["account_code"], "account_name": account_name, "amount": amount})
         elif account_type == "Expense":
             amount = round(row["debit_total"] - row["credit_total"], 2)
-            total_expenses += amount
-            rows.append({"category": "Expense", "account_id": row["account_id"], "account_code": row["account_code"], "account_name": row["account_name"], "amount": amount})
-    rows.append({"category": "Profit", "account_id": None, "account_code": "", "account_name": "Net Profit", "amount": round(total_income - total_expenses, 2)})
+            if normalized_name == "sales returns and refunds":
+                sales_returns += amount
+                rows.append({"category": "Sales Deductions", "account_id": row["account_id"], "account_code": row["account_code"], "account_name": "Less: Sales Returns and Refunds", "amount": -amount})
+            elif normalized_name == "cost of goods sold":
+                cost_of_sales += amount
+                rows.append({"category": "Cost of Sales", "account_id": row["account_id"], "account_code": row["account_code"], "account_name": account_name, "amount": amount})
+            else:
+                operating_expenses += amount
+                rows.append({"category": "Operating Expenses", "account_id": row["account_id"], "account_code": row["account_code"], "account_name": account_name, "amount": amount})
+    net_sales = round(gross_revenue - sales_returns, 2)
+    gross_profit = round(net_sales - cost_of_sales, 2)
+    net_profit = round(gross_profit - operating_expenses, 2)
+    rows.append({"category": "Revenue", "account_id": None, "account_code": "", "account_name": "Net Sales", "amount": net_sales})
+    rows.append({"category": "Profit", "account_id": None, "account_code": "", "account_name": "Gross Profit", "amount": gross_profit})
+    rows.append({"category": "Profit", "account_id": None, "account_code": "", "account_name": "Net Profit", "amount": net_profit})
     return rows
 
 
