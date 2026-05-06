@@ -78,6 +78,8 @@ PURCHASE_CLASSIFICATION_OPTIONS = eka_modules.PURCHASE_CLASSIFICATION_OPTIONS
 FIXED_ASSET_PURCHASE_CATEGORIES = eka_modules.FIXED_ASSET_PURCHASE_CATEGORIES
 build_purchase_journal_lines = eka_modules.build_purchase_journal_lines
 get_purchase_expense_account_options = eka_modules.get_purchase_expense_account_options
+build_sales_tax_journal_lines = eka_modules.build_sales_tax_journal_lines
+_tax_amount = eka_modules._tax_amount
 
 
 def _resolve_date(value):
@@ -553,6 +555,8 @@ def show_invoice_manager(company_key, role):
             customer_name = st.selectbox("Customer", [""] + customers)
             amount = st.number_input("Amount (GHS)", min_value=0.0, step=0.01)
             output_vat_rate = st.number_input("Output VAT Rate (%)", min_value=0.0, max_value=100.0, step=0.5, value=0.0, key=f"invoice_vat_rate_{company_key}")
+            output_nhil_rate = st.number_input("Output NHIL Rate (%)", min_value=0.0, max_value=100.0, step=0.5, value=0.0, key=f"invoice_nhil_rate_{company_key}")
+            output_getfund_rate = st.number_input("Output GETFund Levy Rate (%)", min_value=0.0, max_value=100.0, step=0.5, value=0.0, key=f"invoice_getfund_rate_{company_key}")
             status = st.selectbox("Status", ["Draft", "Pending", "Paid"])
             posting_state = st.selectbox("Posting State", DOCUMENT_WORKFLOW_STATUSES, index=0, key=f"invoice_posting_state_{company_key}")
             invoice_date = st.date_input("Invoice Date", value=datetime.now().date(), key=f"invoice_date_{company_key}")
@@ -574,7 +578,9 @@ def show_invoice_manager(company_key, role):
                     st.warning("Invoice amount must match the total of the invoice items before posting.")
                     return
                 customer_id = _party_id(conn, "customers", company_key, customer_name)
-                output_vat = round(amount * (output_vat_rate or 0.0) / 100.0, 2)
+                output_vat = _tax_amount(amount, output_vat_rate)
+                output_nhil = _tax_amount(amount, output_nhil_rate)
+                output_getfund = _tax_amount(amount, output_getfund_rate)
                 try:
                     cursor = conn.execute(
                         """
@@ -600,12 +606,16 @@ def show_invoice_manager(company_key, role):
                         branch_id=st.session_state.get("active_branch_id"),
                     )
                     cogs_total = round(float(stock_effects.get("cogs_total") or 0.0), 2)
-                    journal_lines = [
-                        {"account_id": get_account_id(conn, "Cash" if status == "Paid" else "Accounts Receivable", "Asset"), "debit": amount + output_vat, "credit": 0},
-                        {"account_id": get_account_id(conn, "Sales Revenue", "Income"), "debit": 0, "credit": amount},
-                    ]
-                    if output_vat > 0:
-                        journal_lines.append({"account_id": get_account_id(conn, "VAT Payable", "Liability"), "debit": 0, "credit": output_vat})
+                    journal_lines, _ = build_sales_tax_journal_lines(
+                        conn,
+                        company_key,
+                        receipt_account_name="Cash" if status == "Paid" else "Accounts Receivable",
+                        receipt_account_type="Asset",
+                        amount=amount,
+                        output_vat=output_vat,
+                        nhil=output_nhil,
+                        getfund=output_getfund,
+                    )
                     if cogs_total > 0:
                         journal_lines.extend(
                             [
@@ -900,6 +910,8 @@ def show_create_invoice_page(company_key, role):
         customer_name = st.selectbox("Customer", [""] + customers)
         amount = st.number_input("Amount (GHS)", min_value=0.0, step=0.01)
         output_vat_rate = st.number_input("Output VAT Rate (%)", min_value=0.0, max_value=100.0, step=0.5, value=0.0, key=f"invoice_vat_rate_{company_key}")
+        output_nhil_rate = st.number_input("Output NHIL Rate (%)", min_value=0.0, max_value=100.0, step=0.5, value=0.0, key=f"create_invoice_nhil_rate_{company_key}")
+        output_getfund_rate = st.number_input("Output GETFund Levy Rate (%)", min_value=0.0, max_value=100.0, step=0.5, value=0.0, key=f"create_invoice_getfund_rate_{company_key}")
         status = st.selectbox("Status", ["Draft", "Pending", "Paid"])
         posting_state = st.selectbox("Posting State", DOCUMENT_WORKFLOW_STATUSES, index=0)
         invoice_date = st.date_input("Invoice Date", value=datetime.now().date(), key=f"invoice_date_{company_key}")
@@ -928,7 +940,9 @@ def show_create_invoice_page(company_key, role):
                 (company_key, customer_name),
             ).fetchone()
             customer_id = int(row["id"]) if row else None
-            output_vat = round(amount * (output_vat_rate or 0.0) / 100.0, 2)
+            output_vat = _tax_amount(amount, output_vat_rate)
+            output_nhil = _tax_amount(amount, output_nhil_rate)
+            output_getfund = _tax_amount(amount, output_getfund_rate)
             try:
                 cursor = conn.execute(
                     """
@@ -976,12 +990,16 @@ def show_create_invoice_page(company_key, role):
                     branch_id=st.session_state.get("active_branch_id"),
                 )
                 cogs_total = round(float(stock_effects.get("cogs_total") or 0.0), 2)
-                journal_lines = [
-                    {"account_id": get_account_id(conn, "Cash" if status == "Paid" else "Accounts Receivable", "Asset"), "debit": amount + output_vat, "credit": 0},
-                    {"account_id": get_account_id(conn, "Sales Revenue", "Income"), "debit": 0, "credit": amount},
-                ]
-                if output_vat > 0:
-                    journal_lines.append({"account_id": get_account_id(conn, "VAT Payable", "Liability"), "debit": 0, "credit": output_vat})
+                journal_lines, _ = build_sales_tax_journal_lines(
+                    conn,
+                    company_key,
+                    receipt_account_name="Cash" if status == "Paid" else "Accounts Receivable",
+                    receipt_account_type="Asset",
+                    amount=amount,
+                    output_vat=output_vat,
+                    nhil=output_nhil,
+                    getfund=output_getfund,
+                )
                 if cogs_total > 0:
                     journal_lines.extend(
                         [

@@ -2445,6 +2445,30 @@ CORE_FINANCIAL_ACCOUNT_SPECS = [
 ]
 
 
+TAX_CONTROL_ACCOUNT_SPECS = [
+    {
+        "canonical_name": "VAT Payable",
+        "account_type": "Liability",
+        "aliases": ["VAT Payable", "VAT Output Payable", "Output VAT Payable"],
+    },
+    {
+        "canonical_name": "VAT Receivable",
+        "account_type": "Asset",
+        "aliases": ["VAT Receivable", "VAT Input Receivable", "Input VAT Receivable"],
+    },
+    {
+        "canonical_name": "NHIL Payable",
+        "account_type": "Liability",
+        "aliases": ["NHIL Payable", "National Health Insurance Levy Payable"],
+    },
+    {
+        "canonical_name": "GETFund Levy Payable",
+        "account_type": "Liability",
+        "aliases": ["GETFund Levy Payable", "GETFund Payable", "GETFund Levy"],
+    },
+]
+
+
 def _find_matching_account_row(conn, account_names, require_posting_account=False):
     normalized_targets = {
         _normalize_account_name(name)
@@ -2617,6 +2641,159 @@ def ensure_core_financial_accounts(company_key, conn=None):
     finally:
         if owns_connection and conn:
             conn.close()
+
+
+def ensure_tax_control_accounts(company_key, conn=None):
+    owns_connection = conn is None
+    conn = conn or get_connection()
+    ensured_accounts = []
+    try:
+        for spec in TAX_CONTROL_ACCOUNT_SPECS:
+            canonical_name = spec["canonical_name"]
+            account_type = _normalize_account_category(spec["account_type"])
+            aliases = spec.get("aliases") or [canonical_name]
+            matched_row = _find_matching_account_row(conn, [canonical_name, *aliases], require_posting_account=True)
+            if matched_row:
+                existing_name = str(matched_row["account_name"] or "").strip() or canonical_name
+                existing_type = str(matched_row["account_type"] or "").strip().title()
+                status = "reused"
+                if existing_type and existing_type != account_type:
+                    status = "type_mismatch_reused"
+                    logger.warning(
+                        "Tax account type mismatch detected for company_key=%s canonical=%s existing_name=%s existing_type=%s expected_type=%s",
+                        company_key,
+                        canonical_name,
+                        existing_name,
+                        existing_type,
+                        account_type,
+                    )
+                    log_system_event(
+                        "WARNING",
+                        "Chart of Accounts",
+                        "Tax account mismatch company_key={company_key} canonical={canonical} existing_name={existing_name} existing_type={existing_type} expected_type={expected_type}".format(
+                            company_key=company_key,
+                            canonical=canonical_name,
+                            existing_name=existing_name,
+                            existing_type=existing_type,
+                            expected_type=account_type,
+                        ),
+                    )
+                ensured_accounts.append(
+                    {
+                        "canonical_name": canonical_name,
+                        "resolved_name": existing_name,
+                        "account_type": existing_type or account_type,
+                        "account_id": int(matched_row["id"]),
+                        "status": status,
+                    }
+                )
+                continue
+            created_account_id = get_or_create_account(company_key, canonical_name, account_type, conn=conn)
+            ensured_accounts.append(
+                {
+                    "canonical_name": canonical_name,
+                    "resolved_name": canonical_name,
+                    "account_type": account_type,
+                    "account_id": int(created_account_id),
+                    "status": "created",
+                }
+            )
+        if owns_connection:
+            conn.commit()
+        return ensured_accounts
+    finally:
+        if owns_connection and conn:
+            conn.close()
+
+
+def _tax_account_map(company_key, conn):
+    return {row["canonical_name"]: row for row in ensure_tax_control_accounts(company_key, conn=conn)}
+
+
+def _tax_amount(base_amount, rate_percent):
+    return round(float(base_amount or 0.0) * float(rate_percent or 0.0) / 100.0, 2)
+
+
+def build_sales_tax_journal_lines(
+    conn,
+    company_key,
+    *,
+    receipt_account_name,
+    receipt_account_type,
+    amount,
+    output_vat=0.0,
+    nhil=0.0,
+    getfund=0.0,
+):
+    net_amount = round(float(amount or 0.0), 2)
+    vat_amount = round(float(output_vat or 0.0), 2)
+    nhil_amount = round(float(nhil or 0.0), 2)
+    getfund_amount = round(float(getfund or 0.0), 2)
+    if net_amount <= 0:
+        raise ValueError("Sales amount must be greater than 0.")
+    tax_accounts = _tax_account_map(company_key, conn)
+    total_receivable = round(net_amount + vat_amount + nhil_amount + getfund_amount, 2)
+    journal_lines = [
+        {
+            "account_id": get_account_id(conn, receipt_account_name, receipt_account_type),
+            "debit": total_receivable,
+            "credit": 0,
+        },
+        {
+            "account_id": get_account_id(conn, "Sales Revenue", "Income"),
+            "debit": 0,
+            "credit": net_amount,
+        },
+    ]
+    if vat_amount > 0:
+        journal_lines.append({"account_id": int(tax_accounts["VAT Payable"]["account_id"]), "debit": 0, "credit": vat_amount})
+    if nhil_amount > 0:
+        journal_lines.append({"account_id": int(tax_accounts["NHIL Payable"]["account_id"]), "debit": 0, "credit": nhil_amount})
+    if getfund_amount > 0:
+        journal_lines.append({"account_id": int(tax_accounts["GETFund Levy Payable"]["account_id"]), "debit": 0, "credit": getfund_amount})
+    return journal_lines, {
+        "net_amount": net_amount,
+        "output_vat": vat_amount,
+        "nhil": nhil_amount,
+        "getfund": getfund_amount,
+        "total_receivable": total_receivable,
+    }
+
+
+def _tax_account_journal_totals(conn, company_key, account_id):
+    row = conn.execute(
+        """
+        SELECT COALESCE(SUM(jl.debit), 0) AS debit_total,
+               COALESCE(SUM(jl.credit), 0) AS credit_total
+        FROM journal_entries je
+        JOIN journal_lines jl ON jl.entry_id = je.id
+        WHERE je.company_key = ?
+          AND jl.account_id = ?
+          AND COALESCE(je.is_voided, 0) = 0
+          AND COALESCE(je.approval_status, 'Posted') = 'Posted'
+        """,
+        (company_key, int(account_id)),
+    ).fetchone()
+    debit_total = round(float(row["debit_total"] or 0.0), 2) if row else 0.0
+    credit_total = round(float(row["credit_total"] or 0.0), 2) if row else 0.0
+    return debit_total, credit_total
+
+
+def _tax_control_balance(conn, company_key, account_info):
+    debit_total, credit_total = _tax_account_journal_totals(conn, company_key, int(account_info["account_id"]))
+    account_type = str(account_info.get("account_type") or "").strip().title()
+    if account_type == "Asset":
+        balance = round(debit_total - credit_total, 2)
+    else:
+        balance = round(credit_total - debit_total, 2)
+    return {
+        "Account": account_info["resolved_name"],
+        "Expected Type": account_info["account_type"],
+        "Debit Total": debit_total,
+        "Credit Total": credit_total,
+        "Journal Balance": balance,
+        "Status": account_info["status"],
+    }
 
 
 def post_transaction(description, lines, company_key=None, reference=None, created_by=None, entry_date=None, branch_id=None, conn=None):
@@ -9662,6 +9839,9 @@ def show_sales_purchase(company_key, role, doc_type="Sales"):
         city_region = st.text_input("City / Region")
         narration = st.text_input("Description / Reference")
         if doc_type == "Sales":
+            output_vat_rate = st.number_input("Output VAT Rate (%)", min_value=0.0, max_value=100.0, step=0.5, value=0.0)
+            output_nhil_rate = st.number_input("Output NHIL Rate (%)", min_value=0.0, max_value=100.0, step=0.5, value=0.0)
+            output_getfund_rate = st.number_input("Output GETFund Levy Rate (%)", min_value=0.0, max_value=100.0, step=0.5, value=0.0)
             st.markdown("Optional Invoice Items")
             invoice_editor_conn = get_connection()
             try:
@@ -9697,12 +9877,15 @@ def show_sales_purchase(company_key, role, doc_type="Sales"):
                         st.warning("Invoice amount must match the total of the invoice items before posting.")
                         return
                     customer_id = _register_customer(conn, company_key, party_name)
+                    output_vat = _tax_amount(amount, output_vat_rate)
+                    output_nhil = _tax_amount(amount, output_nhil_rate)
+                    output_getfund = _tax_amount(amount, output_getfund_rate)
                     invoice_cursor = conn.execute(
                         """
-                        INSERT INTO invoices (company_key, customer_id, invoice_number, invoice_date, due_date, status, approval_status, amount, currency, description, created_by)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'GHS', ?, ?)
+                        INSERT INTO invoices (company_key, customer_id, invoice_number, invoice_date, due_date, status, approval_status, amount, output_vat, currency, description, created_by)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'GHS', ?, ?)
                         """,
-                        (company_key, customer_id, tx_reference, doc_date.isoformat(), doc_date.isoformat(), status, posting_state, amount, narration, role),
+                        (company_key, customer_id, tx_reference, doc_date.isoformat(), doc_date.isoformat(), status, posting_state, amount, output_vat, narration, role),
                     )
                     if invoice_items:
                         save_invoice_lines(conn, int(invoice_cursor.lastrowid), invoice_items)
@@ -9717,10 +9900,16 @@ def show_sales_purchase(company_key, role, doc_type="Sales"):
                             branch_id=branch_id,
                         )
                         cogs_total = round(float(stock_effects.get("cogs_total") or 0.0), 2)
-                        journal_lines = [
-                            {"account_id": get_account_id(conn, debit_account, "Asset"), "debit": amount, "credit": 0},
-                            {"account_id": get_account_id(conn, "Sales Revenue", "Income"), "debit": 0, "credit": amount},
-                        ]
+                        journal_lines, _ = build_sales_tax_journal_lines(
+                            conn,
+                            company_key,
+                            receipt_account_name=debit_account,
+                            receipt_account_type="Asset",
+                            amount=amount,
+                            output_vat=output_vat,
+                            nhil=output_nhil,
+                            getfund=output_getfund,
+                        )
                         if cogs_total > 0:
                             journal_lines.extend(
                                 [
@@ -10823,24 +11012,169 @@ def show_taxation(company_key):
     NHIL_RATE = 0.025
     GETFUND_RATE = 0.025
 
+    role = st.session_state.get("user", {}).get("role", "System")
+    branch_id = st.session_state.get("active_branch_id")
+    conn = None
     try:
         conn = get_connection()
-        total_sales = get_account_total(company_key, "Sales", balance_side="credit", conn=conn)
+        ensured_accounts = ensure_tax_control_accounts(company_key, conn=conn)
+        account_map = {row["canonical_name"]: row for row in ensured_accounts}
+        total_sales = get_account_total(company_key, "Sales Revenue", balance_side="credit", conn=conn)
         compare_legacy_and_journal_totals(company_key, logger_instance=logger, conn=conn)
-        conn.close()
 
-        vat = total_sales * VAT_RATE
-        nhil = total_sales * NHIL_RATE
-        getfund = total_sales * GETFUND_RATE
+        vat = round(total_sales * VAT_RATE, 2)
+        nhil = round(total_sales * NHIL_RATE, 2)
+        getfund = round(total_sales * GETFUND_RATE, 2)
         total_tax = vat + nhil + getfund
+        balances = {
+            name: _tax_control_balance(conn, company_key, info)
+            for name, info in account_map.items()
+        }
+        vat_output_balance = balances["VAT Payable"]["Journal Balance"]
+        vat_input_balance = balances["VAT Receivable"]["Journal Balance"]
+        net_vat = round(vat_output_balance - vat_input_balance, 2)
+        nhil_balance = balances["NHIL Payable"]["Journal Balance"]
+        getfund_balance = balances["GETFund Levy Payable"]["Journal Balance"]
 
         col1, col2, col3, col4 = st.columns(4)
         col1.metric(f"Total Sales ({get_currency_symbol()})", format_currency(total_sales))
-        col2.metric(f"VAT ({VAT_RATE*100:.1f}%) {get_currency_symbol()}", format_currency(vat))
-        col3.metric(f"NHIL ({NHIL_RATE*100:.1f}%) {get_currency_symbol()}", format_currency(nhil))
-        col4.metric(f"Total Tax Due ({get_currency_symbol()})", format_currency(total_tax))
+        col2.metric("VAT Output Journal", format_currency(vat_output_balance))
+        col3.metric("VAT Input Journal", format_currency(vat_input_balance))
+        col4.metric("Net VAT Payable" if net_vat >= 0 else "Net VAT Receivable", format_currency(abs(net_vat)))
+
+        levy_col1, levy_col2, levy_col3 = st.columns(3)
+        levy_col1.metric("NHIL Payable Journal", format_currency(nhil_balance))
+        levy_col2.metric("GETFund Levy Journal", format_currency(getfund_balance))
+        levy_col3.metric("Statutory Math Total", format_currency(total_tax))
+
+        report_rows = [
+            {
+                "Tax": "VAT Output",
+                "Report Math": vat,
+                "Journal Balance": vat_output_balance,
+                "Difference": round(vat - vat_output_balance, 2),
+                "Basis": f"{VAT_RATE * 100:.1f}% of Sales Revenue",
+            },
+            {
+                "Tax": "VAT Input",
+                "Report Math": 0.0,
+                "Journal Balance": vat_input_balance,
+                "Difference": round(0.0 - vat_input_balance, 2),
+                "Basis": "Journal-backed purchase input tax",
+            },
+            {
+                "Tax": "Net VAT Payable / (Receivable)",
+                "Report Math": vat,
+                "Journal Balance": net_vat,
+                "Difference": round(vat - net_vat, 2),
+                "Basis": "VAT Output less VAT Input",
+            },
+            {
+                "Tax": "NHIL Payable",
+                "Report Math": nhil,
+                "Journal Balance": nhil_balance,
+                "Difference": round(nhil - nhil_balance, 2),
+                "Basis": f"{NHIL_RATE * 100:.1f}% of Sales Revenue",
+            },
+            {
+                "Tax": "GETFund Levy Payable",
+                "Report Math": getfund,
+                "Journal Balance": getfund_balance,
+                "Difference": round(getfund - getfund_balance, 2),
+                "Basis": f"{GETFUND_RATE * 100:.1f}% of Sales Revenue",
+            },
+        ]
+        st.subheader("Tax Report")
+        st.dataframe(format_currency_dataframe(pd.DataFrame(report_rows)), use_container_width=True, hide_index=True)
+
+        account_rows = [
+            {
+                "Account": row["resolved_name"],
+                "Expected Type": row["account_type"],
+                "Status": row["status"],
+            }
+            for row in ensured_accounts
+        ]
+        st.subheader("Tax Control Accounts")
+        st.dataframe(pd.DataFrame(account_rows), use_container_width=True, hide_index=True)
+        st.caption("COVID-19 Health Recovery Levy is not configured elsewhere in this app, so no journal account or settlement line is created for it in this phase.")
+
+        st.subheader("Tax Settlement")
+        payable_options = [
+            ("VAT Payable", vat_output_balance),
+            ("NHIL Payable", nhil_balance),
+            ("GETFund Levy Payable", getfund_balance),
+        ]
+        payable_options = [(name, balance) for name, balance in payable_options if balance > 0]
+        if not payable_options:
+            st.info("No positive journal-backed tax liability is available for settlement.")
+        else:
+            with st.form(f"tax_settlement_form_{company_key}"):
+                selected_label = st.selectbox(
+                    "Tax Liability",
+                    [f"{name} - {format_currency(balance)}" for name, balance in payable_options],
+                )
+                payment_method = st.selectbox("Payment Account", ["Cash", "Bank", "Mobile Money"])
+                payment_date = st.date_input("Payment Date", value=datetime.now().date())
+                amount = st.number_input(f"Settlement Amount ({get_currency_symbol()})", min_value=0.0, step=0.01)
+                reference = st.text_input("Reference", value=f"TAX-{datetime.now().strftime('%Y%m%d%H%M%S')}")
+                submitted = st.form_submit_button("Post Tax Settlement")
+                if submitted:
+                    if not require_permission(
+                        role,
+                        "post_accounting_document",
+                        action_label="post tax settlement",
+                        company_key=company_key,
+                        conn=conn,
+                        branch_id=branch_id,
+                    ):
+                        return
+                    selected_account_name = selected_label.split(" - ", 1)[0]
+                    selected_balance = dict(payable_options)[selected_account_name]
+                    if amount <= 0:
+                        st.warning("Settlement amount must be greater than zero.")
+                        return
+                    if amount - selected_balance > 0.01:
+                        st.warning("Settlement amount cannot exceed the current journal-backed liability.")
+                        return
+                    payment_account_type = "Asset"
+                    settlement_lines = [
+                        {
+                            "account_id": int(account_map[selected_account_name]["account_id"]),
+                            "debit": round(float(amount), 2),
+                            "credit": 0,
+                        },
+                        {
+                            "account_id": get_account_id(conn, payment_method, payment_account_type),
+                            "debit": 0,
+                            "credit": round(float(amount), 2),
+                        },
+                    ]
+                    post_journal_entry(
+                        company_key=company_key,
+                        date=payment_date,
+                        description=f"Tax settlement payment - {selected_account_name}",
+                        reference=reference.strip() or f"TAX-{datetime.now().strftime('%Y%m%d%H%M%S')}",
+                        lines=settlement_lines,
+                        created_by=role,
+                        branch_id=branch_id,
+                        source_module="Taxation",
+                        source_table="journal_entries",
+                        source_type="Tax Settlement",
+                        approval_status="Posted",
+                        user_role=role,
+                        conn=conn,
+                    )
+                    conn.commit()
+                    st.success("Tax settlement posted to the journal.")
+                    st.rerun()
     except Exception as e:
-        st.error(build_user_safe_error(e, st.session_state.get("user", {}).get("role")))
+        if conn:
+            conn.rollback()
+        st.error(build_user_safe_error(e, role))
+    finally:
+        if conn:
+            conn.close()
 
 
 # ==========================================

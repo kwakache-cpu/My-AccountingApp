@@ -129,6 +129,8 @@ IFRS_CHART_OF_ACCOUNTS = [
     ("Accounts Payable", "Liability", "Current Liabilities"),
     ("Payroll Payable", "Liability", "Current Liabilities"),
     ("VAT Payable", "Liability", "Current Liabilities"),
+    ("NHIL Payable", "Liability", "Current Liabilities"),
+    ("GETFund Levy Payable", "Liability", "Current Liabilities"),
     ("Loans Payable", "Liability", "Current Liabilities"),
     ("Equity", "Equity", None),
     ("Owner Capital", "Equity", "Equity"),
