@@ -2384,40 +2384,74 @@ else:
                                 st.dataframe(pd.DataFrame(posting_engine_diag.get("reversal_void_counts") or []), use_container_width=True)
                             reporting_diag = company_operations_snapshot["reporting_trust"]
                             st.caption("Reporting Trust & Period Controls")
+                            reporting_status = "Green" if reporting_diag.get("ok") else "Yellow"
                             rt1, rt2, rt3 = st.columns(3)
                             rt1.metric(
                                 "Trial Balance",
-                                "Balanced" if reporting_diag["trial_balance"]["balanced"] else "Out of Balance",
+                                "Green - Balanced" if reporting_diag["trial_balance"]["balanced"] else "Red - Out of Balance",
                                 format_currency(reporting_diag["trial_balance"]["difference"]),
                             )
                             rt2.metric(
                                 "Balance Sheet",
-                                "Balanced" if reporting_diag["balance_sheet"]["balanced"] else "Needs Review",
+                                "Green - Balanced" if reporting_diag["balance_sheet"]["balanced"] else "Red - Needs Review",
                                 format_currency(reporting_diag["balance_sheet"]["difference"]),
                             )
                             rt3.metric(
-                                "Period Status",
+                                "Reporting Status",
+                                reporting_status,
                                 reporting_diag["period_control"]["current_period_status"],
-                                reporting_diag["period_control"]["current_period"],
                             )
                             rc1, rc2, rc3 = st.columns(3)
                             rc1.metric(
+                                "A/R Aging vs GL",
+                                "Green - Matched" if reporting_diag.get("ar_aging", {}).get("reconciled") else "Yellow - Review",
+                                format_currency(reporting_diag.get("ar_aging", {}).get("difference", 0.0)),
+                            )
+                            rc2.metric(
+                                "A/P Aging vs GL",
+                                "Green - Matched" if reporting_diag.get("ap_aging", {}).get("reconciled") else "Yellow - Review",
+                                format_currency(reporting_diag.get("ap_aging", {}).get("difference", 0.0)),
+                            )
+                            rc3.metric(
+                                "Cash Equivalents",
+                                format_currency(reporting_diag.get("cash_book", {}).get("combined_cash_equivalent_balance", 0.0)),
+                                reporting_diag["period_control"]["current_period"],
+                            )
+                            rr1, rr2, rr3 = st.columns(3)
+                            inventory_diag = reporting_diag.get("reconciliation", {}).get("inventory", {})
+                            fixed_asset_diag = reporting_diag.get("fixed_assets", {})
+                            rr1.metric(
+                                "Inventory GL vs Register",
+                                "Green - Matched" if inventory_diag.get("reconciled") else "Yellow - Review",
+                                format_currency(inventory_diag.get("difference", 0.0)),
+                            )
+                            rr2.metric(
+                                "Fixed Assets GL vs Register",
+                                "Green - Matched" if fixed_asset_diag.get("reconciled") else "Yellow - Review",
+                                format_currency(fixed_asset_diag.get("difference") or 0.0),
+                            )
+                            rr3.metric(
+                                "Tax Liabilities",
+                                format_currency(reporting_diag.get("tax_liabilities", {}).get("total_balance", 0.0)),
+                            )
+                            rj1, rj2, rj3 = st.columns(3)
+                            rj1.metric(
                                 "Cash/Bank Unmatched",
                                 format_currency(reporting_diag["reconciliation"]["cash_bank"]["unmatched_total"]),
                             )
-                            rc2.metric(
+                            rj2.metric(
                                 "Unbalanced Journals",
                                 int(reporting_diag["reconciliation"]["unbalanced_journal_count"] or 0),
                             )
-                            rc3.metric(
+                            rj3.metric(
                                 "Orphaned References",
                                 int(reporting_diag["reconciliation"]["orphaned_journal_reference_count"] or 0),
                             )
                             st.caption(f"Report source: {reporting_diag['report_source']}")
                             if reporting_diag.get("warnings"):
-                                st.warning("Reporting warnings: " + " ".join(reporting_diag["warnings"]))
+                                st.warning("Reporting status needs review: " + " ".join(sanitize_error_message(item) for item in reporting_diag["warnings"]))
                             else:
-                                st.success("Reporting trust and period-control checks passed.")
+                                st.success("Green - Reporting trust and period-control checks passed.")
                             with st.expander("Accounting Period Control Summary", expanded=False):
                                 st.json(reporting_diag["period_control"]["period_counts"])
                                 st.dataframe(pd.DataFrame(reporting_diag["period_control"]["periods"]), use_container_width=True)

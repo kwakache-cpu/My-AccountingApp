@@ -296,14 +296,48 @@ def get_purchases_journal(company_key, start_date=None, end_date=None, account_n
 
 def get_cash_book(company_key, start_date=None, end_date=None, account_name=None, branch_id=None):
     df = get_general_journal(company_key, start_date, end_date, account_name, branch_id=branch_id)
+    columns = [
+        "Date",
+        "Description",
+        "Reference",
+        "Account Code",
+        "Account",
+        "Debit (GHS)",
+        "Credit (GHS)",
+        "Movement (GHS)",
+        "Account Running Balance (GHS)",
+        "Cash Balance (GHS)",
+        "Bank Balance (GHS)",
+        "Mobile Money Balance (GHS)",
+        "Combined Cash Equivalents Balance (GHS)",
+        "Running Balance (GHS)",
+    ]
     if df.empty:
-        return pd.DataFrame(columns=["Date", "Description", "Reference", "Account Code", "Account", "Debit (GHS)", "Credit (GHS)", "Movement (GHS)", "Running Balance (GHS)"])
+        return pd.DataFrame(columns=columns)
     cash_df = df[df["Account"].isin(["Cash", "Bank", "Mobile Money"])].copy()
     if cash_df.empty:
-        return pd.DataFrame(columns=["Date", "Description", "Reference", "Account Code", "Account", "Debit (GHS)", "Credit (GHS)", "Movement (GHS)", "Running Balance (GHS)"])
+        return pd.DataFrame(columns=columns)
     cash_df["Movement (GHS)"] = cash_df["Debit (GHS)"] - cash_df["Credit (GHS)"]
-    cash_df["Running Balance (GHS)"] = cash_df["Movement (GHS)"].cumsum()
-    return cash_df[["Date", "Description", "Reference", "Account Code", "Account", "Debit (GHS)", "Credit (GHS)", "Movement (GHS)", "Running Balance (GHS)"]]
+    cash_df["Account Running Balance (GHS)"] = cash_df.groupby("Account", sort=False)["Movement (GHS)"].cumsum()
+    account_balances = (
+        cash_df.pivot_table(
+            index=cash_df.index,
+            columns="Account",
+            values="Movement (GHS)",
+            aggfunc="sum",
+            fill_value=0.0,
+        )
+        .reindex(columns=["Cash", "Bank", "Mobile Money"], fill_value=0.0)
+        .cumsum()
+    )
+    cash_df["Cash Balance (GHS)"] = account_balances["Cash"].values
+    cash_df["Bank Balance (GHS)"] = account_balances["Bank"].values
+    cash_df["Mobile Money Balance (GHS)"] = account_balances["Mobile Money"].values
+    cash_df["Combined Cash Equivalents Balance (GHS)"] = (
+        cash_df["Cash Balance (GHS)"] + cash_df["Bank Balance (GHS)"] + cash_df["Mobile Money Balance (GHS)"]
+    )
+    cash_df["Running Balance (GHS)"] = cash_df["Combined Cash Equivalents Balance (GHS)"]
+    return cash_df[columns]
 
 
 def get_general_ledger(company_key, start_date=None, end_date=None, account_name=None, branch_id=None):

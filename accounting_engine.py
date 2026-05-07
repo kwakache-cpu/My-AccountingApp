@@ -2081,30 +2081,53 @@ def generate_cash_flow_statement(company_key, start_date, end_date, branch_id=No
     journal_df = _journal_dataframe(company_key, start_date=start_date, end_date=end_date, branch_id=branch_id)
     if journal_df.empty:
         return []
-    cash_df = journal_df[journal_df["account_name"].isin(["Cash", "Bank", "Mobile Money"])].copy()
+    cash_equivalent_accounts = {"Cash", "Bank", "Mobile Money"}
+    cash_df = journal_df[journal_df["account_name"].isin(cash_equivalent_accounts)].copy()
     if cash_df.empty:
         return []
     rows = []
     totals = {"Operating Activities": 0.0, "Investing Activities": 0.0, "Financing Activities": 0.0}
     for _, row in cash_df.iterrows():
         description = str(row["description"] or "").lower()
+        source_module = str(row.get("source_module") or "").lower()
+        source_type = str(row.get("source_type") or "").lower()
         other_side = journal_df[
             (journal_df["entry_id"] == row["entry_id"]) & (journal_df["account_id"] != row["account_id"])
         ]
         counterpart_types = {str(value).title() for value in other_side["account_type"].tolist()}
         counterpart_names = {str(value) for value in other_side["account_name"].tolist()}
+        non_cash_counterpart_names = {name for name in counterpart_names if name not in cash_equivalent_accounts}
         movement = round(float(row["debit"] or 0.0) - float(row["credit"] or 0.0), 2)
-        if counterpart_types & {"Income", "Expense"} or "Accounts Receivable" in counterpart_names or "Accounts Payable" in counterpart_names:
+        if counterpart_names and counterpart_names <= cash_equivalent_accounts:
+            section = "Internal Transfers"
+        elif (
+            {"Accounts Receivable", "Accounts Payable"} & counterpart_names
+            or "payroll" in source_module
+            or "payroll" in source_type
+            or "salary expense" in {name.lower() for name in non_cash_counterpart_names}
+            or "taxation" in source_module
+            or "tax settlement" in source_type
+            or any("tax" in name.lower() or "vat" in name.lower() or "nhil" in name.lower() or "getfund" in name.lower() for name in non_cash_counterpart_names)
+        ):
             section = "Operating Activities"
-        elif "Fixed Assets" in counterpart_names or "Inventory" in counterpart_names or "Accumulated Depreciation" in counterpart_names:
+        elif "Fixed Assets" in counterpart_names or "Accumulated Depreciation" in counterpart_names or "fixed assets" in source_module:
             section = "Investing Activities"
-        elif counterpart_types & {"Equity", "Liability"} or "Owner Capital" in counterpart_names or "Retained Earnings" in counterpart_names:
+        elif (
+            {"Owner Capital", "Owner Drawings", "Retained Earnings", "Loan Payable", "Loans Payable"} & counterpart_names
+            or any("loan" in name.lower() for name in non_cash_counterpart_names)
+            or counterpart_types & {"Equity"}
+        ):
+            section = "Financing Activities"
+        elif counterpart_types & {"Income", "Expense"}:
+            section = "Operating Activities"
+        elif counterpart_types & {"Liability"}:
             section = "Financing Activities"
         elif "depreciation" in description:
             section = "Operating Activities"
         else:
             section = "Operating Activities"
-        totals[section] += movement
+        if section in totals:
+            totals[section] += movement
         rows.append(
             {
                 "section": section,
@@ -2112,6 +2135,17 @@ def generate_cash_flow_statement(company_key, start_date, end_date, branch_id=No
                 "amount": movement,
                 "date": row["date"],
                 "reference": row["reference"],
+            }
+        )
+    internal_transfer_total = round(sum(float(row["amount"] or 0.0) for row in rows if row["section"] == "Internal Transfers"), 2)
+    if any(row["section"] == "Internal Transfers" for row in rows):
+        rows.append(
+            {
+                "section": "Internal Transfers",
+                "line_item": "Net Internal Cash/Bank/Mobile Money Transfers",
+                "amount": internal_transfer_total,
+                "date": None,
+                "reference": None,
             }
         )
     rows.extend(
@@ -2595,25 +2629,59 @@ def get_bank_reconciliation(company_key, start_date=None, end_date=None):
         conn.close()
 
 
+def _table_exists(conn, table_name):
+    return bool(
+        conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name = ? LIMIT 1",
+            (str(table_name or "").strip(),),
+        ).fetchone()
+    )
+
+
+def _account_balance_snapshot(company_key, account_names, as_of_date=None, branch_id=None, conn=None):
+    rows = []
+    for account_name in account_names:
+        account_total = get_account_total(
+            company_key,
+            account_name,
+            end_date=as_of_date,
+            branch_id=branch_id,
+            conn=conn,
+        )
+        debit_total = round(float(account_total.get("debit_total") or 0.0), 2)
+        credit_total = round(float(account_total.get("credit_total") or 0.0), 2)
+        balance = round(debit_total - credit_total, 2)
+        rows.append(
+            {
+                "account_name": account_name,
+                "debit_total": debit_total,
+                "credit_total": credit_total,
+                "balance": balance,
+            }
+        )
+    return rows
+
+
 def get_reporting_trust_diagnostics(company_key, start_date=None, end_date=None, branch_id=None, conn=None):
     """Validate report outputs against posted journal data and reconciliation rules."""
     owns_connection = conn is None
     conn = conn or get_connection()
     try:
+        report_end_date = end_date or datetime.now().date()
         trial_balance = get_trial_balance(company_key, start_date=start_date, end_date=end_date, branch_id=branch_id)
         total_debits = round(sum(float(row.get("debit_total") or 0.0) for row in trial_balance), 2)
         total_credits = round(sum(float(row.get("credit_total") or 0.0) for row in trial_balance), 2)
         trial_balance_difference = round(total_debits - total_credits, 2)
 
-        balance_sheet = generate_balance_sheet(company_key, end_date or datetime.now().date(), branch_id=branch_id)
+        balance_sheet = generate_balance_sheet(company_key, report_end_date, branch_id=branch_id)
         assets = round(sum(float(row.get("amount") or 0.0) for row in balance_sheet if str(row.get("category")).title() == "Asset"), 2)
         liabilities = round(sum(float(row.get("amount") or 0.0) for row in balance_sheet if str(row.get("category")).title() == "Liability"), 2)
         equity = round(sum(float(row.get("amount") or 0.0) for row in balance_sheet if str(row.get("category")).title() == "Equity"), 2)
         balance_sheet_difference = round(assets - (liabilities + equity), 2)
 
-        income_statement = generate_income_statement(company_key, start_date, end_date or datetime.now().date(), branch_id=branch_id)
-        income_accounts = [row for row in income_statement if str(row.get("category")).title() == "Income"]
-        expense_accounts = [row for row in income_statement if str(row.get("category")).title() == "Expense"]
+        income_statement = generate_income_statement(company_key, start_date, report_end_date, branch_id=branch_id)
+        income_accounts = [row for row in income_statement if str(row.get("category")).lower() in {"income", "revenue"}]
+        expense_accounts = [row for row in income_statement if str(row.get("category")).lower() in {"expense", "operating expenses", "cost of sales"}]
         net_profit = round(
             sum(float(row.get("amount") or 0.0) for row in income_statement if str(row.get("account_name")) == "Net Profit"),
             2,
@@ -2621,13 +2689,67 @@ def get_reporting_trust_diagnostics(company_key, start_date=None, end_date=None,
 
         integrity = get_finance_integrity_diagnostics(company_key, as_of_date=end_date, branch_id=branch_id, conn=conn)
         bank_reconciliation = get_bank_reconciliation(company_key, start_date=start_date, end_date=end_date)
-        period_control = get_period_control_diagnostics(company_key, as_of_date=end_date or datetime.now().date(), conn=conn)
+        period_control = get_period_control_diagnostics(company_key, as_of_date=report_end_date, conn=conn)
+        ar_aging_total = round(sum(float(row.get("remaining_balance", row.get("balance", 0.0)) or 0.0) for row in get_ar_aging_report(company_key, as_of_date=report_end_date)), 2)
+        ap_aging_total = round(sum(float(row.get("remaining_balance", row.get("balance", 0.0)) or 0.0) for row in get_ap_aging_report(company_key, as_of_date=report_end_date)), 2)
+        ar_gl_balance = round(float(integrity["accounts_receivable"]["control_account_balance"] or 0.0), 2)
+        ap_gl_balance = round(float(integrity["accounts_payable"]["control_account_balance"] or 0.0), 2)
+
+        cash_account_names = ["Cash", "Bank", "Mobile Money"]
+        cash_balances = _account_balance_snapshot(company_key, cash_account_names, as_of_date=report_end_date, branch_id=branch_id, conn=conn)
+        for cash_row in cash_balances:
+            cash_row["balance"] = round(float(cash_row["debit_total"] or 0.0) - float(cash_row["credit_total"] or 0.0), 2)
+        cash_gl_total = round(sum(float(row["balance"] or 0.0) for row in cash_balances), 2)
+
+        fixed_assets_register_total = None
+        if _table_exists(conn, "fixed_assets"):
+            try:
+                fixed_assets_row = conn.execute(
+                    """
+                    SELECT COALESCE(SUM(COALESCE(book_value, cost, 0)), 0) AS register_total
+                    FROM fixed_assets
+                    WHERE company_key = ?
+                      AND lower(COALESCE(status, 'Active')) NOT IN ('deleted', 'voided', 'cancelled')
+                    """,
+                    (company_key,),
+                ).fetchone()
+                fixed_assets_register_total = round(float(fixed_assets_row["register_total"] or 0.0), 2) if fixed_assets_row else 0.0
+            except Exception:
+                fixed_assets_register_total = None
+        fixed_assets_cost_gl = round(float(get_account_total(company_key, "Fixed Assets", end_date=report_end_date, branch_id=branch_id, balance_side="debit", conn=conn)), 2)
+        accumulated_depreciation_gl = round(float(get_account_total(company_key, "Accumulated Depreciation", end_date=report_end_date, branch_id=branch_id, balance_side="credit", conn=conn)), 2)
+        fixed_assets_net_gl = round(fixed_assets_cost_gl - accumulated_depreciation_gl, 2)
+
+        payroll_liability_accounts = [
+            "Payroll Payable",
+            "SSNIT Payable",
+            "PAYE Payable",
+            "Other Payroll Deductions Payable",
+        ]
+        payroll_liabilities = _account_balance_snapshot(company_key, payroll_liability_accounts, as_of_date=report_end_date, branch_id=branch_id, conn=conn)
+        for payroll_row in payroll_liabilities:
+            payroll_row["balance"] = round(float(payroll_row["credit_total"] or 0.0) - float(payroll_row["debit_total"] or 0.0), 2)
+
+        tax_liability_accounts = [
+            "VAT Payable",
+            "NHIL Payable",
+            "GETFund Levy Payable",
+        ]
+        tax_liabilities = _account_balance_snapshot(company_key, tax_liability_accounts, as_of_date=report_end_date, branch_id=branch_id, conn=conn)
+        for tax_row in tax_liabilities:
+            tax_row["balance"] = round(float(tax_row["credit_total"] or 0.0) - float(tax_row["debit_total"] or 0.0), 2)
 
         warnings = []
         if abs(trial_balance_difference) >= 0.01:
             warnings.append(f"Trial Balance is out of balance by {trial_balance_difference:.2f}.")
         if abs(balance_sheet_difference) >= 0.01:
             warnings.append(f"Balance Sheet does not balance by {balance_sheet_difference:.2f}.")
+        if abs(ar_aging_total - ar_gl_balance) >= 0.01:
+            warnings.append(f"A/R aging differs from A/R control by {ar_aging_total - ar_gl_balance:.2f}.")
+        if abs(ap_aging_total - ap_gl_balance) >= 0.01:
+            warnings.append(f"A/P aging differs from A/P control by {ap_aging_total - ap_gl_balance:.2f}.")
+        if fixed_assets_register_total is not None and abs(fixed_assets_register_total - fixed_assets_net_gl) >= 0.01:
+            warnings.append(f"Fixed asset register differs from fixed asset GL by {fixed_assets_register_total - fixed_assets_net_gl:.2f}.")
         if not income_accounts and not expense_accounts:
             warnings.append("Profit & Loss has no revenue or expense journal activity for the selected range.")
         if integrity["unbalanced_journal_count"]:
@@ -2667,6 +2789,40 @@ def get_reporting_trust_diagnostics(company_key, start_date=None, end_date=None,
                 "cash_bank": bank_reconciliation["summary"],
                 "unbalanced_journal_count": integrity["unbalanced_journal_count"],
                 "orphaned_journal_reference_count": integrity["orphaned_journal_reference_count"],
+            },
+            "ar_aging": {
+                "aging_total": ar_aging_total,
+                "gl_control_balance": ar_gl_balance,
+                "difference": round(ar_aging_total - ar_gl_balance, 2),
+                "reconciled": abs(ar_aging_total - ar_gl_balance) < 0.01,
+            },
+            "ap_aging": {
+                "aging_total": ap_aging_total,
+                "gl_control_balance": ap_gl_balance,
+                "difference": round(ap_aging_total - ap_gl_balance, 2),
+                "reconciled": abs(ap_aging_total - ap_gl_balance) < 0.01,
+            },
+            "cash_book": {
+                "account_balances": cash_balances,
+                "combined_cash_equivalent_balance": cash_gl_total,
+                "gl_cash_equivalent_balance": cash_gl_total,
+                "reconciled": True,
+            },
+            "fixed_assets": {
+                "register_book_value": fixed_assets_register_total,
+                "gl_cost_balance": fixed_assets_cost_gl,
+                "gl_accumulated_depreciation": accumulated_depreciation_gl,
+                "gl_net_balance": fixed_assets_net_gl,
+                "difference": None if fixed_assets_register_total is None else round(fixed_assets_register_total - fixed_assets_net_gl, 2),
+                "reconciled": fixed_assets_register_total is None or abs(fixed_assets_register_total - fixed_assets_net_gl) < 0.01,
+            },
+            "payroll_liabilities": {
+                "account_balances": payroll_liabilities,
+                "total_balance": round(sum(float(row["balance"] or 0.0) for row in payroll_liabilities), 2),
+            },
+            "tax_liabilities": {
+                "account_balances": tax_liabilities,
+                "total_balance": round(sum(float(row["balance"] or 0.0) for row in tax_liabilities), 2),
             },
             "period_control": period_control,
             "warnings": warnings,
