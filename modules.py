@@ -8202,85 +8202,90 @@ def show_company_setup(company_key, company_name, role):
 
                 st.markdown("---")
                 st.subheader("Staff Management")
-                with st.form("company_setup_staff_form"):
-                    staff_name = st.text_input("Full Name")
-                    staff_role = st.selectbox("Role", ["Bookkeeper", "Staff"])
-                    manual_login_key = st.text_input("Staff Login Key (Manual)", type="password")
-                    staff_password = st.text_input("Assign Password", type="password")
-                    submitted = st.form_submit_button("Create Staff Login")
+                staff_conn = get_connection()
+                try:
+                    with st.form("company_setup_staff_form"):
+                        staff_name = st.text_input("Full Name")
+                        staff_role = st.selectbox("Role", ["Bookkeeper", "Staff"])
+                        manual_login_key = st.text_input("Staff Login Key (Manual)", type="password")
+                        staff_password = st.text_input("Assign Password", type="password")
+                        submitted = st.form_submit_button("Create Staff Login")
 
-                    if submitted:
-                        if not require_permission(
-                            role,
-                            "manage_users",
-                            action_label="manage users",
-                            company_key=company_key,
-                            conn=conn,
-                        ):
-                            return
-                        if not staff_name.strip():
-                            st.warning("Enter a staff name before creating a login.")
-                        elif not manual_login_key.strip():
-                            st.warning("Enter a manual staff login key before creating the staff login.")
-                        elif not staff_password:
-                            st.warning("Assign a password before creating the staff login.")
-                        else:
-                            try:
-                                existing_key = conn.execute(
-                                    "SELECT 1 FROM users WHERE login_key = ? LIMIT 1",
-                                    (manual_login_key.strip(),),
-                                ).fetchone()
-                                if existing_key:
-                                    st.error("This staff login key already exists. Choose a different manual key.")
-                                    return
-                                user_id = _generate_user_id(company_key, staff_name, manual_login_key)
-                                conn.execute(
-                                    """
-                                    INSERT INTO users (company_key, full_name, user_id, login_key, password_hash, role, status)
-                                    VALUES (?, ?, ?, ?, ?, ?, 'Active')
-                                    """,
-                                    (
+                        if submitted:
+                            if not require_permission(
+                                role,
+                                "manage_users",
+                                action_label="manage users",
+                                company_key=company_key,
+                                conn=staff_conn,
+                            ):
+                                return
+                            if not staff_name.strip():
+                                st.warning("Enter a staff name before creating a login.")
+                            elif not manual_login_key.strip():
+                                st.warning("Enter a manual staff login key before creating the staff login.")
+                            elif not staff_password:
+                                st.warning("Assign a password before creating the staff login.")
+                            else:
+                                try:
+                                    existing_key = staff_conn.execute(
+                                        "SELECT 1 FROM users WHERE login_key = ? LIMIT 1",
+                                        (manual_login_key.strip(),),
+                                    ).fetchone()
+                                    if existing_key:
+                                        st.error("This staff login key already exists. Choose a different manual key.")
+                                        return
+                                    user_id = _generate_user_id(company_key, staff_name, manual_login_key)
+                                    staff_conn.execute(
+                                        """
+                                        INSERT INTO users (company_key, full_name, user_id, login_key, password_hash, role, status)
+                                        VALUES (?, ?, ?, ?, ?, ?, 'Active')
+                                        """,
+                                        (
+                                            company_key,
+                                            staff_name.strip(),
+                                            user_id,
+                                            manual_login_key.strip(),
+                                            _hash_staff_password(staff_password),
+                                            staff_role,
+                                        ),
+                                    )
+                                    log_audit_action(
+                                        staff_conn,
                                         company_key,
-                                        staff_name.strip(),
-                                        user_id,
-                                        manual_login_key.strip(),
-                                        _hash_staff_password(staff_password),
-                                        staff_role,
-                                    ),
-                                )
-                                conn.commit()
-                                log_audit_action(
-                                    conn,
-                                    company_key,
-                                    role,
-                                    "Staff Login Created",
-                                    "Company Setup",
-                                    f"{staff_name.strip()} created as {staff_role} with user_id {user_id[:12]}...",
-                                )
-                                st.success("Staff login created successfully.")
-                            except Exception as exc:
-                                st.error(build_user_safe_error(exc, role))
+                                        role,
+                                        "Staff Login Created",
+                                        "Company Setup",
+                                        f"{staff_name.strip()} created as {staff_role} with user_id {user_id[:12]}...",
+                                    )
+                                    staff_conn.commit()
+                                    st.success("Staff login created successfully.")
+                                except Exception as exc:
+                                    staff_conn.rollback()
+                                    st.error(build_user_safe_error(exc, role))
 
-                users = conn.execute(
-                    """
-                    SELECT full_name, role, user_id, status, created_at
-                    FROM users
-                    WHERE company_key = ?
-                    ORDER BY created_at DESC
-                    """,
-                    (company_key,),
-                ).fetchall()
-                if users:
-                    users_df = pd.DataFrame(
-                        users,
-                        columns=["Full Name", "Role", "User ID", "Status", "Created At"],
-                    )
-                    users_df["User ID"] = users_df["User ID"].fillna("").map(
-                        lambda value: f"{str(value)[:8]}..." if str(value) else ""
-                    )
-                    st.dataframe(format_currency_dataframe(users_df), use_container_width=True)
-                else:
-                    st.caption("No staff logins created yet.")
+                    users = staff_conn.execute(
+                        """
+                        SELECT full_name, role, user_id, status, created_at
+                        FROM users
+                        WHERE company_key = ?
+                        ORDER BY created_at DESC
+                        """,
+                        (company_key,),
+                    ).fetchall()
+                    if users:
+                        users_df = pd.DataFrame(
+                            users,
+                            columns=["Full Name", "Role", "User ID", "Status", "Created At"],
+                        )
+                        users_df["User ID"] = users_df["User ID"].fillna("").map(
+                            lambda value: f"{str(value)[:8]}..." if str(value) else ""
+                        )
+                        st.dataframe(format_currency_dataframe(users_df), use_container_width=True)
+                    else:
+                        st.caption("No staff logins created yet.")
+                finally:
+                    staff_conn.close()
         else:
             st.info("Company profile not found.")
     except Exception as e:
