@@ -28,7 +28,17 @@ def _normal_balance(account_type):
 
 VALID_ACCOUNT_TYPES = {"Asset", "Liability", "Equity", "Income", "Expense"}
 VALID_DOCUMENT_CONTROL_STATUSES = {"Draft", "Submitted", "Approved", "Posted", "Cancelled", "Voided", "Active"}
-CONTROLLED_SOURCE_TABLES = {"invoices", "bills", "payments", "stock_movements", "vouchers", "fixed_assets", "payroll"}
+CONTROLLED_SOURCE_TABLES = {
+    "invoices",
+    "bills",
+    "payments",
+    "stock_movements",
+    "vouchers",
+    "fixed_assets",
+    "payroll",
+    "pos_returns",
+    "inventory_import_batches",
+}
 CONTROL_ACCOUNT_NAMES = {"Accounts Receivable", "Accounts Payable", "Inventory"}
 UNIFIED_POSTING_ENGINE_VERSION = "phase7_unified_posting_engine_v1"
 HEADER_ACCOUNT_NAMES = {
@@ -379,7 +389,13 @@ def _safe_doc_status(row, columns):
         return normalize_document_status(row["approval_status"], default="Draft")
     if "status" in columns:
         return normalize_document_status(row["status"], default="Draft")
+    if "opening_posted" in columns:
+        return "Posted" if bool(int(row["opening_posted"] or 0)) else "Draft"
     return "Draft"
+
+
+def _controlled_source_table_sql_list():
+    return ", ".join("'" + table_name.replace("'", "''") + "'" for table_name in sorted(CONTROLLED_SOURCE_TABLES))
 
 
 def _chart_account_structure(conn):
@@ -522,11 +538,11 @@ def _source_document_duplicate_postings(conn, company_key, branch_id=None):
           AND COALESCE(is_voided, 0) = 0
           AND COALESCE(approval_status, 'Posted') = 'Posted'
           AND source_id IS NOT NULL
-          AND lower(COALESCE(source_table, '')) IN ('invoices', 'bills', 'payments', 'stock_movements', 'vouchers', 'fixed_assets', 'payroll')
+          AND lower(COALESCE(source_table, '')) IN ({controlled_tables})
           {branch_clause}
         GROUP BY lower(COALESCE(source_table, '')), source_id
         HAVING COUNT(*) > 1
-        """.format(branch_clause=branch_clause),
+        """.format(branch_clause=branch_clause, controlled_tables=_controlled_source_table_sql_list()),
         tuple([company_key] + ([branch_id] if branch_id else [])),
     ).fetchall()
     return [
@@ -2117,13 +2133,16 @@ def generate_cash_flow_statement(company_key, start_date, end_date, branch_id=No
 
 
 def _aging_bucket(days_outstanding):
-    if days_outstanding <= 30:
-        return "0-30 Days"
-    if days_outstanding <= 60:
+    days = int(days_outstanding or 0)
+    if days <= 0:
+        return "Current"
+    if days <= 30:
+        return "1-30 Days"
+    if days <= 60:
         return "31-60 Days"
-    if days_outstanding <= 90:
+    if days <= 90:
         return "61-90 Days"
-    return "91+ Days"
+    return "90+ Days"
 
 
 def get_ar_aging_report(company_key, as_of_date=None):
@@ -2136,38 +2155,127 @@ def get_ar_aging_report(company_key, as_of_date=None):
         ).fetchall()
         rows = []
         for customer in customers:
-            balance = get_customer_balance(company_key, int(customer["id"]), as_of_date=report_date.date(), conn=conn)
-            if abs(balance) < 0.005:
-                continue
-            oldest_row = conn.execute(
-                f"""
-                SELECT MIN(date(je.date)) AS oldest_open_date
-                FROM journal_entries je
-                JOIN journal_lines jl ON jl.entry_id = je.id
-                JOIN chart_of_accounts c ON c.id = jl.account_id
-                WHERE je.company_key = ?
-                  AND je.customer_id = ?
-                  AND jl.debit > 0
-                  AND lower({_coa_name_expression()}) LIKE 'accounts receivable%'
-                  AND date(je.date) <= date(?)
-                  AND COALESCE(je.is_voided, 0) = 0
-                  AND COALESCE(je.approval_status, 'Posted') = 'Posted'
+            customer_id = int(customer["id"])
+            gl_balance = get_customer_balance(company_key, customer_id, as_of_date=report_date.date(), conn=conn)
+            customer_label = customer["customer_id"] or f"CUST-{customer_id:06d}"
+            document_remaining_total = 0.0
+            invoice_rows = conn.execute(
+                """
+                SELECT
+                    i.id,
+                    i.invoice_number,
+                    i.invoice_date,
+                    COALESCE(NULLIF(i.due_date, ''), i.invoice_date) AS due_date,
+                    ROUND(COALESCE(i.amount, 0) + COALESCE(i.output_vat, 0), 2) AS original_amount,
+                    ROUND(
+                        COALESCE((
+                            SELECT SUM(pa.amount)
+                            FROM payment_allocations pa
+                            JOIN payments p ON p.id = pa.payment_id
+                            WHERE pa.invoice_id = i.id
+                              AND p.company_key = i.company_key
+                              AND date(p.payment_date) <= date(?)
+                              AND COALESCE(p.approval_status, p.status, 'Posted') = 'Posted'
+                        ), 0)
+                        +
+                        COALESCE((
+                            SELECT SUM(p.amount)
+                            FROM payments p
+                            WHERE p.invoice_id = i.id
+                              AND p.company_key = i.company_key
+                              AND date(p.payment_date) <= date(?)
+                              AND COALESCE(p.approval_status, p.status, 'Posted') = 'Posted'
+                              AND NOT EXISTS (
+                                  SELECT 1
+                                  FROM payment_allocations pa
+                                  WHERE pa.payment_id = p.id
+                                    AND pa.invoice_id = i.id
+                              )
+                        ), 0),
+                        2
+                    ) AS paid_amount
+                FROM invoices i
+                WHERE i.company_key = ?
+                  AND i.customer_id = ?
+                  AND date(i.invoice_date) <= date(?)
+                  AND COALESCE(i.approval_status, i.status, 'Draft') = 'Posted'
+                ORDER BY date(COALESCE(NULLIF(i.due_date, ''), i.invoice_date)), i.id
                 """,
-                (company_key, int(customer["id"]), _resolve_date(report_date.date())),
-            ).fetchone()
-            oldest_date = pd.Timestamp(oldest_row["oldest_open_date"]) if oldest_row and oldest_row["oldest_open_date"] else pd.Timestamp(report_date)
-            days = int((report_date - oldest_date).days) if oldest_date is not None else 0
-            rows.append(
-                {
-                    "customer_id": customer["customer_id"] or f"CUST-{int(customer['id']):06d}",
-                    "customer_name": customer["name"],
-                    "phone": customer["phone"],
-                    "email": customer["email"],
-                    "days_outstanding": days,
-                    "bucket": _aging_bucket(days),
-                    "balance": round(balance, 2),
-                }
-            )
+                (
+                    _resolve_date(report_date.date()),
+                    _resolve_date(report_date.date()),
+                    company_key,
+                    customer_id,
+                    _resolve_date(report_date.date()),
+                ),
+            ).fetchall()
+            for invoice in invoice_rows:
+                original_amount = round(float(invoice["original_amount"] or 0.0), 2)
+                paid_amount = round(float(invoice["paid_amount"] or 0.0), 2)
+                remaining = round(original_amount - paid_amount, 2)
+                if remaining <= 0.005:
+                    continue
+                due_date = pd.Timestamp(invoice["due_date"] or invoice["invoice_date"] or report_date)
+                days_overdue = max(int((report_date - due_date).days), 0)
+                document_remaining_total = round(document_remaining_total + remaining, 2)
+                rows.append(
+                    {
+                        "customer_id": customer_label,
+                        "customer_name": customer["name"],
+                        "document_type": "Invoice",
+                        "document_number": invoice["invoice_number"] or f"INV-{int(invoice['id'])}",
+                        "document_date": invoice["invoice_date"],
+                        "due_date": invoice["due_date"],
+                        "phone": customer["phone"],
+                        "email": customer["email"],
+                        "original_amount": original_amount,
+                        "paid_amount": paid_amount,
+                        "remaining_balance": remaining,
+                        "days_overdue": days_overdue,
+                        "days_outstanding": days_overdue,
+                        "bucket": _aging_bucket(days_overdue),
+                        "balance": remaining,
+                    }
+                )
+            legacy_balance = round(gl_balance - document_remaining_total, 2)
+            if abs(legacy_balance) >= 0.005:
+                oldest_row = conn.execute(
+                    f"""
+                    SELECT MIN(date(je.date)) AS oldest_open_date
+                    FROM journal_entries je
+                    JOIN journal_lines jl ON jl.entry_id = je.id
+                    JOIN chart_of_accounts c ON c.id = jl.account_id
+                    WHERE je.company_key = ?
+                      AND je.customer_id = ?
+                      AND jl.debit > 0
+                      AND lower({_coa_name_expression()}) LIKE 'accounts receivable%'
+                      AND date(je.date) <= date(?)
+                      AND COALESCE(je.is_voided, 0) = 0
+                      AND COALESCE(je.approval_status, 'Posted') = 'Posted'
+                    """,
+                    (company_key, customer_id, _resolve_date(report_date.date())),
+                ).fetchone()
+                oldest_date = pd.Timestamp(oldest_row["oldest_open_date"]) if oldest_row and oldest_row["oldest_open_date"] else report_date
+                days = max(int((report_date - oldest_date).days), 0)
+                rows.append(
+                    {
+                        "customer_id": customer_label,
+                        "customer_name": customer["name"],
+                        "document_type": "Legacy / Unallocated",
+                        "document_number": "Unallocated AR Balance",
+                        "document_date": oldest_date.date().isoformat() if hasattr(oldest_date, "date") else str(oldest_date),
+                        "due_date": oldest_date.date().isoformat() if hasattr(oldest_date, "date") else str(oldest_date),
+                        "phone": customer["phone"],
+                        "email": customer["email"],
+                        "original_amount": round(legacy_balance, 2),
+                        "paid_amount": 0.0,
+                        "remaining_balance": round(legacy_balance, 2),
+                        "days_overdue": days if legacy_balance > 0 else 0,
+                        "days_outstanding": days if legacy_balance > 0 else 0,
+                        "bucket": _aging_bucket(days if legacy_balance > 0 else 0),
+                        "balance": round(legacy_balance, 2),
+                    }
+                )
         return rows
     finally:
         conn.close()
@@ -2243,39 +2351,127 @@ def get_ap_aging_report(company_key, as_of_date=None):
         rows = []
         for supplier in suppliers:
             supplier_id = int(supplier["id"])
-            balance = get_supplier_balance(company_key, supplier_id, as_of_date=report_date.date(), conn=conn)
-            if abs(balance) < 0.005:
-                continue
-            oldest_row = conn.execute(
-                f"""
-                SELECT MIN(date(je.date)) AS oldest_open_date
-                FROM journal_entries je
-                JOIN journal_lines jl ON jl.entry_id = je.id
-                JOIN chart_of_accounts c ON c.id = jl.account_id
-                WHERE je.company_key = ?
-                  AND je.supplier_id = ?
-                  AND jl.credit > 0
-                  AND lower({_coa_name_expression()}) LIKE 'accounts payable%'
-                  AND date(je.date) <= date(?)
-                  AND COALESCE(je.is_voided, 0) = 0
-                  AND COALESCE(je.approval_status, 'Posted') = 'Posted'
+            gl_balance = get_supplier_balance(company_key, supplier_id, as_of_date=report_date.date(), conn=conn)
+            document_remaining_total = 0.0
+            bill_rows = conn.execute(
+                """
+                SELECT
+                    b.id,
+                    b.bill_number,
+                    b.bill_date,
+                    COALESCE(NULLIF(b.due_date, ''), b.bill_date) AS due_date,
+                    ROUND(COALESCE(b.amount, 0) + COALESCE(b.input_vat, 0), 2) AS original_amount,
+                    ROUND(
+                        COALESCE((
+                            SELECT SUM(pa.amount)
+                            FROM payment_allocations pa
+                            JOIN payments p ON p.id = pa.payment_id
+                            WHERE pa.bill_id = b.id
+                              AND p.company_key = b.company_key
+                              AND date(p.payment_date) <= date(?)
+                              AND COALESCE(p.approval_status, p.status, 'Posted') = 'Posted'
+                        ), 0)
+                        +
+                        COALESCE((
+                            SELECT SUM(p.amount)
+                            FROM payments p
+                            WHERE p.bill_id = b.id
+                              AND p.company_key = b.company_key
+                              AND date(p.payment_date) <= date(?)
+                              AND COALESCE(p.approval_status, p.status, 'Posted') = 'Posted'
+                              AND NOT EXISTS (
+                                  SELECT 1
+                                  FROM payment_allocations pa
+                                  WHERE pa.payment_id = p.id
+                                    AND pa.bill_id = b.id
+                              )
+                        ), 0),
+                        2
+                    ) AS paid_amount
+                FROM bills b
+                WHERE b.company_key = ?
+                  AND b.supplier_id = ?
+                  AND date(b.bill_date) <= date(?)
+                  AND COALESCE(b.approval_status, b.status, 'Draft') = 'Posted'
+                ORDER BY date(COALESCE(NULLIF(b.due_date, ''), b.bill_date)), b.id
                 """,
-                (company_key, supplier_id, _resolve_date(report_date.date())),
-            ).fetchone()
-            oldest_date = pd.Timestamp(oldest_row["oldest_open_date"]) if oldest_row and oldest_row["oldest_open_date"] else report_date
-            days = int((report_date - oldest_date).days)
-            rows.append(
-                {
-                    "supplier_id": supplier_id,
-                    "supplier_name": supplier["name"],
-                    "email": supplier["email"],
-                    "phone": supplier["phone"],
-                    "address": supplier["address"],
-                    "days_outstanding": days,
-                    "bucket": _aging_bucket(days),
-                    "balance": round(balance, 2),
-                }
-            )
+                (
+                    _resolve_date(report_date.date()),
+                    _resolve_date(report_date.date()),
+                    company_key,
+                    supplier_id,
+                    _resolve_date(report_date.date()),
+                ),
+            ).fetchall()
+            for bill in bill_rows:
+                original_amount = round(float(bill["original_amount"] or 0.0), 2)
+                paid_amount = round(float(bill["paid_amount"] or 0.0), 2)
+                remaining = round(original_amount - paid_amount, 2)
+                if remaining <= 0.005:
+                    continue
+                due_date = pd.Timestamp(bill["due_date"] or bill["bill_date"] or report_date)
+                days_overdue = max(int((report_date - due_date).days), 0)
+                document_remaining_total = round(document_remaining_total + remaining, 2)
+                rows.append(
+                    {
+                        "supplier_id": supplier_id,
+                        "supplier_name": supplier["name"],
+                        "document_type": "Bill",
+                        "document_number": bill["bill_number"] or f"BILL-{int(bill['id'])}",
+                        "document_date": bill["bill_date"],
+                        "due_date": bill["due_date"],
+                        "email": supplier["email"],
+                        "phone": supplier["phone"],
+                        "address": supplier["address"],
+                        "original_amount": original_amount,
+                        "paid_amount": paid_amount,
+                        "remaining_balance": remaining,
+                        "days_overdue": days_overdue,
+                        "days_outstanding": days_overdue,
+                        "bucket": _aging_bucket(days_overdue),
+                        "balance": remaining,
+                    }
+                )
+            legacy_balance = round(gl_balance - document_remaining_total, 2)
+            if abs(legacy_balance) >= 0.005:
+                oldest_row = conn.execute(
+                    f"""
+                    SELECT MIN(date(je.date)) AS oldest_open_date
+                    FROM journal_entries je
+                    JOIN journal_lines jl ON jl.entry_id = je.id
+                    JOIN chart_of_accounts c ON c.id = jl.account_id
+                    WHERE je.company_key = ?
+                      AND je.supplier_id = ?
+                      AND jl.credit > 0
+                      AND lower({_coa_name_expression()}) LIKE 'accounts payable%'
+                      AND date(je.date) <= date(?)
+                      AND COALESCE(je.is_voided, 0) = 0
+                      AND COALESCE(je.approval_status, 'Posted') = 'Posted'
+                    """,
+                    (company_key, supplier_id, _resolve_date(report_date.date())),
+                ).fetchone()
+                oldest_date = pd.Timestamp(oldest_row["oldest_open_date"]) if oldest_row and oldest_row["oldest_open_date"] else report_date
+                days = max(int((report_date - oldest_date).days), 0)
+                rows.append(
+                    {
+                        "supplier_id": supplier_id,
+                        "supplier_name": supplier["name"],
+                        "document_type": "Legacy / Unallocated",
+                        "document_number": "Unallocated AP Balance",
+                        "document_date": oldest_date.date().isoformat() if hasattr(oldest_date, "date") else str(oldest_date),
+                        "due_date": oldest_date.date().isoformat() if hasattr(oldest_date, "date") else str(oldest_date),
+                        "email": supplier["email"],
+                        "phone": supplier["phone"],
+                        "address": supplier["address"],
+                        "original_amount": round(legacy_balance, 2),
+                        "paid_amount": 0.0,
+                        "remaining_balance": round(legacy_balance, 2),
+                        "days_overdue": days if legacy_balance > 0 else 0,
+                        "days_outstanding": days if legacy_balance > 0 else 0,
+                        "bucket": _aging_bucket(days if legacy_balance > 0 else 0),
+                        "balance": round(legacy_balance, 2),
+                    }
+                )
         return rows
     finally:
         conn.close()
