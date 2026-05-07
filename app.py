@@ -1466,6 +1466,21 @@ def check_session_lock():
         return True
 
 
+def _has_restored_data_without_admin_users():
+    conn = None
+    try:
+        conn = get_connection()
+        company_count = conn.execute("SELECT COUNT(*) FROM companies").fetchone()[0]
+        user_count = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+        return int(company_count or 0) > 0 and int(user_count or 0) == 0
+    except Exception as exc:
+        logger.warning("Administrative access repair check skipped: %s", sanitize_error_message(exc))
+        return False
+    finally:
+        if conn:
+            conn.close()
+
+
 def main():
     st.cache_data.clear()
     st.cache_resource.clear()
@@ -1499,6 +1514,10 @@ def main():
         st.stop()
     if bootstrap_needed:
         st.info("No company has been created yet. Complete initial company setup to activate this ERP.")
+    if _has_restored_data_without_admin_users():
+        st.warning(
+            "Administrative access repair required. Restored company data exists, but no active admin user records were found."
+        )
     _verify_cloud_vault_handshake()
     if "base_currency" not in st.session_state:
         st.session_state.base_currency = "GHS"
