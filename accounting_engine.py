@@ -36,6 +36,7 @@ CONTROLLED_SOURCE_TABLES = {
     "vouchers",
     "fixed_assets",
     "payroll",
+    "pos_sales",
     "pos_returns",
     "inventory_import_batches",
 }
@@ -156,7 +157,7 @@ def _source_document_columns(conn, table_name):
     return {row[1] for row in conn.execute(f"PRAGMA table_info({table_name})").fetchall()}
 
 
-def _sync_source_document_posting(conn, source_table, source_id, entry_id, posting_user=None):
+def _sync_source_document_posting(conn, source_table, source_id, entry_id, posting_user=None, source_type=None):
     if not source_table or not source_id:
         return
     normalized_source_table = str(source_table).strip().lower()
@@ -165,7 +166,14 @@ def _sync_source_document_posting(conn, source_table, source_id, entry_id, posti
     source_columns = _source_document_columns(conn, normalized_source_table)
     update_parts = []
     params = []
-    if "posted_entry_id" in source_columns:
+    if (
+        normalized_source_table == "pos_sales"
+        and "cogs" in str(source_type or "").strip().lower()
+        and "cogs_posted_entry_id" in source_columns
+    ):
+        update_parts.append("cogs_posted_entry_id = ?")
+        params.append(int(entry_id))
+    elif "posted_entry_id" in source_columns:
         update_parts.append("posted_entry_id = ?")
         params.append(int(entry_id))
     if "last_journal_sync_at" in source_columns:
@@ -330,7 +338,7 @@ def _assert_source_document_postable(conn, source_table, source_id):
         )
 
 
-def _assert_no_duplicate_source_posting(conn, company_key, source_table, source_id, branch_id=None):
+def _assert_no_duplicate_source_posting(conn, company_key, source_table, source_id, branch_id=None, source_type=None):
     if not source_table or not source_id:
         return
     normalized_table = str(source_table).strip().lower()
@@ -346,6 +354,9 @@ def _assert_no_duplicate_source_posting(conn, company_key, source_table, source_
           AND COALESCE(approval_status, 'Posted') = 'Posted'
     """
     params = [company_key, normalized_table, int(source_id)]
+    if normalized_table == "pos_sales" and source_type:
+        query += " AND lower(COALESCE(source_type, '')) = lower(?)"
+        params.append(str(source_type))
     if branch_id:
         query += " AND branch_id = ?"
         params.append(branch_id)
@@ -1155,7 +1166,7 @@ def post_journal_entry(
     if _period_locked(conn, company_key, entry_date):
         raise ValueError(f"The accounting period for {entry_date[:7]} is locked.")
     _assert_source_document_postable(conn, source_table, source_id)
-    _assert_no_duplicate_source_posting(conn, company_key, source_table, source_id, branch_id=branch_id)
+    _assert_no_duplicate_source_posting(conn, company_key, source_table, source_id, branch_id=branch_id, source_type=source_type)
 
     normalized_approval_status = normalize_document_status(approval_status, default="Posted")
     normalized_lines = []
@@ -1283,6 +1294,7 @@ def post_journal_entry(
                 source_id=source_id,
                 entry_id=entry_id,
                 posting_user=created_by,
+                source_type=source_type,
             )
         _mirror_legacy_transactions(conn, company_key, entry_date, description, reference, created_by, branch_id, normalized_lines)
         if source_module:

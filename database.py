@@ -4267,6 +4267,9 @@ def ensure_pos_sales_schema(conn):
             grand_total REAL DEFAULT 0,
             amount_tendered REAL DEFAULT 0,
             change_due REAL DEFAULT 0,
+            posted_entry_id INTEGER,
+            cogs_posted_entry_id INTEGER,
+            last_journal_sync_at TIMESTAMP,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (company_key) REFERENCES companies (key) ON DELETE CASCADE
         )
@@ -4290,6 +4293,9 @@ def ensure_pos_sales_schema(conn):
         "grand_total": "REAL DEFAULT 0",
         "amount_tendered": "REAL DEFAULT 0",
         "change_due": "REAL DEFAULT 0",
+        "posted_entry_id": "INTEGER",
+        "cogs_posted_entry_id": "INTEGER",
+        "last_journal_sync_at": "TIMESTAMP",
         "created_at": "TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
     }
     for column_name, column_def in pos_sale_column_defs.items():

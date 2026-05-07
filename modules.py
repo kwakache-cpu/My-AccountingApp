@@ -248,6 +248,9 @@ from database import (
     force_backup_after_company_creation,
     get_firebase_service_account_info,
     get_connection,
+    get_database_health_snapshot,
+    get_persistence_diagnostics,
+    get_schema_manifest_diagnostics,
     get_subscription_plan_setting,
     get_subscription_plan_settings,
     get_company_subscription_snapshot,
@@ -263,6 +266,8 @@ from accounting_engine import (
     get_ap_aging_report,
     get_ar_aging_report,
     get_chart_of_accounts_diagnostics,
+    get_reporting_trust_diagnostics,
+    get_unified_posting_engine_diagnostics,
     generate_balance_sheet,
     generate_cash_flow_statement,
     generate_income_statement,
@@ -6086,6 +6091,80 @@ def get_system_health_snapshot():
     }
 
 
+def get_deployment_readiness_diagnostics():
+    conn = None
+    recommendations = []
+    diagnostics = {
+        "database_backend": "SQLite",
+        "db_label": "Unavailable",
+        "company_count": 0,
+        "cloud_vault_status": "Unknown",
+        "runtime_db_valid": False,
+        "last_local_backup": "Unknown",
+        "last_cloud_backup": "Unknown",
+        "cloud_backup_count": "Unknown",
+        "schema_self_heal_status": "Unknown",
+        "journal_integrity_status": "Unknown",
+        "trial_balance_balanced": "Unknown",
+        "pos_source_document_control": "Unknown",
+        "sqlite_concurrency_warning": "SQLite is suitable for pilot/small-client use but not high-concurrency enterprise deployment.",
+        "recommended_action": "Review diagnostics before client rollout.",
+    }
+    try:
+        db_health = get_database_health_snapshot()
+        persistence = get_persistence_diagnostics()
+        schema_diag = get_schema_manifest_diagnostics()
+        diagnostics.update(
+            {
+                "db_label": db_health.get("db_path") or "SQLite runtime database",
+                "company_count": int(db_health.get("company_count") or 0),
+                "cloud_vault_status": str(persistence.get("latest_cloud_backup_status") or "Unknown"),
+                "runtime_db_valid": bool(db_health.get("structural_valid")),
+                "last_local_backup": str(persistence.get("last_local_backup_timestamp") or persistence.get("latest_local_backup_status") or "Unknown"),
+                "last_cloud_backup": str(persistence.get("last_cloud_backup_timestamp") or persistence.get("latest_cloud_backup_status") or "Unknown"),
+                "cloud_backup_count": str(persistence.get("cloud_backup_count") if persistence.get("cloud_backup_count") is not None else "Unknown"),
+                "schema_self_heal_status": "OK" if schema_diag.get("ok") else "Needs Attention",
+            }
+        )
+        if not diagnostics["runtime_db_valid"]:
+            recommendations.append("Repair or restore the runtime database before deployment.")
+        if not schema_diag.get("ok"):
+            recommendations.append("Run startup migration/self-heal and review missing schema columns.")
+
+        conn = get_connection()
+        company_row = None
+        if conn:
+            company_row = conn.execute(
+                "SELECT key FROM companies ORDER BY created_at DESC LIMIT 1"
+            ).fetchone()
+        if company_row:
+            company_key = company_row["key"]
+            trust = get_reporting_trust_diagnostics(company_key, conn=conn)
+            posting_diag = get_unified_posting_engine_diagnostics(company_key, conn=conn)
+            diagnostics["journal_integrity_status"] = "OK" if not trust.get("reconciliation", {}).get("unbalanced_journal_count") else "Unbalanced Journals"
+            diagnostics["trial_balance_balanced"] = "Yes" if trust.get("trial_balance", {}).get("balanced") else "No"
+            controlled_tables = set(posting_diag.get("controlled_source_tables") or [])
+            diagnostics["pos_source_document_control"] = "Protected" if "pos_sales" in controlled_tables else "Not Protected"
+            if diagnostics["trial_balance_balanced"] != "Yes":
+                recommendations.append("Resolve Trial Balance imbalance before deployment.")
+            if diagnostics["pos_source_document_control"] != "Protected":
+                recommendations.append("Enable POS sale source-document controls before POS rollout.")
+        else:
+            diagnostics["journal_integrity_status"] = "No company data"
+            diagnostics["trial_balance_balanced"] = "No company data"
+            diagnostics["pos_source_document_control"] = "Protected by engine configuration"
+        if not recommendations:
+            recommendations.append("Proceed with pilot deployment monitoring.")
+    except Exception as exc:
+        diagnostics["recommended_action"] = build_user_safe_error(exc, st.session_state.get("user", {}).get("role"))
+        return diagnostics
+    finally:
+        if conn:
+            conn.close()
+    diagnostics["recommended_action"] = " ".join(recommendations)
+    return diagnostics
+
+
 def _demo_notice():
     st.info("Enterprise Demo Mode is active. These values are virtual and are not written to the vault database.")
 
@@ -6185,6 +6264,25 @@ def show_system_health_module():
     col2.metric("Database Status", snapshot["db_status"])
     col3.metric("Companies", str(snapshot["company_count"]))
     col4.metric("Active Licenses", str(snapshot["active_licenses"]))
+
+    deployment = get_deployment_readiness_diagnostics()
+    st.subheader("Deployment Readiness")
+    diag_rows = [
+        {"Check": "Database Backend", "Status": deployment["database_backend"], "Detail": deployment["db_label"]},
+        {"Check": "Runtime DB Valid", "Status": "Yes" if deployment["runtime_db_valid"] else "No", "Detail": ""},
+        {"Check": "Company Count", "Status": str(deployment["company_count"]), "Detail": ""},
+        {"Check": "Cloud Vault", "Status": deployment["cloud_vault_status"], "Detail": ""},
+        {"Check": "Last Local Backup", "Status": deployment["last_local_backup"], "Detail": ""},
+        {"Check": "Last Cloud Backup", "Status": deployment["last_cloud_backup"], "Detail": ""},
+        {"Check": "Cloud Backup Count", "Status": deployment["cloud_backup_count"], "Detail": ""},
+        {"Check": "Schema Self-Heal", "Status": deployment["schema_self_heal_status"], "Detail": ""},
+        {"Check": "Journal Integrity", "Status": deployment["journal_integrity_status"], "Detail": ""},
+        {"Check": "Trial Balance", "Status": deployment["trial_balance_balanced"], "Detail": ""},
+        {"Check": "POS Source Control", "Status": deployment["pos_source_document_control"], "Detail": "source_table=pos_sales"},
+    ]
+    st.dataframe(pd.DataFrame(diag_rows), use_container_width=True, hide_index=True)
+    st.warning(deployment["sqlite_concurrency_warning"])
+    st.caption(deployment["recommended_action"])
 
     conn = get_connection()
     try:
@@ -9161,6 +9259,46 @@ def show_pos(company_key, company_name, role):
                     payment_method=payment_method,
                 )
                 sale_reference = f"POS-{legacy_sale_id or datetime.now().strftime('%Y%m%d%H%M%S')}"
+                sale_datetime = f"{sale_date.isoformat()} {datetime.now().strftime('%H:%M:%S')}"
+                receipt_data = {
+                    "company_key": company_key,
+                    "company_name": company_label,
+                    "branch_name": branch_label,
+                    "receipt_number": sale_reference,
+                    "sale_reference": sale_reference,
+                    "sale_date": sale_date.isoformat(),
+                    "sale_datetime": sale_datetime,
+                    "cashier": role,
+                    "payment_method": payment_method,
+                    "payment_reference": payment_reference,
+                    "subtotal": float(current_summary["subtotal"] or 0.0),
+                    "discount_total": float(current_summary["discount_total"] or 0.0),
+                    "tax_total": float(current_summary["tax_total"] or 0.0),
+                    "grand_total": float(current_summary["grand_total"] or 0.0),
+                    "discount_approved_by": discount_approved_by,
+                    "amount_tendered": float(cash_tendered or 0.0) if payment_method == "Cash" else None,
+                    "change_due": max(float(cash_tendered or 0.0) - float(current_summary["grand_total"] or 0.0), 0.0)
+                    if payment_method == "Cash"
+                    else 0.0,
+                    "items": [
+                        {
+                            "name": sale_line["name"],
+                            "qty": int(sale_line["qty"]),
+                            "price": float(sale_line["price"] or 0.0),
+                            "line_total": float(sale_line.get("line_total") or 0.0),
+                        }
+                        for sale_line in sale_cart
+                    ],
+                }
+                pos_sale_id = _persist_pos_sale(
+                    conn,
+                    company_key,
+                    branch_id,
+                    sale_reference,
+                    receipt_data,
+                    sale_cart,
+                    customer_id=selected_credit_customer_id if payment_method == "On Credit" else None,
+                )
                 journal_lines, _ = build_sales_tax_journal_lines(
                     conn,
                     company_key,
@@ -9179,8 +9317,9 @@ def show_pos(company_key, company_name, role):
                     branch_id=branch_id,
                     customer_id=selected_credit_customer_id if payment_method == "On Credit" else None,
                     source_module="POS",
-                    source_table="vouchers" if legacy_sale_id else "journal_entries",
-                    source_id=int(legacy_sale_id) if legacy_sale_id else None,
+                    source_table="pos_sales",
+                    source_type="POS Sale",
+                    source_id=int(pos_sale_id),
                     conn=conn,
                 )
                 if payment_method == "On Credit":
@@ -9221,7 +9360,9 @@ def show_pos(company_key, company_name, role):
                         branch_id=branch_id,
                         customer_id=selected_credit_customer_id if payment_method == "On Credit" else None,
                         source_module="POS",
-                        source_table="inventory",
+                        source_table="pos_sales",
+                        source_type="POS COGS",
+                        source_id=int(pos_sale_id),
                         conn=conn,
                     )
                 conn.commit()
@@ -9291,46 +9432,6 @@ def show_pos(company_key, company_name, role):
                             document_ref=sale_reference,
                         )
                 if print_receipt:
-                    sale_datetime = f"{sale_date.isoformat()} {datetime.now().strftime('%H:%M:%S')}"
-                    receipt_data = {
-                        "company_key": company_key,
-                        "company_name": company_label,
-                        "branch_name": branch_label,
-                        "receipt_number": sale_reference,
-                        "sale_reference": sale_reference,
-                        "sale_date": sale_date.isoformat(),
-                        "sale_datetime": sale_datetime,
-                        "cashier": role,
-                        "payment_method": payment_method,
-                        "payment_reference": payment_reference,
-                        "subtotal": float(current_summary["subtotal"] or 0.0),
-                        "discount_total": float(current_summary["discount_total"] or 0.0),
-                        "tax_total": float(current_summary["tax_total"] or 0.0),
-                        "grand_total": float(current_summary["grand_total"] or 0.0),
-                        "discount_approved_by": discount_approved_by,
-                        "amount_tendered": float(cash_tendered or 0.0) if payment_method == "Cash" else None,
-                        "change_due": max(float(cash_tendered or 0.0) - float(current_summary["grand_total"] or 0.0), 0.0)
-                        if payment_method == "Cash"
-                        else 0.0,
-                        "items": [
-                            {
-                                "name": sale_line["name"],
-                                "qty": int(sale_line["qty"]),
-                                "price": float(sale_line["price"] or 0.0),
-                                "line_total": float(sale_line.get("line_total") or 0.0),
-                            }
-                            for sale_line in sale_cart
-                        ],
-                    }
-                    _persist_pos_sale(
-                        conn,
-                        company_key,
-                        branch_id,
-                        sale_reference,
-                        receipt_data,
-                        sale_cart,
-                        customer_id=selected_credit_customer_id if payment_method == "On Credit" else None,
-                    )
                     conn.commit()
                     st.session_state["last_receipt_data"] = receipt_data
                     st.session_state[last_receipt_data_key] = receipt_data
