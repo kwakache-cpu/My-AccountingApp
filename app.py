@@ -115,6 +115,8 @@ SUBSCRIPTION_PRICING_NOT_CONFIGURED_MESSAGE = eka_modules.SUBSCRIPTION_PRICING_N
 test_paystack_connection = eka_modules.test_paystack_connection
 log_audit_action = eka_modules.log_audit_action
 render_accounting_assistant_sidebar = eka_modules.render_accounting_assistant_sidebar
+user_has_permission = eka_modules.user_has_permission
+can_access_branch = eka_modules.can_access_branch
 show_accounts_payable = eka_modules.show_accounts_payable
 show_accounts_receivable = eka_modules.show_accounts_receivable
 show_create_bill_page = eka_modules.show_create_bill_page
@@ -1028,6 +1030,7 @@ def login_ui():
                             "name": user_login[1],
                             "role": role_name,
                             "staff_name": user_login[3],
+                            "branch_id": user_login[4],
                         }
                         st.session_state.company_id = user_login[0]
                         st.session_state.active_branch_id = user_login[4]
@@ -1620,6 +1623,52 @@ SIDEBAR_NAV_GROUPS = [
     ),
 ]
 
+PAGE_PERMISSION_MAP = {
+    "Dashboard": "view_dashboard",
+    "Point of Sale": "sell_pos",
+    "Inventory Management": "view_inventory",
+    "Vouchers & Journals": "post_accounting_document",
+    "General Journal": "view_reports",
+    "General Ledger": "view_reports",
+    "Chart of Accounts": "view_reports",
+    "Customer Ledger": "view_reports",
+    "Supplier Ledger": "view_reports",
+    "Accounts Receivable": "view_reports",
+    "Accounts Payable": "view_reports",
+    "Customers": "create_customer",
+    "Suppliers": "create_supplier",
+    "Create Invoice": "create_invoice",
+    "Receive Payment (Customer)": "receive_customer_payment",
+    "Supplier Payment": "make_supplier_payment",
+    "Create Bill": "create_bill",
+    "Banking & Cash": "view_banking",
+    "Banking": "view_banking",
+    "Taxation (VAT/NHIL)": "view_reports",
+    "Payroll & Salaries": "view_payroll",
+    "Asset Register": "view_fixed_assets",
+    "Data Analytics": "view_reports",
+    "Financial Reports": "view_reports",
+    "Gatekeeper Admin": "use_ai_assistant",
+    "System Audit Trail": "view_audit_trail",
+    "System Configuration": "manage_company",
+    "branch_management": "manage_branches",
+    "Sales Invoicing": "create_invoice",
+    "Purchase Orders": "create_bill",
+}
+
+
+def _page_permission(page_name):
+    return PAGE_PERMISSION_MAP.get(page_name)
+
+
+def _user_can_access_page(user, page_name):
+    if not user:
+        return False
+    if user.get("role") == "Demo":
+        return page_name in {"Dashboard", "Point of Sale", "Inventory Management"}
+    permission = _page_permission(page_name)
+    return True if not permission else user_has_permission(user.get("role"), permission)
+
 
 def _ensure_valid_page(default_page="Dashboard"):
     valid_pages = {page_key for _label, page_key in PRIMARY_NAV_ITEMS}
@@ -1683,6 +1732,8 @@ def _render_sidebar_navigation(user, current_page):
         for label, page_name in options:
             if page_name not in allowed_pages and page_name != "branch_management":
                 continue
+            if not _user_can_access_page(user, page_name):
+                continue
             if user["role"] == "Demo" and page_name in {
                 "Create Invoice",
                 "Create Bill",
@@ -1730,8 +1781,8 @@ def _render_primary_sidebar(user, include_settings=True):
         unsafe_allow_html=True,
     )
 
-    # Branch selector for Master Admins
-    if user['role'] == 'Master Admin':
+    # Branch selector is only exposed to roles allowed to view all branches.
+    if user.get("role") in {"Dev", "Master Admin", "System Admin", "Owner / CEO"}:
         try:
             conn = get_connection()
             branches = conn.execute("SELECT branch_id, branch_name FROM branches WHERE company_key = ? ORDER BY branch_name", (user['key'],)).fetchall()
@@ -1751,6 +1802,8 @@ def _render_primary_sidebar(user, include_settings=True):
         except Exception as e:
             logger.error("Branch selector error: %s", sanitize_error_message(e))
             st.session_state.active_branch_id = None
+    elif user.get("branch_id"):
+        st.session_state.active_branch_id = user.get("branch_id")
 
     current_page = _ensure_valid_page()
     _render_sidebar_nav_styles()
@@ -1891,6 +1944,10 @@ def _render_primary_sidebar(user, include_settings=True):
 
 def _render_primary_page(user):
     current_page = _ensure_valid_page()
+    if not _user_can_access_page(user, current_page):
+        st.warning("You do not have permission to access that page.")
+        _set_active_page("Dashboard")
+        current_page = "Dashboard"
     if current_page == "Dashboard":
         if user["role"] == "Demo":
             show_dashboard_module("DEMO", "Demo Corporation Ltd", "Demo")

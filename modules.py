@@ -94,6 +94,14 @@ ALL_ENTERPRISE_PERMISSIONS = {
     "manage_integrations",
     "use_ai_assistant",
     "manual_license_override",
+    "sell_pos",
+    "view_own_cashier_session",
+    "view_inventory",
+    "manage_inventory",
+    "view_payroll",
+    "manage_payroll",
+    "view_fixed_assets",
+    "manage_fixed_assets",
     "close_cash_drawer",
     "view_cashier_closings",
     "manage_cashier_closings",
@@ -105,9 +113,22 @@ ROLE_NAME_ALIASES = {
     "Gatekeeper": "Dev",
     "Branch Admin": "Sub-Admin",
     "Manager": "Sub-Admin",
-    "Branch Manager": "Sub-Admin",
+    "Branch Manager": "Branch Manager",
     "Branch Bookkeeper": "Branch_Bookkeeper",
-    "Cashier": "Staff",
+    "System Admin": "System Admin",
+    "Owner": "Owner / CEO",
+    "CEO": "Owner / CEO",
+    "Owner / CEO": "Owner / CEO",
+    "Accountant": "Accountant",
+    "Cashier": "Cashier",
+    "Sales Officer": "Sales Officer",
+    "Inventory Officer": "Inventory Officer",
+    "HR Officer": "HR / Payroll Officer",
+    "Payroll Officer": "HR / Payroll Officer",
+    "HR / Payroll Officer": "HR / Payroll Officer",
+    "Auditor": "Auditor / Read Only",
+    "Auditor / Read Only": "Auditor / Read Only",
+    "Read Only": "Auditor / Read Only",
 }
 PERMISSION_ALIASES = {
     "system_health": {"view_system_health"},
@@ -118,9 +139,14 @@ PERMISSION_ALIASES = {
     "period_control": {"close_period", "reopen_period", "lock_period"},
     "post_journal": {"post_accounting_document"},
     "system_configuration": {"manage_company", "manage_integrations"},
+    "payroll": {"view_payroll", "manage_payroll"},
+    "fixed_assets": {"view_fixed_assets", "manage_fixed_assets"},
+    "inventory": {"view_inventory", "manage_inventory"},
 }
 ENTERPRISE_ROLE_PERMISSIONS = {
     "Dev": set(ALL_ENTERPRISE_PERMISSIONS),
+    # Dev and Master Admin preserve the historical superuser behavior relied on by
+    # internal support. System Admin below is deliberately narrower for user/config admin.
     "Master Admin": {
         "view_dashboard",
         "view_banking",
@@ -149,6 +175,153 @@ ENTERPRISE_ROLE_PERMISSIONS = {
         "restore_backup",
         "manage_integrations",
         "use_ai_assistant",
+        "sell_pos",
+        "view_own_cashier_session",
+        "view_inventory",
+        "manage_inventory",
+        "view_payroll",
+        "manage_payroll",
+        "view_fixed_assets",
+        "manage_fixed_assets",
+        "close_cash_drawer",
+        "view_cashier_closings",
+        "manage_cashier_closings",
+        "process_pos_return",
+        "apply_pos_discount",
+        "approve_pos_discount",
+    },
+    "System Admin": {
+        "view_dashboard",
+        "manage_company",
+        "manage_branches",
+        "manage_users",
+        "view_audit_trail",
+        "view_system_health",
+        "export_backup",
+        "restore_backup",
+        "manage_integrations",
+        "use_ai_assistant",
+    },
+    "Owner / CEO": {
+        "view_dashboard",
+        "view_banking",
+        "manage_owner_equity_transactions",
+        "manage_loan_transactions",
+        "manage_cash_bank_transfers",
+        "manage_company",
+        "manage_branches",
+        "manage_users",
+        "manage_chart_of_accounts",
+        "create_customer",
+        "create_supplier",
+        "create_invoice",
+        "create_bill",
+        "receive_customer_payment",
+        "make_supplier_payment",
+        "post_accounting_document",
+        "void_or_reverse_document",
+        "close_period",
+        "reopen_period",
+        "lock_period",
+        "view_reports",
+        "view_audit_trail",
+        "view_system_health",
+        "use_ai_assistant",
+        "sell_pos",
+        "view_inventory",
+        "manage_inventory",
+        "view_payroll",
+        "view_fixed_assets",
+        "manage_fixed_assets",
+        "close_cash_drawer",
+        "view_cashier_closings",
+        "manage_cashier_closings",
+        "process_pos_return",
+        "apply_pos_discount",
+        "approve_pos_discount",
+    },
+    "Accountant": {
+        "view_dashboard",
+        "view_banking",
+        "manage_chart_of_accounts",
+        "create_customer",
+        "create_supplier",
+        "create_invoice",
+        "create_bill",
+        "receive_customer_payment",
+        "make_supplier_payment",
+        "post_accounting_document",
+        "void_or_reverse_document",
+        "close_period",
+        "reopen_period",
+        "lock_period",
+        "view_reports",
+        "view_audit_trail",
+        "view_system_health",
+        "use_ai_assistant",
+        "view_inventory",
+        "view_fixed_assets",
+        "manage_fixed_assets",
+        "view_cashier_closings",
+        "manage_cashier_closings",
+        "process_pos_return",
+        "approve_pos_discount",
+    },
+    "Cashier": {
+        "view_dashboard",
+        "sell_pos",
+        "view_own_cashier_session",
+        "create_customer",
+        "receive_customer_payment",
+        "close_cash_drawer",
+        "apply_pos_discount",
+    },
+    "Sales Officer": {
+        "view_dashboard",
+        "sell_pos",
+        "create_customer",
+        "create_invoice",
+        "receive_customer_payment",
+        "apply_pos_discount",
+    },
+    "Inventory Officer": {
+        "view_dashboard",
+        "view_inventory",
+        "manage_inventory",
+        "create_supplier",
+    },
+    "HR / Payroll Officer": {
+        "view_dashboard",
+        "view_payroll",
+        "manage_payroll",
+        "post_accounting_document",
+        "void_or_reverse_document",
+        "view_reports",
+        "view_audit_trail",
+    },
+    "Auditor / Read Only": {
+        "view_dashboard",
+        "view_reports",
+        "view_audit_trail",
+        "view_system_health",
+    },
+    "Branch Manager": {
+        "view_dashboard",
+        "view_banking",
+        "create_customer",
+        "create_supplier",
+        "create_invoice",
+        "create_bill",
+        "receive_customer_payment",
+        "make_supplier_payment",
+        "post_accounting_document",
+        "view_reports",
+        "view_audit_trail",
+        "use_ai_assistant",
+        "sell_pos",
+        "view_inventory",
+        "manage_inventory",
+        "view_fixed_assets",
         "close_cash_drawer",
         "view_cashier_closings",
         "manage_cashier_closings",
@@ -177,6 +350,11 @@ ENTERPRISE_ROLE_PERMISSIONS = {
         "view_reports",
         "view_audit_trail",
         "use_ai_assistant",
+        "sell_pos",
+        "view_inventory",
+        "manage_inventory",
+        "view_fixed_assets",
+        "manage_fixed_assets",
         "close_cash_drawer",
         "view_cashier_closings",
         "manage_cashier_closings",
@@ -197,6 +375,10 @@ ENTERPRISE_ROLE_PERMISSIONS = {
         "post_accounting_document",
         "view_reports",
         "use_ai_assistant",
+        "sell_pos",
+        "view_inventory",
+        "view_fixed_assets",
+        "manage_fixed_assets",
         "close_cash_drawer",
         "view_cashier_closings",
         "manage_cashier_closings",
@@ -216,18 +398,18 @@ ENTERPRISE_ROLE_PERMISSIONS = {
         "post_accounting_document",
         "view_reports",
         "use_ai_assistant",
+        "sell_pos",
+        "view_inventory",
+        "view_fixed_assets",
         "close_cash_drawer",
         "process_pos_return",
         "apply_pos_discount",
     },
     "Staff": {
         "view_dashboard",
-        "view_banking",
         "create_customer",
-        "create_supplier",
-        "create_invoice",
         "receive_customer_payment",
-        "view_reports",
+        "sell_pos",
         "close_cash_drawer",
         "apply_pos_discount",
     },
@@ -376,6 +558,59 @@ def user_has_permission(role, permission):
     if not granted_permissions or not permission_targets:
         return False
     return any(target in granted_permissions for target in permission_targets)
+
+
+def _extract_role_from_user(user_or_role):
+    if isinstance(user_or_role, dict):
+        return user_or_role.get("role") or user_or_role.get("user_role") or user_or_role.get("type")
+    return user_or_role
+
+
+def has_permission(user, permission_key):
+    """Compatibility wrapper for role strings and session/user dictionaries."""
+    return user_has_permission(_extract_role_from_user(user), permission_key)
+
+
+def _extract_user_branch_id(user):
+    if isinstance(user, dict):
+        return user.get("branch_id") or user.get("active_branch_id") or user.get("assigned_branch_id")
+    return None
+
+
+def can_access_branch(user, branch_id):
+    normalized_role = _normalize_role_name(_extract_role_from_user(user))
+    if not branch_id:
+        return True
+    if normalized_role in {"Dev", "Master Admin", "System Admin", "Owner / CEO"}:
+        return True
+    assigned_branch_id = _extract_user_branch_id(user)
+    if not assigned_branch_id:
+        return True
+    return str(assigned_branch_id).strip() == str(branch_id).strip()
+
+
+def filter_by_user_branch(records, user, branch_key="branch_id"):
+    if records is None:
+        return records
+    normalized_role = _normalize_role_name(_extract_role_from_user(user))
+    if normalized_role in {"Dev", "Master Admin", "System Admin", "Owner / CEO"}:
+        return records
+    assigned_branch_id = _extract_user_branch_id(user)
+    if not assigned_branch_id:
+        return records
+    if isinstance(records, pd.DataFrame):
+        if branch_key not in records.columns:
+            return records
+        branch_values = records[branch_key].fillna("")
+        return records[(branch_values == "") | (branch_values.astype(str) == str(assigned_branch_id))]
+    if isinstance(records, list):
+        filtered = []
+        for row in records:
+            row_branch_id = row.get(branch_key) if isinstance(row, dict) else getattr(row, branch_key, None)
+            if not row_branch_id or str(row_branch_id).strip() == str(assigned_branch_id):
+                filtered.append(row)
+        return filtered
+    return records
 
 
 def require_permission(role, permission, action_label=None, company_key=None, conn=None, branch_id=None):
@@ -2877,6 +3112,14 @@ def save_transaction(description, lines, company_key=None, reference=None, creat
 
 def show_journal_entries(company_key, role):
     st.header("🧾 General Journal")
+    if not require_permission(
+        role,
+        "view_reports",
+        action_label="view general journal",
+        company_key=company_key,
+        branch_id=st.session_state.get("active_branch_id"),
+    ):
+        return
     can_post_manual_entries = user_has_permission(role, "post_accounting_document")
 
     branch_id = st.session_state.get("active_branch_id")
@@ -7120,6 +7363,14 @@ def show_onboarding_payment():
 # ==========================================
 def show_inventory(company_key, role):
     st.header("📦 Inventory Management")
+    if role != "Demo" and not require_permission(
+        role,
+        "view_inventory",
+        action_label="view inventory",
+        company_key=company_key,
+        branch_id=st.session_state.get("active_branch_id"),
+    ):
+        return
     success_key = f"inventory_add_success_{company_key}"
     delete_success_key = f"inventory_delete_success_{company_key}"
     inventory_message_key = f"inventory_message_{company_key}"
@@ -7252,7 +7503,7 @@ def show_inventory(company_key, role):
                 col1.metric("Total Items", len(df))
                 col2.metric(f"Total Value ({get_currency_symbol()})", format_currency(df["total_value"].sum()))
                 col3.metric("Low Stock Alerts", len(df[df['quantity'] < 10]))
-                if role in ("Master Admin", "Bookkeeper", "Branch_Bookkeeper", "Sub-Admin") and "id" in df.columns:
+                if user_has_permission(role, "manage_inventory") and "id" in df.columns:
                     st.markdown("Edit Stock Item")
                     selected_edit_key = f"inventory_edit_selected_{company_key}"
                     delete_confirm_key = f"inventory_delete_confirm_{company_key}"
@@ -7417,6 +7668,14 @@ def show_inventory(company_key, role):
                         submitted = st.form_submit_button("Record Movement")
 
                     if submitted:
+                        if not require_permission(
+                            role,
+                            "manage_inventory",
+                            action_label="record stock movements",
+                            company_key=company_key,
+                            branch_id=branch_id,
+                        ):
+                            return
                         current_qty = float(selected_item["qty"] or 0.0)
                         movement_qty = float(quantity or 0.0)
                         if movement_qty <= 0:
@@ -7566,6 +7825,14 @@ def show_inventory(company_key, role):
             is_active = st.checkbox("Active", value=True)
             submitted = st.form_submit_button("➕ Add New Item")
             if submitted and item_name:
+                if not require_permission(
+                    role,
+                    "manage_inventory",
+                    action_label="manage inventory items",
+                    company_key=company_key,
+                    branch_id=st.session_state.get("active_branch_id"),
+                ):
+                    return
                 try:
                     conn = get_connection()
                     normalized_barcode = barcode.strip()
@@ -8421,6 +8688,14 @@ def show_pos(company_key, company_name, role):
         selected = st.multiselect("Select Items", demo_items)
         if selected:
             st.success(f"Demo sale: {len(selected)} item(s) selected. Total: GH₵ {len(selected) * 120:.2f}")
+        return
+    if not require_permission(
+        role,
+        "sell_pos",
+        action_label="access point of sale",
+        company_key=company_key,
+        branch_id=st.session_state.get("active_branch_id"),
+    ):
         return
 
     if st.session_state.get(pos_success_key):
@@ -11309,6 +11584,15 @@ def show_payroll(company_key, role):
         })
         st.dataframe(format_currency_dataframe(demo_df), use_container_width=True)
         return
+    if not require_permission(
+        role,
+        "view_payroll",
+        action_label="view payroll",
+        company_key=company_key,
+        branch_id=st.session_state.get("active_branch_id"),
+    ):
+        return
+    can_manage_payroll = user_has_permission(role, "manage_payroll")
 
     with st.expander("➕ Add Payroll Entry", expanded=True):
         with st.form("payroll_form", clear_on_submit=True):
@@ -11330,6 +11614,14 @@ def show_payroll(company_key, role):
 
             submitted = st.form_submit_button("Calculate & Save")
             if submitted and emp_name and basic_salary > 0:
+                if not require_permission(
+                    role,
+                    "manage_payroll",
+                    action_label="process payroll",
+                    company_key=company_key,
+                    branch_id=st.session_state.get("active_branch_id"),
+                ):
+                    return
                 payroll_values = _calculate_payroll_values(basic_salary, allowances, deductions)
                 if paye_override > 0:
                     payroll_values["paye"] = float(paye_override)
@@ -11452,7 +11744,7 @@ def show_payroll(company_key, role):
                 for _, row in df.iterrows()
             }
             st.dataframe(format_currency_dataframe(df), use_container_width=True)
-            if role == "Master Admin":
+            if can_manage_payroll:
                 selected_payroll_key = f"payroll_edit_selected_{company_key}"
                 void_payroll_key = f"payroll_void_selected_{company_key}"
                 for _, payroll_list_row in df.iterrows():
@@ -11467,6 +11759,13 @@ def show_payroll(company_key, role):
                     if edit_col.button("Edit", key=f"payroll_edit_btn_{company_key}_{int(payroll_list_row['ID'])}"):
                         st.session_state[selected_payroll_key] = int(payroll_list_row["ID"])
                     if payroll_list_row["Status"] not in {"Void", "Reversed"} and void_col.button("Void / Reverse", key=f"payroll_void_btn_{company_key}_{int(payroll_list_row['ID'])}"):
+                        if not require_permission(
+                            role,
+                            "void_or_reverse_document",
+                            action_label="reverse payroll",
+                            company_key=company_key,
+                        ):
+                            continue
                         st.session_state[void_payroll_key] = int(payroll_list_row["ID"])
                     if print_col.button("Print", key=f"payroll_print_btn_{company_key}_{int(payroll_list_row['ID'])}"):
                         st.session_state[payroll_print_preview_key] = _build_payslip_html(payroll_list_row)
@@ -11775,9 +12074,26 @@ def show_fixed_assets(company_key, role):
         )
         st.dataframe(format_currency_dataframe(demo_df), use_container_width=True)
         return
+    if not require_permission(
+        role,
+        "view_fixed_assets",
+        action_label="view fixed assets",
+        company_key=company_key,
+        branch_id=st.session_state.get("active_branch_id"),
+    ):
+        return
+    can_manage_assets = user_has_permission(role, "manage_fixed_assets")
 
     action_col1, action_col2 = st.columns(2)
     if action_col1.button("Post Current Depreciation", key=f"run_depreciation_{company_key}"):
+        if not require_permission(
+            role,
+            "manage_fixed_assets",
+            action_label="post fixed asset depreciation",
+            company_key=company_key,
+            branch_id=st.session_state.get("active_branch_id"),
+        ):
+            return
         try:
             posted_entries = run_straight_line_depreciation(company_key, created_by=role)
             st.success(f"Depreciation run complete. Posted {posted_entries} journal entr{'y' if posted_entries == 1 else 'ies'}.")
@@ -11833,6 +12149,14 @@ def show_fixed_assets(company_key, role):
                 asset_notes = st.text_area("Notes")
 
             if st.form_submit_button("Add Asset") and asset_name and cost > 0:
+                if not require_permission(
+                    role,
+                    "manage_fixed_assets",
+                    action_label="create fixed assets",
+                    company_key=company_key,
+                    branch_id=st.session_state.get("active_branch_id"),
+                ):
+                    return
                 book_value = opening_book_value if opening_book_value > 0 else cost
                 depreciation_rate = round((100.0 / useful_life_years), 4) if useful_life_years > 0 else 0.0
                 try:
@@ -11972,7 +12296,7 @@ def show_fixed_assets(company_key, role):
         col2.metric("Total Cost", format_currency(df["Cost (GHS)"].sum()))
         col3.metric("Total Book Value", format_currency(df["Current Value"].sum()))
 
-        if role in ("Master Admin", "Bookkeeper", "Branch_Bookkeeper", "Sub-Admin"):
+        if can_manage_assets:
             selected_asset_key = f"asset_edit_selected_{company_key}"
             delete_asset_key = f"asset_delete_selected_{company_key}"
             for _, asset_row in df.iterrows():
@@ -11992,7 +12316,7 @@ def show_fixed_assets(company_key, role):
 
             st.warning("Posted asset records cannot be financially edited directly. Use reversal/correction workflow.")
 
-            if role in ("Master Admin", "Sub-Admin") and user_has_permission(role, "void_or_reverse_document"):
+            if user_has_permission(role, "void_or_reverse_document"):
                 reversal_asset_options = [
                     asset_id
                     for asset_id, entry_id in posted_asset_entry_map.items()

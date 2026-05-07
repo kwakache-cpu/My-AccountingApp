@@ -244,3 +244,54 @@ class PermissionSecurityTests(ERPIsolatedTestCase):
         ).fetchone()
         self.assertGreaterEqual(int(audit_row["row_count"] or 0), 1)
         self.assertGreaterEqual(int(system_log_row["row_count"] or 0), 1)
+
+    def test_cashier_role_is_pos_limited(self):
+        self.assertTrue(self.modules.user_has_permission("Cashier", "sell_pos"))
+        self.assertTrue(self.modules.user_has_permission("Cashier", "close_cash_drawer"))
+        self.assertFalse(self.modules.user_has_permission("Cashier", "view_banking"))
+        self.assertFalse(self.modules.user_has_permission("Cashier", "manage_owner_equity_transactions"))
+        self.assertFalse(self.modules.user_has_permission("Cashier", "manage_loan_transactions"))
+        self.assertFalse(self.modules.user_has_permission("Cashier", "manage_cash_bank_transfers"))
+        self.assertFalse(self.modules.user_has_permission("Cashier", "view_reports"))
+        self.assertFalse(self.modules.user_has_permission("Cashier", "view_payroll"))
+        self.assertFalse(self.modules.user_has_permission("Cashier", "post_accounting_document"))
+
+    def test_auditor_is_read_only_for_reporting(self):
+        self.assertTrue(self.modules.user_has_permission("Auditor / Read Only", "view_reports"))
+        self.assertTrue(self.modules.user_has_permission("Auditor", "view_audit_trail"))
+        self.assertTrue(self.modules.user_has_permission("Auditor", "view_system_health"))
+        self.assertFalse(self.modules.user_has_permission("Auditor", "post_accounting_document"))
+        self.assertFalse(self.modules.user_has_permission("Auditor", "void_or_reverse_document"))
+        self.assertFalse(self.modules.user_has_permission("Auditor", "manage_company"))
+        self.assertFalse(self.modules.user_has_permission("Auditor", "manage_users"))
+
+    def test_accountant_can_post_but_not_manage_users(self):
+        self.assertTrue(self.modules.user_has_permission("Accountant", "post_accounting_document"))
+        self.assertTrue(self.modules.user_has_permission("Accountant", "view_reports"))
+        self.assertTrue(self.modules.user_has_permission("Accountant", "view_banking"))
+        self.assertFalse(self.modules.user_has_permission("Accountant", "manage_users"))
+        self.assertFalse(self.modules.user_has_permission("Accountant", "manage_payroll"))
+
+    def test_system_admin_can_manage_configuration_without_accounting_bypass(self):
+        self.assertTrue(self.modules.user_has_permission("System Admin", "manage_company"))
+        self.assertTrue(self.modules.user_has_permission("System Admin", "manage_users"))
+        self.assertTrue(self.modules.user_has_permission("System Admin", "view_system_health"))
+        self.assertFalse(self.modules.user_has_permission("System Admin", "post_accounting_document"))
+        self.assertFalse(self.modules.user_has_permission("System Admin", "void_or_reverse_document"))
+        self.assertFalse(self.modules.user_has_permission("System Admin", "manage_owner_equity_transactions"))
+
+    def test_branch_access_helper_restricts_assigned_users(self):
+        branch_user = {"role": "Branch_Bookkeeper", "branch_id": "BR-001"}
+        self.assertTrue(self.modules.can_access_branch(branch_user, "BR-001"))
+        self.assertTrue(self.modules.can_access_branch(branch_user, None))
+        self.assertFalse(self.modules.can_access_branch(branch_user, "BR-002"))
+        self.assertTrue(self.modules.can_access_branch({"role": "Master Admin"}, "BR-002"))
+
+    def test_filter_by_user_branch_preserves_null_legacy_rows(self):
+        rows = [
+            {"branch_id": "BR-001", "value": 1},
+            {"branch_id": "BR-002", "value": 2},
+            {"branch_id": None, "value": 3},
+        ]
+        filtered = self.modules.filter_by_user_branch(rows, {"role": "Cashier", "branch_id": "BR-001"})
+        self.assertEqual([row["value"] for row in filtered], [1, 3])
