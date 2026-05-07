@@ -2149,6 +2149,26 @@ else:
                                 cloud_count=persistence_diag["cloud_backup_company_count"],
                             )
                         )
+                    postgres_diag = operations_snapshot.get("postgres_readiness") or {}
+                    if postgres_diag:
+                        st.caption(
+                            "DB Backend: configured={configured} active={active} | DATABASE_URL configured: {url_configured} | SSL mode: {sslmode}".format(
+                                configured=postgres_diag.get("configured_backend", "sqlite"),
+                                active=postgres_diag.get("active_backend", "sqlite"),
+                                url_configured="Yes" if postgres_diag.get("database_url_configured") else "No",
+                                sslmode=postgres_diag.get("supabase_sslmode") or "missing",
+                            )
+                        )
+                        if postgres_diag.get("sqlite_concurrency_warning"):
+                            st.warning(postgres_diag["sqlite_concurrency_warning"])
+                        st.caption(
+                            "PostgreSQL readiness score: {score}/100 | Blockers: {blockers}".format(
+                                score=postgres_diag.get("readiness_score", 0),
+                                blockers=sum(item.get("count", 0) for item in postgres_diag.get("blockers", [])),
+                            )
+                        )
+                        if postgres_diag.get("switch_blocked"):
+                            st.info("PostgreSQL switch is not enabled yet. Review readiness blockers before changing runtime backend.")
                     self_test = operations_snapshot["persistence_self_test"]
                     if self_test["mismatch"]:
                         st.warning(

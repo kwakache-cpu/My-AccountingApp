@@ -104,7 +104,9 @@ def build_operations_console_snapshot(
     """
     from database import (
         get_audit_operations_summary,
+        get_data_migration_export_plan,
         get_persistence_diagnostics,
+        get_postgres_readiness_diagnostics,
         get_schema_manifest_diagnostics,
         run_persistence_self_test,
     )
@@ -121,6 +123,8 @@ def build_operations_console_snapshot(
         "document_workflow": None,
         "reporting_trust": None,
         "posting_engine": None,
+        "postgres_readiness": _safe_section("postgres_readiness", get_postgres_readiness_diagnostics),
+        "data_migration_plan": _safe_section("data_migration_plan", get_data_migration_export_plan),
     }
 
     from modules import get_paystack_diagnostics, get_subscription_billing_health_snapshot

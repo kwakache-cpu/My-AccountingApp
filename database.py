@@ -8,6 +8,7 @@ import re
 import tempfile
 import time
 from security_utils import sanitize_error_message
+from urllib.parse import parse_qs, urlparse, urlunparse
 
 try:
     import streamlit as st
@@ -585,6 +586,187 @@ def log_schema_manifest_diagnostics(conn):
     return diagnostics
 
 
+POSTGRES_AUDIT_FILES = (
+    "database.py",
+    "accounting_engine.py",
+    "financials.py",
+    "modules.py",
+    "enterprise_services.py",
+    "app.py",
+)
+
+
+POSTGRES_READINESS_PATTERNS = {
+    "direct_sqlite3_usage": "sqlite3",
+    "pragma_usage": "PRAGMA",
+    "sqlite_autoincrement": "AUTOINCREMENT",
+    "insert_or_ignore": "INSERT OR IGNORE",
+    "last_insert_rowid": "last_insert_rowid",
+    "lastrowid_usage": "lastrowid",
+    "sqlite_master_usage": "sqlite_master",
+    "sqlite_date_function": "date(",
+    "question_mark_placeholders": "?",
+    "db_path_file_assumption": "DB_PATH",
+}
+
+
+def _scan_postgres_readiness_sources():
+    findings = {key: [] for key in POSTGRES_READINESS_PATTERNS}
+    for relative_path in POSTGRES_AUDIT_FILES:
+        file_path = os.path.join(BASE_DIR, relative_path)
+        if not os.path.exists(file_path):
+            continue
+        try:
+            with open(file_path, "r", encoding="utf-8", errors="ignore") as source_file:
+                for line_number, line in enumerate(source_file, start=1):
+                    for key, pattern in POSTGRES_READINESS_PATTERNS.items():
+                        if pattern in line:
+                            findings[key].append({"file": relative_path, "line": line_number})
+        except OSError:
+            continue
+    return findings
+
+
+def get_postgres_readiness_diagnostics(conn=None):
+    findings = _scan_postgres_readiness_sources()
+    blocker_keys = {
+        "direct_sqlite3_usage",
+        "pragma_usage",
+        "sqlite_autoincrement",
+        "insert_or_ignore",
+        "last_insert_rowid",
+        "lastrowid_usage",
+        "sqlite_master_usage",
+        "db_path_file_assumption",
+    }
+    blockers = [
+        {
+            "key": key,
+            "count": len(rows),
+            "examples": rows[:5],
+        }
+        for key, rows in sorted(findings.items())
+        if rows and key in blocker_keys
+    ]
+    warning_count = sum(len(rows) for rows in findings.values())
+    blocker_count = sum(item["count"] for item in blockers)
+    score = max(0, 100 - min(85, blocker_count * 2) - min(15, max(0, warning_count - blocker_count) // 10))
+    table_notes = {}
+    owns_connection = conn is None
+    diagnostics_conn = conn
+    try:
+        diagnostics_conn = diagnostics_conn or get_connection()
+        if diagnostics_conn:
+            tables = [
+                row["name"]
+                for row in diagnostics_conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()
+                if not str(row["name"]).startswith("sqlite_")
+            ]
+            for table_name in tables:
+                columns = diagnostics_conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+                pk_columns = [row[1] for row in columns if int(row[5] or 0) > 0]
+                column_names = {row[1] for row in columns}
+                table_notes[table_name] = {
+                    "has_primary_key": bool(pk_columns),
+                    "primary_key_columns": pk_columns,
+                    "has_created_at": "created_at" in column_names,
+                    "has_updated_at": "updated_at" in column_names,
+                }
+    except Exception as exc:
+        table_notes["_error"] = {"reason": sanitize_error_message(exc)}
+    finally:
+        if owns_connection and diagnostics_conn:
+            diagnostics_conn.close()
+
+    source_document_unique_constraints_needed = [
+        "journal_entries(company_key, source_table, source_id, source_type)",
+        "pos_sales(company_key, receipt_number)",
+        "payments(company_key, reference)",
+    ]
+    journal_indexes_needed = [
+        "journal_entries(company_key, date)",
+        "journal_entries(company_key, source_table, source_id)",
+        "journal_lines(entry_id)",
+        "journal_lines(account_id)",
+    ]
+    return {
+        "configured_backend": get_db_backend(),
+        "active_backend": get_active_db_backend(),
+        "database_url_configured": bool(_get_database_url()),
+        "database_url_label": _redact_database_url(_get_database_url()),
+        "supabase_sslmode": _postgres_sslmode(_get_database_url()) or "missing",
+        "postgres_runtime_enabled": POSTGRES_RUNTIME_ENABLED,
+        "sqlite_concurrency_warning": (
+            "SQLite is suitable for pilot/small-client use but not high-concurrency enterprise deployment."
+            if get_active_db_backend() == "sqlite"
+            else ""
+        ),
+        "readiness_score": score,
+        "blockers": blockers,
+        "sqlite_only_constructs": {key: len(rows) for key, rows in findings.items() if rows},
+        "table_readiness": table_notes,
+        "source_document_unique_constraints_needed": source_document_unique_constraints_needed,
+        "journal_indexes_needed": journal_indexes_needed,
+        "switch_blocked": bool(blockers) or get_active_db_backend() != "postgres",
+    }
+
+
+def get_data_migration_export_plan(conn=None):
+    owns_connection = conn is None
+    diagnostics_conn = conn
+    tables = []
+    try:
+        diagnostics_conn = diagnostics_conn or get_connection()
+        if diagnostics_conn:
+            for row in diagnostics_conn.execute("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name").fetchall():
+                table_name = row["name"]
+                if str(table_name).startswith("sqlite_"):
+                    continue
+                count_row = diagnostics_conn.execute(f"SELECT COUNT(*) AS row_count FROM {table_name}").fetchone()
+                columns = [column[1] for column in diagnostics_conn.execute(f"PRAGMA table_info({table_name})").fetchall()]
+                tables.append(
+                    {
+                        "table": table_name,
+                        "row_count": int(count_row["row_count"] or 0),
+                        "columns": columns,
+                    }
+                )
+    finally:
+        if owns_connection and diagnostics_conn:
+            diagnostics_conn.close()
+    export_order = [
+        "companies",
+        "branches",
+        "users",
+        "chart_of_accounts",
+        "customers",
+        "suppliers",
+        "inventory",
+        "invoices",
+        "bills",
+        "payments",
+        "journal_entries",
+        "journal_lines",
+        "stock_movements",
+        "payroll",
+        "fixed_assets",
+        "tax_settlements",
+        "audit_logs",
+    ]
+    return {
+        "mode": "report_only",
+        "tables": tables,
+        "table_count": len(tables),
+        "export_order": export_order,
+        "foreign_key_risk_notes": [
+            "Preserve company_key values before dependent operational rows.",
+            "Load journal_entries before journal_lines.",
+            "Load invoices/bills/payments before payment_allocations.",
+            "Validate source-document IDs before enabling duplicate-post constraints.",
+        ],
+    }
+
+
 def _read_runtime_secret(secret_name, default=None):
     env_value = os.getenv(secret_name)
     if env_value not in (None, ""):
@@ -597,6 +779,201 @@ def _read_runtime_secret(secret_name, default=None):
     except Exception:
         return default
     return default
+
+
+SUPPORTED_DB_BACKENDS = {"sqlite", "postgres", "postgresql", "supabase"}
+POSTGRES_RUNTIME_ENABLED = str(os.getenv("ERP_ENABLE_POSTGRES_RUNTIME", "0")).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _normalize_db_backend(value=None):
+    normalized = str(value or "sqlite").strip().lower()
+    if normalized in {"postgresql", "supabase"}:
+        return "postgres"
+    if normalized not in SUPPORTED_DB_BACKENDS:
+        return "sqlite"
+    return normalized
+
+
+def get_db_backend():
+    """Return the configured backend without exposing connection secrets."""
+    return _normalize_db_backend(_read_runtime_secret("DB_BACKEND", os.getenv("DB_BACKEND", "sqlite")))
+
+
+def get_active_db_backend():
+    configured_backend = get_db_backend()
+    if configured_backend == "postgres" and POSTGRES_RUNTIME_ENABLED:
+        return "postgres"
+    return "sqlite"
+
+
+def is_sqlite():
+    return get_active_db_backend() == "sqlite"
+
+
+def is_postgres():
+    return get_active_db_backend() == "postgres"
+
+
+def _get_database_url():
+    return str(_read_runtime_secret("DATABASE_URL", os.getenv("DATABASE_URL", "")) or "").strip()
+
+
+def _redact_database_url(database_url):
+    if not database_url:
+        return ""
+    try:
+        parsed = urlparse(database_url)
+        host = parsed.hostname or ""
+        port = f":{parsed.port}" if parsed.port else ""
+        username = parsed.username or ""
+        auth = f"{username}:***@" if username else ""
+        return urlunparse((parsed.scheme, f"{auth}{host}{port}", parsed.path, "", "", ""))
+    except Exception:
+        return "[redacted-database-url]"
+
+
+def _postgres_sslmode(database_url=None):
+    database_url = database_url if database_url is not None else _get_database_url()
+    try:
+        query = parse_qs(urlparse(database_url).query)
+        values = query.get("sslmode") or []
+        return values[0] if values else ""
+    except Exception:
+        return ""
+
+
+def get_engine():
+    """Return an optional SQLAlchemy engine for future PostgreSQL/Supabase runtime use.
+
+    SQLite remains the active runtime unless ERP_ENABLE_POSTGRES_RUNTIME=1 is set.
+    """
+    if get_active_db_backend() != "postgres":
+        return None
+    database_url = _get_database_url()
+    if not database_url:
+        raise RuntimeError("DATABASE_URL is required when PostgreSQL runtime is enabled.")
+    try:
+        from sqlalchemy import create_engine
+        from sqlalchemy.pool import NullPool
+    except Exception as exc:
+        raise RuntimeError("SQLAlchemy is required for PostgreSQL runtime connections.") from exc
+    connect_args = {}
+    if "sslmode=" not in database_url:
+        separator = "&" if "?" in database_url else "?"
+        database_url = f"{database_url}{separator}sslmode=require"
+    return create_engine(database_url, poolclass=NullPool, pool_pre_ping=True, connect_args=connect_args)
+
+
+def db_param_placeholder(index=1, backend=None):
+    backend = _normalize_db_backend(backend or get_active_db_backend())
+    return f"${int(index)}" if backend == "postgres" else "?"
+
+
+def db_placeholders(count, backend=None):
+    backend = _normalize_db_backend(backend or get_active_db_backend())
+    return ", ".join(db_param_placeholder(index + 1, backend=backend) for index in range(int(count or 0)))
+
+
+def db_current_timestamp_sql(backend=None):
+    return "CURRENT_TIMESTAMP"
+
+
+def db_boolean_value(value, backend=None):
+    backend = _normalize_db_backend(backend or get_active_db_backend())
+    return bool(value) if backend == "postgres" else (1 if value else 0)
+
+
+def db_limit_offset_clause(limit=None, offset=None, backend=None):
+    parts = []
+    if limit is not None:
+        parts.append(f"LIMIT {int(limit)}")
+    if offset is not None:
+        parts.append(f"OFFSET {int(offset)}")
+    return " ".join(parts)
+
+
+def db_insert_ignore_sql(table_name, columns, conflict_columns=None, backend=None):
+    backend = _normalize_db_backend(backend or get_active_db_backend())
+    columns = [str(column).strip() for column in columns if str(column).strip()]
+    placeholders = db_placeholders(len(columns), backend=backend)
+    column_sql = ", ".join(columns)
+    if backend == "postgres":
+        conflict_sql = ""
+        if conflict_columns:
+            conflict_sql = " (" + ", ".join(str(column).strip() for column in conflict_columns) + ")"
+        return f"INSERT INTO {table_name} ({column_sql}) VALUES ({placeholders}) ON CONFLICT{conflict_sql} DO NOTHING"
+    return f"INSERT OR IGNORE INTO {table_name} ({column_sql}) VALUES ({placeholders})"
+
+
+def db_table_exists(conn, table_name):
+    if conn is None:
+        return False
+    if is_postgres():
+        row = conn.execute(
+            "SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = %s)",
+            (table_name,),
+        ).fetchone()
+        return bool(row[0] if row else False)
+    return bool(
+        conn.execute("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?", (table_name,)).fetchone()
+    )
+
+
+def db_column_exists(conn, table_name, column_name):
+    if conn is None:
+        return False
+    if is_postgres():
+        row = conn.execute(
+            """
+            SELECT EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name = %s AND column_name = %s
+            )
+            """,
+            (table_name, column_name),
+        ).fetchone()
+        return bool(row[0] if row else False)
+    return column_name in {row[1] for row in conn.execute(f"PRAGMA table_info({table_name})").fetchall()}
+
+
+def db_create_index_sql(index_name, table_name, columns, unique=False, backend=None):
+    unique_sql = "UNIQUE " if unique else ""
+    column_sql = ", ".join(str(column).strip() for column in columns)
+    return f"CREATE {unique_sql}INDEX IF NOT EXISTS {index_name} ON {table_name} ({column_sql})"
+
+
+def db_begin(conn):
+    if conn is not None:
+        conn.execute("BEGIN")
+
+
+def db_commit(conn):
+    if conn is not None:
+        conn.commit()
+
+
+def db_rollback(conn):
+    if conn is not None:
+        conn.rollback()
+
+
+def get_db_diagnostics():
+    health = get_database_health_snapshot(DB_PATH, logger_instance=logger)
+    readiness = get_postgres_readiness_diagnostics()
+    return {
+        "configured_backend": get_db_backend(),
+        "active_backend": get_active_db_backend(),
+        "is_sqlite": is_sqlite(),
+        "is_postgres": is_postgres(),
+        "database_url_configured": bool(_get_database_url()),
+        "database_url_label": _redact_database_url(_get_database_url()),
+        "db_path": DB_PATH,
+        "db_exists": health.get("file_exists"),
+        "company_count": health.get("company_count"),
+        "schema_version": health.get("schema_version"),
+        "database_uuid": health.get("database_uuid"),
+        "postgres_readiness": readiness,
+    }
 
 
 def get_firebase_service_account_info():

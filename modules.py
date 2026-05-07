@@ -431,6 +431,7 @@ from database import (
     get_firebase_service_account_info,
     get_connection,
     get_database_health_snapshot,
+    get_postgres_readiness_diagnostics,
     get_persistence_diagnostics,
     get_schema_manifest_diagnostics,
     get_subscription_plan_setting,
@@ -6356,9 +6357,11 @@ def get_deployment_readiness_diagnostics():
     try:
         db_health = get_database_health_snapshot()
         persistence = get_persistence_diagnostics()
+        postgres_diag = get_postgres_readiness_diagnostics()
         schema_diag = get_schema_manifest_diagnostics()
         diagnostics.update(
             {
+                "database_backend": postgres_diag.get("active_backend", "sqlite").upper(),
                 "db_label": db_health.get("db_path") or "SQLite runtime database",
                 "company_count": int(db_health.get("company_count") or 0),
                 "cloud_vault_status": str(persistence.get("latest_cloud_backup_status") or "Unknown"),
@@ -6367,8 +6370,11 @@ def get_deployment_readiness_diagnostics():
                 "last_cloud_backup": str(persistence.get("last_cloud_backup_timestamp") or persistence.get("latest_cloud_backup_status") or "Unknown"),
                 "cloud_backup_count": str(persistence.get("cloud_backup_count") if persistence.get("cloud_backup_count") is not None else "Unknown"),
                 "schema_self_heal_status": "OK" if schema_diag.get("ok") else "Needs Attention",
+                "sqlite_concurrency_warning": postgres_diag.get("sqlite_concurrency_warning") or "",
             }
         )
+        if postgres_diag.get("switch_blocked"):
+            recommendations.append("PostgreSQL/Supabase migration is not ready; review backend readiness diagnostics.")
         if not diagnostics["runtime_db_valid"]:
             recommendations.append("Repair or restore the runtime database before deployment.")
         if not schema_diag.get("ok"):
