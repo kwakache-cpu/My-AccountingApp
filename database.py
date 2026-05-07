@@ -250,7 +250,7 @@ SCHEMA_MANIFEST = {
         "system_settings": ("id", "base_currency", "display_currency", "exchange_rate"),
         "audit_logs": ("id", "company_key", "user_role", "action", "module_name"),
         "schema_version": ("version", "description", "applied_at"),
-        "database_identity": ("instance_id", "created_at", "last_verified_at"),
+        "database_identity": ("instance_id", "created_at", "last_verified_at", "schema_version", "last_startup_at", "backend_label", "environment_label"),
     },
     "compatibility_detail": {
         "customer_transactions": ("id", "company_key", "customer_id", "transaction_type", "amount"),
@@ -882,6 +882,36 @@ def _candidate_is_valid_production_backup(health_snapshot):
     return bool(health_snapshot.get("production_ready")) and int(health_snapshot.get("company_count") or 0) >= 1
 
 
+def _evaluate_runtime_replacement(local_health, incoming_health, explicit_recovery_mode=False):
+    local_health = local_health or {}
+    incoming_health = incoming_health or {}
+    local_count = int(local_health.get("company_count") or 0)
+    incoming_count = int(incoming_health.get("company_count") or 0)
+    local_valid = bool(local_health.get("structural_valid"))
+    local_ready = bool(local_health.get("production_ready"))
+    incoming_ready = bool(incoming_health.get("production_ready"))
+
+    if not incoming_ready or incoming_count <= 0:
+        return {
+            "allowed": False,
+            "reason": "incoming database is not production-ready or has no company rows",
+        }
+    if local_ready and local_count > 0 and not explicit_recovery_mode:
+        return {
+            "allowed": False,
+            "reason": "local runtime database is valid and populated; automatic replacement is blocked",
+        }
+    if local_valid and local_count > 0 and incoming_count < local_count and not explicit_recovery_mode:
+        return {
+            "allowed": False,
+            "reason": (
+                f"incoming database has fewer companies than local runtime "
+                f"({incoming_count} < {local_count}); replacement is blocked"
+            ),
+        }
+    return {"allowed": True, "reason": "runtime replacement passed safety checks"}
+
+
 def _download_blob_to_temp_path(blob, prefix, logger_instance=None):
     logger_instance = logger_instance or logger
     temp_fd, temp_path = tempfile.mkstemp(prefix=prefix, suffix=".db", dir=DB_DIR)
@@ -1398,9 +1428,17 @@ def get_persistence_diagnostics():
     )
     return {
         "canonical_db_path": DB_PATH,
+        "db_backend": local_health.get("backend_label") or local_health.get("backend") or "SQLite",
+        "db_file_size_bytes": local_health.get("file_size_bytes"),
+        "database_uuid": local_health.get("database_uuid"),
+        "schema_version": local_health.get("schema_version"),
+        "database_created_at": local_health.get("database_created_at"),
+        "last_startup_at": local_health.get("last_startup_at"),
+        "environment_label": local_health.get("environment_label"),
         "local_db_valid": local_health["structural_valid"],
         "production_ready": local_health["production_ready"],
         "company_count": local_health["company_count"],
+        "required_tables_missing": local_health.get("missing_tables", []),
         "latest_backup_upload_status": LAST_BACKUP_STATUS.get("status"),
         "last_backup_timestamp": LAST_BACKUP_STATUS.get("timestamp"),
         "last_backup_reason": LAST_BACKUP_STATUS.get("reason"),
@@ -1599,7 +1637,7 @@ def get_downloadable_backup_export(logger_instance=None):
                 pass
 
 
-def restore_latest_cloud_backup_to_local(logger_instance=None):
+def restore_latest_cloud_backup_to_local(logger_instance=None, explicit_recovery_mode=False):
     global LAST_RESTORE_SOURCE
     logger_instance = logger_instance or logger
     diagnostics = get_recovery_source_diagnostics()
@@ -1663,6 +1701,38 @@ def restore_latest_cloud_backup_to_local(logger_instance=None):
                 "replacement_performed": False,
                 "temp_download_succeeded": bool(temp_restore_path and os.path.exists(temp_restore_path)),
                 "health": selected_health or local_health,
+                "validation_attempts": selected_candidate.get("validation_attempts") or [],
+            }
+
+        replacement_check = _evaluate_runtime_replacement(
+            local_health,
+            selected_health,
+            explicit_recovery_mode=explicit_recovery_mode,
+        )
+        if not replacement_check.get("allowed"):
+            logger_instance.warning(
+                "Cloud restore replacement blocked: reason=%s local_company_count=%s incoming_company_count=%s local_ready=%s incoming_ready=%s explicit_recovery_mode=%s",
+                replacement_check.get("reason"),
+                local_health.get("company_count"),
+                selected_health.get("company_count"),
+                local_health.get("production_ready"),
+                selected_health.get("production_ready"),
+                explicit_recovery_mode,
+            )
+            return {
+                "ok": False,
+                "stage": "replacement_guard",
+                "reason": replacement_check.get("reason"),
+                "bucket_name": diagnostics.get("bucket_name"),
+                "object_name": diagnostics.get("object_name"),
+                "selected_source_type": selected_candidate.get("source_type"),
+                "selected_object_path": selected_candidate.get("object_path"),
+                "replacement_performed": False,
+                "temp_download_succeeded": bool(temp_restore_path and os.path.exists(temp_restore_path)),
+                "health": local_health,
+                "incoming_health": selected_health,
+                "company_count": int(local_health.get("company_count") or 0),
+                "incoming_company_count": int(selected_health.get("company_count") or 0),
                 "validation_attempts": selected_candidate.get("validation_attempts") or [],
             }
 
@@ -2824,10 +2894,23 @@ def _ensure_database_identity_table(conn):
         CREATE TABLE IF NOT EXISTS database_identity (
             instance_id TEXT PRIMARY KEY,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            last_verified_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            last_verified_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            schema_version INTEGER DEFAULT 0,
+            last_startup_at TIMESTAMP,
+            backend_label TEXT DEFAULT 'SQLite',
+            environment_label TEXT
         )
         """
     )
+    existing_columns = {row[1] for row in conn.execute("PRAGMA table_info(database_identity)").fetchall()}
+    for column_name, column_def in {
+        "schema_version": "INTEGER DEFAULT 0",
+        "last_startup_at": "TIMESTAMP",
+        "backend_label": "TEXT DEFAULT 'SQLite'",
+        "environment_label": "TEXT",
+    }.items():
+        if column_name not in existing_columns:
+            conn.execute(f"ALTER TABLE database_identity ADD COLUMN {column_name} {column_def}")
     conn.execute(
         """
         INSERT INTO database_identity (instance_id)
@@ -2836,7 +2919,32 @@ def _ensure_database_identity_table(conn):
         """,
         (f"{os.path.basename(DB_PATH)}::{int(datetime.now().timestamp())}",),
     )
-    conn.execute("UPDATE database_identity SET last_verified_at = CURRENT_TIMESTAMP")
+    conn.execute(
+        """
+        UPDATE database_identity
+        SET last_verified_at = CURRENT_TIMESTAMP,
+            schema_version = COALESCE((SELECT MAX(version) FROM schema_version), schema_version, 0),
+            backend_label = COALESCE(NULLIF(backend_label, ''), 'SQLite'),
+            environment_label = ?,
+            last_startup_at = COALESCE(last_startup_at, CURRENT_TIMESTAMP)
+        """,
+        ("production" if ERP_PRODUCTION_MODE else "development",),
+    )
+
+
+def _mark_database_startup_identity(conn):
+    _ensure_database_identity_table(conn)
+    conn.execute(
+        """
+        UPDATE database_identity
+        SET last_startup_at = CURRENT_TIMESTAMP,
+            last_verified_at = CURRENT_TIMESTAMP,
+            schema_version = COALESCE((SELECT MAX(version) FROM schema_version), schema_version, 0),
+            backend_label = COALESCE(NULLIF(backend_label, ''), 'SQLite'),
+            environment_label = ?
+        """,
+        ("production" if ERP_PRODUCTION_MODE else "development",),
+    )
 
 
 def _table_exists(conn, table_name):
@@ -2898,11 +3006,19 @@ def get_database_production_readiness_report(db_path=DB_PATH, logger_instance=No
     logger_instance = logger_instance or logger
     report = {
         "db_path": db_path,
+        "backend": "SQLite",
+        "file_size_bytes": os.path.getsize(db_path) if db_path and os.path.exists(db_path) and os.path.isfile(db_path) else 0,
         "file_exists": bool(db_path and os.path.exists(db_path)),
         "sqlite_open_success": False,
         "structural_valid": False,
         "production_ready": False,
         "company_count": 0,
+        "database_uuid": None,
+        "schema_version": 0,
+        "database_created_at": None,
+        "last_startup_at": None,
+        "backend_label": None,
+        "environment_label": None,
         "required_tables_exist": False,
         "missing_tables": [],
         "companies_table_exists": False,
@@ -2938,6 +3054,26 @@ def get_database_production_readiness_report(db_path=DB_PATH, logger_instance=No
         if missing_tables:
             report["failures"].append(f"missing required production tables: {', '.join(missing_tables)}")
         report["company_count"] = get_database_company_count(db_path=db_path, logger_instance=logger_instance)
+        if "database_identity" in existing_tables:
+            identity_row = conn.execute(
+                """
+                SELECT instance_id, created_at, last_verified_at, schema_version,
+                       last_startup_at, backend_label, environment_label
+                FROM database_identity
+                ORDER BY created_at ASC
+                LIMIT 1
+                """
+            ).fetchone()
+            if identity_row:
+                report["database_uuid"] = identity_row["instance_id"]
+                report["database_created_at"] = identity_row["created_at"]
+                report["schema_version"] = int(identity_row["schema_version"] or 0)
+                report["last_startup_at"] = identity_row["last_startup_at"] or identity_row["last_verified_at"]
+                report["backend_label"] = identity_row["backend_label"]
+                report["environment_label"] = identity_row["environment_label"]
+        if "schema_version" in existing_tables:
+            version_row = conn.execute("SELECT COALESCE(MAX(version), 0) AS version FROM schema_version").fetchone()
+            report["schema_version"] = max(int(report["schema_version"] or 0), int(version_row["version"] or 0))
         if report["company_count"] <= 0:
             report["failures"].append("companies table has no deployed company rows")
         report["production_ready"] = not report["failures"]
@@ -2964,11 +3100,19 @@ def get_database_health_snapshot(db_path=DB_PATH, logger_instance=None):
     report = get_database_production_readiness_report(db_path=db_path, logger_instance=logger_instance)
     return {
         "db_path": db_path,
+        "backend": report["backend"],
+        "file_size_bytes": report["file_size_bytes"],
         "file_exists": report["file_exists"],
         "sqlite_open_success": report["sqlite_open_success"],
         "structural_valid": report["structural_valid"],
         "production_ready": report["production_ready"],
         "company_count": report["company_count"],
+        "database_uuid": report["database_uuid"],
+        "schema_version": report["schema_version"],
+        "database_created_at": report["database_created_at"],
+        "last_startup_at": report["last_startup_at"],
+        "backend_label": report["backend_label"],
+        "environment_label": report["environment_label"],
         "required_tables_exist": report["required_tables_exist"],
         "missing_tables": report["missing_tables"],
         "companies_table_exists": report["companies_table_exists"],
@@ -3068,7 +3212,10 @@ def attempt_production_database_recovery(force_restore=True):
             "replacement_performed": False,
             "health": local_health,
         }
-    restore_result = restore_latest_cloud_backup_to_local(logger_instance=logger)
+    restore_result = restore_latest_cloud_backup_to_local(
+        logger_instance=logger,
+        explicit_recovery_mode=force_restore,
+    )
     return {
         "ok": bool(restore_result.get("ok")),
         "stage": restore_result.get("stage") or "recovery_validation",
@@ -5257,15 +5404,21 @@ def startup_database():
     failure_reason = "; ".join(db_health_before_startup.get("readiness_failures", [])) or "local database is not production-ready"
     failure_stage = "startup_validation"
     logger.info(
-        "Database startup path selected: base_dir=%s db_dir=%s db_path=%s eka_data_dir=%s db_exists=%s db_valid=%s production_ready=%s company_count=%s readiness_failures=%s production_mode=%s safe_mode=%s advanced_helpers_available=%s db_upgrade_safety=%s erp_migrations=%s recovery_attempted=%s recovery_succeeded=%s cloud_restore_disabled=%s",
+        "Database startup path selected: base_dir=%s db_dir=%s db_path=%s backend=%s file_size_bytes=%s database_uuid=%s schema_version=%s last_startup_at=%s eka_data_dir=%s db_exists=%s db_valid=%s production_ready=%s company_count=%s missing_tables=%s readiness_failures=%s production_mode=%s safe_mode=%s advanced_helpers_available=%s db_upgrade_safety=%s erp_migrations=%s recovery_attempted=%s recovery_succeeded=%s cloud_restore_disabled=%s",
         BASE_DIR,
         DB_DIR,
         db_health_before_startup["db_path"],
+        db_health_before_startup.get("backend_label") or db_health_before_startup.get("backend") or "SQLite",
+        db_health_before_startup.get("file_size_bytes"),
+        db_health_before_startup.get("database_uuid") or "missing",
+        db_health_before_startup.get("schema_version"),
+        db_health_before_startup.get("last_startup_at") or "never",
         os.getenv("EKA_DATA_DIR"),
         db_health_before_startup["file_exists"],
         db_health_before_startup["structural_valid"],
         db_health_before_startup["production_ready"],
         db_health_before_startup["company_count"],
+        ", ".join(db_health_before_startup.get("missing_tables", [])) or "none",
         "; ".join(db_health_before_startup.get("readiness_failures", [])) or "none",
         ERP_PRODUCTION_MODE,
         ERP_SAFE_STARTUP_MODE,
@@ -5276,7 +5429,7 @@ def startup_database():
         cloud_restore_used,
         False,
     )
-    if _is_empty_local_db_recovery_candidate(db_health_before_startup):
+    if False and _is_empty_local_db_recovery_candidate(db_health_before_startup):
         local_bootstrap_company_count = int(db_health_before_startup.get("company_count") or 0)
         logger.warning(
             "Empty local DB detected – forcing cloud restore: db_path=%s local_company_count=%s structural_valid=%s required_tables_exist=%s companies_table_exists=%s database_identity_exists=%s schema_version_exists=%s",
@@ -5340,7 +5493,7 @@ def startup_database():
                 cloud_backup_company_count=cloud_backup_company_count,
             )
     if _is_bootstrap_candidate(db_health_before_startup):
-        if ERP_PRODUCTION_MODE:
+        if False and ERP_PRODUCTION_MODE:
             logger.error(
                 "Production startup blocked because the runtime database is empty after recovery evaluation: db_path=%s company_count=%s",
                 db_health_before_startup["db_path"],
@@ -5362,7 +5515,7 @@ def startup_database():
                 cloud_backup_company_count=startup_cloud_backup_company_count,
             )
         logger.info(
-            "Database startup entering bootstrap mode: db_path=%s company_count=%s production_ready=%s recovery_attempted=%s",
+            "Database startup entering bootstrap mode for structurally valid empty database: db_path=%s company_count=%s production_ready=%s recovery_attempted=%s",
             db_health_before_startup["db_path"],
             db_health_before_startup["company_count"],
             db_health_before_startup["production_ready"],
@@ -5471,6 +5624,7 @@ def startup_database():
             )
             conn.execute("BEGIN")
             _run_lightweight_integrity_checks(conn)
+            _mark_database_startup_identity(conn)
             conn.commit()
             logger.info(
                 "Database startup completed in fallback mode: db_path=%s db_valid=%s production_ready=%s recovery_attempted=%s recovery_succeeded=%s final_startup_mode=%s",
@@ -5564,6 +5718,7 @@ def startup_database():
 
         conn.execute("BEGIN")
         _run_lightweight_integrity_checks(conn)
+        _mark_database_startup_identity(conn)
         after_counts = _snapshot_critical_row_counts(conn)
         count_failures = validate_row_counts(before_counts, after_counts)
         if count_failures:

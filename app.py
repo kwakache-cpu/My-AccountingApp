@@ -2089,6 +2089,18 @@ else:
                         )
                     )
                     st.caption(
+                        "DB Backend: {backend} | Size: {size} bytes | UUID: {uuid} | Schema: {schema} | Last Startup: {startup}".format(
+                            backend=persistence_diag.get("db_backend") or "SQLite",
+                            size=persistence_diag.get("db_file_size_bytes") or 0,
+                            uuid=persistence_diag.get("database_uuid") or "missing",
+                            schema=persistence_diag.get("schema_version") or 0,
+                            startup=persistence_diag.get("last_startup_at") or "never",
+                        )
+                    )
+                    missing_tables = persistence_diag.get("required_tables_missing") or []
+                    if missing_tables:
+                        st.warning("Missing required DB tables: " + ", ".join(missing_tables))
+                    st.caption(
                         "Local Backup Status: {status} | Last Local Backup: {timestamp} | Local Latest: {local_latest}".format(
                             status=persistence_diag["latest_local_backup_status"],
                             timestamp=persistence_diag["last_local_backup_timestamp"] or "never",
