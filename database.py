@@ -191,6 +191,39 @@ DATABASE_REQUIRED_TABLES = (
 DATABASE_PRODUCTION_REQUIRED_TABLES = DATABASE_REQUIRED_TABLES + (
     "database_identity",
 )
+FIXED_ASSET_SCHEMA_COLUMN_DEFS = {
+    "company_key": "TEXT",
+    "asset_category": "TEXT",
+    "purchase_date": "TEXT",
+    "cost": "REAL DEFAULT 0",
+    "opening_book_value": "REAL DEFAULT 0",
+    "supplier_id": "INTEGER",
+    "useful_life_years": "REAL DEFAULT 0",
+    "residual_value": "REAL DEFAULT 0",
+    "depreciation_method": "TEXT DEFAULT 'Straight-line'",
+    "depreciation_rate": "REAL DEFAULT 0",
+    "accumulated_depreciation": "REAL DEFAULT 0",
+    "book_value": "REAL DEFAULT 0",
+    "last_depreciation_date": "TEXT",
+    "location": "TEXT",
+    "custodian": "TEXT",
+    "description": "TEXT",
+    "notes": "TEXT",
+    "acquisition_type": "TEXT DEFAULT 'Opening Balance Asset'",
+    "acquisition_source": "TEXT",
+    "payment_method": "TEXT",
+    "owner_contributor_name": "TEXT",
+    "owner_name": "TEXT",
+    "status": "TEXT DEFAULT 'Active'",
+    "approval_status": "TEXT DEFAULT 'Posted'",
+    "approved_at": "TIMESTAMP",
+    "approved_by": "TEXT",
+    "posted_entry_id": "INTEGER",
+    "acquisition_journal_entry_id": "INTEGER",
+    "last_journal_sync_at": "TIMESTAMP",
+    "created_by": "TEXT",
+}
+
 SCHEMA_MANIFEST = {
     "source_of_truth": {
         "companies": ("key", "name", "subscription_expiry", "status"),
@@ -209,7 +242,7 @@ SCHEMA_MANIFEST = {
         "payment_allocations": ("id", "company_key", "payment_id", "amount"),
         "inventory": ("id", "company_key", "item_name", "qty", "cost_price"),
         "stock_movements": ("id", "company_key", "inventory_item_id", "movement_type", "quantity"),
-        "fixed_assets": ("id", "company_key", "asset_name", "cost", "book_value"),
+        "fixed_assets": ("id", "company_key", "asset_name", "asset_category", "purchase_date", "cost", "opening_book_value", "book_value", "location", "custodian", "description", "notes", "acquisition_type", "acquisition_source", "payment_method", "supplier_id", "owner_contributor_name", "owner_name", "posted_entry_id", "acquisition_journal_entry_id", "last_journal_sync_at", "status"),
         "payroll": ("id", "company_key", "emp_name", "net_salary", "status"),
         "vouchers": ("id", "company_key", "date", "v_type", "approval_status"),
         "bank_accounts": ("id", "company_key", "account_name", "currency"),
@@ -438,6 +471,98 @@ def get_schema_manifest_diagnostics(conn=None):
             "legacy_obsolete_tables_present": [],
             "missing_required_columns": {},
             "warnings": [f"Schema diagnostics unavailable: {exc}"],
+            "ok": False,
+        }
+    finally:
+        if owns_connection and diagnostics_conn:
+            diagnostics_conn.close()
+
+
+def get_fixed_assets_schema_diagnostics(conn=None, repair=False):
+    """
+    Report the fixed_assets self-heal state and optionally apply additive repairs.
+
+    This is intentionally limited to ALTER TABLE ADD COLUMN on existing tables.
+    It never recreates fixed_assets and never deletes or overwrites asset records.
+    """
+    owns_connection = conn is None
+    diagnostics_conn = conn or get_connection()
+    table_name = "fixed_assets"
+    expected_columns = dict(FIXED_ASSET_SCHEMA_COLUMN_DEFS)
+    expected_columns.setdefault("id", "INTEGER")
+    expected_columns.setdefault("asset_name", "TEXT")
+    repaired_columns = []
+    failed_repairs = []
+    if diagnostics_conn is None:
+        return {
+            "table": table_name,
+            "table_exists": False,
+            "expected_columns": sorted(expected_columns),
+            "existing_columns": [],
+            "missing_columns": sorted(expected_columns),
+            "repaired_columns": [],
+            "failed_repairs": [{"column": None, "error": "Database connection unavailable."}],
+            "ok": False,
+        }
+    try:
+        table_exists = table_name in _get_existing_tables(diagnostics_conn)
+        if not table_exists:
+            return {
+                "table": table_name,
+                "table_exists": False,
+                "expected_columns": sorted(expected_columns),
+                "existing_columns": [],
+                "missing_columns": sorted(expected_columns),
+                "repaired_columns": [],
+                "failed_repairs": [],
+                "ok": False,
+            }
+        existing_columns = _get_existing_columns(diagnostics_conn, table_name)
+        missing_columns = [
+            column_name
+            for column_name in expected_columns
+            if column_name not in existing_columns and column_name not in {"id", "asset_name"}
+        ]
+        if repair:
+            for column_name in list(missing_columns):
+                column_def = expected_columns[column_name]
+                try:
+                    diagnostics_conn.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_def}")
+                    repaired_columns.append(column_name)
+                    existing_columns.add(column_name)
+                except sqlite3.Error as exc:
+                    failed_repairs.append(
+                        {
+                            "column": column_name,
+                            "error": sanitize_error_message(exc),
+                        }
+                    )
+            if owns_connection:
+                diagnostics_conn.commit()
+            missing_columns = [
+                column_name
+                for column_name in expected_columns
+                if column_name not in existing_columns and column_name not in {"id", "asset_name"}
+            ]
+        return {
+            "table": table_name,
+            "table_exists": True,
+            "expected_columns": sorted(expected_columns),
+            "existing_columns": sorted(existing_columns),
+            "missing_columns": sorted(missing_columns),
+            "repaired_columns": sorted(repaired_columns),
+            "failed_repairs": failed_repairs,
+            "ok": not missing_columns and not failed_repairs,
+        }
+    except sqlite3.Error as exc:
+        return {
+            "table": table_name,
+            "table_exists": False,
+            "expected_columns": sorted(expected_columns),
+            "existing_columns": [],
+            "missing_columns": sorted(expected_columns),
+            "repaired_columns": sorted(repaired_columns),
+            "failed_repairs": [{"column": None, "error": sanitize_error_message(exc)}],
             "ok": False,
         }
     finally:
@@ -3129,35 +3254,7 @@ def ensure_schema_integrity(conn):
         "recurring_transactions": {"company_key": "TEXT", "branch_id": "TEXT", "description": "TEXT", "frequency": "TEXT", "next_run_date": "TEXT", "last_run_at": "TIMESTAMP", "is_active": "INTEGER DEFAULT 1", "created_by": "TEXT", "created_at": "TIMESTAMP DEFAULT CURRENT_TIMESTAMP", "source_module": "TEXT", "source_table": "TEXT", "source_id": "INTEGER", "recurrence_payload": "TEXT"},
         "accounting_periods": {"status": "TEXT DEFAULT 'Open'", "closed_at": "TIMESTAMP", "closed_by": "TEXT", "reopened_at": "TIMESTAMP", "reopened_by": "TEXT"},
         "branches": {"contact_number": "TEXT", "branch_manager": "TEXT", "branch_access_key": "TEXT"},
-        "fixed_assets": {
-            "company_key": "TEXT",
-            "asset_category": "TEXT",
-            "purchase_date": "TEXT",
-            "cost": "REAL DEFAULT 0",
-            "opening_book_value": "REAL DEFAULT 0",
-            "supplier_id": "INTEGER",
-            "useful_life_years": "REAL DEFAULT 0",
-            "residual_value": "REAL DEFAULT 0",
-            "depreciation_method": "TEXT DEFAULT 'Straight-line'",
-            "depreciation_rate": "REAL DEFAULT 0",
-            "accumulated_depreciation": "REAL DEFAULT 0",
-            "book_value": "REAL DEFAULT 0",
-            "last_depreciation_date": "TEXT",
-            "location": "TEXT",
-            "custodian": "TEXT",
-            "description": "TEXT",
-            "notes": "TEXT",
-            "acquisition_type": "TEXT DEFAULT 'Opening Balance Asset'",
-            "payment_method": "TEXT",
-            "owner_contributor_name": "TEXT",
-            "status": "TEXT DEFAULT 'Active'",
-            "approval_status": "TEXT DEFAULT 'Posted'",
-            "approved_at": "TIMESTAMP",
-            "approved_by": "TEXT",
-            "posted_entry_id": "INTEGER",
-            "last_journal_sync_at": "TIMESTAMP",
-            "created_by": "TEXT",
-        },
+        "fixed_assets": FIXED_ASSET_SCHEMA_COLUMN_DEFS,
         "suppliers": {"address": "TEXT", "category": "TEXT", "currency": "TEXT DEFAULT 'GHS'", "created_at": "TIMESTAMP DEFAULT CURRENT_TIMESTAMP"},
     }
 
@@ -4454,6 +4551,14 @@ def _run_lightweight_integrity_checks(conn):
     _ensure_migration_metadata_tables(conn)
     _ensure_database_identity_table(conn)
     ensure_schema_integrity(conn)
+    fixed_asset_schema = get_fixed_assets_schema_diagnostics(conn, repair=False)
+    if fixed_asset_schema.get("missing_columns") or fixed_asset_schema.get("failed_repairs"):
+        logger.warning(
+            "Fixed assets schema diagnostics: table_exists=%s missing_columns=%s failed_repairs=%s",
+            fixed_asset_schema.get("table_exists"),
+            fixed_asset_schema.get("missing_columns"),
+            fixed_asset_schema.get("failed_repairs"),
+        )
     _ensure_app_compatibility_tables(conn)
     log_schema_manifest_diagnostics(conn)
 
@@ -4780,13 +4885,16 @@ def _deploy_full_schema(conn):
                 description TEXT,
                 notes TEXT,
                 acquisition_type TEXT DEFAULT 'Opening Balance Asset',
+                acquisition_source TEXT,
                 payment_method TEXT,
                 owner_contributor_name TEXT,
+                owner_name TEXT,
                 status TEXT DEFAULT 'Active',
                 approval_status TEXT DEFAULT 'Posted',
                 approved_at TIMESTAMP,
                 approved_by TEXT,
                 posted_entry_id INTEGER,
+                acquisition_journal_entry_id INTEGER,
                 last_journal_sync_at TIMESTAMP,
                 created_by TEXT,
                 FOREIGN KEY (company_key) REFERENCES companies (key) ON DELETE CASCADE
@@ -4794,35 +4902,7 @@ def _deploy_full_schema(conn):
         """)
         cursor.execute("PRAGMA table_info(fixed_assets)")
         fixed_asset_columns = {row[1] for row in cursor.fetchall()}
-        fixed_asset_column_defs = {
-            "company_key": "TEXT",
-            "asset_category": "TEXT",
-            "purchase_date": "TEXT",
-            "cost": "REAL DEFAULT 0",
-            "opening_book_value": "REAL DEFAULT 0",
-            "supplier_id": "INTEGER",
-            "useful_life_years": "REAL DEFAULT 0",
-            "residual_value": "REAL DEFAULT 0",
-            "depreciation_method": "TEXT DEFAULT 'Straight-line'",
-            "depreciation_rate": "REAL DEFAULT 0",
-            "accumulated_depreciation": "REAL DEFAULT 0",
-            "book_value": "REAL DEFAULT 0",
-            "last_depreciation_date": "TEXT",
-            "location": "TEXT",
-            "custodian": "TEXT",
-            "description": "TEXT",
-            "notes": "TEXT",
-            "acquisition_type": "TEXT DEFAULT 'Opening Balance Asset'",
-            "payment_method": "TEXT",
-            "owner_contributor_name": "TEXT",
-            "status": "TEXT DEFAULT 'Active'",
-            "approval_status": "TEXT DEFAULT 'Posted'",
-            "approved_at": "TIMESTAMP",
-            "approved_by": "TEXT",
-            "posted_entry_id": "INTEGER",
-            "last_journal_sync_at": "TIMESTAMP",
-            "created_by": "TEXT",
-        }
+        fixed_asset_column_defs = FIXED_ASSET_SCHEMA_COLUMN_DEFS
         for column_name, column_def in fixed_asset_column_defs.items():
             if column_name not in fixed_asset_columns:
                 cursor.execute(f"ALTER TABLE fixed_assets ADD COLUMN {column_name} {column_def}")
