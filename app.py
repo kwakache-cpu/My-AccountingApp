@@ -11,6 +11,7 @@ from database import (
     get_company_subscription_snapshot,
     get_connection,
     get_recovery_source_diagnostics,
+    get_sqlite_concurrency_diagnostics,
     restore_latest_cloud_backup_to_local,
     startup_database,
 )
@@ -2188,6 +2189,27 @@ else:
                         )
                         if postgres_diag.get("switch_blocked"):
                             st.info("PostgreSQL switch is not enabled yet. Review readiness blockers before changing runtime backend.")
+                    sqlite_diag = get_sqlite_concurrency_diagnostics()
+                    if sqlite_diag.get("sqlite_active"):
+                        st.warning(
+                            "SQLite concurrency advisory: recommended limit is {limit}; readiness level {level}. {advisory}".format(
+                                limit=sqlite_diag.get("recommended_safe_user_limit"),
+                                level=sqlite_diag.get("readiness_level"),
+                                advisory=sqlite_diag.get("advisory"),
+                            )
+                        )
+                        st.caption(
+                            "SQLite locks: active_writes={active} retries={retries} failed_locks={failed} "
+                            "backup_overlaps={overlaps} busy_timeout={timeout}ms longest_write={longest}s ({operation})".format(
+                                active=len(sqlite_diag.get("active_write_operations") or {}),
+                                retries=sqlite_diag.get("lock_retries", 0),
+                                failed=sqlite_diag.get("failed_lock_acquisitions", 0),
+                                overlaps=sqlite_diag.get("backup_overlap_events", 0),
+                                timeout=sqlite_diag.get("busy_timeout_ms", 0),
+                                longest=sqlite_diag.get("longest_write_seconds", 0),
+                                operation=sqlite_diag.get("longest_write_operation") or "none",
+                            )
+                        )
                     self_test = operations_snapshot["persistence_self_test"]
                     if self_test["mismatch"]:
                         st.warning(

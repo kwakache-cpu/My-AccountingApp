@@ -7,6 +7,8 @@ import json
 import re
 import tempfile
 import time
+import threading
+from contextlib import contextmanager
 from security_utils import sanitize_error_message
 from urllib.parse import parse_qs, urlparse, urlunparse
 
@@ -319,6 +321,41 @@ LAST_LOCAL_BACKUP_STATUS = {
 LAST_BACKUP_SIGNATURE = None
 LAST_BACKUP_AT = 0.0
 LAST_RESTORE_SOURCE = "local_runtime_database"
+SQLITE_BUSY_TIMEOUT_MS = max(int(os.getenv("EKA_SQLITE_BUSY_TIMEOUT_MS", "10000") or 10000), 1000)
+SQLITE_LOCK_RETRY_ATTEMPTS = max(int(os.getenv("EKA_SQLITE_LOCK_RETRY_ATTEMPTS", "5") or 5), 1)
+SQLITE_LOCK_RETRY_BASE_SECONDS = max(float(os.getenv("EKA_SQLITE_LOCK_RETRY_BASE_SECONDS", "0.05") or 0.05), 0.01)
+SQLITE_OPERATION_LOCK_TIMEOUT_SECONDS = max(
+    float(os.getenv("EKA_SQLITE_OPERATION_LOCK_TIMEOUT_SECONDS", "15") or 15),
+    1.0,
+)
+SQLITE_CRITICAL_OPERATION_NAMES = {
+    "pos_finalization",
+    "payroll_posting",
+    "depreciation_run",
+    "inventory_import",
+    "cloud_backup_sync",
+    "year_end_close",
+}
+SQLITE_CONCURRENCY_DIAGNOSTICS = {
+    "connection_opened": 0,
+    "connection_closed": 0,
+    "active_connections": 0,
+    "max_active_connections": 0,
+    "write_transactions_started": 0,
+    "write_transactions_committed": 0,
+    "write_transactions_rolled_back": 0,
+    "lock_retries": 0,
+    "failed_lock_acquisitions": 0,
+    "backup_overlap_events": 0,
+    "active_write_operations": {},
+    "longest_write_seconds": 0.0,
+    "longest_write_operation": None,
+    "total_lock_wait_seconds": 0.0,
+    "last_lock_error": None,
+    "last_write_failure": None,
+}
+SQLITE_DIAGNOSTICS_LOCK = threading.RLock()
+SQLITE_OPERATION_LOCKS = {}
 EMPTY_DB_LOCKDOWN_MESSAGE = (
     "No company data was loaded. A valid cloud backup could not be restored. "
     "Do not register a new company until recovery is completed."
@@ -957,6 +994,186 @@ def db_rollback(conn):
         conn.rollback()
 
 
+def _sqlite_lock_error(exc):
+    if not isinstance(exc, sqlite3.Error):
+        return False
+    message = str(exc).lower()
+    return "database is locked" in message or "database table is locked" in message or "sqlite_busy" in message
+
+
+def _diagnostic_increment(key, amount=1):
+    with SQLITE_DIAGNOSTICS_LOCK:
+        SQLITE_CONCURRENCY_DIAGNOSTICS[key] = SQLITE_CONCURRENCY_DIAGNOSTICS.get(key, 0) + amount
+
+
+def _diagnostic_set(key, value):
+    with SQLITE_DIAGNOSTICS_LOCK:
+        SQLITE_CONCURRENCY_DIAGNOSTICS[key] = value
+
+
+def _diagnostic_connection_opened():
+    with SQLITE_DIAGNOSTICS_LOCK:
+        SQLITE_CONCURRENCY_DIAGNOSTICS["connection_opened"] += 1
+        SQLITE_CONCURRENCY_DIAGNOSTICS["active_connections"] += 1
+        SQLITE_CONCURRENCY_DIAGNOSTICS["max_active_connections"] = max(
+            SQLITE_CONCURRENCY_DIAGNOSTICS["max_active_connections"],
+            SQLITE_CONCURRENCY_DIAGNOSTICS["active_connections"],
+        )
+
+
+def _diagnostic_connection_closed():
+    with SQLITE_DIAGNOSTICS_LOCK:
+        SQLITE_CONCURRENCY_DIAGNOSTICS["connection_closed"] += 1
+        SQLITE_CONCURRENCY_DIAGNOSTICS["active_connections"] = max(
+            int(SQLITE_CONCURRENCY_DIAGNOSTICS.get("active_connections") or 0) - 1,
+            0,
+        )
+
+
+def with_retry_on_lock(operation, operation_name="sqlite_operation", attempts=None, base_delay=None, logger_instance=None):
+    attempts = int(attempts or SQLITE_LOCK_RETRY_ATTEMPTS)
+    base_delay = float(base_delay or SQLITE_LOCK_RETRY_BASE_SECONDS)
+    logger_instance = logger_instance or logger
+    last_error = None
+    for attempt in range(1, attempts + 1):
+        try:
+            return operation()
+        except sqlite3.Error as exc:
+            if not _sqlite_lock_error(exc) or attempt >= attempts:
+                _diagnostic_set("last_lock_error", sanitize_error_message(exc))
+                raise
+            last_error = exc
+            wait_seconds = min(base_delay * (2 ** (attempt - 1)), 1.0)
+            _diagnostic_increment("lock_retries")
+            _diagnostic_increment("total_lock_wait_seconds", wait_seconds)
+            logger_instance.warning(
+                "SQLite lock retry: operation=%s attempt=%s/%s wait=%.3fs reason=%s",
+                operation_name,
+                attempt,
+                attempts,
+                wait_seconds,
+                sanitize_error_message(exc),
+            )
+            time.sleep(wait_seconds)
+    if last_error:
+        raise last_error
+
+
+def _operation_lock_for(name):
+    normalized = str(name or "sqlite_write").strip() or "sqlite_write"
+    with SQLITE_DIAGNOSTICS_LOCK:
+        lock = SQLITE_OPERATION_LOCKS.get(normalized)
+        if lock is None:
+            lock = threading.RLock()
+            SQLITE_OPERATION_LOCKS[normalized] = lock
+        return lock
+
+
+@contextmanager
+def sqlite_operation_lock(name, timeout=None):
+    normalized = str(name or "sqlite_write").strip() or "sqlite_write"
+    lock = _operation_lock_for(normalized)
+    start = time.monotonic()
+    acquired = lock.acquire(timeout=float(timeout or SQLITE_OPERATION_LOCK_TIMEOUT_SECONDS))
+    wait_seconds = time.monotonic() - start
+    _diagnostic_increment("total_lock_wait_seconds", wait_seconds)
+    if not acquired:
+        _diagnostic_increment("failed_lock_acquisitions")
+        raise TimeoutError(f"Could not acquire SQLite operation lock for {normalized}")
+    with SQLITE_DIAGNOSTICS_LOCK:
+        SQLITE_CONCURRENCY_DIAGNOSTICS["active_write_operations"][normalized] = {
+            "started_at": datetime.utcnow().isoformat(timespec="seconds"),
+            "wait_seconds": round(wait_seconds, 4),
+        }
+    try:
+        yield
+    finally:
+        elapsed = time.monotonic() - start
+        with SQLITE_DIAGNOSTICS_LOCK:
+            SQLITE_CONCURRENCY_DIAGNOSTICS["active_write_operations"].pop(normalized, None)
+            if elapsed > float(SQLITE_CONCURRENCY_DIAGNOSTICS.get("longest_write_seconds") or 0.0):
+                SQLITE_CONCURRENCY_DIAGNOSTICS["longest_write_seconds"] = round(elapsed, 4)
+                SQLITE_CONCURRENCY_DIAGNOSTICS["longest_write_operation"] = normalized
+        lock.release()
+
+
+class SQLiteWriteTransaction:
+    def __init__(self, operation_name="sqlite_write", conn=None, immediate=True, retries=None):
+        self.operation_name = operation_name
+        self.conn = conn
+        self.owns_connection = conn is None
+        self.immediate = bool(immediate)
+        self.retries = retries
+
+    def __enter__(self):
+        def begin():
+            self.conn = self.conn or get_connection()
+            if self.conn is None:
+                raise RuntimeError("Database connection unavailable.")
+            if not getattr(self.conn, "in_transaction", False):
+                self.conn.execute("BEGIN IMMEDIATE" if self.immediate else "BEGIN")
+            return self.conn
+
+        _diagnostic_increment("write_transactions_started")
+        return with_retry_on_lock(begin, operation_name=self.operation_name, attempts=self.retries)
+
+    def __exit__(self, exc_type, exc, tb):
+        try:
+            if exc_type is None:
+                self.conn.commit()
+                _diagnostic_increment("write_transactions_committed")
+            else:
+                try:
+                    self.conn.rollback()
+                finally:
+                    _diagnostic_increment("write_transactions_rolled_back")
+                    _diagnostic_set("last_write_failure", sanitize_error_message(exc))
+        finally:
+            if self.owns_connection and self.conn:
+                self.conn.close()
+        return False
+
+
+def execute_write_transaction(callback, operation_name="sqlite_write", conn=None, immediate=True, retries=None):
+    with sqlite_operation_lock(operation_name):
+        with SQLiteWriteTransaction(operation_name=operation_name, conn=conn, immediate=immediate, retries=retries) as tx_conn:
+            return callback(tx_conn)
+
+
+def execute_readonly_query(callback, operation_name="sqlite_read", conn=None, retries=None):
+    owns_connection = conn is None
+    conn = conn or get_connection()
+    try:
+        return with_retry_on_lock(lambda: callback(conn), operation_name=operation_name, attempts=retries)
+    finally:
+        if owns_connection and conn:
+            conn.close()
+
+
+def get_sqlite_concurrency_diagnostics():
+    with SQLITE_DIAGNOSTICS_LOCK:
+        active_operations = dict(SQLITE_CONCURRENCY_DIAGNOSTICS.get("active_write_operations") or {})
+        diagnostics = dict(SQLITE_CONCURRENCY_DIAGNOSTICS)
+        diagnostics["active_write_operations"] = active_operations
+    diagnostics.update(
+        {
+            "sqlite_active": is_sqlite(),
+            "busy_timeout_ms": SQLITE_BUSY_TIMEOUT_MS,
+            "retry_attempts": SQLITE_LOCK_RETRY_ATTEMPTS,
+            "operation_lock_timeout_seconds": SQLITE_OPERATION_LOCK_TIMEOUT_SECONDS,
+            "journal_mode": "WAL",
+            "synchronous": "NORMAL",
+            "recommended_safe_user_limit": "3-5 active users for write-heavy pilot/SME workloads",
+            "readiness_level": "pilot / SME",
+            "advisory": (
+                "SQLite is safe for small teams with short writes, but high-write multi-user ERP usage "
+                "should move to PostgreSQL/Supabase before enterprise rollout."
+            ),
+        }
+    )
+    return diagnostics
+
+
 def get_db_diagnostics():
     health = get_database_health_snapshot(DB_PATH, logger_instance=logger)
     readiness = get_postgres_readiness_diagnostics()
@@ -973,6 +1190,7 @@ def get_db_diagnostics():
         "schema_version": health.get("schema_version"),
         "database_uuid": health.get("database_uuid"),
         "postgres_readiness": readiness,
+        "sqlite_concurrency": get_sqlite_concurrency_diagnostics(),
     }
 
 
@@ -1498,7 +1716,15 @@ def _extract_mutated_table_name(sql_text):
     return str(match.group(1)).lower() if match else None
 
 
-class ManagedSQLiteConnection(sqlite3.Connection):
+class TrackedSQLiteConnection(sqlite3.Connection):
+    def close(self):
+        try:
+            super().close()
+        finally:
+            _diagnostic_connection_closed()
+
+
+class ManagedSQLiteConnection(TrackedSQLiteConnection):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self._managed_db_path = None
@@ -1524,7 +1750,6 @@ class ManagedSQLiteConnection(sqlite3.Connection):
         super().rollback()
         self._mutated_tables.clear()
 
-
 def _create_runtime_snapshot_file(source_db_path=DB_PATH):
     _ensure_db_directory()
     snapshot_fd, snapshot_path = tempfile.mkstemp(
@@ -1537,7 +1762,11 @@ def _create_runtime_snapshot_file(source_db_path=DB_PATH):
     snapshot_conn = None
     try:
         source_conn = sqlite3.connect(source_db_path, timeout=20, check_same_thread=False)
+        source_conn.execute(f"PRAGMA busy_timeout = {SQLITE_BUSY_TIMEOUT_MS};")
+        source_conn.execute("PRAGMA foreign_keys = ON;")
+        source_conn.execute("PRAGMA journal_mode = WAL;")
         snapshot_conn = sqlite3.connect(snapshot_path, timeout=20, check_same_thread=False)
+        snapshot_conn.execute(f"PRAGMA busy_timeout = {SQLITE_BUSY_TIMEOUT_MS};")
         source_conn.backup(snapshot_conn)
         return snapshot_path
     finally:
@@ -1667,31 +1896,38 @@ def backup_runtime_database_to_cloud(force=False, trigger_tables=None, logger_in
 
     snapshot_path = None
     try:
-        snapshot_path = _create_runtime_snapshot_file(DB_PATH)
-        snapshot_health = get_database_health_snapshot(snapshot_path, logger_instance=logger_instance)
-        if not snapshot_health["production_ready"]:
-            reason = "; ".join(snapshot_health.get("readiness_failures", [])) or "snapshot database is not production-ready"
-            logger_instance.warning("Backup skipped because snapshot validation failed; latest backups protected: %s", reason)
-            _update_local_backup_status("failed", reason, latest_path=LOCAL_LATEST_BACKUP_PATH, history_path=None, trigger_tables=trigger_tables)
-            _update_backup_status("failed", reason, latest_object=latest_object, history_object=None, trigger_tables=trigger_tables)
-            return {
-                "ok": False,
-                "reason": reason,
-                "latest_object": latest_object,
-                "history_object": None,
-                "latest_local_path": LOCAL_LATEST_BACKUP_PATH,
-                "history_local_path": None,
-            }
+        if SQLITE_CONCURRENCY_DIAGNOSTICS.get("active_write_operations"):
+            _diagnostic_increment("backup_overlap_events")
+        backup_lock_context = sqlite_operation_lock("cloud_backup_sync")
+        backup_lock_context.__enter__()
+        try:
+            snapshot_path = _create_runtime_snapshot_file(DB_PATH)
+            snapshot_health = get_database_health_snapshot(snapshot_path, logger_instance=logger_instance)
+            if not snapshot_health["production_ready"]:
+                reason = "; ".join(snapshot_health.get("readiness_failures", [])) or "snapshot database is not production-ready"
+                logger_instance.warning("Backup skipped because snapshot validation failed; latest backups protected: %s", reason)
+                _update_local_backup_status("failed", reason, latest_path=LOCAL_LATEST_BACKUP_PATH, history_path=None, trigger_tables=trigger_tables)
+                _update_backup_status("failed", reason, latest_object=latest_object, history_object=None, trigger_tables=trigger_tables)
+                return {
+                    "ok": False,
+                    "reason": reason,
+                    "latest_object": latest_object,
+                    "history_object": None,
+                    "latest_local_path": LOCAL_LATEST_BACKUP_PATH,
+                    "history_local_path": None,
+                }
 
-        logger_instance.info(
-            "Validated backup snapshot created: snapshot=%s company_count=%s local_latest=%s local_history=%s cloud_latest=%s cloud_history=%s",
-            snapshot_path,
-            snapshot_health["company_count"],
-            LOCAL_LATEST_BACKUP_PATH,
-            local_history_path,
-            latest_object,
-            history_object,
-        )
+            logger_instance.info(
+                "Validated backup snapshot created: snapshot=%s company_count=%s local_latest=%s local_history=%s cloud_latest=%s cloud_history=%s",
+                snapshot_path,
+                snapshot_health["company_count"],
+                LOCAL_LATEST_BACKUP_PATH,
+                local_history_path,
+                latest_object,
+                history_object,
+            )
+        finally:
+            backup_lock_context.__exit__(None, None, None)
 
         try:
             local_backup_result = _copy_snapshot_to_local_backups(
@@ -3179,6 +3415,9 @@ def _ensure_local_db_file():
     _ensure_db_directory()
     if not os.path.exists(DB_PATH) and not ERP_PRODUCTION_MODE:
         conn = sqlite3.connect(DB_PATH, timeout=20, check_same_thread=False)
+        conn.execute(f"PRAGMA busy_timeout = {SQLITE_BUSY_TIMEOUT_MS};")
+        conn.execute("PRAGMA journal_mode = WAL;")
+        conn.execute("PRAGMA synchronous = NORMAL;")
         conn.close()
         logger.info("Created local database file at: %s", DB_PATH)
     elif not os.path.exists(DB_PATH):
@@ -3190,14 +3429,17 @@ def _open_sqlite_connection(path=DB_PATH, enable_persistence_hooks=False):
         raise sqlite3.OperationalError(
             f"Production database file is missing and cannot be recreated outside startup recovery: {path}"
         )
-    connection_factory = ManagedSQLiteConnection if enable_persistence_hooks else sqlite3.Connection
+    connection_factory = ManagedSQLiteConnection if enable_persistence_hooks else TrackedSQLiteConnection
     conn = sqlite3.connect(path, timeout=20, check_same_thread=False, factory=connection_factory)
+    _diagnostic_connection_opened()
     conn.row_factory = sqlite3.Row
     if isinstance(conn, ManagedSQLiteConnection):
         conn._managed_db_path = path
         conn._persistence_hooks_enabled = bool(enable_persistence_hooks)
     conn.execute("PRAGMA foreign_keys = ON;")
+    conn.execute(f"PRAGMA busy_timeout = {SQLITE_BUSY_TIMEOUT_MS};")
     conn.execute("PRAGMA journal_mode = WAL;")
+    conn.execute("PRAGMA synchronous = NORMAL;")
     return conn
 
 

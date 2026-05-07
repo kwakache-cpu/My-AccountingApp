@@ -7,7 +7,12 @@ import sqlite3
 
 import pandas as pd
 
-from database import get_connection, log_audit_action as database_log_audit_action
+from database import (
+    execute_write_transaction,
+    get_connection,
+    log_audit_action as database_log_audit_action,
+    with_retry_on_lock,
+)
 
 
 LEGACY_TABLES = {"vouchers", "transactions"}
@@ -1160,6 +1165,37 @@ def post_journal_entry(
 
     entry_date = _resolve_date(date)
     owns_connection = conn is None
+    if owns_connection:
+        operation_name = "journal_posting"
+        if str(source_table or "").strip().lower() == "pos_sales":
+            operation_name = "pos_finalization"
+        elif str(source_table or "").strip().lower() == "payroll":
+            operation_name = "payroll_posting"
+        elif str(source_type or source_module or "").strip().lower().find("depreciation") >= 0:
+            operation_name = "depreciation_run"
+        return execute_write_transaction(
+            lambda tx_conn: post_journal_entry(
+                company_key=company_key,
+                date=date,
+                description=description,
+                reference=reference,
+                lines=lines,
+                created_by=created_by,
+                branch_id=branch_id,
+                customer_id=customer_id,
+                supplier_id=supplier_id,
+                inventory_item_id=inventory_item_id,
+                payment_id=payment_id,
+                source_module=source_module,
+                source_table=source_table,
+                source_type=source_type,
+                source_id=source_id,
+                approval_status=approval_status,
+                manual_entry=manual_entry,
+                conn=tx_conn,
+            ),
+            operation_name=operation_name,
+        )
     conn = conn or get_connection()
     if conn is None:
         raise RuntimeError("Database connection unavailable.")
@@ -1300,7 +1336,7 @@ def post_journal_entry(
         if source_module:
             _legacy_voucher_insert(conn, company_key, branch_id, entry_date, description, reference, created_by, normalized_lines, source_module=source_module)
         if owns_connection:
-            conn.commit()
+            with_retry_on_lock(conn.commit, operation_name="journal_posting_commit")
         return entry_id
     except Exception:
         if owns_connection:
