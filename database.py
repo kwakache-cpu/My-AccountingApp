@@ -321,6 +321,8 @@ LAST_LOCAL_BACKUP_STATUS = {
 LAST_BACKUP_SIGNATURE = None
 LAST_BACKUP_AT = 0.0
 LAST_RESTORE_SOURCE = "local_runtime_database"
+LAST_CLOUD_RESTORE_SKIP_REASON = None
+LAST_CLOUD_UPLOAD_BLOCK_REASON = None
 SQLITE_BUSY_TIMEOUT_MS = max(int(os.getenv("EKA_SQLITE_BUSY_TIMEOUT_MS", "10000") or 10000), 1000)
 SQLITE_LOCK_RETRY_ATTEMPTS = max(int(os.getenv("EKA_SQLITE_LOCK_RETRY_ATTEMPTS", "5") or 5), 1)
 SQLITE_LOCK_RETRY_BASE_SECONDS = max(float(os.getenv("EKA_SQLITE_LOCK_RETRY_BASE_SECONDS", "0.05") or 0.05), 0.01)
@@ -849,6 +851,103 @@ def is_sqlite():
 
 def is_postgres():
     return get_active_db_backend() == "postgres"
+
+
+def is_test_runtime():
+    """Detect whether the current process is running automated tests."""
+    test_flag = str(os.getenv("EKA_TEST_MODE", "") or "").strip().lower()
+    if test_flag in {"1", "true", "yes", "on"}:
+        return True
+    if os.getenv("PYTEST_CURRENT_TEST"):
+        return True
+    if os.getenv("UNITTEST_MODE", "").strip().lower() in {"1", "true", "yes", "on"}:
+        return True
+    db_path = str(globals().get("DB_PATH", "") or "").lower()
+    temp_dir = str(tempfile.gettempdir()).lower()
+    if temp_dir and temp_dir in db_path:
+        return True
+    if ".test-tmp" in db_path or "pytest" in db_path or "unittest" in db_path or os.path.basename(db_path).startswith("test_"):
+        return True
+    return False
+
+
+def is_automated_test_runtime():
+    """Explicit helper for automated test runtime detection."""
+    test_flag = str(os.getenv("EKA_TEST_MODE", "") or "").strip().lower()
+    if test_flag in {"1", "true", "yes", "on"}:
+        return True
+    if os.getenv("PYTEST_CURRENT_TEST"):
+        return True
+    if os.getenv("UNITTEST_MODE", "").strip().lower() in {"1", "true", "yes", "on"}:
+        return True
+    return False
+
+
+def is_local_development_runtime():
+    """Return True when runtime is clearly local development and not tests."""
+    return not ERP_PRODUCTION_MODE and not is_test_runtime()
+
+
+def is_streamlit_cloud_production():
+    """Return True when running on Streamlit Cloud in production mode."""
+    return is_streamlit_cloud() and ERP_PRODUCTION_MODE and not is_test_runtime()
+
+
+def is_production_runtime():
+    """Return True when runtime is production and not automated tests."""
+    return ERP_PRODUCTION_MODE and not is_test_runtime()
+
+
+def get_runtime_mode():
+    """Return a normalized runtime mode label."""
+    if is_test_runtime():
+        return "automated_test"
+    if is_streamlit_cloud_production():
+        return "streamlit_cloud_production"
+    if ERP_PRODUCTION_MODE:
+        return "production"
+    return "local_development"
+
+
+def is_streamlit_cloud():
+    """Detect deployed Streamlit Cloud environments safely."""
+    if os.getenv("STREAMLIT_SERVER_PORT"):
+        return True
+    home_dir = str(os.getenv("HOME", "")).lower()
+    if "/home/appuser" in home_dir or "/mount/src" in home_dir:
+        return True
+    if st is not None:
+        try:
+            _ = st.secrets
+            return True
+        except Exception:
+            pass
+    return False
+
+
+def is_force_cloud_restore_enabled():
+    """Return whether explicit FORCE_CLOUD_RESTORE is enabled, but never during tests."""
+    if is_test_runtime():
+        return False
+    force_flag = str(os.getenv("FORCE_CLOUD_RESTORE", "0") or "").strip().lower()
+    return force_flag in {"1", "true", "yes", "on"}
+
+
+def is_test_cloud_restore_allowed():
+    """Return whether test code has explicitly enabled cloud restore during automated tests."""
+    allow_flag = str(os.getenv("EKA_ALLOW_TEST_CLOUD_RESTORE", "0") or "").strip().lower()
+    return allow_flag in {"1", "true", "yes", "on"}
+
+
+def is_test_cloud_backup_allowed():
+    """Return whether test code has explicitly enabled cloud backup during automated tests."""
+    allow_flag = str(os.getenv("EKA_ALLOW_TEST_CLOUD_BACKUP", "0") or "").strip().lower()
+    return allow_flag in {"1", "true", "yes", "on"}
+
+
+def is_automatic_cloud_restore_allowed():
+    """Return whether automatic cloud restore should be attempted in this runtime."""
+    return is_production_runtime()
 
 
 def _get_database_url():
@@ -1492,6 +1591,20 @@ def _evaluate_runtime_replacement(local_health, incoming_health, explicit_recove
             "reason": "incoming database is not production-ready or has no company rows",
         }
     if local_ready and local_count > 0 and not explicit_recovery_mode:
+        if is_streamlit_cloud_production():
+            if incoming_count > local_count:
+                return {
+                    "allowed": True,
+                    "reason": (
+                        f"Streamlit Cloud source-of-truth replacement allowed because incoming cloud backup has more companies "
+                        f"({incoming_count} > {local_count})"
+                    ),
+                }
+            if _has_suspicious_local_companies(DB_PATH, logger_instance=logger) and incoming_ready:
+                return {
+                    "allowed": True,
+                    "reason": "Streamlit Cloud source-of-truth replacement allowed because local runtime database contains suspicious/test companies",
+                }
         return {
             "allowed": False,
             "reason": "local runtime database is valid and populated; automatic replacement is blocked",
@@ -1505,6 +1618,96 @@ def _evaluate_runtime_replacement(local_health, incoming_health, explicit_recove
             ),
         }
     return {"allowed": True, "reason": "runtime replacement passed safety checks"}
+
+
+def _is_stale_local_db_compared_to_cloud(local_health, cloud_health):
+    """Determine whether the local runtime DB should be considered stale compared to cloud."""
+    local_health = local_health or {}
+    cloud_health = cloud_health or {}
+    local_count = int(local_health.get("company_count") or 0)
+    cloud_count = int(cloud_health.get("company_count") or 0)
+    if cloud_count > local_count and cloud_count > 0:
+        return True
+    local_uuid = str(local_health.get("database_uuid") or "")
+    cloud_uuid = str(cloud_health.get("database_uuid") or "")
+    if local_uuid and cloud_uuid and local_uuid != cloud_uuid:
+        if cloud_health.get("production_ready") and local_count == 0:
+            return True
+    return False
+
+
+def _find_suspicious_company_signals(db_path=DB_PATH, logger_instance=None):
+    """Return suspicious company rows for runtime detection and diagnostics."""
+    logger_instance = logger_instance or logger
+    suspicious = []
+    if not db_path or not os.path.exists(db_path):
+        return suspicious
+    conn = None
+    try:
+        conn = _open_sqlite_connection(path=db_path)
+        if not _table_exists(conn, "companies"):
+            return suspicious
+        for row in conn.execute("SELECT key, name FROM companies").fetchall():
+            company_key = str(row["key"] or "").strip()
+            company_name = str(row["name"] or "").strip()
+            key_upper = company_key.upper()
+            name_lower = company_name.lower()
+            reasons = []
+            if key_upper in {"TESTCO", "PAYSTACK-ACTIVE-001"} or any(term in key_upper for term in ("TESTCO", "PAYSTACK", "DEMO", "SAMPLE")):
+                reasons.append("suspicious_key")
+            if any(term in name_lower for term in ("test", "demo", "paystack", "sample", "sandbox")):
+                reasons.append("suspicious_name")
+            if reasons:
+                suspicious.append({
+                    "company_key": company_key,
+                    "company_name": company_name,
+                    "reasons": sorted(set(reasons)),
+                })
+        return suspicious
+    except sqlite3.Error as exc:
+        logger_instance.warning("Suspicious company detection failed for %s: %s", db_path, sanitize_error_message(exc))
+        return suspicious
+    finally:
+        if conn:
+            conn.close()
+
+
+def _has_suspicious_local_companies(db_path=DB_PATH, logger_instance=None):
+    return bool(_find_suspicious_company_signals(db_path=db_path, logger_instance=logger_instance))
+
+
+def _should_block_cloud_backup_upload(local_health, logger_instance=None):
+    """Return whether uploading the current runtime DB should be blocked."""
+    logger_instance = logger_instance or logger
+    local_health = local_health or {}
+    if is_test_runtime() and not is_test_cloud_backup_allowed():
+        return True, "cloud backup upload disabled during automated tests"
+    company_count = int(local_health.get("company_count") or 0)
+    if company_count <= 0:
+        return True, "companies table is empty; empty runtime DB cannot overwrite cloud backup"
+    if not local_health.get("production_ready"):
+        reason = "; ".join(local_health.get("readiness_failures", [])) or "runtime database is not production-ready"
+        return True, reason
+    if local_health.get("missing_tables"):
+        return True, f"runtime database missing required tables: {', '.join(local_health.get('missing_tables') or [])}"
+    try:
+        diagnostics = get_recovery_source_diagnostics()
+        if diagnostics.get("credentials_loaded"):
+            bucket = _get_firebase_recovery_bucket()
+            if bucket is not None:
+                selected = _select_valid_cloud_backup(bucket, FIREBASE_OBJECT_NAME, logger_instance=logger_instance)
+                if selected.get("ok"):
+                    cloud_health = selected.get("health") or {}
+                    cloud_count = int(cloud_health.get("company_count") or 0)
+                    if cloud_count > company_count:
+                        reason = (
+                            f"runtime database company count ({company_count}) is less than current cloud backup ({cloud_count}); upload would cause data loss"
+                        )
+                        logger_instance.warning("Cloud backup upload blocked: %s", reason)
+                        return True, reason
+    except Exception as exc:
+        logger_instance.debug("Could not verify cloud backup for upload guard: %s", sanitize_error_message(exc))
+    return False, ""
 
 
 def _download_blob_to_temp_path(blob, prefix, logger_instance=None):
@@ -1777,8 +1980,68 @@ def _create_runtime_snapshot_file(source_db_path=DB_PATH):
 
 
 def backup_runtime_database_to_cloud(force=False, trigger_tables=None, logger_instance=None):
-    global LAST_BACKUP_SIGNATURE, LAST_BACKUP_AT
+    global LAST_BACKUP_SIGNATURE, LAST_BACKUP_AT, LAST_CLOUD_UPLOAD_BLOCK_REASON
     logger_instance = logger_instance or logger
+    LAST_CLOUD_UPLOAD_BLOCK_REASON = None
+    if is_test_runtime() and not is_test_cloud_backup_allowed():
+        reason = "cloud backup upload disabled during automated tests"
+        LAST_CLOUD_UPLOAD_BLOCK_REASON = reason
+        logger_instance.warning(reason)
+        _update_backup_status("blocked", reason, latest_object=FIREBASE_OBJECT_NAME, history_object=None, trigger_tables=trigger_tables)
+        snapshot_path = None
+        local_history_path = _build_local_history_backup_path(datetime.utcnow())
+        try:
+            snapshot_path = _create_runtime_snapshot_file(DB_PATH)
+            snapshot_health = get_database_health_snapshot(snapshot_path, logger_instance=logger_instance)
+            if not snapshot_health["production_ready"]:
+                snapshot_reason = "; ".join(snapshot_health.get("readiness_failures", [])) or "snapshot database is not production-ready"
+                logger_instance.warning("Backup skipped because snapshot validation failed; latest backups protected: %s", snapshot_reason)
+                _update_local_backup_status("failed", snapshot_reason, latest_path=LOCAL_LATEST_BACKUP_PATH, history_path=local_history_path, trigger_tables=trigger_tables)
+                return {
+                    "ok": False,
+                    "reason": snapshot_reason,
+                    "latest_object": FIREBASE_OBJECT_NAME,
+                    "history_object": None,
+                    "latest_local_path": LOCAL_LATEST_BACKUP_PATH,
+                    "history_local_path": local_history_path,
+                    "cloud_ok": False,
+                }
+            local_backup_result = _copy_snapshot_to_local_backups(
+                snapshot_path,
+                local_history_path,
+                trigger_tables=trigger_tables,
+                logger_instance=logger_instance,
+            )
+            return {
+                "ok": False,
+                "reason": reason,
+                "local_ok": bool(local_backup_result.get("ok")),
+                "local_reason": local_backup_result.get("reason"),
+                "cloud_ok": False,
+                "latest_object": FIREBASE_OBJECT_NAME,
+                "history_object": None,
+                "latest_local_path": local_backup_result.get("latest_path"),
+                "history_local_path": local_backup_result.get("history_path"),
+            }
+        except Exception as exc:
+            failure_reason = f"{reason}; local snapshot failed: {exc}"
+            logger_instance.warning("Backup local snapshot failed: %s", sanitize_error_message(exc))
+            _update_local_backup_status("failed", failure_reason, latest_path=LOCAL_LATEST_BACKUP_PATH, history_path=local_history_path, trigger_tables=trigger_tables)
+            return {
+                "ok": False,
+                "reason": failure_reason,
+                "latest_object": FIREBASE_OBJECT_NAME,
+                "history_object": None,
+                "latest_local_path": LOCAL_LATEST_BACKUP_PATH,
+                "history_local_path": local_history_path,
+                "cloud_ok": False,
+            }
+        finally:
+            if snapshot_path and os.path.exists(snapshot_path):
+                try:
+                    os.remove(snapshot_path)
+                except OSError:
+                    pass
     restore_guard = _load_restore_guard_state()
     diagnostics = get_recovery_source_diagnostics()
     latest_object = diagnostics.get("object_name") or FIREBASE_OBJECT_NAME
@@ -1868,6 +2131,21 @@ def backup_runtime_database_to_cloud(force=False, trigger_tables=None, logger_in
         return {
             "ok": False,
             "reason": reason,
+            "latest_object": latest_object,
+            "history_object": None,
+            "latest_local_path": LOCAL_LATEST_BACKUP_PATH,
+            "history_local_path": None,
+        }
+
+    should_block, block_reason = _should_block_cloud_backup_upload(local_health, logger_instance=logger_instance)
+    if should_block:
+        LAST_CLOUD_UPLOAD_BLOCK_REASON = block_reason
+        logger_instance.warning("Backup skipped by enhanced upload guard: %s", block_reason)
+        _update_local_backup_status("blocked", block_reason, latest_path=LOCAL_LATEST_BACKUP_PATH, history_path=None, trigger_tables=trigger_tables)
+        _update_backup_status("blocked", block_reason, latest_object=latest_object, history_object=None, trigger_tables=trigger_tables)
+        return {
+            "ok": False,
+            "reason": block_reason,
             "latest_object": latest_object,
             "history_object": None,
             "latest_local_path": LOCAL_LATEST_BACKUP_PATH,
@@ -2039,15 +2317,26 @@ def get_persistence_diagnostics():
         if backup_counts_known
         else False
     )
+    suspicious_companies = []
+    if local_health.get("companies_table_exists"):
+        suspicious_companies = _find_suspicious_company_signals(DB_PATH, logger_instance=logger)
     return {
         "canonical_db_path": DB_PATH,
         "db_backend": local_health.get("backend_label") or local_health.get("backend") or "SQLite",
         "db_file_size_bytes": local_health.get("file_size_bytes"),
         "database_uuid": local_health.get("database_uuid"),
+        "local_db_uuid": local_health.get("database_uuid"),
         "schema_version": local_health.get("schema_version"),
         "database_created_at": local_health.get("database_created_at"),
         "last_startup_at": local_health.get("last_startup_at"),
         "environment_label": local_health.get("environment_label"),
+        "runtime_mode": get_runtime_mode(),
+        "force_cloud_restore_enabled": is_force_cloud_restore_enabled(),
+        "cloud_restore_disabled_due_to_tests": is_test_runtime(),
+        "cloud_upload_disabled_due_to_tests": is_test_runtime(),
+        "has_suspicious_companies": bool(suspicious_companies),
+        "suspicious_companies": suspicious_companies,
+        "suspicious_company_count": len(suspicious_companies),
         "local_db_valid": local_health["structural_valid"],
         "production_ready": local_health["production_ready"],
         "company_count": local_health["company_count"],
@@ -2071,9 +2360,13 @@ def get_persistence_diagnostics():
         "local_backup_reason": local_backup.get("reason"),
         "local_cloud_backup_mismatch": local_cloud_mismatch,
         "restore_source_used_at_startup": LAST_RESTORE_SOURCE,
+        "restore_skipped_reason": LAST_CLOUD_RESTORE_SKIP_REASON,
+        "upload_blocked_reason": LAST_CLOUD_UPLOAD_BLOCK_REASON,
         "bucket_name": recovery_diagnostics.get("bucket_name"),
         "cloud_backup_company_count": cloud_backup.get("company_count"),
         "cloud_backup_last_modified": cloud_backup.get("last_modified"),
+        "cloud_backup_database_uuid": cloud_backup.get("database_uuid"),
+        "cloud_db_uuid": cloud_backup.get("database_uuid"),
         "cloud_backup_newer_than_local": cloud_backup.get("newer_than_local"),
         "cloud_backup_reason": cloud_backup.get("reason"),
     }
@@ -2251,8 +2544,27 @@ def get_downloadable_backup_export(logger_instance=None):
 
 
 def restore_latest_cloud_backup_to_local(logger_instance=None, explicit_recovery_mode=False):
-    global LAST_RESTORE_SOURCE
+    global LAST_RESTORE_SOURCE, LAST_CLOUD_RESTORE_SKIP_REASON
+    LAST_CLOUD_RESTORE_SKIP_REASON = None
     logger_instance = logger_instance or logger
+    if is_test_runtime() and not is_test_cloud_restore_allowed():
+        skip_reason = "cloud restore is disabled during automated tests"
+        LAST_CLOUD_RESTORE_SKIP_REASON = skip_reason
+        logger.warning(skip_reason)
+        return {
+            "ok": False,
+            "stage": "recovery_disabled_in_tests",
+            "reason": skip_reason,
+            "bucket_name": None,
+            "object_name": None,
+            "selected_source_type": None,
+            "selected_object_path": None,
+            "replacement_performed": False,
+            "temp_download_succeeded": False,
+            "health": get_database_health_snapshot(DB_PATH, logger_instance=logger_instance),
+            "validation_attempts": [],
+            "restore_skipped_reason": skip_reason,
+        }
     diagnostics = get_recovery_source_diagnostics()
     bucket = _get_firebase_recovery_bucket()
     local_health = get_database_health_snapshot(DB_PATH, logger_instance=logger_instance)
@@ -2323,9 +2635,11 @@ def restore_latest_cloud_backup_to_local(logger_instance=None, explicit_recovery
             explicit_recovery_mode=explicit_recovery_mode,
         )
         if not replacement_check.get("allowed"):
+            skip_reason = replacement_check.get("reason")
+            LAST_CLOUD_RESTORE_SKIP_REASON = skip_reason
             logger_instance.warning(
                 "Cloud restore replacement blocked: reason=%s local_company_count=%s incoming_company_count=%s local_ready=%s incoming_ready=%s explicit_recovery_mode=%s",
-                replacement_check.get("reason"),
+                skip_reason,
                 local_health.get("company_count"),
                 selected_health.get("company_count"),
                 local_health.get("production_ready"),
@@ -2335,7 +2649,7 @@ def restore_latest_cloud_backup_to_local(logger_instance=None, explicit_recovery
             return {
                 "ok": False,
                 "stage": "replacement_guard",
-                "reason": replacement_check.get("reason"),
+                "reason": skip_reason,
                 "bucket_name": diagnostics.get("bucket_name"),
                 "object_name": diagnostics.get("object_name"),
                 "selected_source_type": selected_candidate.get("source_type"),
@@ -2347,6 +2661,7 @@ def restore_latest_cloud_backup_to_local(logger_instance=None, explicit_recovery
                 "company_count": int(local_health.get("company_count") or 0),
                 "incoming_company_count": int(selected_health.get("company_count") or 0),
                 "validation_attempts": selected_candidate.get("validation_attempts") or [],
+                "restore_skipped_reason": skip_reason,
             }
 
         if os.path.exists(DB_PATH):
@@ -2485,6 +2800,8 @@ def get_cloud_backup_diagnostics(logger_instance=None):
         "object_name": latest_object,
         "last_modified": None,
         "company_count": None,
+        "database_uuid": None,
+        "production_ready": None,
         "newer_than_local": None,
         "reason": diagnostics.get("credential_error") or "cloud backup diagnostics not available",
     }
@@ -2535,6 +2852,8 @@ def get_cloud_backup_diagnostics(logger_instance=None):
         blob.download_to_filename(temp_download_path)
         downloaded_health = get_database_health_snapshot(temp_download_path, logger_instance=logger_instance)
         result["company_count"] = downloaded_health.get("company_count")
+        result["database_uuid"] = downloaded_health.get("database_uuid")
+        result["production_ready"] = downloaded_health.get("production_ready")
         if os.path.exists(DB_PATH):
             try:
                 local_mtime = datetime.utcfromtimestamp(os.path.getmtime(DB_PATH))
@@ -3784,8 +4103,16 @@ def _build_startup_result(
     bootstrap_needed=False,
     startup_mode=None,
     cloud_backup_company_count=None,
+    restore_source=None,
+    cloud_backup_object=None,
+    runtime_mode=None,
+    test_mode=False,
+    restore_skipped_due_to_test_mode=False,
+    restore_skipped_reason=None,
 ):
     final_startup_mode = startup_mode or stage
+    test_mode_final = bool(test_mode or is_test_runtime())
+    runtime_mode_final = runtime_mode or get_runtime_mode()
     return {
         "ok": bool(ok),
         "stage": str(stage),
@@ -3800,11 +4127,37 @@ def _build_startup_result(
         "recovery_attempted": bool(recovery_attempted),
         "recovery_succeeded": bool(recovery_succeeded),
         "bootstrap_needed": bool(bootstrap_needed),
+        "restore_source": restore_source,
+        "cloud_backup_object": cloud_backup_object,
+        "runtime_mode": runtime_mode_final,
+        "test_mode": test_mode_final,
+        "restore_skipped_due_to_test_mode": bool(restore_skipped_due_to_test_mode),
+        "restore_skipped_reason": restore_skipped_reason,
     }
 
 
 def attempt_production_database_recovery(force_restore=True):
+    global LAST_CLOUD_RESTORE_SKIP_REASON
+    LAST_CLOUD_RESTORE_SKIP_REASON = None
     logger.info("Trusted backup recovery invoked: db_path=%s force_restore=%s", DB_PATH, force_restore)
+    if is_test_runtime() and not is_test_cloud_restore_allowed():
+        skip_reason = "cloud recovery is disabled during automated tests"
+        LAST_CLOUD_RESTORE_SKIP_REASON = skip_reason
+        logger.warning(skip_reason)
+        return {
+            "ok": False,
+            "stage": "recovery_disabled_in_tests",
+            "reason": skip_reason,
+            "backend": "firebase_storage",
+            "bucket_name": None,
+            "object_name": None,
+            "recovery_source_found": False,
+            "temp_download_succeeded": False,
+            "replacement_performed": False,
+            "health": get_database_health_snapshot(DB_PATH, logger_instance=logger),
+            "validation_attempts": [],
+            "restore_skipped_reason": skip_reason,
+        }
     local_health = get_database_health_snapshot(DB_PATH, logger_instance=logger)
     diagnostics = get_recovery_source_diagnostics()
     logger.info(
