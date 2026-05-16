@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 import importlib.util
+import time
 from database import (
     DB_PATH,
     create_company_record,
@@ -1468,18 +1469,198 @@ def check_session_lock():
 
 
 def _has_restored_data_without_admin_users():
+    """Check if companies exist but no active admin-capable users exist in users table.
+    
+    Note: Master Admin login uses company key directly and does not require users table.
+    This check only warns if STAFF-level admin users are missing.
+    """
     conn = None
     try:
         conn = get_connection()
-        company_count = conn.execute("SELECT COUNT(*) FROM companies").fetchone()[0]
-        user_count = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
-        return int(company_count or 0) > 0 and int(user_count or 0) == 0
+        company_count = conn.execute("SELECT COUNT(*) FROM companies WHERE COALESCE(status, 'Active') = 'Active'").fetchone()[0]
+        if company_count == 0:
+            return False  # No companies, no repair needed
+        
+        # Check if users table exists and has active admin-capable users
+        try:
+            # Only count users with admin-capable roles (not just any user)
+            admin_user_count = conn.execute(
+                "SELECT COUNT(*) FROM users WHERE role IN ('Master Admin', 'System Admin', 'Sub-Admin') AND COALESCE(status, 'Active') = 'Active'"
+            ).fetchone()[0]
+            return int(admin_user_count or 0) == 0
+        except Exception:
+            # If users table doesn't exist or query fails, no repair needed
+            # (Master Admin login via company key will still work)
+            return False
     except Exception as exc:
         logger.warning("Administrative access repair check skipped: %s", sanitize_error_message(exc))
         return False
     finally:
         if conn:
             conn.close()
+
+
+def _get_restored_companies_needing_admin():
+    """Get list of active companies that have no admin-capable users.
+    
+    Returns list of (company_key, company_name) tuples.
+    """
+    conn = None
+    try:
+        conn = get_connection()
+        companies = conn.execute(
+            """SELECT c.key, c.name FROM companies c
+               WHERE COALESCE(c.status, 'Active') = 'Active'
+               AND NOT EXISTS (
+                   SELECT 1 FROM users u
+                   WHERE u.company_key = c.key
+                   AND u.role IN ('Master Admin', 'System Admin', 'Sub-Admin')
+                   AND COALESCE(u.status, 'Active') = 'Active'
+               )
+               ORDER BY c.name"""
+        ).fetchall()
+        return companies or []
+    except Exception as exc:
+        logger.warning("Failed to get restored companies: %s", sanitize_error_message(exc))
+        return []
+    finally:
+        if conn:
+            conn.close()
+
+
+def _show_admin_recovery_panel():
+    """Show guided admin recovery panel for restored companies.
+    
+    Allows controlled creation of new admin users for companies that need them.
+    """
+    st.warning("⚠️ **Administrative Access Repair Needed**")
+    st.info(
+        "Restored company data exists with no active admin users. "
+        "You can log in with your company Master Admin key, or create a new admin user below."
+    )
+    
+    restored_companies = _get_restored_companies_needing_admin()
+    if not restored_companies:
+        st.success("All companies have active admin users. No repair needed.")
+        return
+    
+    st.subheader("Create New Admin User for Restored Company")
+    col1, col2 = st.columns(2)
+    with col1:
+        selected_company = st.selectbox(
+            "Select Company",
+            options=restored_companies,
+            format_func=lambda x: f"{x[1]} ({x[0]})",
+            key="repair_company_select"
+        )
+    
+    if selected_company:
+        company_key, company_name = selected_company
+        st.markdown(f"**Creating admin for:** {company_name}")
+        
+        with st.form("admin_recovery_form"):
+            admin_name = st.text_input(
+                "Admin User Full Name",
+                placeholder="e.g., John Smith",
+                key="repair_admin_name"
+            )
+            admin_login = st.text_input(
+                "Admin Login Key (unique identifier)",
+                placeholder="e.g., john.smith@acme",
+                key="repair_admin_login"
+            )
+            admin_password = st.text_input(
+                "Temporary Password",
+                type="password",
+                placeholder="Will be set immediately upon creation",
+                key="repair_admin_password"
+            )
+            confirm_password = st.text_input(
+                "Confirm Password",
+                type="password",
+                key="repair_admin_confirm"
+            )
+            
+            security_question = st.text_input(
+                "Security Question (for password recovery)",
+                placeholder="e.g., What is your pet's name?",
+                key="repair_security_question"
+            )
+            security_answer = st.text_input(
+                "Security Answer",
+                placeholder="e.g., Fluffy",
+                key="repair_security_answer"
+            )
+            
+            submitted = st.form_submit_button("Create Admin User")
+            
+            if submitted:
+                # Validation
+                if not admin_name.strip():
+                    st.error("Admin name is required.")
+                elif not admin_login.strip():
+                    st.error("Admin login key is required.")
+                elif not admin_password or not confirm_password:
+                    st.error("Password is required.")
+                elif admin_password != confirm_password:
+                    st.error("Passwords do not match.")
+                elif not security_question.strip() or not security_answer.strip():
+                    st.error("Security question and answer are required.")
+                else:
+                    # Create the admin user
+                    try:
+                        conn = get_connection()
+                        
+                        # Check if login key already exists
+                        existing = conn.execute(
+                            "SELECT 1 FROM users WHERE login_key = ? LIMIT 1",
+                            (admin_login.strip(),)
+                        ).fetchone()
+                        if existing:
+                            st.error(f"Login key '{admin_login}' already exists. Choose a different key.")
+                            conn.close()
+                        else:
+                            user_id = f"{company_key}_{admin_login.strip()[:20]}_{int(time.time())}"
+                            
+                            conn.execute(
+                                """INSERT INTO users (
+                                    company_key, full_name, user_id, login_key, 
+                                    password_hash, role, status, 
+                                    security_question, security_answer, created_at
+                                ) VALUES (?, ?, ?, ?, ?, 'System Admin', 'Active', ?, ?, CURRENT_TIMESTAMP)""",
+                                (
+                                    company_key,
+                                    admin_name.strip(),
+                                    user_id,
+                                    admin_login.strip(),
+                                    hash_login_password(admin_password),
+                                    security_question.strip(),
+                                    hash_login_password(security_answer.strip()),
+                                )
+                            )
+                            conn.commit()
+                            
+                            # Log the action
+                            log_audit_action(
+                                conn,
+                                company_key,
+                                "Recovery",
+                                "Admin user created during recovery",
+                                "Administrative Recovery",
+                                f"Created System Admin user: {admin_name}"
+                            )
+                            conn.close()
+                            
+                            st.success(
+                                f"✅ Admin user created successfully!\n\n"
+                                f"**Login Key:** {admin_login}\n\n"
+                                f"This user can now log in and manage {company_name}."
+                            )
+                            time.sleep(2)
+                            st.rerun()
+                    except Exception as exc:
+                        st.error(f"Failed to create admin user: {sanitize_error_message(exc)}")
+                        logger.error("Admin recovery creation failed: %s", sanitize_error_message(exc))
 
 
 def main():
@@ -1515,10 +1696,9 @@ def main():
         st.stop()
     if bootstrap_needed:
         st.info("No company has been created yet. Complete initial company setup to activate this ERP.")
-    if _has_restored_data_without_admin_users():
-        st.warning(
-            "Administrative access repair required. Restored company data exists, but no active admin user records were found."
-        )
+    elif _has_restored_data_without_admin_users():
+        # Show recovery panel instead of blocking
+        _show_admin_recovery_panel()
     _verify_cloud_vault_handshake()
     if "base_currency" not in st.session_state:
         st.session_state.base_currency = "GHS"

@@ -82,17 +82,18 @@ class PersistenceSafetyTests(ERPIsolatedTestCase):
 
     def test_cloud_backup_can_be_mocked_without_real_credentials(self):
         fake_bucket = _FakeBucket()
-        with mock.patch.object(self.database, "_get_firebase_recovery_bucket", return_value=fake_bucket):
-            with mock.patch.object(
-                self.database,
-                "get_recovery_source_diagnostics",
-                return_value={
-                    "bucket_name": "fake-bucket",
-                    "object_name": self.database.FIREBASE_OBJECT_NAME,
-                    "credential_error": None,
-                },
-            ):
-                result = self.database.backup_runtime_database_to_cloud(force=True, trigger_tables=["companies"])
+        with mock.patch.dict("os.environ", {"EKA_ALLOW_TEST_CLOUD_BACKUP": "1"}, clear=False):
+            with mock.patch.object(self.database, "_get_firebase_recovery_bucket", return_value=fake_bucket):
+                with mock.patch.object(
+                    self.database,
+                    "get_recovery_source_diagnostics",
+                    return_value={
+                        "bucket_name": "fake-bucket",
+                        "object_name": self.database.FIREBASE_OBJECT_NAME,
+                        "credential_error": None,
+                    },
+                ):
+                    result = self.database.backup_runtime_database_to_cloud(force=True, trigger_tables=["companies"])
         self.assertTrue(result["cloud_ok"])
         uploaded_objects = [name for name, _filename in fake_bucket.uploads]
         self.assertIn(self.database.FIREBASE_OBJECT_NAME, uploaded_objects)
@@ -104,6 +105,29 @@ class PersistenceSafetyTests(ERPIsolatedTestCase):
         self.assertEqual(result["startup_mode"], "local_production_ready")
         self.assertFalse(result["bootstrap_needed"])
         self.assertEqual(result["company_count"], 1)
+
+    def test_restore_latest_cloud_backup_disabled_during_automated_tests(self):
+        with mock.patch.dict("os.environ", {"EKA_TEST_MODE": "1"}, clear=False):
+            result = self.database.restore_latest_cloud_backup_to_local()
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["stage"], "recovery_disabled_in_tests")
+        self.assertIn("disabled during automated tests", result["reason"])
+        self.assertEqual(result.get("restore_skipped_reason"), result["reason"])
+
+    def test_backup_runtime_database_to_cloud_disabled_during_automated_tests(self):
+        with mock.patch.dict("os.environ", {"EKA_TEST_MODE": "1"}, clear=False):
+            result = self.database.backup_runtime_database_to_cloud(force=True)
+        self.assertFalse(result["ok"])
+        self.assertIn("disabled during automated tests", result["reason"])
+        self.assertEqual(self.database.LAST_CLOUD_UPLOAD_BLOCK_REASON, result["reason"])
+
+    def test_force_cloud_restore_is_ignored_during_automated_tests(self):
+        with mock.patch.dict("os.environ", {"EKA_TEST_MODE": "1", "FORCE_CLOUD_RESTORE": "true"}, clear=False):
+            self.assertFalse(self.database.is_force_cloud_restore_enabled())
+            result = self.database.attempt_production_database_recovery(force_restore=True)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["stage"], "recovery_disabled_in_tests")
+        self.assertEqual(result.get("restore_skipped_reason"), result["reason"])
 
     def test_empty_structurally_valid_db_enters_bootstrap_mode(self):
         self.conn.execute("DELETE FROM company_subscriptions WHERE company_key = ?", (self.company_key,))
@@ -170,9 +194,10 @@ class PersistenceSafetyTests(ERPIsolatedTestCase):
                 )
             }
         )
-        with mock.patch.object(self.database, "_get_firebase_recovery_bucket", return_value=fake_bucket):
-            with mock.patch.object(self.database, "ERP_PRODUCTION_MODE", True):
-                result = self.database.startup_database()
+        with mock.patch.dict("os.environ", {"EKA_ALLOW_TEST_CLOUD_RESTORE": "1"}, clear=False):
+            with mock.patch.object(self.database, "_get_firebase_recovery_bucket", return_value=fake_bucket):
+                with mock.patch.object(self.database, "ERP_PRODUCTION_MODE", True):
+                    result = self.database.startup_database()
         self.assertTrue(result["ok"])
         self.assertTrue(result["recovery_succeeded"])
         self.assertEqual(result["startup_mode"], "restored_from_cloud")
@@ -193,8 +218,9 @@ class PersistenceSafetyTests(ERPIsolatedTestCase):
                 )
             }
         )
-        with mock.patch.object(self.database, "_get_firebase_recovery_bucket", return_value=fake_bucket):
-            result = self.database.restore_latest_cloud_backup_to_local(explicit_recovery_mode=True)
+        with mock.patch.dict("os.environ", {"EKA_ALLOW_TEST_CLOUD_RESTORE": "1"}, clear=False):
+            with mock.patch.object(self.database, "_get_firebase_recovery_bucket", return_value=fake_bucket):
+                result = self.database.restore_latest_cloud_backup_to_local(explicit_recovery_mode=True)
         self.assertTrue(result["ok"])
         self.assertTrue(result["replacement_performed"])
         self.assertTrue(result.get("pre_restore_backup_path"))
