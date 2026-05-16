@@ -1545,16 +1545,19 @@ def _show_admin_recovery_panel():
         return
     
     st.subheader("Create New Admin User for Restored Company")
+    company_labels = [f"{company[1]} ({company[0]})" for company in restored_companies]
+    option_indexes = list(range(len(restored_companies)))
     col1, col2 = st.columns(2)
     with col1:
-        selected_company = st.selectbox(
+        selected_index = st.selectbox(
             "Select Company",
-            options=restored_companies,
-            format_func=lambda x: f"{x[1]} ({x[0]})",
+            options=option_indexes,
+            format_func=lambda i: company_labels[i],
             key="repair_company_select"
         )
     
-    if selected_company:
+    if selected_index is not None and 0 <= selected_index < len(restored_companies):
+        selected_company = restored_companies[selected_index]
         company_key, company_name = selected_company
         st.markdown(f"**Creating admin for:** {company_name}")
         
