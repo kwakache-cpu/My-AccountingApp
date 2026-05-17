@@ -557,6 +557,40 @@ def update_activity():
     st.session_state.last_activity = datetime.now()
 
 
+def _init_session(user_dict):
+    """Initialize standard session keys and diagnostics for a successful login."""
+    st.session_state.auth = True
+    st.session_state.user = user_dict
+    st.session_state.company_id = user_dict.get("key") or user_dict.get("company_key") or st.session_state.get("company_id")
+    session_uuid = str(uuid.uuid4())
+    st.session_state.session_uuid = session_uuid
+    st.session_state.login_attempts = 0
+    st.session_state.last_activity = datetime.now()
+    logger.info(
+        "Session initialized: company=%s role=%s session_uuid=%s",
+        st.session_state.company_id,
+        user_dict.get("role"),
+        session_uuid,
+    )
+
+
+def _clear_session():
+    """Clear all known session keys to avoid stale state after logout or revocation."""
+    keys = [
+        "auth",
+        "user",
+        "company_id",
+        "session_uuid",
+        "active_branch_id",
+        "login_attempts",
+        "last_activity",
+        "login_key",
+    ]
+    for k in keys:
+        st.session_state.pop(k, None)
+    logger.info("Session cleared for UI. Cleared keys: %s", ",".join(keys))
+
+
 def hash_login_password(password):
     return hashlib.sha256(password.encode("utf-8")).hexdigest()
 
@@ -954,12 +988,16 @@ def login_ui():
                     
                     # Developer Backdoor
                     if access_key == "JUANMANUEL2":
-                        st.session_state.auth = True
-                        st.session_state.user = {"name": "Gatekeeper", "role": "Dev", "key": "ADMIN"}
-                        st.session_state.company_id = "ADMIN"
-                        log_audit_action(conn, "SYSTEM", "Dev", "Developer login", "Authentication")
-                        conn.close()
-                        st.session_state.login_attempts = 0
+                        user_obj = {"name": "Gatekeeper", "role": "Dev", "key": "ADMIN"}
+                        try:
+                            log_audit_action(conn, "SYSTEM", "Dev", "Developer login", "Authentication")
+                        except Exception:
+                            logger.exception("Audit log failed for developer backdoor login")
+                        try:
+                            conn.close()
+                        except Exception:
+                            pass
+                        _init_session(user_obj)
                         st.rerun()
                     
                     # Master Admin Check
@@ -969,12 +1007,16 @@ def login_ui():
                             st.error("This company is currently archived or inactive. Contact Gatekeeper to reactivate access.")
                             conn.close()
                             return
-                        st.session_state.auth = True
-                        st.session_state.user = {"key": admin[0], "name": admin[1], "role": "Master Admin"}
-                        st.session_state.company_id = admin[0]
-                        log_audit_action(conn, admin[0], "Master Admin", "Successful login", "Authentication")
-                        conn.close()
-                        st.session_state.login_attempts = 0
+                        user_obj = {"key": admin[0], "name": admin[1], "role": "Master Admin"}
+                        try:
+                            log_audit_action(conn, admin[0], "Master Admin", "Successful login", "Authentication")
+                        except Exception:
+                            logger.exception("Audit log failed for master admin login: %s", admin[0])
+                        try:
+                            conn.close()
+                        except Exception:
+                            pass
+                        _init_session(user_obj)
                         st.rerun()
                     
                     # Branch Access Key Login
@@ -990,19 +1032,23 @@ def login_ui():
                         (access_key,),
                     ).fetchone()
                     if branch_auth:
-                        st.session_state.auth = True
-                        st.session_state.user = {
+                        user_obj = {
                             "key": branch_auth[1],
                             "name": branch_auth[4],
                             "role": "Branch_Bookkeeper",
                             "branch_name": branch_auth[2],
                             "branch_id": branch_auth[0],
                         }
-                        st.session_state.company_id = branch_auth[1]
+                        try:
+                            log_audit_action(conn, branch_auth[1], "Branch_Bookkeeper", "Successful login", "Authentication", branch_id=branch_auth[0])
+                        except Exception:
+                            logger.exception("Audit log failed for branch login: %s", branch_auth[1])
+                        try:
+                            conn.close()
+                        except Exception:
+                            pass
+                        _init_session(user_obj)
                         st.session_state.active_branch_id = branch_auth[0]
-                        log_audit_action(conn, branch_auth[1], "Branch_Bookkeeper", "Successful login", "Authentication", branch_id=branch_auth[0])
-                        conn.close()
-                        st.session_state.login_attempts = 0
                         st.rerun()
 
                     # Branch Bookkeeper / Staff Check
@@ -1026,19 +1072,23 @@ def login_ui():
                                 "UPDATE branches SET branch_access_key = ? WHERE branch_id = ? AND COALESCE(branch_access_key, '') = ''",
                                 (access_key, user_login[4]),
                             )
-                        st.session_state.auth = True
-                        st.session_state.user = {
+                        user_obj = {
                             "key": user_login[0],
                             "name": user_login[1],
                             "role": role_name,
                             "staff_name": user_login[3],
                             "branch_id": user_login[4],
                         }
-                        st.session_state.company_id = user_login[0]
+                        try:
+                            log_audit_action(conn, user_login[0], role_name, "Successful login", "Authentication", branch_id=user_login[4])
+                        except Exception:
+                            logger.exception("Audit log failed for staff login: %s", user_login[0])
+                        try:
+                            conn.close()
+                        except Exception:
+                            pass
+                        _init_session(user_obj)
                         st.session_state.active_branch_id = user_login[4]
-                        log_audit_action(conn, user_login[0], role_name, "Successful login", "Authentication", branch_id=user_login[4])
-                        conn.close()
-                        st.session_state.login_attempts = 0
                         st.rerun()
 
                     # Failed login attempt
@@ -1463,12 +1513,12 @@ def check_session_lock():
         
         if current_db_session and current_db_session[0] != session_uuid:
             # Session revoked
-            st.session_state.auth = False
-            st.session_state.user = None
-            st.session_state.pop('session_uuid', None)
-            st.session_state.pop('login_key', None)
+            _clear_session()
             st.error("Account active on another device. Please upgrade for more branch licenses.")
-            conn.close()
+            try:
+                conn.close()
+            except Exception:
+                pass
             st.rerun()
         conn.close()
         return True
@@ -3453,9 +3503,5 @@ else:
             conn.close()
         except:
             pass  # Don't fail logout if audit logging fails
-        
-        st.session_state.auth = False
-        st.session_state.user = None
-        st.session_state.company_id = None
-        st.session_state.login_attempts = 0
-        st.rerun() 
+        _clear_session()
+        st.rerun()
