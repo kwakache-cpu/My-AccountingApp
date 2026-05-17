@@ -1053,6 +1053,12 @@ def login_ui():
         elif st.session_state.get('demo_toggle'):
             st.button('🚀 Enter Demo ERP', on_click=enter_demo)
 
+        if _has_restored_data_without_admin_users():
+            st.info(
+                "Restored company data detected. Use your company Master Admin key to log in, "
+                "or open System Recovery to create an admin user."
+            )
+
         # License Renewal Section
         with st.expander("🔄 Renew License", expanded=False):
             st.subheader("License Renewal Portal")
@@ -1136,6 +1142,10 @@ def login_ui():
                     except Exception as e:
                         st.error("Unable to reset password at this time.")
                         logger.error("Password reset error: %s", sanitize_error_message(e))
+
+        if _has_restored_data_without_admin_users():
+            st.markdown("---")
+            _show_admin_recovery_panel()
 
     with t3:
         show_onboarding_payment()
@@ -1699,9 +1709,6 @@ def main():
         st.stop()
     if bootstrap_needed:
         st.info("No company has been created yet. Complete initial company setup to activate this ERP.")
-    elif _has_restored_data_without_admin_users():
-        # Show recovery panel instead of blocking
-        _show_admin_recovery_panel()
     _verify_cloud_vault_handshake()
     if "base_currency" not in st.session_state:
         st.session_state.base_currency = "GHS"
