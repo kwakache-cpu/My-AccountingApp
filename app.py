@@ -1055,8 +1055,7 @@ def login_ui():
 
         if _has_restored_data_without_admin_users():
             st.info(
-                "Restored company data detected. Use your company Master Admin key to log in, "
-                "or open System Recovery to create an admin user."
+                "Secure company workspace detected. Please log in with your company access credentials."
             )
 
         # License Renewal Section
