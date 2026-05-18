@@ -1792,52 +1792,79 @@ def main():
 
 SIDEBAR_NAV_GROUPS = [
     (
-        "Core Operations",
+        "Overview",
         [
             ("Dashboard", "Dashboard"),
-            ("Point of Sale", "Point of Sale"),
-            ("Customers", "Customers"),
-            ("Suppliers", "Suppliers"),
-            ("Inventory", "Inventory Management"),
-            ("Banking & Cash", "Banking & Cash"),
-            ("Payroll", "Payroll & Salaries"),
-            ("Financial Reports", "Financial Reports"),
         ],
     ),
     (
-        "Accounting",
+        "Transactions",
+        [
+            ("Point of Sale", "Point of Sale"),
+            ("Create Invoice", "Create Invoice"),
+            ("Receive Payment", "Receive Payment (Customer)"),
+            ("Create Bill", "Create Bill"),
+            ("Supplier Payment", "Supplier Payment"),
+        ],
+    ),
+    (
+        "Invoicing",
+        [
+            ("Sales Invoicing", "Sales Invoicing"),
+            ("Purchase Invoicing", "Purchase Invoicing"),
+        ],
+    ),
+    (
+        "Contacts",
+        [
+            ("Customers", "Customers"),
+            ("Suppliers", "Suppliers"),
+        ],
+    ),
+    (
+        "Banking",
+        [
+            ("Banking & Cash", "Banking & Cash"),
+        ],
+    ),
+    (
+        "Ledgers",
         [
             ("General Journal", "General Journal"),
             ("Vouchers & Journals", "Vouchers & Journals"),
             ("Chart of Accounts", "Chart of Accounts"),
+            ("Accounts Receivable", "Accounts Receivable"),
+            ("Accounts Payable", "Accounts Payable"),
             ("Taxation", "Taxation (VAT/NHIL)"),
         ],
     ),
     (
-        "Sales Workflow",
+        "Inventory",
         [
-            ("Create Invoice", "Create Invoice"),
-            ("Receive Payment", "Receive Payment (Customer)"),
-            ("Sales Invoicing", "Sales Invoicing"),
-            ("Accounts Receivable", "Accounts Receivable"),
+            ("Inventory", "Inventory Management"),
+            ("Asset Register", "Asset Register"),
         ],
     ),
     (
-        "Purchases Workflow",
+        "Reports",
         [
-            ("Create Bill", "Create Bill"),
-            ("Supplier Payment", "Supplier Payment"),
-            ("Purchase Invoicing", "Purchase Invoicing"),
-            ("Accounts Payable", "Accounts Payable"),
+            ("Financial Reports", "Financial Reports"),
+            ("Analytics", "Data Analytics"),
+            ("Audit Trail", "System Audit Trail"),
+        ],
+    ),
+    (
+        "System",
+        [
+            ("Payroll", "Payroll & Salaries"),
+            ("Gatekeeper Admin", "Gatekeeper Admin"),
+            ("System Configuration", "System Configuration"),
         ],
     ),
     (
         "Administration",
         [
-            ("Asset Register", "Asset Register"),
-            ("Audit Trail", "System Audit Trail"),
-            ("System Configuration", "System Configuration"),
-            ("Gatekeeper Admin", "Gatekeeper Admin"),
+            ("Manage Branches", "branch_management"),
         ],
     ),
 ]
