@@ -1,4 +1,4 @@
-import streamlit as st
+﻿import streamlit as st
 import pandas as pd
 import importlib.util
 import time
@@ -321,26 +321,26 @@ def _get_cloud_vault_status():
             diagnostics.get("object_name") or "missing",
         )
         if not diagnostics.get("credentials_loaded"):
-            return "🔴 Cloud Vault: Credentials Missing"
+            return "ðŸ”´ Cloud Vault: Credentials Missing"
         bucket = _get_firebase_bucket()
         if bucket is None:
-            return "🔴 Cloud Vault: Local Mode"
+            return "ðŸ”´ Cloud Vault: Local Mode"
         try:
             list(bucket.list_blobs(prefix=diagnostics.get("object_name") or FIREBASE_OBJECT_NAME, max_results=1))
-            return "🟢 Cloud Vault: Connected"
+            return "ðŸŸ¢ Cloud Vault: Connected"
         except Exception as exc:
             logger.warning("Cloud Vault connectivity check failed: %s", sanitize_error_message(exc))
-            return "🔴 Cloud Vault: Source Unreachable"
+            return "ðŸ”´ Cloud Vault: Source Unreachable"
     except Exception as exc:
         logger.warning("Cloud Vault status check failed: %s", sanitize_error_message(exc))
-        return "🔴 Cloud Vault: Source Unreachable"
+        return "ðŸ”´ Cloud Vault: Source Unreachable"
 
 
 def _verify_cloud_vault_handshake():
     try:
         st.session_state.cloud_vault_status = _get_cloud_vault_status()
     except Exception:
-        st.session_state.cloud_vault_status = "🔴 Cloud Vault: Local Mode"
+        st.session_state.cloud_vault_status = "ðŸ”´ Cloud Vault: Local Mode"
 
 
 st.set_page_config(
@@ -360,38 +360,38 @@ if 'page' not in st.session_state:
     st.session_state.page = "Dashboard"
 
 PAGE_LABELS = {
-    "pos": "🛒 Point of Sale",
-    "inventory": "📦 Inventory Management",
-    "payroll": "💳 Payroll & Salaries",
-    "reports": "📊 Data Analytics",
-    "settings": "⚙️ System Configuration",
+    "pos": "ðŸ›’ Point of Sale",
+    "inventory": "ðŸ“¦ Inventory Management",
+    "payroll": "ðŸ’³ Payroll & Salaries",
+    "reports": "ðŸ“Š Data Analytics",
+    "settings": "âš™ï¸ System Configuration",
 }
 
 PAGE_ALIASES = {
     "POS (Point of Sale)": PAGE_LABELS["pos"],
-    "🛒 Point of Sale": PAGE_LABELS["pos"],
+    "ðŸ›’ Point of Sale": PAGE_LABELS["pos"],
     "Inventory & Stock": PAGE_LABELS["inventory"],
-    "📦 Inventory Management": PAGE_LABELS["inventory"],
+    "ðŸ“¦ Inventory Management": PAGE_LABELS["inventory"],
     "Payroll": PAGE_LABELS["payroll"],
     "Ghana Payroll (SSNIT)": PAGE_LABELS["payroll"],
-    "💳 Payroll & Salaries": PAGE_LABELS["payroll"],
+    "ðŸ’³ Payroll & Salaries": PAGE_LABELS["payroll"],
     "Reports": PAGE_LABELS["reports"],
     "Financial Intelligence": PAGE_LABELS["reports"],
-    "📊 Data Analytics": PAGE_LABELS["reports"],
+    "ðŸ“Š Data Analytics": PAGE_LABELS["reports"],
     "Company Setup": PAGE_LABELS["settings"],
-    "⚙️ System Configuration": PAGE_LABELS["settings"],
+    "âš™ï¸ System Configuration": PAGE_LABELS["settings"],
 }
 
 
 def _normalize_page_label_legacy(page_name):
     canonical = PAGE_ALIASES.get(page_name, page_name)
     legacy_labels = {
-        PAGE_LABELS["dashboard"]: "ðŸ  Dashboard",
-        PAGE_LABELS["pos"]: "ðŸ›’ Point of Sale",
-        PAGE_LABELS["inventory"]: "ðŸ“¦ Inventory Management",
-        PAGE_LABELS["payroll"]: "ðŸ’³ Payroll & Salaries",
-        PAGE_LABELS["reports"]: "ðŸ“Š Data Analytics",
-        PAGE_LABELS["settings"]: "âš™ï¸ System Configuration",
+        PAGE_LABELS["dashboard"]: "Ã°Å¸ÂÂ  Dashboard",
+        PAGE_LABELS["pos"]: "Ã°Å¸â€ºâ€™ Point of Sale",
+        PAGE_LABELS["inventory"]: "Ã°Å¸â€œÂ¦ Inventory Management",
+        PAGE_LABELS["payroll"]: "Ã°Å¸â€™Â³ Payroll & Salaries",
+        PAGE_LABELS["reports"]: "Ã°Å¸â€œÅ  Data Analytics",
+        PAGE_LABELS["settings"]: "Ã¢Å¡â„¢Ã¯Â¸Â System Configuration",
         PAGE_LABELS["invoices"]: "Sales Invoicing",
     }
     return legacy_labels.get(canonical, canonical)
@@ -400,7 +400,7 @@ def _normalize_page_label_legacy(page_name):
 if 'exchange_rate' not in st.session_state:
     st.session_state.exchange_rate = 1.0
 if 'currency_symbol' not in st.session_state:
-    st.session_state.currency_symbol = "GH₵"
+    st.session_state.currency_symbol = "GHâ‚µ"
 
 
 def _get_bog_display_rate(currency_code):
@@ -426,11 +426,11 @@ def _render_currency_sidebar_controls(selectbox_key):
             key=selectbox_key,
         )
         selected_rate = _get_bog_display_rate(selected_currency)
-        symbols = {"GHS": "GH₵", "USD": "$", "EUR": "€", "GBP": "£"}
+        symbols = {"GHS": "GHâ‚µ", "USD": "$", "EUR": "â‚¬", "GBP": "Â£"}
         st.session_state.base_currency = selected_currency
         st.session_state.display_currency = selected_currency
         st.session_state.exchange_rate = selected_rate
-        st.session_state.currency_symbol = symbols.get(st.session_state.base_currency, "GH₵")
+        st.session_state.currency_symbol = symbols.get(st.session_state.base_currency, "GHâ‚µ")
         if selected_currency == "GHS":
             st.sidebar.caption("BoG April 2026 sync: 1 GHS = 1.00 GHS")
         else:
@@ -447,39 +447,39 @@ def _render_currency_sidebar_controls(selectbox_key):
         settings_conn.close()
 
 PAGE_LABELS = {
-    "dashboard": "📊 Dashboard",
-    "pos": "🛒 Point of Sale",
-    "inventory": "📦 Inventory Management",
-    "customers": "🧾 Customers",
-    "create_invoice": "📄 Create Invoice",
-    "receive_payment_customer": "💳 Receive Payment (Customer)",
-    "suppliers": "🏷️ Suppliers",
-    "create_bill": "📝 Create Bill",
-    "supplier_payment": "💸 Supplier Payment",
-    "customer_ledger": "📔 Customer Ledger",
-    "supplier_ledger": "📔 Supplier Ledger",
-    "journal": "🧾 General Journal",
-    "ledger": "📚 General Ledger",
-    "chart_of_accounts": "🗂️ Chart of Accounts",
-    "banking": "💰 Banking & Cash",
-    "taxation": "📅 Taxation (VAT/NHIL)",
-    "payroll": "💳 Payroll & Salaries",
-    "assets": "🏛️ Asset Register",
-    "reports": "📊 Data Analytics",
-    "financial_reports": "🧾 Financial Reports",
-    "audit_trail": "📅 System Audit Trail",
-    "settings": "⚙️ System Configuration",
-    "invoices": "🧾 Sales History",
+    "dashboard": "ðŸ“Š Dashboard",
+    "pos": "ðŸ›’ Point of Sale",
+    "inventory": "ðŸ“¦ Inventory Management",
+    "customers": "ðŸ§¾ Customers",
+    "create_invoice": "ðŸ“„ Create Invoice",
+    "receive_payment_customer": "ðŸ’³ Receive Payment (Customer)",
+    "suppliers": "ðŸ·ï¸ Suppliers",
+    "create_bill": "ðŸ“ Create Bill",
+    "supplier_payment": "ðŸ’¸ Supplier Payment",
+    "customer_ledger": "ðŸ“” Customer Ledger",
+    "supplier_ledger": "ðŸ“” Supplier Ledger",
+    "journal": "ðŸ§¾ General Journal",
+    "ledger": "ðŸ“š General Ledger",
+    "chart_of_accounts": "ðŸ—‚ï¸ Chart of Accounts",
+    "banking": "ðŸ’° Banking & Cash",
+    "taxation": "ðŸ“… Taxation (VAT/NHIL)",
+    "payroll": "ðŸ’³ Payroll & Salaries",
+    "assets": "ðŸ›ï¸ Asset Register",
+    "reports": "ðŸ“Š Data Analytics",
+    "financial_reports": "ðŸ§¾ Financial Reports",
+    "audit_trail": "ðŸ“… System Audit Trail",
+    "settings": "âš™ï¸ System Configuration",
+    "invoices": "ðŸ§¾ Sales Invoicing",
 }
 
 PAGE_ALIASES = dict(
     {
         "POS (Point of Sale)": PAGE_LABELS["pos"],
+        "Ã°Å¸â€ºâ€™ Point of Sale": PAGE_LABELS["pos"],
         "ðŸ›’ Point of Sale": PAGE_LABELS["pos"],
-        "🛒 Point of Sale": PAGE_LABELS["pos"],
         "Inventory & Stock": PAGE_LABELS["inventory"],
+        "Ã°Å¸â€œÂ¦ Inventory Management": PAGE_LABELS["inventory"],
         "ðŸ“¦ Inventory Management": PAGE_LABELS["inventory"],
-        "📦 Inventory Management": PAGE_LABELS["inventory"],
         "Accounts Receivable": PAGE_LABELS["customer_ledger"],
         "Accounts Receivables": PAGE_LABELS["customer_ledger"],
         "Customer Ledger": PAGE_LABELS["customer_ledger"],
@@ -488,20 +488,21 @@ PAGE_ALIASES = dict(
         "Supplier Ledger": PAGE_LABELS["supplier_ledger"],
         "Payroll": PAGE_LABELS["payroll"],
         "Ghana Payroll (SSNIT)": PAGE_LABELS["payroll"],
+        "Ã°Å¸â€™Â³ Payroll & Salaries": PAGE_LABELS["payroll"],
         "ðŸ’³ Payroll & Salaries": PAGE_LABELS["payroll"],
-        "💳 Payroll & Salaries": PAGE_LABELS["payroll"],
         "Reports": PAGE_LABELS["reports"],
         "Financial Intelligence": PAGE_LABELS["reports"],
+        "Ã°Å¸â€œÅ  Data Analytics": PAGE_LABELS["reports"],
         "ðŸ“Š Data Analytics": PAGE_LABELS["reports"],
-        "📊 Data Analytics": PAGE_LABELS["reports"],
         "Company Setup": PAGE_LABELS["settings"],
+        "Ã¢Å¡â„¢Ã¯Â¸Â System Configuration": PAGE_LABELS["settings"],
         "âš™ï¸ System Configuration": PAGE_LABELS["settings"],
-        "⚙️ System Configuration": PAGE_LABELS["settings"],
-        "ðŸ  Dashboard": PAGE_LABELS["dashboard"],
-        "📊 Dashboard": PAGE_LABELS["dashboard"],
+        "Ã°Å¸ÂÂ  Dashboard": PAGE_LABELS["dashboard"],
+        "ðŸ“Š Dashboard": PAGE_LABELS["dashboard"],
         "Sales Invoicing": PAGE_LABELS["invoices"],
-        "🧾 Sales Invoicing": PAGE_LABELS["invoices"],
-        "Purchase Orders": "📜 Purchase History",
+        "ðŸ§¾ Sales Invoicing": PAGE_LABELS["invoices"],
+        "Purchase Orders": "🧾 Purchase Invoicing",
+        "Purchase History": "🧾 Purchase Invoicing",
     }
 )
 
@@ -509,12 +510,12 @@ PAGE_ALIASES = dict(
 def normalize_page_label(page_name):
     canonical = PAGE_ALIASES.get(page_name, page_name)
     legacy_labels = {
-        PAGE_LABELS["dashboard"]: "ðŸ  Dashboard",
-        PAGE_LABELS["pos"]: "ðŸ›’ Point of Sale",
-        PAGE_LABELS["inventory"]: "ðŸ“¦ Inventory Management",
-        PAGE_LABELS["payroll"]: "ðŸ’³ Payroll & Salaries",
-        PAGE_LABELS["reports"]: "ðŸ“Š Data Analytics",
-        PAGE_LABELS["settings"]: "âš™ï¸ System Configuration",
+        PAGE_LABELS["dashboard"]: "Ã°Å¸ÂÂ  Dashboard",
+        PAGE_LABELS["pos"]: "Ã°Å¸â€ºâ€™ Point of Sale",
+        PAGE_LABELS["inventory"]: "Ã°Å¸â€œÂ¦ Inventory Management",
+        PAGE_LABELS["payroll"]: "Ã°Å¸â€™Â³ Payroll & Salaries",
+        PAGE_LABELS["reports"]: "Ã°Å¸â€œÅ  Data Analytics",
+        PAGE_LABELS["settings"]: "Ã¢Å¡â„¢Ã¯Â¸Â System Configuration",
         PAGE_LABELS["invoices"]: "Sales Invoicing",
     }
     return legacy_labels.get(canonical, canonical)
@@ -523,15 +524,15 @@ def normalize_page_label(page_name):
 def repair_ui_label(label):
     value = str(label or "")
     keyword_map = [
-        ("Dashboard", "📊 Dashboard"),
-        ("Point of Sale", "🛒 Point of Sale"),
-        ("Inventory Management", "📦 Inventory Management"),
-        ("Payroll & Salaries", "💳 Payroll & Salaries"),
-        ("Data Analytics", "📊 Data Analytics"),
-        ("System Configuration", "⚙️ System Configuration"),
-        ("Sales Invoicing", "🧾 Sales Invoicing"),
-        ("Gatekeeper Admin", "🤖 Gatekeeper Admin"),
-        ("Asset Register", "📦 Asset Register"),
+        ("Dashboard", "ðŸ“Š Dashboard"),
+        ("Point of Sale", "ðŸ›’ Point of Sale"),
+        ("Inventory Management", "ðŸ“¦ Inventory Management"),
+        ("Payroll & Salaries", "ðŸ’³ Payroll & Salaries"),
+        ("Data Analytics", "ðŸ“Š Data Analytics"),
+        ("System Configuration", "âš™ï¸ System Configuration"),
+        ("Sales Invoicing", "ðŸ§¾ Sales Invoicing"),
+        ("Gatekeeper Admin", "ðŸ¤– Gatekeeper Admin"),
+        ("Asset Register", "ðŸ“¦ Asset Register"),
     ]
     for keyword, repaired in keyword_map:
         if keyword in value:
@@ -741,7 +742,7 @@ def render_gatekeeper_ai_chat(menu_selection):
             }
         ]
 
-    with st.sidebar.expander("🤖 Gatekeeper Admin", expanded=False):
+    with st.sidebar.expander("ðŸ¤– Gatekeeper Admin", expanded=False):
         st.caption(f"Active module: {menu_selection}")
 
         for message in st.session_state.messages[-6:]:
@@ -802,7 +803,7 @@ def render_gatekeeper_ai_guide(menu_selection):
         "This AI guide follows the module you are currently viewing and explains the most important fields before you save an entry. Ask a short question below if you want entry help tailored to this screen."
     )
 
-    with st.sidebar.expander("🤖 Gatekeeper Admin", expanded=False):
+    with st.sidebar.expander("ðŸ¤– Gatekeeper Admin", expanded=False):
         st.markdown(
             """
             <div style='background-color:#eef6ff; border-left:4px solid #0f766e; padding:12px; border-radius:10px; margin-bottom:10px;'>
@@ -873,7 +874,7 @@ def submit_payment_reference(company_key, reference, amount, payment_method):
         
         # Show success notification
         st.success(f"Payment reference {reference} submitted successfully!")
-        st.toast("Payment reference received. Awaiting admin approval.", icon="✅")
+        st.toast("Payment reference received. Awaiting admin approval.", icon="âœ…")
         
         # TODO: Trigger smtplib to send payment_ref to admin email for Passcode generation.
         
@@ -917,30 +918,30 @@ def enter_demo():
 
 def show_system_status():
     """Public-facing system status monitoring dashboard."""
-    st.title("🌐 System Status Dashboard")
+    st.title("ðŸŒ System Status Dashboard")
     st.markdown("Real-time monitoring of E.K.A Enterprise ERP infrastructure components.")
     
     # Status Indicators
-    st.subheader("🟢 System Components")
+    st.subheader("ðŸŸ¢ System Components")
     col1, col2, col3 = st.columns(3)
     
     with col1:
-        st.metric("API Gateway", "Operational", delta="🟢 Online")
+        st.metric("API Gateway", "Operational", delta="ðŸŸ¢ Online")
     with col2:
-        st.metric("Database Engine", "Operational", delta="🟢 Online")
+        st.metric("Database Engine", "Operational", delta="ðŸŸ¢ Online")
     with col3:
-        st.metric("Payment Server", "Operational", delta="🟢 Online")
+        st.metric("Payment Server", "Operational", delta="ðŸŸ¢ Online")
     
     st.markdown("---")
     
     # Uptime Metric
     col1, col2 = st.columns(2)
     with col1:
-        st.subheader("⏱️ Live Uptime")
+        st.subheader("â±ï¸ Live Uptime")
         st.metric("System Availability", "99.9%", delta="+0.1% this month")
     
     with col2:
-        st.subheader("📋 Past Incidents")
+        st.subheader("ðŸ“‹ Past Incidents")
         incidents_df = pd.DataFrame({
             'Date': [f"{(datetime.now() - timedelta(days=i)).strftime('%Y-%m-%d')}" for i in range(90)],
             'Status': ['All Systems Operational'] * 90,
@@ -972,7 +973,7 @@ def login_ui():
         st.error("Too many failed login attempts. Please wait before trying again.")
         return
     
-    t1, t2, t3, t4 = st.tabs(["🔒 Secure Login", "🔑 System Recovery", "🏢 Register New Company", "🌐 System Status"])
+    t1, t2, t3, t4 = st.tabs(["ðŸ”’ Secure Login", "ðŸ”‘ System Recovery", "ðŸ¢ Register New Company", "ðŸŒ System Status"])
     
     with t1:
         if not st.session_state.get('demo_toggle'):
@@ -1102,7 +1103,7 @@ def login_ui():
                     st.error("System error during authentication. Please try again.")
                     logger.error("Login error: %s", sanitize_error_message(e))
         elif st.session_state.get('demo_toggle'):
-            st.button('🚀 Enter Demo ERP', on_click=enter_demo)
+            st.button('ðŸš€ Enter Demo ERP', on_click=enter_demo)
 
         if _has_restored_data_without_admin_users():
             st.info(
@@ -1110,7 +1111,7 @@ def login_ui():
             )
 
         # License Renewal Section
-        with st.expander("🔄 Renew License", expanded=False):
+        with st.expander("ðŸ”„ Renew License", expanded=False):
             st.subheader("License Renewal Portal")
             st.info("Submit your payment reference below for manual verification and approval.")
             
@@ -1205,7 +1206,7 @@ def login_ui():
 
     # Demo Mode Toggle
     st.markdown("---")
-    st.toggle('🚀 Try Demo Mode', key='demo_toggle')
+    st.toggle('ðŸš€ Try Demo Mode', key='demo_toggle')
 
 # Dashboard Module (NEW FUNCTION)
 def _show_legacy_dashboard(company_key, company_name, role):
@@ -1359,22 +1360,22 @@ def _show_legacy_dashboard(company_key, company_name, role):
             col1, col2, col3, col4 = st.columns(4)
 
             with col1:
-                if st.button("🛒 New Sale", key="dash_pos", width='stretch'):
+                if st.button("ðŸ›’ New Sale", key="dash_pos", width='stretch'):
                     st.session_state.page = "Point of Sale"
                     st.rerun()
 
             with col2:
-                if st.button("📦 Add Inventory", key="dash_inventory", width='stretch'):
+                if st.button("ðŸ“¦ Add Inventory", key="dash_inventory", width='stretch'):
                     st.session_state.page = "Inventory Management"
                     st.rerun()
 
             with col3:
-                if st.button("💳 Process Payroll", key="dash_payroll", width='stretch'):
+                if st.button("ðŸ’³ Process Payroll", key="dash_payroll", width='stretch'):
                     st.session_state.page = "Payroll & Salaries"
                     st.rerun()
 
             with col4:
-                if st.button("📊 View Reports", key="dash_reports", width='stretch'):
+                if st.button("ðŸ“Š View Reports", key="dash_reports", width='stretch'):
                     st.session_state.page = "Data Analytics"
                     st.rerun()
 
@@ -1471,16 +1472,16 @@ def _show_local_dashboard(company_key, company_name, role):
 
             st.subheader("Quick Actions")
             quick_col1, quick_col2, quick_col3, quick_col4 = st.columns(4)
-            if quick_col1.button("🛒 New Sale", key="dash_pos_v2", width='stretch'):
+            if quick_col1.button("ðŸ›’ New Sale", key="dash_pos_v2", width='stretch'):
                 st.session_state.page = "Point of Sale"
                 st.rerun()
-            if quick_col2.button("📦 Add Inventory", key="dash_inventory_v2", width='stretch'):
+            if quick_col2.button("ðŸ“¦ Add Inventory", key="dash_inventory_v2", width='stretch'):
                 st.session_state.page = "Inventory Management"
                 st.rerun()
-            if quick_col3.button("💳 Process Payroll", key="dash_payroll_v2", width='stretch'):
+            if quick_col3.button("ðŸ’³ Process Payroll", key="dash_payroll_v2", width='stretch'):
                 st.session_state.page = "Payroll & Salaries"
                 st.rerun()
-            if quick_col4.button("📊 View Reports", key="dash_reports_v2", width='stretch'):
+            if quick_col4.button("ðŸ“Š View Reports", key="dash_reports_v2", width='stretch'):
                 st.session_state.page = "Data Analytics"
                 st.rerun()
         finally:
@@ -1593,7 +1594,7 @@ def _show_admin_recovery_panel():
     
     Allows controlled creation of new admin users for companies that need them.
     """
-    st.warning("⚠️ **Administrative Access Repair Needed**")
+    st.warning("âš ï¸ **Administrative Access Repair Needed**")
     st.info(
         "Restored company data exists with no active admin users. "
         "You can log in with your company Master Admin key, or create a new admin user below."
@@ -1715,7 +1716,7 @@ def _show_admin_recovery_panel():
                             conn.close()
                             
                             st.success(
-                                f"✅ Admin user created successfully!\n\n"
+                                f"âœ… Admin user created successfully!\n\n"
                                 f"**Login Key:** {admin_login}\n\n"
                                 f"This user can now log in and manage {company_name}."
                             )
@@ -1764,8 +1765,8 @@ def main():
         st.session_state.base_currency = "GHS"
     if "exchange_rate" not in st.session_state:
         st.session_state.exchange_rate = 1.0
-    symbols = {"GHS": "GH₵", "USD": "$", "EUR": "€", "GBP": "£"}
-    st.session_state.currency_symbol = symbols.get(st.session_state.base_currency, "GH₵")
+    symbols = {"GHS": "GHâ‚µ", "USD": "$", "EUR": "â‚¬", "GBP": "Â£"}
+    st.session_state.currency_symbol = symbols.get(st.session_state.base_currency, "GHâ‚µ")
 
     selected_base_currency = str(st.session_state.get("base_currency", "GHS")).upper()
     bog_rate = _get_bog_display_rate(selected_base_currency)
@@ -1791,80 +1792,80 @@ def main():
 
 SIDEBAR_NAV_GROUPS = [
     (
-        "📊 Dashboard",
+        "ðŸ“Š Dashboard",
         [
-            ("📊 Dashboard", "Dashboard"),
+            ("ðŸ“Š Dashboard", "Dashboard"),
         ],
     ),
     (
-        "🛍️ Sales",
+        "ðŸ›ï¸ Sales",
         [
-            ("🧾 Customers", "Customers"),
-            ("📄 Create Invoice", "Create Invoice"),
-            ("💳 Receive Payment", "Receive Payment (Customer)"),
-            ("📜 Sales History", "Sales History"),
-            ("📈 Accounts Receivable", "Accounts Receivable"),
+            ("ðŸ§¾ Customers", "Customers"),
+            ("ðŸ“„ Create Invoice", "Create Invoice"),
+            ("ðŸ’³ Receive Payment", "Receive Payment (Customer)"),
+            ("ðŸ§¾ Sales Invoicing", "Sales Invoicing"),
+            ("ðŸ“ˆ Accounts Receivable", "Accounts Receivable"),
         ],
     ),
     (
-        "🛒 Purchases",
+        "ðŸ›’ Purchases",
         [
-            ("🏷️ Suppliers", "Suppliers"),
-            ("📝 Create Bill", "Create Bill"),
-            ("💸 Supplier Payment", "Supplier Payment"),
-            ("📜 Purchase History", "Purchase History"),
-            ("📉 Accounts Payable", "Accounts Payable"),
+            ("ðŸ·ï¸ Suppliers", "Suppliers"),
+            ("ðŸ“ Create Bill", "Create Bill"),
+            ("ðŸ’¸ Supplier Payment", "Supplier Payment"),
+            ("ï¿½ Purchase Invoicing", "Purchase Invoicing"),
+            ("ðŸ“‰ Accounts Payable", "Accounts Payable"),
         ],
     ),
     (
-        "🛒 Point of Sale",
+        "ðŸ›’ Point of Sale",
         [
-            ("🛒 Point of Sale", "Point of Sale"),
+            ("ðŸ›’ Point of Sale", "Point of Sale"),
         ],
     ),
     (
-        "💰 Banking & Cash",
+        "ðŸ’° Banking & Cash",
         [
-            ("💰 Banking & Cash", "Banking & Cash"),
+            ("ðŸ’° Banking & Cash", "Banking & Cash"),
         ],
     ),
     (
-        "🧾 Accounting",
+        "ðŸ§¾ Accounting",
         [
-            ("🗂️ Chart of Accounts", "Chart of Accounts"),
-            ("🧾 General Journal", "General Journal"),
-            ("📚 General Ledger", "General Ledger"),
-            ("🧾 Financial Reports", "Financial Reports"),
-            ("📅 Taxation", "Taxation (VAT/NHIL)"),
-            ("🧾 Vouchers & Journals", "Vouchers & Journals"),
+            ("ðŸ—‚ï¸ Chart of Accounts", "Chart of Accounts"),
+            ("ðŸ§¾ General Journal", "General Journal"),
+            ("ðŸ“š General Ledger", "General Ledger"),
+            ("ðŸ§¾ Financial Reports", "Financial Reports"),
+            ("ðŸ“… Taxation", "Taxation (VAT/NHIL)"),
+            ("ðŸ§¾ Vouchers & Journals", "Vouchers & Journals"),
         ],
     ),
     (
-        "📦 Inventory",
+        "ðŸ“¦ Inventory",
         [
-            ("📦 Inventory Management", "Inventory Management"),
-            ("🏛️ Asset Register", "Asset Register"),
+            ("ðŸ“¦ Inventory Management", "Inventory Management"),
+            ("ðŸ›ï¸ Asset Register", "Asset Register"),
         ],
     ),
     (
-        "💳 Payroll & Salaries",
+        "ðŸ’³ Payroll & Salaries",
         [
-            ("💳 Payroll & Salaries", "Payroll & Salaries"),
+            ("ðŸ’³ Payroll & Salaries", "Payroll & Salaries"),
         ],
     ),
     (
-        "📊 Data Analytics",
+        "ðŸ“Š Data Analytics",
         [
-            ("📊 Data Analytics", "Data Analytics"),
+            ("ðŸ“Š Data Analytics", "Data Analytics"),
         ],
     ),
     (
-        "⚙️ Administration",
+        "âš™ï¸ Administration",
         [
-            ("⚙️ System Configuration", "System Configuration"),
-            ("📅 System Audit Trail", "System Audit Trail"),
-            ("🤖 Gatekeeper Admin", "Gatekeeper Admin"),
-            ("🏢 Manage Branches", "branch_management"),
+            ("âš™ï¸ System Configuration", "System Configuration"),
+            ("ðŸ“… System Audit Trail", "System Audit Trail"),
+            ("ðŸ¤– Gatekeeper Admin", "Gatekeeper Admin"),
+            ("ðŸ¢ Manage Branches", "branch_management"),
         ],
     ),
 ]
@@ -1908,6 +1909,7 @@ PAGE_PERMISSION_MAP = {
     "Sales Invoicing": "create_invoice",
     "Purchase History": "create_bill",
     "Purchase Orders": "create_bill",
+    "Purchase Invoicing": "create_bill",
 }
 
 
@@ -1930,9 +1932,11 @@ def _ensure_valid_page(default_page="Dashboard"):
     active_page = st.session_state.get("active_page")
     current_page = legacy_page if legacy_page and legacy_page != active_page else active_page or legacy_page or default_page
     legacy_aliases = {
-        "Sales/Purchase": "Sales History",
-        "Sales Invoicing": "Sales History",
-        "Purchase Orders": "Purchase History",
+        "Sales/Purchase": "Sales Invoicing",
+        "Sales History": "Sales Invoicing",
+        "Sales Invoicing": "Sales Invoicing",
+        "Purchase Orders": "Purchase Invoicing",
+        "Purchase History": "Purchase Invoicing",
         "Taxation": "Taxation (VAT/NHIL)",
         "Audit Trail": "System Audit Trail",
     }
@@ -2029,7 +2033,7 @@ def _render_primary_sidebar(user, include_settings=True):
     st.sidebar.markdown(
         f"""
         <div style='background-color:#f0f2f6; padding:20px; border-radius:15px; border: 1px solid #d1d5db;'>
-            <h2 style='margin-bottom:0;'>📦 {user['name']}</h2>
+            <h2 style='margin-bottom:0;'>ðŸ“¦ {user['name']}</h2>
             <p style='color:#6b7280;'>Role: <b>{user['role']}</b></p>
             <p style='color:#6b7280; font-size:12px;'>Session: Active</p>
         </div>
@@ -2067,25 +2071,25 @@ def _render_primary_sidebar(user, include_settings=True):
 
     if False and user['role'] == "Demo":
         menu_options = [
-            "📊 Dashboard",
-            "📦 Inventory Management", 
-            "💳 Payroll & Salaries",
+            "ðŸ“Š Dashboard",
+            "ðŸ“¦ Inventory Management", 
+            "ðŸ’³ Payroll & Salaries",
             "Sales/Purchase",
-            "📊 Data Analytics",
+            "ðŸ“Š Data Analytics",
             "Banking",
             "Taxation",
-            "🤖 Gatekeeper Admin",
+            "ðŸ¤– Gatekeeper Admin",
             "Audit Trail"
         ]
         page_mapping = {
-            "📊 Dashboard": "Dashboard",
-            "📦 Inventory Management": "Inventory Management",
-            "💳 Payroll & Salaries": "Payroll & Salaries",
+            "ðŸ“Š Dashboard": "Dashboard",
+            "ðŸ“¦ Inventory Management": "Inventory Management",
+            "ðŸ’³ Payroll & Salaries": "Payroll & Salaries",
             "Sales/Purchase": "Sales/Purchase",
-            "📊 Data Analytics": "Data Analytics",
+            "ðŸ“Š Data Analytics": "Data Analytics",
             "Banking": "Banking",
             "Taxation": "Taxation",
-            "🤖 Gatekeeper Admin": "Gatekeeper Admin",
+            "ðŸ¤– Gatekeeper Admin": "Gatekeeper Admin",
             "Audit Trail": "Audit Trail"
         }
 
@@ -2101,40 +2105,40 @@ def _render_primary_sidebar(user, include_settings=True):
             (
                 "Transactions",
                 [
-                    ("🛒 Point of Sale", "Point of Sale"),
-                    ("📜 Vouchers & Journals", "Vouchers & Journals"),
-                    ("📝 Create Bill", "Create Bill"),
-                    ("💰 Banking & Cash", "Banking & Cash"),
+                    ("ðŸ›’ Point of Sale", "Point of Sale"),
+                    ("ðŸ“œ Vouchers & Journals", "Vouchers & Journals"),
+                    ("ðŸ“ Create Bill", "Create Bill"),
+                    ("ðŸ’° Banking & Cash", "Banking & Cash"),
                 ],
             ),
             (
                 "Ledgers",
                 [
-                    ("🗂️ Chart of Accounts", "Chart of Accounts"),
-                    ("📈 Accounts Receivable", "Accounts Receivable"),
-                    ("📉 Accounts Payable", "Accounts Payable"),
+                    ("ðŸ—‚ï¸ Chart of Accounts", "Chart of Accounts"),
+                    ("ðŸ“ˆ Accounts Receivable", "Accounts Receivable"),
+                    ("ðŸ“‰ Accounts Payable", "Accounts Payable"),
                 ],
             ),
             (
                 "Inventory",
                 [
-                    ("📦 Inventory Management", "Inventory Management"),
-                    ("📤 Stock In/Out", "Inventory Management"),
+                    ("ðŸ“¦ Inventory Management", "Inventory Management"),
+                    ("ðŸ“¤ Stock In/Out", "Inventory Management"),
                 ],
             ),
             (
                 "Reports",
                 [
-                    ("📊 Data Analytics", "Data Analytics"),
-                    ("🧾 Financial Reports", "Financial Reports"),
+                    ("ðŸ“Š Data Analytics", "Data Analytics"),
+                    ("ðŸ§¾ Financial Reports", "Financial Reports"),
                 ],
             ),
             (
                 "System",
                 [
-                    ("🏢 Manage Branches", "branch_management"),
-                    ("📅 System Audit Trail", "System Audit Trail"),
-                    ("⚙️ System Configuration", "System Configuration"),
+                    ("ðŸ¢ Manage Branches", "branch_management"),
+                    ("ðŸ“… System Audit Trail", "System Audit Trail"),
+                    ("âš™ï¸ System Configuration", "System Configuration"),
                 ],
             ),
         ]
@@ -2159,7 +2163,7 @@ def _render_primary_sidebar(user, include_settings=True):
         try:
             days_left = check_license_expiry_with_grace(user['key'])
             if days_left['status'] == 'warning':
-                st.sidebar.warning(f"⚠️ License expires in {days_left['days_left']} days")
+                st.sidebar.warning(f"âš ï¸ License expires in {days_left['days_left']} days")
         except:
             pass
 
@@ -2178,8 +2182,8 @@ def _render_primary_sidebar(user, include_settings=True):
     st.session_state.base_currency = currency
     rates = {"GHS": 1.0, "USD": 11.65, "EUR": 13.34, "GBP": 15.47}
     st.session_state.exchange_rate = rates[currency]
-    symbols = {"GHS": "GH₵", "USD": "$", "EUR": "€", "GBP": "£"}
-    st.session_state.currency_symbol = symbols.get(st.session_state.base_currency, "GH₵")
+    symbols = {"GHS": "GHâ‚µ", "USD": "$", "EUR": "â‚¬", "GBP": "Â£"}
+    st.session_state.currency_symbol = symbols.get(st.session_state.base_currency, "GHâ‚µ")
     fallback_history_key = "sidebar_accounting_ai_history"
     if fallback_history_key not in st.session_state:
         st.session_state[fallback_history_key] = [
@@ -2265,9 +2269,9 @@ def _render_primary_page(user):
         show_company_setup(user["key"], user["name"], user["role"])
     elif current_page == "Vouchers & Journals":
         show_vouchers(user["key"], user["role"])
-    elif current_page in {"Sales History", "Sales Invoicing"}:
+    elif current_page in {"Sales Invoicing", "Sales History", "Sales/Purchase"}:
         show_sales_purchase(user["key"], user["role"], "Sales")
-    elif current_page in {"Purchase History", "Purchase Orders"}:
+    elif current_page in {"Purchase Invoicing", "Purchase History", "Purchase Orders"}:
         show_sales_purchase(user["key"], user["role"], "Purchase")
     elif current_page == "Accounts Receivable":
         show_aging(user["key"], "Receivable")
@@ -2295,7 +2299,7 @@ else:
     if subscription_status.get("ok") and not subscription_status.get("renewal_required"):
         if subscription_status.get("days_left") is not None and int(subscription_status.get("days_left") or 0) <= 7:
             st.warning(
-                f"⚠️ Your subscription expires in {subscription_status['days_left']} days. Please renew to avoid service interruption."
+                f"âš ï¸ Your subscription expires in {subscription_status['days_left']} days. Please renew to avoid service interruption."
             )
     
     if u['role'] == "Dev":
@@ -2333,7 +2337,7 @@ else:
 
                 st.markdown("---")
                 st.subheader("System Health")
-                st.caption(st.session_state.get("cloud_vault_status", "🔴 Cloud Vault: Local Mode"))
+                st.caption(st.session_state.get("cloud_vault_status", "ðŸ”´ Cloud Vault: Local Mode"))
                 try:
                     operations_snapshot = build_operations_console_snapshot(conn=conn)
                     persistence_diag = operations_snapshot["persistence"]
@@ -3453,7 +3457,7 @@ else:
         _render_primary_sidebar(demo_user, include_settings=False)
         _render_primary_page(demo_user)
         st.sidebar.markdown("---")
-        if st.sidebar.button("🔴 Secure Logout", width='stretch', key="v3_demo_logout_primary"):
+        if st.sidebar.button("ðŸ”´ Secure Logout", width='stretch', key="v3_demo_logout_primary"):
             st.session_state.clear()
             st.rerun()
         st.stop()
@@ -3462,7 +3466,7 @@ else:
         if subscription_status.get("renewal_required"):
             show_subscription_renewal_page(st.session_state.company_id, role=u["role"])
             st.sidebar.markdown("---")
-            if st.sidebar.button("🔴 Secure Logout", width='stretch', key="v3_subscription_logout"):
+            if st.sidebar.button("ðŸ”´ Secure Logout", width='stretch', key="v3_subscription_logout"):
                 try:
                     conn = get_connection()
                     log_audit_action(conn, u.get('key', 'SYSTEM'), u['role'], "User logout", "Authentication")
@@ -3478,7 +3482,7 @@ else:
         _render_primary_sidebar(u, include_settings=True)
         _render_primary_page(u)
         st.sidebar.markdown("---")
-        if st.sidebar.button("🔴 Secure Logout", width='stretch', key="v3_primary_logout"):
+        if st.sidebar.button("ðŸ”´ Secure Logout", width='stretch', key="v3_primary_logout"):
             try:
                 conn = get_connection()
                 log_audit_action(conn, u.get('key', 'SYSTEM'), u['role'], "User logout", "Authentication")
@@ -3493,7 +3497,7 @@ else:
         st.stop()
 
     st.sidebar.markdown("---")
-    if st.sidebar.button("🔴 Secure Logout", width='stretch', key="v3_final_logout"):
+    if st.sidebar.button("ðŸ”´ Secure Logout", width='stretch', key="v3_final_logout"):
         try:
             conn = get_connection()
             log_audit_action(conn, u.get('key', 'SYSTEM'), u['role'], "User logout", "Authentication")
@@ -3502,3 +3506,4 @@ else:
             pass  # Don't fail logout if audit logging fails
         _clear_session()
         st.rerun()
+
