@@ -501,8 +501,8 @@ PAGE_ALIASES = dict(
         "ðŸ“Š Dashboard": PAGE_LABELS["dashboard"],
         "Sales Invoicing": PAGE_LABELS["invoices"],
         "ðŸ§¾ Sales Invoicing": PAGE_LABELS["invoices"],
-        "Purchase Orders": "🧾 Purchase Invoicing",
-        "Purchase History": "🧾 Purchase Invoicing",
+        "Purchase Orders": "Purchase Invoicing",
+        "Purchase History": "Purchase Invoicing",
     }
 )
 

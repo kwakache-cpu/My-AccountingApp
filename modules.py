@@ -10196,7 +10196,7 @@ def show_pos(company_key, company_name, role):
 # SALES & PURCHASE
 # ==========================================
 def show_sales_purchase(company_key, role, doc_type="Sales"):
-    st.header(f"{'🧾 Sales Invoicing' if doc_type == 'Sales' else '📦 Purchase Orders'}")
+    st.header(f"{'🧾 Sales Invoicing' if doc_type == 'Sales' else '📦 Purchase Invoicing'}")
     branch_id = st.session_state.get("active_branch_id")
     if role == "Demo":
         _demo_notice()
