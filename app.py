@@ -1792,80 +1792,52 @@ def main():
 
 SIDEBAR_NAV_GROUPS = [
     (
-        "ðŸ“Š Dashboard",
+        "Core Operations",
         [
-            ("ðŸ“Š Dashboard", "Dashboard"),
+            ("Dashboard", "Dashboard"),
+            ("Point of Sale", "Point of Sale"),
+            ("Customers", "Customers"),
+            ("Suppliers", "Suppliers"),
+            ("Inventory", "Inventory Management"),
+            ("Banking & Cash", "Banking & Cash"),
+            ("Payroll", "Payroll & Salaries"),
+            ("Financial Reports", "Financial Reports"),
         ],
     ),
     (
-        "ðŸ›ï¸ Sales",
+        "Accounting",
         [
-            ("ðŸ§¾ Customers", "Customers"),
-            ("ðŸ“„ Create Invoice", "Create Invoice"),
-            ("ðŸ’³ Receive Payment", "Receive Payment (Customer)"),
-            ("ðŸ§¾ Sales Invoicing", "Sales Invoicing"),
-            ("ðŸ“ˆ Accounts Receivable", "Accounts Receivable"),
+            ("General Journal", "General Journal"),
+            ("Vouchers & Journals", "Vouchers & Journals"),
+            ("Chart of Accounts", "Chart of Accounts"),
+            ("Taxation", "Taxation (VAT/NHIL)"),
         ],
     ),
     (
-        "ðŸ›’ Purchases",
+        "Sales Workflow",
         [
-            ("ðŸ·ï¸ Suppliers", "Suppliers"),
-            ("ðŸ“ Create Bill", "Create Bill"),
-            ("ðŸ’¸ Supplier Payment", "Supplier Payment"),
-            ("ï¿½ Purchase Invoicing", "Purchase Invoicing"),
-            ("ðŸ“‰ Accounts Payable", "Accounts Payable"),
+            ("Create Invoice", "Create Invoice"),
+            ("Receive Payment", "Receive Payment (Customer)"),
+            ("Sales Invoicing", "Sales Invoicing"),
+            ("Accounts Receivable", "Accounts Receivable"),
         ],
     ),
     (
-        "ðŸ›’ Point of Sale",
+        "Purchases Workflow",
         [
-            ("ðŸ›’ Point of Sale", "Point of Sale"),
+            ("Create Bill", "Create Bill"),
+            ("Supplier Payment", "Supplier Payment"),
+            ("Purchase Invoicing", "Purchase Invoicing"),
+            ("Accounts Payable", "Accounts Payable"),
         ],
     ),
     (
-        "ðŸ’° Banking & Cash",
+        "Administration",
         [
-            ("ðŸ’° Banking & Cash", "Banking & Cash"),
-        ],
-    ),
-    (
-        "ðŸ§¾ Accounting",
-        [
-            ("ðŸ—‚ï¸ Chart of Accounts", "Chart of Accounts"),
-            ("ðŸ§¾ General Journal", "General Journal"),
-            ("ðŸ“š General Ledger", "General Ledger"),
-            ("ðŸ§¾ Financial Reports", "Financial Reports"),
-            ("ðŸ“… Taxation", "Taxation (VAT/NHIL)"),
-            ("ðŸ§¾ Vouchers & Journals", "Vouchers & Journals"),
-        ],
-    ),
-    (
-        "ðŸ“¦ Inventory",
-        [
-            ("ðŸ“¦ Inventory Management", "Inventory Management"),
-            ("ðŸ›ï¸ Asset Register", "Asset Register"),
-        ],
-    ),
-    (
-        "ðŸ’³ Payroll & Salaries",
-        [
-            ("ðŸ’³ Payroll & Salaries", "Payroll & Salaries"),
-        ],
-    ),
-    (
-        "ðŸ“Š Data Analytics",
-        [
-            ("ðŸ“Š Data Analytics", "Data Analytics"),
-        ],
-    ),
-    (
-        "âš™ï¸ Administration",
-        [
-            ("âš™ï¸ System Configuration", "System Configuration"),
-            ("ðŸ“… System Audit Trail", "System Audit Trail"),
-            ("ðŸ¤– Gatekeeper Admin", "Gatekeeper Admin"),
-            ("ðŸ¢ Manage Branches", "branch_management"),
+            ("Asset Register", "Asset Register"),
+            ("Audit Trail", "System Audit Trail"),
+            ("System Configuration", "System Configuration"),
+            ("Gatekeeper Admin", "Gatekeeper Admin"),
         ],
     ),
 ]
