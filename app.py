@@ -469,7 +469,7 @@ PAGE_LABELS = {
     "financial_reports": "🧾 Financial Reports",
     "audit_trail": "📅 System Audit Trail",
     "settings": "⚙️ System Configuration",
-    "invoices": "🧾 Sales Invoicing",
+    "invoices": "🧾 Sales History",
 }
 
 PAGE_ALIASES = dict(
@@ -501,6 +501,7 @@ PAGE_ALIASES = dict(
         "📊 Dashboard": PAGE_LABELS["dashboard"],
         "Sales Invoicing": PAGE_LABELS["invoices"],
         "🧾 Sales Invoicing": PAGE_LABELS["invoices"],
+        "Purchase Orders": "📜 Purchase History",
     }
 )
 
@@ -1788,73 +1789,54 @@ def main():
             settings_conn.close()
 
 
-PRIMARY_NAV_ITEMS = [
-    ("📊 Dashboard", "Dashboard"),
-    ("🛒 Point of Sale", "Point of Sale"),
-    ("📦 Inventory Management", "Inventory Management"),
-    ("🧾 Customers", "Customers"),
-    ("📄 Create Invoice", "Create Invoice"),
-    ("💳 Receive Payment (Customer)", "Receive Payment (Customer)"),
-    ("🏷️ Suppliers", "Suppliers"),
-    ("📝 Create Bill", "Create Bill"),
-    ("💸 Supplier Payment", "Supplier Payment"),
-    ("📔 Customer Ledger", "Customer Ledger"),
-    ("📔 Supplier Ledger", "Supplier Ledger"),
-    ("🧾 General Journal", "General Journal"),
-    ("📚 General Ledger", "General Ledger"),
-    ("🗂️ Chart of Accounts", "Chart of Accounts"),
-    ("📊 Data Analytics", "Data Analytics"),
-    ("🧾 Financial Reports", "Financial Reports"),
-    ("📅 System Audit Trail", "System Audit Trail"),
-    ("⚙️ System Configuration", "System Configuration"),
-    ("🏢 Manage Branches", "branch_management"),
-    ("🏛️ Asset Register", "Asset Register"),
-    ("💳 Payroll & Salaries", "Payroll & Salaries"),
-    ("Taxation (VAT/NHIL)", "Taxation (VAT/NHIL)"),
-    ("Banking & Cash", "Banking & Cash"),
-    ("Vouchers & Journals", "Vouchers & Journals"),
-    ("Sales Invoicing", "Sales Invoicing"),
-    ("Purchase Orders", "Purchase Orders"),
-    ("Accounts Receivable", "Accounts Receivable"),
-    ("Accounts Payable", "Accounts Payable"),
-    ("Dashboard", "Dashboard"),
-    ("Inventory Management", "Inventory Management"),
-    ("Payroll & Salaries", "Payroll & Salaries"),
-    ("Gatekeeper Admin", "Gatekeeper Admin"),
-    ("🏠 Dashboard", "Dashboard"),
-]
-
-
 SIDEBAR_NAV_GROUPS = [
     (
-        "💼 Transactions",
+        "📊 Dashboard",
         [
             ("📊 Dashboard", "Dashboard"),
-            ("🛒 Point of Sale", "Point of Sale"),
-            ("🧾 Vouchers & Journals", "Vouchers & Journals"),
-            ("🧾 General Journal", "General Journal"),
-            ("💰 Banking & Cash", "Banking & Cash"),
-            ("📝 Create Invoice", "Create Invoice"),
-            ("🧾 Create Bill", "Create Bill"),
-            ("💳 Receive Payment (Customer)", "Receive Payment (Customer)"),
-            ("💸 Supplier Payment", "Supplier Payment"),
-            ("🧾 Sales Invoicing", "Sales Invoicing"),
-            ("🛍️ Purchase Orders", "Purchase Orders"),
-            ("🧮 Payroll & Salaries", "Payroll & Salaries"),
-            ("🧾 Taxation (VAT/NHIL)", "Taxation (VAT/NHIL)"),
         ],
     ),
     (
-        "📑 Ledgers",
+        "🛍️ Sales",
+        [
+            ("🧾 Customers", "Customers"),
+            ("📄 Create Invoice", "Create Invoice"),
+            ("💳 Receive Payment", "Receive Payment (Customer)"),
+            ("📜 Sales History", "Sales History"),
+            ("📈 Accounts Receivable", "Accounts Receivable"),
+        ],
+    ),
+    (
+        "🛒 Purchases",
+        [
+            ("🏷️ Suppliers", "Suppliers"),
+            ("📝 Create Bill", "Create Bill"),
+            ("💸 Supplier Payment", "Supplier Payment"),
+            ("📜 Purchase History", "Purchase History"),
+            ("📉 Accounts Payable", "Accounts Payable"),
+        ],
+    ),
+    (
+        "🛒 Point of Sale",
+        [
+            ("🛒 Point of Sale", "Point of Sale"),
+        ],
+    ),
+    (
+        "💰 Banking & Cash",
+        [
+            ("💰 Banking & Cash", "Banking & Cash"),
+        ],
+    ),
+    (
+        "🧾 Accounting",
         [
             ("🗂️ Chart of Accounts", "Chart of Accounts"),
+            ("🧾 General Journal", "General Journal"),
             ("📚 General Ledger", "General Ledger"),
-            ("📒 Customer Ledger", "Customer Ledger"),
-            ("📕 Supplier Ledger", "Supplier Ledger"),
-            ("📈 Accounts Receivable", "Accounts Receivable"),
-            ("📉 Accounts Payable", "Accounts Payable"),
-            ("🧾 Customers", "Customers"),
-            ("🏷️ Suppliers", "Suppliers"),
+            ("🧾 Financial Reports", "Financial Reports"),
+            ("📅 Taxation", "Taxation (VAT/NHIL)"),
+            ("🧾 Vouchers & Journals", "Vouchers & Journals"),
         ],
     ),
     (
@@ -1865,21 +1847,32 @@ SIDEBAR_NAV_GROUPS = [
         ],
     ),
     (
-        "📊 Reports",
+        "💳 Payroll & Salaries",
         [
-            ("📊 Data Analytics", "Data Analytics"),
-            ("🧾 Financial Reports", "Financial Reports"),
-            ("🧭 System Audit Trail", "System Audit Trail"),
+            ("💳 Payroll & Salaries", "Payroll & Salaries"),
         ],
     ),
     (
-        "⚙️ System",
+        "📊 Data Analytics",
         [
-            ("⚙️ System Configuration", "System Configuration"),
-            ("🏢 Manage Branches", "branch_management"),
-            ("🤖 Gatekeeper Admin", "Gatekeeper Admin"),
+            ("📊 Data Analytics", "Data Analytics"),
         ],
     ),
+    (
+        "⚙️ Administration",
+        [
+            ("⚙️ System Configuration", "System Configuration"),
+            ("📅 System Audit Trail", "System Audit Trail"),
+            ("🤖 Gatekeeper Admin", "Gatekeeper Admin"),
+            ("🏢 Manage Branches", "branch_management"),
+        ],
+    ),
+]
+
+PRIMARY_NAV_ITEMS = [
+    (label, page_key)
+    for _group_name, options in SIDEBAR_NAV_GROUPS
+    for label, page_key in options
 ]
 
 PAGE_PERMISSION_MAP = {
@@ -1911,7 +1904,9 @@ PAGE_PERMISSION_MAP = {
     "System Audit Trail": "view_audit_trail",
     "System Configuration": "manage_company",
     "branch_management": "manage_branches",
+    "Sales History": "create_invoice",
     "Sales Invoicing": "create_invoice",
+    "Purchase History": "create_bill",
     "Purchase Orders": "create_bill",
 }
 
@@ -1935,7 +1930,9 @@ def _ensure_valid_page(default_page="Dashboard"):
     active_page = st.session_state.get("active_page")
     current_page = legacy_page if legacy_page and legacy_page != active_page else active_page or legacy_page or default_page
     legacy_aliases = {
-        "Sales/Purchase": "Sales Invoicing",
+        "Sales/Purchase": "Sales History",
+        "Sales Invoicing": "Sales History",
+        "Purchase Orders": "Purchase History",
         "Taxation": "Taxation (VAT/NHIL)",
         "Audit Trail": "System Audit Trail",
     }
@@ -2268,9 +2265,9 @@ def _render_primary_page(user):
         show_company_setup(user["key"], user["name"], user["role"])
     elif current_page == "Vouchers & Journals":
         show_vouchers(user["key"], user["role"])
-    elif current_page == "Sales Invoicing":
+    elif current_page in {"Sales History", "Sales Invoicing"}:
         show_sales_purchase(user["key"], user["role"], "Sales")
-    elif current_page == "Purchase Orders":
+    elif current_page in {"Purchase History", "Purchase Orders"}:
         show_sales_purchase(user["key"], user["role"], "Purchase")
     elif current_page == "Accounts Receivable":
         show_aging(user["key"], "Receivable")
