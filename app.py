@@ -1961,19 +1961,27 @@ def _render_sidebar_nav_styles():
         <style>
         section[data-testid="stSidebar"] div[data-testid="stButton"] > button {
             width: 100%;
-            border-radius: 10px;
-            border: 1px solid rgba(184, 134, 11, 0.18);
+            border-radius: 12px;
+            border: 1px solid rgba(148, 163, 184, 0.24);
             text-align: left;
             justify-content: flex-start;
-            padding: 0.55rem 0.8rem;
-            margin-bottom: 0.2rem;
+            padding: 0.75rem 1rem;
+            margin-bottom: 0.45rem;
             background: linear-gradient(180deg, #ffffff 0%, #f8fafc 100%);
+            transition: transform 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease;
+        }
+        section[data-testid="stSidebar"] div[data-testid="stButton"] > button:hover {
+            transform: translateY(-1px);
+            border-color: rgba(148, 163, 184, 0.45);
+        }
+        section[data-testid="stSidebar"] div[data-testid="stButton"] {
+            margin-bottom: 0.6rem;
         }
         section[data-testid="stSidebar"] div[data-testid="stButton"] > button[kind="primary"] {
-            background: linear-gradient(135deg, #0f766e 0%, #b45309 100%);
+            background: linear-gradient(135deg, #0f766e 0%, #ca8a04 100%);
             color: #ffffff;
             border: 1px solid rgba(180, 83, 9, 0.55);
-            box-shadow: 0 6px 16px rgba(15, 118, 110, 0.18);
+            box-shadow: 0 10px 24px rgba(15, 118, 110, 0.16);
         }
         section[data-testid="stSidebar"] div[data-testid="stButton"] > button[kind="secondary"]:hover {
             border-color: rgba(180, 83, 9, 0.45);

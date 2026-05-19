@@ -12839,9 +12839,13 @@ def show_reports(company_key, branch_id=None):
 
 def show_dashboard(company_key, company_name, role):
     """Primary business dashboard restored in modules.py for safe routing."""
-    st.header(f"📊 Dashboard: {company_name}")
+    st.title("📊 Enterprise Dashboard")
+    st.markdown(f"#### Operational snapshot for {company_name}")
+    st.markdown("##### Current business performance, cash flow, inventory alerts and quick actions.")
 
     if role == "Demo":
+        st.markdown("#### Demo Summary")
+        st.caption("Sample enterprise metrics and operational indicators for the demo environment.")
         col1, col2, col3, col4 = st.columns(4)
         col1.metric("Inventory Value", format_currency(25000.0))
         col2.metric("Month Sales", format_currency(15000.0))
@@ -12874,10 +12878,12 @@ def show_dashboard(company_key, company_name, role):
         col4.metric("Asset Value", format_currency(fa_val))
 
         st.markdown("---")
-        left_col, right_col = st.columns(2)
+        st.markdown("### Live Activity")
+        left_col, right_col = st.columns([2, 1])
 
         with left_col:
             st.subheader("Recent Transactions")
+            st.caption("Latest posted activity across accounts, sorted by date.")
             recent_txns = pd.DataFrame(get_recent_accounting_activity(company_key, limit=10, conn=conn))
             if recent_txns.empty:
                 st.info("No recent transactions found.")
@@ -12886,11 +12892,13 @@ def show_dashboard(company_key, company_name, role):
                 recent_txns = recent_txns.drop(columns=[column for column in ["amount"] if column in recent_txns.columns]).rename(
                     columns={"date": "Date", "activity_type": "Type", "description": "Description", "reference": "Reference"}
                 )
-                st.dataframe(format_currency_dataframe(recent_txns), use_container_width=True)
+                recent_txns = recent_txns[[col for col in ["Date", "Type", "Reference", "Description", "Amount"] if col in recent_txns.columns]]
+                st.dataframe(format_currency_dataframe(recent_txns), use_container_width=True, hide_index=True)
         compare_legacy_and_journal_totals(company_key, logger_instance=logger, conn=conn)
 
         with right_col:
             st.subheader("Low Stock Items")
+            st.caption("Low inventory items that need attention.")
             low_stock = pd.read_sql_query(
                 """
                 SELECT item_name AS Item, qty AS Quantity, unit AS Unit
@@ -12905,8 +12913,9 @@ def show_dashboard(company_key, company_name, role):
             if low_stock.empty:
                 st.success("All stock levels are adequate!")
             else:
-                st.dataframe(format_currency_dataframe(low_stock), use_container_width=True)
+                st.dataframe(low_stock, use_container_width=True, hide_index=True)
 
+        st.markdown("---")
         st.subheader("Quick Actions")
         action_col1, action_col2, action_col3, action_col4, action_col5 = st.columns(5)
         if action_col1.button("🛒 New Sale", key=f"dashboard_pos_{company_key}", use_container_width=True):
