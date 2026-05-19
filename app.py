@@ -1925,6 +1925,12 @@ def _user_can_access_page(user, page_name):
     return True if not permission else user_has_permission(user.get("role"), permission)
 
 
+def _normalize_page_state(page_name):
+    if str(page_name) == "Purchase Orders":
+        return "Purchase Invoicing"
+    return page_name
+
+
 def _ensure_valid_page(default_page="Dashboard"):
     valid_pages = {page_key for _label, page_key in PRIMARY_NAV_ITEMS}
     legacy_page = st.session_state.get("page")
@@ -1940,6 +1946,7 @@ def _ensure_valid_page(default_page="Dashboard"):
         "Audit Trail": "System Audit Trail",
     }
     current_page = legacy_aliases.get(str(current_page), current_page)
+    current_page = _normalize_page_state(current_page)
     if current_page not in valid_pages and current_page != 'branch_management':
         label_to_key = {label: key for label, key in PRIMARY_NAV_ITEMS}
         current_page = label_to_key.get(str(current_page), default_page)
@@ -1949,6 +1956,7 @@ def _ensure_valid_page(default_page="Dashboard"):
 
 
 def _set_active_page(page_name):
+    page_name = _normalize_page_state(page_name)
     st.session_state.active_page = page_name
     st.session_state.page = page_name
 
