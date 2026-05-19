@@ -2263,7 +2263,7 @@ ACCOUNTING_ASSISTANT_SYSTEM_PROMPT = (
 
 
 def get_currency_symbol():
-    return st.session_state.get("currency_symbol", "GH₵")
+    return st.session_state.get("currency_symbol", "GHS")
 
 
 def _normalize_account_category(category):
@@ -6608,7 +6608,7 @@ def show_sales_invoices_page(conn, demo_on):
 
     with st.form("sales_invoice_form"):
         customer_name = st.text_input("Customer Name")
-        amount = st.number_input("Amount (GH₵)", min_value=0.0, value=0.0)
+        amount = st.number_input("Amount (GHS)", min_value=0.0, value=0.0)
         status = st.selectbox("Status", ["Paid", "Pending", "Draft"])
         invoice_date = st.date_input("Date", value=datetime.now().date())
         submitted = st.form_submit_button("Save Invoice")
@@ -6657,7 +6657,7 @@ def show_accounts_payable_page(conn, demo_on):
     with st.form("accounts_payable_form"):
         supplier_name = st.text_input("Supplier Name")
         purchase_classification = st.selectbox("Purchase Classification", PURCHASE_CLASSIFICATION_OPTIONS)
-        amount = st.number_input("Amount (GH₵)", min_value=0.0, value=0.0)
+        amount = st.number_input("Amount (GHS)", min_value=0.0, value=0.0)
         input_vat_rate = st.number_input("Input VAT Rate (%)", min_value=0.0, max_value=100.0, step=0.5, value=0.0)
         status = st.selectbox("Bill Status", ["Pending", "Received"])
         payment_method = st.selectbox("Payment Method", ["Cash", "Bank", "Mobile Money"], disabled=status != "Received")
@@ -6819,7 +6819,7 @@ def show_create_bill_page(company_key):
         valid_rows = edited_df['item_name'].fillna('').str.strip() != ''
         total_amount = (edited_df.loc[valid_rows, 'quantity'].fillna(0) * edited_df.loc[valid_rows, 'unit_price'].fillna(0)).sum()
 
-        st.markdown(f"**Total Amount: GH₵ {total_amount:.2f}**")
+        st.markdown(f"**Total Amount: GHS {total_amount:.2f}**")
 
         with st.form("create_bill_form"):
             supplier_name = st.selectbox("Supplier", supplier_options)
@@ -6981,7 +6981,7 @@ def show_chart_of_accounts_page(conn, demo_on):
     with st.form("chart_of_accounts_form"):
         account_name = st.text_input("Account Name")
         account_type = st.selectbox("Account Type", ["Asset", "Liability", "Equity", "Income", "Expense"])
-        balance = st.number_input("Opening Balance (GH₵)", value=0.0)
+        balance = st.number_input("Opening Balance (GHS)", value=0.0)
         submitted = st.form_submit_button("Add Account")
         if submitted and account_name:
             conn.execute(
@@ -7013,7 +7013,7 @@ def show_vouchers_page(conn, demo_on):
 
     with st.form("voucher_form"):
         narration = st.text_area("Narration")
-        amount = st.number_input("Amount (GH₵)", min_value=0.0, value=0.0)
+        amount = st.number_input("Amount (GHS)", min_value=0.0, value=0.0)
         ref_no = st.text_input("Reference Number")
         voucher_date = st.date_input("Date", value=datetime.now().date())
         submitted = st.form_submit_button("Post Voucher")
@@ -7517,7 +7517,7 @@ def show_inventory(company_key, role):
                         name_col, edit_col, delete_col = st.columns([4, 1, 1])
                         name_col.caption(
                             f"{stock_row['item_name']} | Barcode {stock_row.get('barcode') or 'N/A'} | Qty {float(stock_row['quantity']):,.2f} | "
-                            f"Sell GH₵ {float(stock_row['unit_price']):,.2f}"
+                            f"Sell GHS {float(stock_row['unit_price']):,.2f}"
                         )
                         if edit_col.button("Edit", key=f"inventory_edit_btn_{company_key}_{int(stock_row['id'])}"):
                             st.session_state[selected_edit_key] = int(stock_row["id"])
@@ -8236,7 +8236,7 @@ def show_vouchers(company_key, role):
                 v_type = st.selectbox("Voucher Type", ["Payment", "Receipt", "Journal", "Sales", "Purchase", "Expense"])
                 narration = st.text_area("Narration")
             with col2:
-                amount = st.number_input("Amount (GH₵)", min_value=0.0, step=0.01)
+                amount = st.number_input("Amount (GHS)", min_value=0.0, step=0.01)
                 ref_no = st.text_input("Reference Number")
                 v_date = st.date_input("Date", datetime.now())
 
@@ -8690,10 +8690,10 @@ def show_pos(company_key, company_name, role):
     if role == "Demo":
         _demo_notice()
         st.info("Demo POS: Select items and process a mock sale.")
-        demo_items = ["Product A - GH₵ 120.00", "Product B - GH₵ 75.00", "Product C - GH₵ 200.00"]
+        demo_items = ["Product A - GHS 120.00", "Product B - GHS 75.00", "Product C - GHS 200.00"]
         selected = st.multiselect("Select Items", demo_items)
         if selected:
-            st.success(f"Demo sale: {len(selected)} item(s) selected. Total: GH₵ {len(selected) * 120:.2f}")
+            st.success(f"Demo sale: {len(selected)} item(s) selected. Total: GHS {len(selected) * 120:.2f}")
         return
     if not require_permission(
         role,
@@ -9653,7 +9653,7 @@ def show_pos(company_key, company_name, role):
                     role,
                     "POS Sale",
                     "POS",
-                    f"Sold {narration} for GH₵{float(total):.2f}" + (
+                    f"Sold {narration} for GHS{float(total):.2f}" + (
                         f" on credit to {ledger_result['customer_name']}" if ledger_result else ""
                     ),
                     branch_id=branch_id,
@@ -10202,7 +10202,7 @@ def show_sales_purchase(company_key, role, doc_type="Sales"):
         _demo_notice()
         demo_data = pd.DataFrame({
             "Customer/Supplier": ["Demo Client Ltd", "Demo Supplier Co."],
-            "Amount (GH₵)": [5000.0, 2000.0],
+            "Amount (GHS)": [5000.0, 2000.0],
             "Status": ["Paid", "Pending"],
             "Date": [datetime.now().date().isoformat()] * 2,
         })
@@ -10225,7 +10225,7 @@ def show_sales_purchase(company_key, role, doc_type="Sales"):
         col1, col2 = st.columns(2)
         with col1:
             party_name = st.text_input("Customer Name" if doc_type == "Sales" else "Supplier Name")
-            amount = st.number_input("Amount (GH₵)", min_value=0.0, step=0.01)
+            amount = st.number_input("Amount (GHS)", min_value=0.0, step=0.01)
         with col2:
             status = st.selectbox("Status", ["Paid", "Pending", "Draft"] if doc_type == "Sales" else ["Received", "Pending", "Cancelled"])
             posting_state = st.selectbox("Posting State", DOCUMENT_WORKFLOW_STATUSES, index=3)
@@ -10397,7 +10397,7 @@ def show_sales_purchase(company_key, role, doc_type="Sales"):
                     balance_delta,
                 )
                 conn.commit()
-                log_audit_action(conn, company_key, role, f"{doc_type} Recorded", doc_type, f"{party_name} - GH₵{amount:.2f}", branch_id=branch_id)
+                log_audit_action(conn, company_key, role, f"{doc_type} Recorded", doc_type, f"{party_name} - GHS{amount:.2f}", branch_id=branch_id)
                 conn.close()
                 if posting_state == "Posted":
                     st.success(f"{doc_type} saved and posted successfully!")
@@ -10421,7 +10421,7 @@ def show_sales_purchase(company_key, role, doc_type="Sales"):
             ).fetchall()
         conn.close()
         if data:
-            df = pd.DataFrame(data, columns=["Date", "Description", "Amount (GH₵)"])
+            df = pd.DataFrame(data, columns=["Date", "Description", "Amount (GHS)"])
             st.dataframe(format_currency_dataframe(df), use_container_width=True)
             excel_bin = get_excel_bin(df)
             if excel_bin:
@@ -11758,8 +11758,8 @@ def show_payroll(company_key, role):
                     name_col, edit_col, void_col, print_col = info_cols
                     has_posted_payroll = payroll_posted_entry_map.get(int(payroll_list_row["ID"])) is not None
                     name_col.caption(
-                        f"{payroll_list_row['Employee']} | Salary GH₵ {float(payroll_list_row['Basic Salary']):,.2f} | "
-                        f"Net GH₵ {float(payroll_list_row['Net Salary']):,.2f} | {payroll_list_row['Status']} | "
+                        f"{payroll_list_row['Employee']} | Salary GHS {float(payroll_list_row['Basic Salary']):,.2f} | "
+                        f"Net GHS {float(payroll_list_row['Net Salary']):,.2f} | {payroll_list_row['Status']} | "
                         f"Method {payroll_list_row['Payment Method'] or 'N/A'}"
                     )
                     if edit_col.button("Edit", key=f"payroll_edit_btn_{company_key}_{int(payroll_list_row['ID'])}"):
@@ -11888,8 +11888,8 @@ def show_payroll(company_key, role):
                 for _, payroll_list_row in df.iterrows():
                     info_col, print_col = st.columns([4, 1])
                     info_col.caption(
-                        f"{payroll_list_row['Employee']} | Salary GH₵ {float(payroll_list_row['Basic Salary']):,.2f} | "
-                        f"Net GH₵ {float(payroll_list_row['Net Salary']):,.2f} | {payroll_list_row['Status']}"
+                        f"{payroll_list_row['Employee']} | Salary GHS {float(payroll_list_row['Basic Salary']):,.2f} | "
+                        f"Net GHS {float(payroll_list_row['Net Salary']):,.2f} | {payroll_list_row['Status']}"
                     )
                     if print_col.button("Print Payslip", key=f"payroll_print_btn_{company_key}_{int(payroll_list_row['ID'])}"):
                         st.session_state[payroll_print_preview_key] = _build_payslip_html(payroll_list_row)
@@ -11923,9 +11923,9 @@ def _show_legacy_fixed_assets(company_key, role):
         demo_df = pd.DataFrame({
             "Asset Name": ["Company Vehicle", "Office Computer"],
             "Category": ["Vehicle", "Equipment"],
-            "Cost (GH₵)": [85000.0, 5500.0],
+            "Cost (GHS)": [85000.0, 5500.0],
             "Depreciation Rate (%)": [20.0, 33.3],
-            "Book Value (GH₵)": [68000.0, 3685.0],
+            "Book Value (GHS)": [68000.0, 3685.0],
             "Status": ["Active", "Active"],
         })
         st.dataframe(format_currency_dataframe(demo_df), use_container_width=True)
@@ -11939,7 +11939,7 @@ def _show_legacy_fixed_assets(company_key, role):
                 asset_category = st.selectbox("Category", ["Vehicle", "Equipment", "Building", "Furniture", "Land", "Other"])
                 purchase_date = st.date_input("Purchase Date", datetime.now().date())
             with col2:
-                cost = st.number_input("Cost (GH₵)", min_value=0.0, step=0.01)
+                cost = st.number_input("Cost (GHS)", min_value=0.0, step=0.01)
                 opening_book_value = st.number_input("Opening Book Value", min_value=0.0, step=0.01)
                 depreciation_rate = st.number_input("Depreciation Rate (%)", min_value=0.0, max_value=100.0, step=0.1)
                 location = st.text_input("Location")
@@ -11958,7 +11958,7 @@ def _show_legacy_fixed_assets(company_key, role):
                          cost, book_value, depreciation_rate, book_value, location),
                     )
                     conn.commit()
-                    log_audit_action(conn, company_key, role, "Fixed Asset Added", "Fixed Assets", f"{asset_name} - GH₵{cost:,.2f}")
+                    log_audit_action(conn, company_key, role, "Fixed Asset Added", "Fixed Assets", f"{asset_name} - GHS{cost:,.2f}")
                     conn.close()
                     st.success("Entry Updated")
                     st.rerun()
@@ -11991,7 +11991,7 @@ def _show_legacy_fixed_assets(company_key, role):
                 for _, asset_row in df.iterrows():
                     name_col, edit_col, delete_col = st.columns([4, 1, 1])
                     name_col.caption(
-                        f"{asset_row['Asset Name']} | Current GH₵ {float(asset_row['Current Value']):,.2f} | "
+                        f"{asset_row['Asset Name']} | Current GHS {float(asset_row['Current Value']):,.2f} | "
                         f"Purchase Date {asset_row['Purchase Date']}"
                     )
                     if edit_col.button("Edit", key=f"asset_edit_btn_{company_key}_{int(asset_row['ID'])}"):
@@ -12020,7 +12020,7 @@ def _show_legacy_fixed_assets(company_key, role):
                 with st.form(f"asset_edit_form_{company_key}_{edit_asset_id}", clear_on_submit=True):
                     edit_asset_name = st.text_input("Asset Name", value=str(edit_asset_row["Asset Name"] or ""))
                     edit_purchase_date = st.date_input("Purchase Date", value=pd.to_datetime(edit_asset_row["Purchase Date"]).date())
-                    edit_cost = st.number_input("Cost (GH₵)", min_value=0.0, value=float(edit_asset_row["Cost (GH₵)"] or 0.0))
+                    edit_cost = st.number_input("Cost (GHS)", min_value=0.0, value=float(edit_asset_row["Cost (GHS)"] or 0.0))
                     edit_opening_book = st.number_input("Opening Book Value", min_value=0.0, value=float(edit_asset_row["Opening Book Value"] or 0.0))
                     edit_depr_rate = st.number_input("Depreciation Rate (%)", min_value=0.0, max_value=100.0, value=float(edit_asset_row["Dep. Rate (%)"] or 0.0))
                     edit_location = st.text_input("Location", value=str(edit_asset_row["Location"] or ""))
