@@ -109,6 +109,61 @@ ALL_ENTERPRISE_PERMISSIONS = {
     "apply_pos_discount",
     "approve_pos_discount",
 }
+# ------------------
+# UI Standardization Helpers
+# ------------------
+def render_ui_standard_styles():
+    """Inject consistent UI styles used across enterprise pages."""
+    st.markdown(
+        """
+        <style>
+        /* Card */
+        .eka-card { background: #ffffff; border: 1px solid #e6eef6; border-radius: 10px; padding: 12px 16px; box-shadow: 0 6px 18px rgba(15,118,110,0.04); margin-bottom: 12px; }
+        .eka-card-title { font-weight:600; margin-bottom:8px; color:#0f172a; }
+        .eka-page-header h1 { margin: 0 0 6px 0; font-size: 1.6rem; }
+        .eka-subtitle { margin:0 0 10px 0; color:#6b7280; }
+        .eka-section { margin-top:18px; margin-bottom:8px; color:#0f172a; }
+        /* Table */
+        .stDataFrame table { border-collapse: collapse; }
+        .stDataFrame thead th { background:#f8fafc; color:#0f172a; }
+        /* Buttons */
+        .stButton>button { padding: 10px 14px !important; border-radius: 8px !important; }
+        @media (max-width: 640px) {
+            .eka-card { padding: 10px 12px; }
+            .stButton>button { width: 100% !important; }
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def page_header(title, subtitle=None):
+    """Render a consistent page header with optional subtitle."""
+    st.markdown(f"<div class=\"eka-page-header\"><h1>{title}</h1>" + (f"<p class=\"eka-subtitle\">{subtitle}</p>" if subtitle else "") + "</div>", unsafe_allow_html=True)
+
+
+def section_header(title):
+    st.markdown(f"<div class=\"eka-section\"><h3>{title}</h3></div>", unsafe_allow_html=True)
+
+
+def card_container(title=None):
+    """Return a Streamlit container representing a card; use `with card_container():`."""
+    container = st.container()
+    if title:
+        container.markdown(f"<div class=\"eka-card\"><div class=\"eka-card-title\">{title}</div>", unsafe_allow_html=True)
+    else:
+        container.markdown(f"<div class=\"eka-card\">", unsafe_allow_html=True)
+    return container
+
+
+def ui_table(df):
+    """Render a dataframe consistently (currency formatting handled elsewhere)."""
+    try:
+        st.dataframe(format_currency_dataframe(df), use_container_width=True, hide_index=True)
+    except Exception:
+        st.dataframe(df, use_container_width=True, hide_index=True)
+
 ROLE_NAME_ALIASES = {
     "Gatekeeper": "Dev",
     "Branch Admin": "Sub-Admin",
@@ -6769,7 +6824,8 @@ def show_create_bill_page(company_key):
     conn = get_connection()
     try:
         demo_on = st.session_state.get("demo_mode", False)
-        st.subheader("Create Bill")
+        render_ui_standard_styles()
+        page_header("Create Bill")
         if demo_on:
             _demo_notice()
             return
@@ -6821,10 +6877,11 @@ def show_create_bill_page(company_key):
 
         st.markdown(f"**Total Amount: GHS {total_amount:.2f}**")
 
-        with st.form("create_bill_form"):
-            supplier_name = st.selectbox("Supplier", supplier_options)
-            bill_date = st.date_input("Bill Date", value=datetime.now().date())
-            purchase_classification = st.selectbox("Purchase Classification", PURCHASE_CLASSIFICATION_OPTIONS)
+        with card_container():
+            with st.form("create_bill_form"):
+                supplier_name = st.selectbox("Supplier", supplier_options)
+                bill_date = st.date_input("Bill Date", value=datetime.now().date())
+                purchase_classification = st.selectbox("Purchase Classification", PURCHASE_CLASSIFICATION_OPTIONS)
             input_vat_rate = st.number_input("Input VAT Rate (%)", min_value=0.0, max_value=100.0, step=0.5, value=0.0)
             status = st.selectbox("Payment Status", ["Pending", "Received"])
             payment_method = st.selectbox("Payment Method", ["Cash", "Bank", "Mobile Money"], disabled=status != "Received")
@@ -8670,7 +8727,8 @@ def show_company_setup(company_key, company_name, role):
 # POINT OF SALE (POS)
 # ==========================================
 def show_pos(company_key, company_name, role):
-    st.header("🛒 Point of Sale")
+    render_ui_standard_styles()
+    page_header("🛒 Point of Sale", subtitle="Fast checkout and inventory-aware POS")
     receipt_key = f"pos_receipt_{company_key}"
     last_receipt_data_key = f"pos_last_receipt_data_{company_key}"
     checkout_complete_key = f"pos_checkout_complete_{company_key}"
