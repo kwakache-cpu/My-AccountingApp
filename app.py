@@ -2270,7 +2270,7 @@ def _render_primary_page(user):
         show_vouchers(user["key"], user["role"])
     elif current_page in {"Sales Invoicing", "Sales History", "Sales/Purchase"}:
         show_sales_purchase(user["key"], user["role"], "Sales")
-    elif current_page in {"Purchase Invoicing", "Purchase History", "Purchase Orders"}:
+    elif current_page in {"Purchase Invoicing", "Purchase History"}:
         show_sales_purchase(user["key"], user["role"], "Purchase")
     elif current_page == "Accounts Receivable":
         show_aging(user["key"], "Receivable")
