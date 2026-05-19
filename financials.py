@@ -947,7 +947,8 @@ def show_suppliers_page(company_key, role):
 
 
 def show_create_invoice_page(company_key, role):
-    st.header("📄 Create Invoice")
+    eka_modules.render_ui_standard_styles()
+    eka_modules.page_header("📄 Create Invoice")
     if not require_permission(role, "create_invoice", action_label="create invoices", company_key=company_key):
         return
     conn = get_connection()
@@ -955,8 +956,9 @@ def show_create_invoice_page(company_key, role):
     conn.close()
     invoice_items = []
     invoice_items_total = 0.0
-    with st.form(f"invoice_form_{company_key}"):
-        customer_name = st.selectbox("Customer", [""] + customers)
+    with eka_modules.card_container():
+        with st.form(f"invoice_form_{company_key}"):
+            customer_name = st.selectbox("Customer", [""] + customers)
         amount = st.number_input("Amount (GHS)", min_value=0.0, step=0.01)
         output_vat_rate = st.number_input("Output VAT Rate (%)", min_value=0.0, max_value=100.0, step=0.5, value=0.0, key=f"invoice_vat_rate_{company_key}")
         output_nhil_rate = st.number_input("Output NHIL Rate (%)", min_value=0.0, max_value=100.0, step=0.5, value=0.0, key=f"create_invoice_nhil_rate_{company_key}")
