@@ -1,4 +1,5 @@
-﻿import logging
+﻿import html
+import logging
 import json
 import logging
 import os
@@ -65,7 +66,7 @@ SUBSCRIPTION_PLANS = {
         "features": ["Annual enterprise plan", "Multi-branch scaling", "Premium support"],
     },
 }
-PRINTABLE_DOCUMENT_FOOTER = "Thank you for choosing Emma Accounting App. This document was generated for your records."
+PRINTABLE_DOCUMENT_FOOTER = "SOFTWARE BY: E.K.A RIGHTWAY CONSULT. 0507017767. VISIT kay-accounting.streamlit.app"
 ALL_ENTERPRISE_PERMISSIONS = {
     "view_dashboard",
     "view_banking",
@@ -4083,69 +4084,84 @@ def _build_receipt(receipt_data):
 def _build_receipt_html(receipt_data):
     rows = []
     for item in receipt_data.get("items", []):
+        item_name = html.escape(str(item.get("name") or ""))
         rows.append(
-            f"<tr>"
-            f"<td style='padding: 0.4rem 0.2rem; border-bottom:1px dashed #ddd;'>{item.get('name') or ''}</td>"
-            f"<td style='padding: 0.4rem 0.2rem; border-bottom:1px dashed #ddd; text-align:center;'>{int(item.get('qty') or 0)}</td>"
-            f"<td style='padding: 0.4rem 0.2rem; border-bottom:1px dashed #ddd; text-align:right;'>{format_currency(float(item.get('price') or 0.0))}</td>"
-            f"<td style='padding: 0.4rem 0.2rem; border-bottom:1px dashed #ddd; text-align:right;'>{format_currency(float(item.get('line_total') or 0.0))}</td>"
-            f"</tr>"
+            "<tr>"
+            f"<td style=\"padding:0.4rem 0.2rem;border-bottom:1px dashed #ddd;\">{item_name}</td>"
+            f"<td style=\"padding:0.4rem 0.2rem;border-bottom:1px dashed #ddd;text-align:center;\">{int(item.get('qty') or 0)}</td>"
+            f"<td style=\"padding:0.4rem 0.2rem;border-bottom:1px dashed #ddd;text-align:right;\">{html.escape(format_currency(float(item.get('price') or 0.0)))}</td>"
+            f"<td style=\"padding:0.4rem 0.2rem;border-bottom:1px dashed #ddd;text-align:right;\">{html.escape(format_currency(float(item.get('line_total') or 0.0)))}</td>"
+            "</tr>"
         )
     payment_reference_html = ""
     if receipt_data.get("payment_reference"):
         payment_reference_html = (
-            f"<div style='font-size:0.8rem; color:#444;'>Reference: {receipt_data['payment_reference']}</div>"
+            f"<div style=\"font-size:0.8rem;color:#444;\">Reference: {html.escape(str(receipt_data['payment_reference']))}</div>"
         )
     discount_approval_html = ""
     if receipt_data.get("discount_approved_by"):
         discount_approval_html = (
-            f"<div style='font-size:0.8rem; color:#444;'>Discount Approved By: {receipt_data['discount_approved_by']}</div>"
+            f"<div style=\"font-size:0.8rem;color:#444;\">Discount Approved By: {html.escape(str(receipt_data['discount_approved_by']))}</div>"
         )
     amount_tendered_html = ""
     change_due_html = ""
     if receipt_data.get("payment_method") == "Cash":
         amount_tendered_html = (
-            f"<div style='display:flex; justify-content:space-between;'><span>Amount Tendered</span><strong>{format_currency(float(receipt_data.get('amount_tendered') or 0.0))}</strong></div>"
+            f"<div style=\"display:flex;justify-content:space-between;\"><span>Amount Tendered</span><strong>{html.escape(format_currency(float(receipt_data.get('amount_tendered') or 0.0)))}</strong></div>"
         )
         change_due_html = (
-            f"<div style='display:flex; justify-content:space-between;'><span>Change Due</span><strong>{format_currency(float(receipt_data.get('change_due') or 0.0))}</strong></div>"
+            f"<div style=\"display:flex;justify-content:space-between;\"><span>Change Due</span><strong>{html.escape(format_currency(float(receipt_data.get('change_due') or 0.0)))}</strong></div>"
         )
-    return f"""
-    <div class='receipt-preview printable' style='font-family: Arial, sans-serif; color: #111; max-width: 360px; margin: 0 auto;'>
-        <div style='text-align:center; margin-bottom:0.75rem;'>
-            <h3 style='margin:0;'>{receipt_data.get("company_name") or ""}</h3>
-            <div style='font-size:0.85rem; color:#555;'>{receipt_data.get("branch_name") or "Main Branch"}</div>
-            <div style='font-size:0.8rem; margin-top:0.3rem;'>Receipt: {receipt_data.get("receipt_number") or "N/A"}</div>
-            <div style='font-size:0.8rem;'>Date: {receipt_data.get("sale_datetime") or ""}</div>
-            <div style='font-size:0.8rem;'>Cashier: {receipt_data.get("cashier") or ""}</div>
-        </div>
-        <table style='width:100%; border-collapse: collapse; margin-bottom:0.75rem; font-size:0.85rem;'>
-            <thead>
-                <tr>
-                    <th style='text-align:left; padding:0.35rem 0.2rem; border-bottom:2px solid #333;'>Item</th>
-                    <th style='text-align:center; padding:0.35rem 0.2rem; border-bottom:2px solid #333;'>Qty</th>
-                    <th style='text-align:right; padding:0.35rem 0.2rem; border-bottom:2px solid #333;'>Unit</th>
-                    <th style='text-align:right; padding:0.35rem 0.2rem; border-bottom:2px solid #333;'>Total</th>
-                </tr>
-            </thead>
-            <tbody>
-                {''.join(rows)}
-            </tbody>
-        </table>
-        <div style='border-top:1px dashed #999; padding-top:0.6rem; font-size:0.85rem;'>
-            <div style='display:flex; justify-content:space-between;'><span>Subtotal</span><strong>{format_currency(float(receipt_data.get("subtotal") or 0.0))}</strong></div>
-            <div style='display:flex; justify-content:space-between;'><span>Discount</span><strong>{format_currency(float(receipt_data.get("discount_total") or 0.0))}</strong></div>
-            <div style='display:flex; justify-content:space-between;'><span>Tax</span><strong>{format_currency(float(receipt_data.get("tax_total") or 0.0))}</strong></div>
-            <div style='display:flex; justify-content:space-between; font-size:1rem; margin-top:0.35rem;'><span>Grand Total</span><strong>{format_currency(float(receipt_data.get("grand_total") or 0.0))}</strong></div>
-            <div style='margin-top:0.5rem; font-size:0.8rem;'>Payment Method: {receipt_data.get("payment_method") or ""}</div>
-            {discount_approval_html}
-            {payment_reference_html}
-            {amount_tendered_html}
-            {change_due_html}
-        </div>
-        <div style='margin-top:0.85rem; font-size:0.78rem; color:#555; text-align:center;'>{PRINTABLE_DOCUMENT_FOOTER}</div>
-    </div>
-    """
+    company_name = html.escape(str(receipt_data.get("company_name") or ""))
+    branch_name = html.escape(str(receipt_data.get("branch_name") or "Main Branch"))
+    receipt_number = html.escape(str(receipt_data.get("receipt_number") or "N/A"))
+    sale_datetime = html.escape(str(receipt_data.get("sale_datetime") or ""))
+    cashier = html.escape(str(receipt_data.get("cashier") or ""))
+    payment_method = html.escape(str(receipt_data.get("payment_method") or ""))
+    footer = html.escape(PRINTABLE_DOCUMENT_FOOTER)
+    return (
+        "<div class=\"receipt-preview printable\" style=\"font-family:Arial,sans-serif;color:#111;max-width:360px;margin:0 auto;\">"
+        "<div style=\"text-align:center;margin-bottom:0.75rem;\">"
+        f"<h3 style=\"margin:0;\">{company_name}</h3>"
+        f"<div style=\"font-size:0.85rem;color:#555;\">{branch_name}</div>"
+        f"<div style=\"font-size:0.8rem;margin-top:0.3rem;\">Receipt: {receipt_number}</div>"
+        f"<div style=\"font-size:0.8rem;\">Date: {sale_datetime}</div>"
+        f"<div style=\"font-size:0.8rem;\">Cashier: {cashier}</div>"
+        "</div>"
+        "<table style=\"width:100%;border-collapse:collapse;margin-bottom:0.75rem;font-size:0.85rem;\">"
+        "<thead><tr>"
+        "<th style=\"text-align:left;padding:0.35rem 0.2rem;border-bottom:2px solid #333;\">Item</th>"
+        "<th style=\"text-align:center;padding:0.35rem 0.2rem;border-bottom:2px solid #333;\">Qty</th>"
+        "<th style=\"text-align:right;padding:0.35rem 0.2rem;border-bottom:2px solid #333;\">Unit</th>"
+        "<th style=\"text-align:right;padding:0.35rem 0.2rem;border-bottom:2px solid #333;\">Total</th>"
+        "</tr></thead><tbody>"
+        f"{''.join(rows)}"
+        "</tbody></table>"
+        "<div style=\"border-top:1px dashed #999;padding-top:0.6rem;font-size:0.85rem;\">"
+        f"<div style=\"display:flex;justify-content:space-between;\"><span>Subtotal</span><strong>{html.escape(format_currency(float(receipt_data.get('subtotal') or 0.0)))}</strong></div>"
+        f"<div style=\"display:flex;justify-content:space-between;\"><span>Discount</span><strong>{html.escape(format_currency(float(receipt_data.get('discount_total') or 0.0)))}</strong></div>"
+        f"<div style=\"display:flex;justify-content:space-between;\"><span>Tax</span><strong>{html.escape(format_currency(float(receipt_data.get('tax_total') or 0.0)))}</strong></div>"
+        f"<div style=\"display:flex;justify-content:space-between;font-size:1rem;margin-top:0.35rem;\"><span>Grand Total</span><strong>{html.escape(format_currency(float(receipt_data.get('grand_total') or 0.0)))}</strong></div>"
+        f"<div style=\"margin-top:0.5rem;font-size:0.8rem;\">Payment Method: {payment_method}</div>"
+        f"{discount_approval_html}{payment_reference_html}{amount_tendered_html}{change_due_html}"
+        "</div>"
+        f"<div style=\"margin-top:0.85rem;font-size:0.78rem;color:#555;text-align:center;\">{footer}</div>"
+        "</div>"
+    )
+
+
+def _build_pos_receipt_print_document(receipt_html_fragment):
+    body = str(receipt_html_fragment or "").strip()
+    return (
+        "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"UTF-8\">"
+        "<title>POS Receipt</title>"
+        "<style>body{margin:16px;font-family:Arial,sans-serif;}"
+        ".receipt-preview{max-width:360px;margin:0 auto;}@media print{body{margin:0;}}</style>"
+        "</head><body>"
+        f"{body}"
+        "<script>window.onload=function(){try{window.focus();window.print();}catch(e){}};</script>"
+        "</body></html>"
+    )
 
 
 def _get_pos_cashier_identity(role):
@@ -6116,7 +6132,8 @@ def _add_item_to_pos_cart(company_key, item_row):
     tax_rate = item_row["tax_rate"] if hasattr(item_row, "keys") and "tax_rate" in item_row.keys() else item_row.get("tax_rate", 0.0)
     min_stock_level = item_row["min_stock_level"] if hasattr(item_row, "keys") and "min_stock_level" in item_row.keys() else item_row.get("min_stock_level", 0.0)
     for existing_line in cart:
-        if int(existing_line["inventory_item_id"]) == item_id:
+        existing_inventory_id = existing_line.get("inventory_item_id")
+        if existing_inventory_id is not None and int(existing_inventory_id) == item_id:
             existing_line["qty"] += 1
             existing_line["line_total"] = max(
                 (existing_line["qty"] * existing_line["price"]) - float(existing_line.get("line_discount") or 0.0),
@@ -8778,6 +8795,19 @@ def show_pos(company_key, company_name, role):
         st.session_state.pop(void_success_key, None)
 
     _render_flash_message(pos_message_key, pos_scan_beep_key)
+    scanner_cart_summary = _get_pos_cart_summary(company_key)
+    with card_container("Sale Summary"):
+        sale_summary_col1, sale_summary_col2, sale_summary_col3, sale_summary_col4 = st.columns([1, 1, 1, 1])
+        sale_summary_col1.metric("Cart Items", scanner_cart_summary["item_count"])
+        sale_summary_col2.metric("Subtotal", format_currency(scanner_cart_summary["subtotal"]))
+        sale_summary_col3.metric("Cart Total", format_currency(scanner_cart_summary["grand_total"]))
+        sale_summary_col4.metric("Discount", format_currency(scanner_cart_summary["discount_total"]))
+        if st.button("Quick Clear Cart", key=f"pos_quick_clear_cart_{company_key}", use_container_width=True):
+            _clear_pos_cart_state(company_key)
+            st.session_state[checkout_complete_key] = False
+            _trigger_scan_feedback(pos_message_key, "Cart cleared.", "info")
+            st.rerun()
+    st.caption("Cashier shortcuts: Scan + Enter = add item | Ctrl/Cmd + K = focus search | F2 = manual entry mode | F4 = checkout")
 
     try:
         conn = get_connection()
@@ -8810,6 +8840,8 @@ def show_pos(company_key, company_name, role):
         receipt_print_trigger_key = f"pos_receipt_print_trigger_{company_key}"
         do_print_key = "do_print"
 
+        section_header("Scan / Search / Add Item")
+        st.markdown('<div class="eka-card">', unsafe_allow_html=True)
         source_options = ["Keyboard Entry", "Camera Scanner", "Physical Scanner"]
         source_index = source_options.index(barcode_input_source) if barcode_input_source in source_options else 0
         selected_barcode_source = st.selectbox(
@@ -8839,18 +8871,6 @@ def show_pos(company_key, company_name, role):
             horizontal=True,
             key=f"pos_item_mode_{company_key}",
         )
-        st.caption("Cashier shortcuts: Scan + Enter = add item | Ctrl/Cmd + K = focus search | F2 = manual entry mode | F4 = checkout")
-
-        scanner_cart_summary = _get_pos_cart_summary(company_key)
-        scan_summary_col1, scan_summary_col2, scan_summary_col3 = st.columns([1, 1, 1])
-        scan_summary_col1.metric("Cart Items", scanner_cart_summary["item_count"])
-        scan_summary_col2.metric("Cart Total", format_currency(scanner_cart_summary["grand_total"]))
-        if scan_summary_col3.button("Quick Clear Cart", key=f"pos_quick_clear_cart_{company_key}", use_container_width=True):
-            _clear_pos_cart_state(company_key)
-            st.session_state[checkout_complete_key] = False
-            _trigger_scan_feedback(pos_message_key, "Cart cleared.", "info")
-            st.rerun()
-
         if item_mode == "From Stock":
             st.caption(f"Barcode input mode: {barcode_input_source}")
             with st.form(key=f"pos_form_{company_key}", clear_on_submit=True):
@@ -8862,7 +8882,7 @@ def show_pos(company_key, company_name, role):
                 _focus_text_input("Scan Barcode")
                 if barcode_input_source == "Camera Scanner":
                     _render_camera_scanner(f"pos_{company_key}", pos_pending_scan_key)
-                submitted = st.form_submit_button("Scan Barcode")
+                submitted = st.form_submit_button("Scan Barcode", use_container_width=True)
                 if submitted:
                     pending_pos_barcode = str(st.session_state.get(pos_scan_input_key, "") or "").strip()
                     if pending_pos_barcode:
@@ -8969,7 +8989,7 @@ def show_pos(company_key, company_name, role):
                         manual_option_labels,
                         key=pos_product_select_key,
                     )
-                    if st.button("Add Search Result", key=f"pos_add_search_result_{company_key}"):
+                    if st.button("Add Search Result", key=f"pos_add_search_result_{company_key}", use_container_width=True):
                         selected_search_row = manual_search_options[manual_option_labels.index(selected_search_label)]
                         st.session_state[checkout_complete_key] = False
                         st.session_state.pop(receipt_key, None)
@@ -8991,7 +9011,7 @@ def show_pos(company_key, company_name, role):
                         st.rerun()
                 selected_item = st.selectbox("Select Item", items_df["Item Name"].tolist(), key=f"pos_item_{company_key}")
                 qty_to_sell = st.number_input("Quantity", min_value=1, value=1, key=f"pos_qty_{company_key}")
-                if st.button("Add Selected Item", key=f"pos_add_selected_{company_key}"):
+                if st.button("Add Selected Item", key=f"pos_add_selected_{company_key}", use_container_width=True):
                     st.session_state[checkout_complete_key] = False
                     st.session_state.pop(receipt_key, None)
                     st.session_state.pop(receipt_html_key, None)
@@ -9027,59 +9047,50 @@ def show_pos(company_key, company_name, role):
                 key=f"manual_pos_price_{company_key}",
             )
             manual_qty = st.number_input("Quantity", min_value=1, value=1, key=f"manual_pos_qty_{company_key}")
-            if st.button("Add Manual Item", key=f"pos_add_manual_{company_key}"):
+            if st.button("Add Manual Item", key=f"pos_add_manual_{company_key}", use_container_width=True):
                 if manual_item_name and float(manual_price) > 0:
                     st.session_state[checkout_complete_key] = False
                     st.session_state.pop(receipt_key, None)
                     st.session_state.pop(receipt_html_key, None)
                     cart = st.session_state.setdefault(cart_key, [])
-                    cart.append(
-                        {
-                            "inventory_item_id": None,
-                            "item_id": None,
-                            "name": manual_item_name.strip(),
-                            "item_name": manual_item_name.strip(),
-                            "item_code": "",
-                            "barcode": "",
-                            "price": float(manual_price),
-                            "cost_price": 0.0,
-                            "tax_rate": 0.0,
-                            "available_qty": None,
-                            "qty": int(manual_qty),
-                            "is_manual": True,
-                            "line_discount_type": "amount",
-                            "line_discount_value": 0.0,
-                            "line_discount": 0.0,
-                            "line_total": int(manual_qty) * float(manual_price),
-                        }
-                    )
+                    manual_line = {
+                        "inventory_item_id": None,
+                        "item_id": None,
+                        "name": manual_item_name.strip(),
+                        "item_name": manual_item_name.strip(),
+                        "item_code": "",
+                        "barcode": "",
+                        "price": float(manual_price),
+                        "cost_price": 0.0,
+                        "tax_rate": 0.0,
+                        "available_qty": None,
+                        "min_stock_level": 0.0,
+                        "qty": int(manual_qty),
+                        "is_manual": True,
+                        "line_discount_type": "amount",
+                        "line_discount_value": 0.0,
+                        "line_discount": 0.0,
+                        "line_total": 0.0,
+                    }
+                    _recalculate_pos_line(manual_line)
+                    cart.append(manual_line)
+                    st.session_state[cart_key] = cart
                     _trigger_scan_feedback(pos_message_key, f"Added manual item {manual_item_name.strip()} to the cart.")
                     st.rerun()
                 else:
                     st.warning("Enter a valid manual item and price before adding it.")
+        st.markdown("</div>", unsafe_allow_html=True)
 
-        payment_method = st.selectbox("Payment Method", ["Cash", "Mobile Money", "Card", "Bank Transfer", "On Credit"])
-        selected_credit_customer_id = None
-        selected_credit_customer_label = None
-        if payment_method == "On Credit":
-            if customers:
-                customer_labels = [
-                    f"{row['name']} ({row['customer_id']}) | Balance {format_currency(float(row['balance'] or 0))}"
-                    for row in customers
-                ]
-                selected_credit_customer_label = st.selectbox("Credit Customer", customer_labels, key=f"pos_credit_customer_{company_key}")
-                selected_credit_customer_id = int(customers[customer_labels.index(selected_credit_customer_label)]["id"])
-            else:
-                st.warning("Register a customer in Accounts Receivable before using On Credit.")
-        sale_date = st.date_input("Transaction Date", value=datetime.now().date(), key=f"pos_sale_date_{company_key}")
         cart = st.session_state.setdefault(cart_key, [])
         cart_summary = _get_pos_cart_summary(company_key)
         discount_state = _get_pos_cart_discount_state(company_key)
         discount_approval_state = _get_pos_discount_approval_state(company_key)
         cash_tendered = 0.0
         payment_reference = ""
+        section_header("Active Cart")
+        st.markdown('<div class="eka-card">', unsafe_allow_html=True)
         if cart:
-            st.subheader("Active Sale Cart")
+            st.markdown("**Line Items**")
             header_cols = st.columns([3, 2, 1, 1, 1, 1, 1, 1, 1, 1])
             header_cols[0].markdown("**Item**")
             header_cols[1].markdown("**Barcode / Code**")
@@ -9142,6 +9153,30 @@ def show_pos(company_key, company_name, role):
 
             st.session_state[cart_key] = cart
             cart_summary = _get_pos_cart_summary(company_key)
+        else:
+            st.info("Scan a barcode or add an item manually to start the sale.")
+        st.markdown("</div>", unsafe_allow_html=True)
+        section_header("Payment & Discounts")
+        st.markdown('<div class="eka-card">', unsafe_allow_html=True)
+        payment_method = st.selectbox(
+            "Payment Method",
+            ["Cash", "Mobile Money", "Card", "Bank Transfer", "On Credit"],
+            key=f"pos_payment_method_{company_key}",
+        )
+        selected_credit_customer_id = None
+        selected_credit_customer_label = None
+        if payment_method == "On Credit":
+            if customers:
+                customer_labels = [
+                    f"{row['name']} ({row['customer_id']}) | Balance {format_currency(float(row['balance'] or 0))}"
+                    for row in customers
+                ]
+                selected_credit_customer_label = st.selectbox("Credit Customer", customer_labels, key=f"pos_credit_customer_{company_key}")
+                selected_credit_customer_id = int(customers[customer_labels.index(selected_credit_customer_label)]["id"])
+            else:
+                st.warning("Register a customer in Accounts Receivable before using On Credit.")
+        sale_date = st.date_input("Transaction Date", value=datetime.now().date(), key=f"pos_sale_date_{company_key}")
+        if cart:
             discount_cfg_col1, discount_cfg_col2, discount_cfg_col3 = st.columns([1, 1, 2])
             discount_state["type"] = str(
                 discount_cfg_col1.selectbox(
@@ -9500,11 +9535,10 @@ def show_pos(company_key, company_name, role):
                         finally:
                             if cancel_conn:
                                 cancel_conn.close()
-            if checkout_col.button("Final Checkout", key=f"pos_final_checkout_{company_key}", use_container_width=True):
+            if checkout_col.button("Final Checkout", key=f"pos_final_checkout_{company_key}", use_container_width=True, type="primary"):
                 st.session_state[checkout_request_key] = True
                 st.rerun()
-        else:
-            st.info("Scan a barcode or add an item manually to start the sale.")
+        st.markdown("</div>", unsafe_allow_html=True)
 
         def process_pos_sale(print_receipt=False):
             sale_cart = st.session_state.get(cart_key, [])
@@ -9805,10 +9839,10 @@ def show_pos(company_key, company_name, role):
             process_pos_sale(print_receipt=True)
 
         action_col1, action_col2 = st.columns(2)
-        if action_col1.button("Final Checkout", key=f"final_checkout_{company_key}"):
+        if action_col1.button("Final Checkout", key=f"final_checkout_{company_key}", use_container_width=True, type="primary"):
             st.session_state[checkout_request_key] = True
             st.rerun()
-        if action_col2.button("Clear Cart", key=f"clear_cart_post_{company_key}"):
+        if action_col2.button("Clear Cart", key=f"clear_cart_post_{company_key}", use_container_width=True):
             _clear_pos_cart_state(company_key)
             st.session_state[checkout_complete_key] = False
             st.rerun()
@@ -10196,66 +10230,76 @@ def show_pos(company_key, company_name, role):
                 summary_conn.close()
 
         if st.session_state.get(checkout_complete_key) and st.session_state.get(receipt_html_key):
-            _inject_print_styles()
-            receipt_data = st.session_state.get(last_receipt_data_key) or st.session_state.get("last_receipt_data") or {}
-            st.success("SALE COMPLETED SUCCESSFULLY")
-            summary_col1, summary_col2, summary_col3 = st.columns(3)
-            summary_col1.caption(f"Receipt No: {receipt_data.get('receipt_number') or 'N/A'}")
-            summary_col2.caption(f"Date / Time: {receipt_data.get('sale_datetime') or 'N/A'}")
-            summary_col3.caption(f"Cashier: {receipt_data.get('cashier') or role}")
-            st.caption(
-                "Payment: {payment} | Total: {total}".format(
-                    payment=receipt_data.get("payment_method") or "N/A",
-                    total=format_currency(float(receipt_data.get("grand_total") or 0.0)),
-                )
-            )
-            if receipt_data.get("payment_method") == "Cash":
+            section_header("Receipt Actions")
+            with card_container():
+                _inject_print_styles()
+                receipt_data = st.session_state.get(last_receipt_data_key) or st.session_state.get("last_receipt_data") or {}
+                st.success("SALE COMPLETED SUCCESSFULLY")
+                summary_col1, summary_col2, summary_col3 = st.columns(3)
+                summary_col1.caption(f"Receipt No: {receipt_data.get('receipt_number') or 'N/A'}")
+                summary_col2.caption(f"Date / Time: {receipt_data.get('sale_datetime') or 'N/A'}")
+                summary_col3.caption(f"Cashier: {receipt_data.get('cashier') or role}")
                 st.caption(
-                    "Amount Tendered: {tendered} | Change Due: {change}".format(
-                        tendered=format_currency(float(receipt_data.get("amount_tendered") or 0.0)),
-                        change=format_currency(float(receipt_data.get("change_due") or 0.0)),
+                    "Payment: {payment} | Total: {total}".format(
+                        payment=receipt_data.get("payment_method") or "N/A",
+                        total=format_currency(float(receipt_data.get("grand_total") or 0.0)),
                     )
                 )
-            if receipt_data.get("discount_approved_by"):
-                st.caption(f"Discount approved by manager: {receipt_data['discount_approved_by']}")
-            st.subheader("Receipt Preview")
-            st.markdown(st.session_state[receipt_html_key], unsafe_allow_html=True)
-            receipt_action_col1, receipt_action_col2, receipt_action_col3 = st.columns(3)
-            if receipt_action_col1.button("Print Receipt", key=f"receipt_print_btn_{company_key}", use_container_width=True):
-                st.session_state[do_print_key] = True
-            if receipt_action_col2.button("Reprint Last Receipt", key=f"receipt_reprint_btn_{company_key}", use_container_width=True):
-                last_receipt_data = st.session_state.get(last_receipt_data_key) or st.session_state.get("last_receipt_data")
-                if last_receipt_data:
-                    st.session_state[receipt_key] = _build_receipt(last_receipt_data)
-                    st.session_state[receipt_html_key] = _build_receipt_html(last_receipt_data)
-                    st.session_state[checkout_complete_key] = True
-                    st.session_state[do_print_key] = True
-                    st.rerun()
-                st.warning("No previous receipt is available for reprint.")
-            if receipt_action_col3.button("New Sale", key=f"receipt_new_sale_btn_{company_key}", use_container_width=True):
-                _clear_pos_cart_state(company_key)
-                st.session_state[checkout_complete_key] = False
-                st.session_state.pop(receipt_key, None)
-                st.session_state.pop(receipt_html_key, None)
-                _clear_streamlit_state(
-                    f"pos_item_{company_key}",
-                    f"pos_qty_{company_key}",
-                    f"manual_pos_item_{company_key}",
-                    f"manual_pos_price_{company_key}",
-                    f"manual_pos_qty_{company_key}",
-                    pos_scan_input_key,
+                if receipt_data.get("payment_method") == "Cash":
+                    st.caption(
+                        "Amount Tendered: {tendered} | Change Due: {change}".format(
+                            tendered=format_currency(float(receipt_data.get("amount_tendered") or 0.0)),
+                            change=format_currency(float(receipt_data.get("change_due") or 0.0)),
+                        )
+                    )
+                if receipt_data.get("discount_approved_by"):
+                    st.caption(f"Discount approved by manager: {receipt_data['discount_approved_by']}")
+                st.markdown("**Receipt Preview**")
+                receipt_preview_html = str(st.session_state.get(receipt_html_key) or "").strip()
+                components.html(
+                    f'<div style="background:#f8fafc;padding:0.75rem;border:1px solid #e6eef6;border-radius:8px;">{receipt_preview_html}</div>',
+                    height=520,
+                    scrolling=True,
                 )
-                st.rerun()
-            st.download_button(
-                "Download Receipt",
-                data=st.session_state.get(receipt_key, ""),
-                file_name=f"receipt_{company_key}.txt",
-                mime="text/plain",
-                key=f"receipt_download_{company_key}",
-            )
-        if st.session_state.get('do_print'):
-            components.html("<script>window.print();</script>", height=0)
-            st.session_state['do_print'] = False
+                receipt_action_col1, receipt_action_col2, receipt_action_col3 = st.columns(3)
+                if receipt_action_col1.button("Print Receipt", key=f"receipt_print_btn_{company_key}", use_container_width=True):
+                    st.session_state[do_print_key] = True
+                if receipt_action_col2.button("Reprint Last Receipt", key=f"receipt_reprint_btn_{company_key}", use_container_width=True):
+                    last_receipt_data = st.session_state.get(last_receipt_data_key) or st.session_state.get("last_receipt_data")
+                    if last_receipt_data:
+                        st.session_state[receipt_key] = _build_receipt(last_receipt_data)
+                        st.session_state[receipt_html_key] = _build_receipt_html(last_receipt_data)
+                        st.session_state[checkout_complete_key] = True
+                        st.session_state[do_print_key] = True
+                        st.rerun()
+                    st.warning("No previous receipt is available for reprint.")
+                if receipt_action_col3.button("New Sale", key=f"receipt_new_sale_btn_{company_key}", use_container_width=True):
+                    _clear_pos_cart_state(company_key)
+                    st.session_state[checkout_complete_key] = False
+                    st.session_state.pop(receipt_key, None)
+                    st.session_state.pop(receipt_html_key, None)
+                    _clear_streamlit_state(
+                        f"pos_item_{company_key}",
+                        f"pos_qty_{company_key}",
+                        f"manual_pos_item_{company_key}",
+                        f"manual_pos_price_{company_key}",
+                        f"manual_pos_qty_{company_key}",
+                        pos_scan_input_key,
+                    )
+                    st.rerun()
+                st.download_button(
+                    "Download Receipt",
+                    data=st.session_state.get(receipt_key, ""),
+                    file_name=f"receipt_{company_key}.txt",
+                    mime="text/plain",
+                    key=f"receipt_download_{company_key}",
+                    use_container_width=True,
+                )
+        if st.session_state.get(do_print_key):
+            print_receipt_html = str(st.session_state.get(receipt_html_key) or "").strip()
+            if print_receipt_html:
+                components.html(_build_pos_receipt_print_document(print_receipt_html), height=0)
+            st.session_state[do_print_key] = False
     except Exception as e:
         st.error(build_user_safe_error(e, role))
 # ==========================================
