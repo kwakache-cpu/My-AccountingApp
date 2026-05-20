@@ -65,6 +65,7 @@ SUBSCRIPTION_PLANS = {
         "features": ["Annual enterprise plan", "Multi-branch scaling", "Premium support"],
     },
 }
+PRINTABLE_DOCUMENT_FOOTER = "Thank you for choosing Emma Accounting App. This document was generated for your records."
 ALL_ENTERPRISE_PERMISSIONS = {
     "view_dashboard",
     "view_banking",
@@ -4028,6 +4029,9 @@ def get_excel_bin(df):
         output = BytesIO()
         with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
             df.to_excel(writer, index=False, sheet_name="Export")
+            worksheet = writer.sheets.get("Export")
+            if worksheet is not None:
+                worksheet.set_footer(PRINTABLE_DOCUMENT_FOOTER)
         return output.getvalue()
     except Exception:
         return b""
@@ -4071,6 +4075,8 @@ def _build_receipt(receipt_data):
         lines.append(f"Change Due: {format_currency(float(receipt_data.get('change_due') or 0.0))}")
     elif receipt_data.get("payment_reference"):
         lines.append(f"Reference: {receipt_data['payment_reference']}")
+    lines.append("-" * 40)
+    lines.append(PRINTABLE_DOCUMENT_FOOTER)
     return "\n".join(lines)
 
 
@@ -4137,6 +4143,7 @@ def _build_receipt_html(receipt_data):
             {amount_tendered_html}
             {change_due_html}
         </div>
+        <div style='margin-top:0.85rem; font-size:0.78rem; color:#555; text-align:center;'>{PRINTABLE_DOCUMENT_FOOTER}</div>
     </div>
     """
 
@@ -4754,6 +4761,7 @@ def _build_payslip_html(payroll_row):
             <tr><td style='border-bottom:1px solid #333;'>PAYE</td><td style='text-align:right;border-bottom:1px solid #333;'>{format_currency(payroll_row['PAYE'])}</td></tr>
             <tr><td style='font-weight:bold;'>Net Salary</td><td style='text-align:right;font-weight:bold;'>{format_currency(payroll_row['Net Salary'])}</td></tr>
         </table>
+            <div style='font-size:0.75rem; color:#555; margin-bottom:0.85rem; text-align:center;'>{PRINTABLE_DOCUMENT_FOOTER}</div>
         <button class='print-button' onclick='window.print()'>Print Payslip</button>
     </div>
     """
@@ -6882,22 +6890,21 @@ def show_create_bill_page(company_key):
                 supplier_name = st.selectbox("Supplier", supplier_options)
                 bill_date = st.date_input("Bill Date", value=datetime.now().date())
                 purchase_classification = st.selectbox("Purchase Classification", PURCHASE_CLASSIFICATION_OPTIONS)
-            input_vat_rate = st.number_input("Input VAT Rate (%)", min_value=0.0, max_value=100.0, step=0.5, value=0.0)
-            status = st.selectbox("Payment Status", ["Pending", "Received"])
-            payment_method = st.selectbox("Payment Method", ["Cash", "Bank", "Mobile Money"], disabled=status != "Received")
-            posting_state = st.selectbox("Posting State", DOCUMENT_WORKFLOW_STATUSES, index=1)
-            expense_account_name = None
-            asset_name = ""
-            asset_category = ""
-            if purchase_classification == "Expense Purchase":
-                expense_account_name = st.selectbox("Expense Account", expense_account_options)
-            elif purchase_classification == "Fixed Asset Purchase":
-                asset_name = st.text_input("Asset Name")
-                asset_category = st.selectbox("Asset Category", FIXED_ASSET_PURCHASE_CATEGORIES)
-            description = st.text_input("Description")
-
-            submitted = st.form_submit_button("Submit")
-
+                input_vat_rate = st.number_input("Input VAT Rate (%)", min_value=0.0, max_value=100.0, step=0.5, value=0.0)
+                status = st.selectbox("Payment Status", ["Pending", "Received"])
+                payment_method = st.selectbox("Payment Method", ["Cash", "Bank", "Mobile Money"], disabled=status != "Received")
+                posting_state = st.selectbox("Posting State", DOCUMENT_WORKFLOW_STATUSES, index=1)
+                expense_account_name = None
+                asset_name = ""
+                asset_category = ""
+                if purchase_classification == "Expense Purchase":
+                    expense_account_name = st.selectbox("Expense Account", expense_account_options)
+                elif purchase_classification == "Fixed Asset Purchase":
+                    asset_name = st.text_input("Asset Name")
+                    asset_category = st.selectbox("Asset Category", FIXED_ASSET_PURCHASE_CATEGORIES)
+                description = st.text_input("Description")
+                submitted = st.form_submit_button("Submit")
+        
             if submitted:
                 if not require_permission(
                     role,
@@ -7425,7 +7432,8 @@ def show_onboarding_payment():
 # INVENTORY MANAGEMENT
 # ==========================================
 def show_inventory(company_key, role):
-    st.header("📦 Inventory Management")
+    render_ui_standard_styles()
+    page_header("📦 Inventory Management", "Track inventory levels, update stock, and manage items")
     if role != "Demo" and not require_permission(
         role,
         "view_inventory",
@@ -10516,7 +10524,8 @@ def show_sales_purchase(company_key, role, doc_type="Sales"):
 # BANKING & CASH
 # ==========================================
 def show_banking(company_key, role):
-    st.header("🏦 Banking & Cash")
+    render_ui_standard_styles()
+    page_header("🏦 Banking & Cash", "Manage cash and bank account transactions")
     if not require_permission(
         role,
         "view_banking",
@@ -11163,7 +11172,8 @@ def show_banking(company_key, role):
 # ACCOUNTS AGING (RECEIVABLE / PAYABLE)
 # ==========================================
 def show_aging(company_key, aging_type="Receivable"):
-    st.header(f"📋 Accounts {aging_type}")
+    render_ui_standard_styles()
+    page_header(f"📋 Accounts {aging_type}", f"Manage {aging_type} accounts and customer/supplier transactions")
     branch_id = st.session_state.get("active_branch_id")
     active_user = st.session_state.get("user") or {}
     role = active_user.get("role", "User")
@@ -11633,7 +11643,8 @@ def show_taxation(company_key):
 # GHANA PAYROLL (SSNIT)
 # ==========================================
 def show_payroll(company_key, role):
-    st.header("💳 Payroll & Salaries")
+    render_ui_standard_styles()
+    page_header("💳 Payroll & Salaries", "Manage employee payroll, salaries, and statutory deductions")
     payroll_print_preview_key = f"payroll_print_preview_{company_key}"
 
     if role == "Demo":
@@ -12570,7 +12581,7 @@ def _build_simple_pdf(title, lines):
 
 def _statement_export_buttons(statement_key, title, dataframe, summary_lines):
     excel_bin = get_excel_bin(dataframe)
-    pdf_bin = _build_simple_pdf(title, summary_lines)
+    pdf_bin = _build_simple_pdf(title, summary_lines + [PRINTABLE_DOCUMENT_FOOTER])
     col1, col2 = st.columns(2)
     with col1:
         if excel_bin:
@@ -12881,6 +12892,7 @@ def show_reports(company_key, branch_id=None):
     """Route report navigation to the IFRS financial reporting suite."""
     from financials import show_financial_reports, show_ledger_viewer, show_record_transaction
 
+    render_ui_standard_styles()
     role = st.session_state.get("user", {}).get("role", "System")
     if not require_permission(role, "view_reports", action_label="view reports", company_key=company_key, branch_id=branch_id):
         return
