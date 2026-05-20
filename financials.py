@@ -959,25 +959,27 @@ def show_create_invoice_page(company_key, role):
     with eka_modules.card_container():
         with st.form(f"invoice_form_{company_key}"):
             customer_name = st.selectbox("Customer", [""] + customers)
-        amount = st.number_input("Amount (GHS)", min_value=0.0, step=0.01)
-        output_vat_rate = st.number_input("Output VAT Rate (%)", min_value=0.0, max_value=100.0, step=0.5, value=0.0, key=f"invoice_vat_rate_{company_key}")
-        output_nhil_rate = st.number_input("Output NHIL Rate (%)", min_value=0.0, max_value=100.0, step=0.5, value=0.0, key=f"create_invoice_nhil_rate_{company_key}")
-        output_getfund_rate = st.number_input("Output GETFund Levy Rate (%)", min_value=0.0, max_value=100.0, step=0.5, value=0.0, key=f"create_invoice_getfund_rate_{company_key}")
-        status = st.selectbox("Status", ["Draft", "Pending", "Paid"])
-        posting_state = st.selectbox("Posting State", DOCUMENT_WORKFLOW_STATUSES, index=0)
-        invoice_date = st.date_input("Invoice Date", value=datetime.now().date(), key=f"invoice_date_{company_key}")
-        description = st.text_input("Description", key=f"invoice_description_{company_key}")
-        editor_conn = get_connection()
-        try:
-            invoice_items, invoice_items_total = render_invoice_line_editor(
-                company_key,
-                f"create_invoice_lines_{company_key}",
-                editor_conn,
-            )
-        finally:
-            if editor_conn:
-                editor_conn.close()
-        if st.form_submit_button("Save Invoice") and customer_name and amount > 0:
+            amount = st.number_input("Amount (GHS)", min_value=0.0, step=0.01)
+            output_vat_rate = st.number_input("Output VAT Rate (%)", min_value=0.0, max_value=100.0, step=0.5, value=0.0, key=f"invoice_vat_rate_{company_key}")
+            output_nhil_rate = st.number_input("Output NHIL Rate (%)", min_value=0.0, max_value=100.0, step=0.5, value=0.0, key=f"create_invoice_nhil_rate_{company_key}")
+            output_getfund_rate = st.number_input("Output GETFund Levy Rate (%)", min_value=0.0, max_value=100.0, step=0.5, value=0.0, key=f"create_invoice_getfund_rate_{company_key}")
+            status = st.selectbox("Status", ["Draft", "Pending", "Paid"])
+            posting_state = st.selectbox("Posting State", DOCUMENT_WORKFLOW_STATUSES, index=0)
+            invoice_date = st.date_input("Invoice Date", value=datetime.now().date(), key=f"invoice_date_{company_key}")
+            description = st.text_input("Description", key=f"invoice_description_{company_key}")
+            editor_conn = get_connection()
+            try:
+                invoice_items, invoice_items_total = render_invoice_line_editor(
+                    company_key,
+                    f"create_invoice_lines_{company_key}",
+                    editor_conn,
+                )
+            finally:
+                if editor_conn:
+                    editor_conn.close()
+            submitted = st.form_submit_button("Save Invoice")
+        
+        if submitted and customer_name and amount > 0:
             conn = get_connection()
             if not require_permission(role, "create_invoice", action_label="create invoices", company_key=company_key, conn=conn):
                 conn.close()
@@ -1833,7 +1835,8 @@ def _convert_money_frame(dataframe):
 
 
 def show_financial_reports(company_key, role=None):
-    st.header("📊 Financial Reports")
+    eka_modules.render_ui_standard_styles()
+    eka_modules.page_header("📊 Financial Reports", "View financial statements, trial balance, and cash flow analysis")
     effective_role = role or st.session_state.get("user", {}).get("role", "System")
     if not require_permission(effective_role, "view_reports", action_label="view reports", company_key=company_key):
         return
