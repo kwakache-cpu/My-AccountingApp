@@ -919,20 +919,32 @@ def show_customers_page(company_key, role):
 
 def show_suppliers_page(company_key, role):
     st.header("🏷️ Suppliers")
+    supplier_contact_form_reset_key = f"supplier_contact_form_reset_{company_key}"
     with st.form(f"supplier_form_{company_key}"):
-        name = st.text_input("Supplier Name")
-        email = st.text_input("Email", key=f"supplier_email_{company_key}")
-        phone = st.text_input("Phone", key=f"supplier_phone_{company_key}")
+        name = st.text_input(
+            "Supplier Name",
+            key=eka_modules._form_widget_key(f"supplier_contact_name_{company_key}", supplier_contact_form_reset_key),
+        )
+        email = st.text_input(
+            "Email",
+            key=eka_modules._form_widget_key(f"supplier_contact_email_{company_key}", supplier_contact_form_reset_key),
+        )
+        phone = st.text_input(
+            "Phone",
+            key=eka_modules._form_widget_key(f"supplier_contact_phone_{company_key}", supplier_contact_form_reset_key),
+        )
         if st.form_submit_button("Save Supplier") and name:
             if not require_permission(role, "create_supplier", action_label="create suppliers", company_key=company_key):
                 return
             conn = get_connection()
             conn.execute(
                 "INSERT OR IGNORE INTO suppliers (company_key, name, email, phone, currency) VALUES (?, ?, ?, ?, 'GHS')",
-                (company_key, name, email, phone),
+                (company_key, name.strip(), email, phone),
             )
             conn.commit()
             conn.close()
+            eka_modules._increment_form_reset(supplier_contact_form_reset_key)
+            st.success("Supplier saved.")
             st.rerun()
 
     conn = get_connection()

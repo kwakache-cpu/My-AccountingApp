@@ -137,6 +137,47 @@ def render_ui_standard_styles():
         .pos-checkout-panel .pos-checkout-actions [data-testid="stButton"]:first-child button {
             font-weight: 600 !important;
         }
+        .pos-receipt-live-label {
+            margin: 0 0 10px 0;
+            padding: 8px 10px;
+            border-radius: 6px;
+            background: #fff7ed;
+            color: #9a3412;
+            font-size: 0.9rem;
+            text-align: center;
+        }
+        .pos-receipt-shell {
+            background: #f8fafc;
+            padding: 0.75rem;
+            border-radius: 8px;
+            margin: 0 auto;
+            max-width: 320px;
+        }
+        .pos-receipt-shell-live {
+            border: 2px dashed #d97706;
+        }
+        .pos-receipt-shell-final {
+            border: 2px solid #059669;
+            box-shadow: 0 4px 14px rgba(5, 150, 105, 0.12);
+        }
+        .receipt-preview.receipt-thermal {
+            max-width: 280px !important;
+            font-family: "Courier New", Consolas, monospace !important;
+            font-size: 12px !important;
+            line-height: 1.35 !important;
+        }
+        .receipt-preview-banner {
+            margin-bottom: 0.65rem;
+            padding: 0.45rem 0.35rem;
+            border: 1px dashed #d97706;
+            border-radius: 4px;
+            background: #fff7ed;
+            color: #9a3412;
+            font-size: 0.72rem;
+            font-weight: 700;
+            text-align: center;
+            letter-spacing: 0.04em;
+        }
         @media (max-width: 640px) {
             .eka-card { padding: 10px 12px; }
             .stButton>button { width: 100% !important; }
@@ -2257,6 +2298,35 @@ def _clear_streamlit_state(*keys):
         st.session_state.pop(key, None)
 
 
+def _get_form_reset_nonce(counter_key):
+    return int(st.session_state.get(counter_key, 0) or 0)
+
+
+def _increment_form_reset(counter_key):
+    st.session_state[counter_key] = _get_form_reset_nonce(counter_key) + 1
+    return st.session_state[counter_key]
+
+
+def _form_widget_key(base_key, counter_key):
+    return f"{base_key}_{_get_form_reset_nonce(counter_key)}"
+
+
+def _load_registered_supplier_names(company_key):
+    conn = None
+    try:
+        conn = get_connection()
+        rows = conn.execute(
+            "SELECT name FROM suppliers WHERE company_key = ? ORDER BY name",
+            (company_key,),
+        ).fetchall()
+        return [str(row["name"]).strip() for row in rows if str(row["name"] or "").strip()]
+    except Exception:
+        return []
+    finally:
+        if conn:
+            conn.close()
+
+
 FIREBASE_MODULE_APP = None
 
 
@@ -4089,26 +4159,27 @@ def _build_receipt(receipt_data):
 
 
 def _build_receipt_html(receipt_data):
+    is_preview = bool(receipt_data.get("is_preview"))
     rows = []
     for item in receipt_data.get("items", []):
         item_name = html.escape(str(item.get("name") or ""))
         rows.append(
             "<tr>"
-            f"<td style=\"padding:0.4rem 0.2rem;border-bottom:1px dashed #ddd;\">{item_name}</td>"
-            f"<td style=\"padding:0.4rem 0.2rem;border-bottom:1px dashed #ddd;text-align:center;\">{int(item.get('qty') or 0)}</td>"
-            f"<td style=\"padding:0.4rem 0.2rem;border-bottom:1px dashed #ddd;text-align:right;\">{html.escape(format_currency(float(item.get('price') or 0.0)))}</td>"
-            f"<td style=\"padding:0.4rem 0.2rem;border-bottom:1px dashed #ddd;text-align:right;\">{html.escape(format_currency(float(item.get('line_total') or 0.0)))}</td>"
+            f"<td style=\"padding:0.25rem 0.1rem;border-bottom:1px dashed #bbb;\">{item_name}</td>"
+            f"<td style=\"padding:0.25rem 0.1rem;border-bottom:1px dashed #bbb;text-align:center;\">{int(item.get('qty') or 0)}</td>"
+            f"<td style=\"padding:0.25rem 0.1rem;border-bottom:1px dashed #bbb;text-align:right;\">{html.escape(format_currency(float(item.get('price') or 0.0)))}</td>"
+            f"<td style=\"padding:0.25rem 0.1rem;border-bottom:1px dashed #bbb;text-align:right;\">{html.escape(format_currency(float(item.get('line_total') or 0.0)))}</td>"
             "</tr>"
         )
     payment_reference_html = ""
     if receipt_data.get("payment_reference"):
         payment_reference_html = (
-            f"<div style=\"font-size:0.8rem;color:#444;\">Reference: {html.escape(str(receipt_data['payment_reference']))}</div>"
+            f"<div style=\"font-size:0.75rem;color:#444;\">Reference: {html.escape(str(receipt_data['payment_reference']))}</div>"
         )
     discount_approval_html = ""
     if receipt_data.get("discount_approved_by"):
         discount_approval_html = (
-            f"<div style=\"font-size:0.8rem;color:#444;\">Discount Approved By: {html.escape(str(receipt_data['discount_approved_by']))}</div>"
+            f"<div style=\"font-size:0.75rem;color:#444;\">Discount Approved By: {html.escape(str(receipt_data['discount_approved_by']))}</div>"
         )
     amount_tendered_html = ""
     change_due_html = ""
@@ -4119,41 +4190,102 @@ def _build_receipt_html(receipt_data):
         change_due_html = (
             f"<div style=\"display:flex;justify-content:space-between;\"><span>Change Due</span><strong>{html.escape(format_currency(float(receipt_data.get('change_due') or 0.0)))}</strong></div>"
         )
+    preview_banner_html = ""
+    if is_preview:
+        preview_banner_html = (
+            "<div class=\"receipt-preview-banner\">SALE PREVIEW — NOT FINAL RECEIPT</div>"
+        )
     company_name = html.escape(str(receipt_data.get("company_name") or ""))
     branch_name = html.escape(str(receipt_data.get("branch_name") or "Main Branch"))
-    receipt_number = html.escape(str(receipt_data.get("receipt_number") or "N/A"))
+    receipt_number = html.escape(str(receipt_data.get("receipt_number") or ("SALE PREVIEW" if is_preview else "N/A")))
     sale_datetime = html.escape(str(receipt_data.get("sale_datetime") or ""))
     cashier = html.escape(str(receipt_data.get("cashier") or ""))
     payment_method = html.escape(str(receipt_data.get("payment_method") or ""))
     footer = html.escape(PRINTABLE_DOCUMENT_FOOTER)
+    receipt_heading = "Sale Preview" if is_preview else "Receipt"
     return (
-        "<div class=\"receipt-preview printable\" style=\"font-family:Arial,sans-serif;color:#111;max-width:360px;margin:0 auto;\">"
-        "<div style=\"text-align:center;margin-bottom:0.75rem;\">"
-        f"<h3 style=\"margin:0;\">{company_name}</h3>"
-        f"<div style=\"font-size:0.85rem;color:#555;\">{branch_name}</div>"
-        f"<div style=\"font-size:0.8rem;margin-top:0.3rem;\">Receipt: {receipt_number}</div>"
-        f"<div style=\"font-size:0.8rem;\">Date: {sale_datetime}</div>"
-        f"<div style=\"font-size:0.8rem;\">Cashier: {cashier}</div>"
+        "<div class=\"receipt-preview printable receipt-thermal\" "
+        "style=\"color:#111;max-width:280px;width:100%;margin:0 auto;"
+        "font-family:'Courier New',Consolas,monospace;font-size:12px;line-height:1.35;\">"
+        f"{preview_banner_html}"
+        "<div style=\"text-align:center;margin-bottom:0.6rem;\">"
+        f"<h3 style=\"margin:0;font-size:14px;\">{company_name}</h3>"
+        f"<div style=\"font-size:11px;color:#555;\">{branch_name}</div>"
+        f"<div style=\"font-size:11px;margin-top:0.25rem;\">{receipt_heading}: {receipt_number}</div>"
+        f"<div style=\"font-size:11px;\">Date: {sale_datetime}</div>"
+        f"<div style=\"font-size:11px;\">Cashier: {cashier}</div>"
         "</div>"
-        "<table style=\"width:100%;border-collapse:collapse;margin-bottom:0.75rem;font-size:0.85rem;\">"
+        "<table style=\"width:100%;border-collapse:collapse;margin-bottom:0.6rem;font-size:11px;\">"
         "<thead><tr>"
-        "<th style=\"text-align:left;padding:0.35rem 0.2rem;border-bottom:2px solid #333;\">Item</th>"
-        "<th style=\"text-align:center;padding:0.35rem 0.2rem;border-bottom:2px solid #333;\">Qty</th>"
-        "<th style=\"text-align:right;padding:0.35rem 0.2rem;border-bottom:2px solid #333;\">Unit</th>"
-        "<th style=\"text-align:right;padding:0.35rem 0.2rem;border-bottom:2px solid #333;\">Total</th>"
+        "<th style=\"text-align:left;padding:0.25rem 0.1rem;border-bottom:2px solid #333;\">Item</th>"
+        "<th style=\"text-align:center;padding:0.25rem 0.1rem;border-bottom:2px solid #333;\">Qty</th>"
+        "<th style=\"text-align:right;padding:0.25rem 0.1rem;border-bottom:2px solid #333;\">Unit</th>"
+        "<th style=\"text-align:right;padding:0.25rem 0.1rem;border-bottom:2px solid #333;\">Total</th>"
         "</tr></thead><tbody>"
         f"{''.join(rows)}"
         "</tbody></table>"
-        "<div style=\"border-top:1px dashed #999;padding-top:0.6rem;font-size:0.85rem;\">"
+        "<div style=\"border-top:1px dashed #999;padding-top:0.5rem;font-size:11px;\">"
         f"<div style=\"display:flex;justify-content:space-between;\"><span>Subtotal</span><strong>{html.escape(format_currency(float(receipt_data.get('subtotal') or 0.0)))}</strong></div>"
         f"<div style=\"display:flex;justify-content:space-between;\"><span>Discount</span><strong>{html.escape(format_currency(float(receipt_data.get('discount_total') or 0.0)))}</strong></div>"
         f"<div style=\"display:flex;justify-content:space-between;\"><span>Tax</span><strong>{html.escape(format_currency(float(receipt_data.get('tax_total') or 0.0)))}</strong></div>"
-        f"<div style=\"display:flex;justify-content:space-between;font-size:1rem;margin-top:0.35rem;\"><span>Grand Total</span><strong>{html.escape(format_currency(float(receipt_data.get('grand_total') or 0.0)))}</strong></div>"
-        f"<div style=\"margin-top:0.5rem;font-size:0.8rem;\">Payment Method: {payment_method}</div>"
+        f"<div style=\"display:flex;justify-content:space-between;font-size:13px;margin-top:0.3rem;\"><span>Grand Total</span><strong>{html.escape(format_currency(float(receipt_data.get('grand_total') or 0.0)))}</strong></div>"
+        f"<div style=\"margin-top:0.4rem;font-size:10px;\">Payment Method: {payment_method}</div>"
         f"{discount_approval_html}{payment_reference_html}{amount_tendered_html}{change_due_html}"
         "</div>"
-        f"<div style=\"margin-top:0.85rem;font-size:0.78rem;color:#555;text-align:center;\">{footer}</div>"
+        f"<div style=\"margin-top:0.65rem;font-size:10px;color:#555;text-align:center;\">{footer}</div>"
         "</div>"
+    )
+
+
+def _build_pos_live_receipt_data(company_key, company_label, branch_label, role):
+    """Build draft receipt payload from the active cart (no sale posting)."""
+    cart = st.session_state.get(f"pos_cart_{company_key}", [])
+    cart_summary = _get_pos_cart_summary(company_key)
+    preview_items = []
+    for line in cart:
+        _recalculate_pos_line(line)
+        preview_items.append(
+            {
+                "name": str(line.get("name") or line.get("item_name") or ""),
+                "qty": int(line.get("qty") or 0),
+                "price": float(line.get("price") or 0.0),
+                "line_total": float(line.get("line_total") or 0.0),
+            }
+        )
+    preview_payment_method = str(st.session_state.get(f"pos_payment_method_{company_key}") or "Pending")
+    preview_cash_tendered = float(st.session_state.get(f"pos_cash_tendered_{company_key}") or cart_summary.get("grand_total") or 0.0)
+    preview_payment_reference = str(st.session_state.get(f"pos_payment_reference_{company_key}") or "").strip()
+    return {
+        "company_key": company_key,
+        "company_name": company_label,
+        "branch_name": branch_label,
+        "receipt_number": "SALE PREVIEW",
+        "sale_reference": "SALE PREVIEW",
+        "sale_date": datetime.now().date().isoformat(),
+        "sale_datetime": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "cashier": _get_pos_cashier_identity(role),
+        "payment_method": preview_payment_method,
+        "payment_reference": preview_payment_reference,
+        "subtotal": float(cart_summary.get("subtotal") or 0.0),
+        "discount_total": float(cart_summary.get("discount_total") or 0.0),
+        "tax_total": float(cart_summary.get("tax_total") or 0.0),
+        "grand_total": float(cart_summary.get("grand_total") or 0.0),
+        "amount_tendered": preview_cash_tendered if preview_payment_method == "Cash" else None,
+        "change_due": max(preview_cash_tendered - float(cart_summary.get("grand_total") or 0.0), 0.0)
+        if preview_payment_method == "Cash"
+        else 0.0,
+        "items": preview_items,
+        "is_preview": True,
+    }
+
+
+def _render_pos_receipt_html_panel(receipt_html_fragment, variant="final", height=500):
+    fragment = str(receipt_html_fragment or "").strip()
+    shell_class = "pos-receipt-shell-live" if variant == "live" else "pos-receipt-shell-final"
+    components.html(
+        f'<div class="pos-receipt-shell {shell_class}">{fragment}</div>',
+        height=height,
+        scrolling=True,
     )
 
 
@@ -4162,8 +4294,12 @@ def _build_pos_receipt_print_document(receipt_html_fragment):
     return (
         "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"UTF-8\">"
         "<title>POS Receipt</title>"
-        "<style>body{margin:16px;font-family:Arial,sans-serif;}"
-        ".receipt-preview{max-width:360px;margin:0 auto;}@media print{body{margin:0;}}</style>"
+        "<style>"
+        "body{margin:8px;font-family:'Courier New',Consolas,monospace;font-size:12px;}"
+        ".receipt-preview,.receipt-thermal{max-width:280px;width:100%;margin:0 auto;}"
+        ".receipt-preview table{font-size:11px;}"
+        "@media print{body{margin:0;}}"
+        "</style>"
         "</head><body>"
         f"{body}"
         "<script>window.onload=function(){try{window.focus();window.print();}catch(e){}};</script>"
@@ -5441,8 +5577,12 @@ def _focus_text_input(input_label):
     )
 
 
+def _request_pos_barcode_scan_focus(company_key):
+    st.session_state[f"pos_scan_focus_request_{company_key}"] = True
+
+
 def _focus_pos_barcode_scanner():
-    """Keep barcode scan input focused during active stock-entry POS sessions."""
+    """Focus barcode scan input only when idle — skip cart, search, payment, and manual fields."""
     components.html(
         """
         <script>
@@ -5453,15 +5593,30 @@ def _focus_pos_barcode_scanner():
                 if (!active) {
                     return false;
                 }
+                const tag = (active.tagName || "").toLowerCase();
                 const label = (active.getAttribute("aria-label") || "").toLowerCase();
-                if (!label) {
-                    return false;
-                }
                 if (label === "scan barcode") {
                     return false;
                 }
-                const manualLabels = ["new item name", "manual price", "search product"];
-                return manualLabels.some((token) => label.includes(token));
+                if (tag === "button" || tag === "select" || tag === "textarea") {
+                    return true;
+                }
+                if (tag === "input") {
+                    const inputType = (active.getAttribute("type") || "text").toLowerCase();
+                    if (inputType === "checkbox" || inputType === "radio") {
+                        return true;
+                    }
+                    return true;
+                }
+                const skipLabels = [
+                    "new item name", "manual price", "search product", "manual product",
+                    "select item", "quantity", "qty", "disc type", "discount", "credit customer",
+                    "transaction / reference", "amount tendered", "suspend sale note",
+                    "cart discount", "manager username", "approval reason", "item code",
+                    "new barcode", "supplier name", "custom supplier", "expiry date",
+                    "payment method", "transaction date", "final checkout", "remove"
+                ];
+                return skipLabels.some((token) => label.includes(token));
             };
             const focusScanInput = () => {
                 if (shouldSkipFocus()) {
@@ -5476,9 +5631,7 @@ def _focus_pos_barcode_scanner():
                     scanInput.select();
                 }
             };
-            [0, 150, 400, 800, 1500, 2500, 4000].forEach((delay) => setTimeout(focusScanInput, delay));
-            const focusInterval = setInterval(focusScanInput, 2000);
-            setTimeout(() => clearInterval(focusInterval), 120000);
+            [150, 400].forEach((delay) => setTimeout(focusScanInput, delay));
         })();
         </script>
         """,
@@ -5641,12 +5794,15 @@ def _search_inventory_for_pos(conn, company_key, search_value):
         return []
     return conn.execute(
         """
-        SELECT id, item_name, item_code, category, brand, qty, price, cost_price, barcode, min_stock_level
+        SELECT id, item_name, item_code, category, brand, qty, price, cost_price, barcode, min_stock_level, tax_rate
         FROM inventory
         WHERE company_key = ?
           AND qty > 0
           AND (
               LOWER(item_name) LIKE LOWER(?)
+              OR LOWER(COALESCE(item_code, '')) LIKE LOWER(?)
+              OR COALESCE(barcode, '') LIKE ?
+              OR LOWER(item_name) LIKE LOWER(?)
               OR LOWER(COALESCE(item_code, '')) LIKE LOWER(?)
               OR COALESCE(barcode, '') LIKE ?
               OR LOWER(COALESCE(category, '')) LIKE LOWER(?)
@@ -5657,7 +5813,10 @@ def _search_inventory_for_pos(conn, company_key, search_value):
                 WHEN LOWER(item_name) = LOWER(?) THEN 0
                 WHEN COALESCE(barcode, '') = ? THEN 1
                 WHEN LOWER(COALESCE(item_code, '')) = LOWER(?) THEN 2
-                ELSE 3
+                WHEN LOWER(item_name) LIKE LOWER(?) THEN 3
+                WHEN COALESCE(barcode, '') LIKE ? THEN 4
+                WHEN LOWER(COALESCE(item_code, '')) LIKE LOWER(?) THEN 5
+                ELSE 6
             END,
             item_name
         LIMIT 15
@@ -5667,13 +5826,23 @@ def _search_inventory_for_pos(conn, company_key, search_value):
             f"%{normalized_value}%",
             f"%{normalized_value}%",
             f"%{normalized_value}%",
+            f"{normalized_value}%",
+            f"{normalized_value}%",
+            f"{normalized_value}%",
             f"%{normalized_value}%",
             f"%{normalized_value}%",
             normalized_value,
             normalized_value,
             normalized_value,
+            f"{normalized_value}%",
+            f"{normalized_value}%",
+            f"{normalized_value}%",
         ),
     ).fetchall()
+
+
+def _pos_inventory_search_rows(conn, company_key, search_value):
+    return [_normalize_pos_item_row(row) for row in _search_inventory_for_pos(conn, company_key, search_value)]
 
 
 STOCK_IMPORT_MAPPING_FIELDS = {
@@ -6176,13 +6345,25 @@ def _post_inventory_import_opening_value(conn, company_key, import_reference, ro
     }
 
 
+def _normalize_pos_item_row(item_row):
+    if isinstance(item_row, dict):
+        return item_row
+    if item_row is None:
+        return {}
+    try:
+        return dict(item_row)
+    except Exception:
+        return {key: item_row[key] for key in item_row.keys()}
+
+
 def _add_item_to_pos_cart(company_key, item_row):
+    item_row = _normalize_pos_item_row(item_row)
     cart_key = f"pos_cart_{company_key}"
     cart = st.session_state.setdefault(cart_key, [])
     item_id = int(item_row["id"])
-    item_code = item_row["item_code"] if hasattr(item_row, "keys") and "item_code" in item_row.keys() else item_row.get("item_code", "")
-    tax_rate = item_row["tax_rate"] if hasattr(item_row, "keys") and "tax_rate" in item_row.keys() else item_row.get("tax_rate", 0.0)
-    min_stock_level = item_row["min_stock_level"] if hasattr(item_row, "keys") and "min_stock_level" in item_row.keys() else item_row.get("min_stock_level", 0.0)
+    item_code = str(item_row.get("item_code") or "")
+    tax_rate = float(item_row.get("tax_rate") or 0.0)
+    min_stock_level = float(item_row.get("min_stock_level") or 0.0)
     for existing_line in cart:
         existing_inventory_id = existing_line.get("inventory_item_id")
         if existing_inventory_id is not None and int(existing_inventory_id) == item_id:
@@ -7678,6 +7859,31 @@ def show_inventory(company_key, role):
                             st.rerun()
                     edit_item_id = st.session_state.get(selected_edit_key, int(df["id"].iloc[0]))
                     edit_row = df.loc[df["id"] == edit_item_id].iloc[0]
+                    existing_expiry_value = str(edit_row.get("expiry_date") or "").strip()
+                    try:
+                        default_expiry_date = (
+                            datetime.fromisoformat(existing_expiry_value).date()
+                            if existing_expiry_value
+                            else None
+                        )
+                    except ValueError:
+                        default_expiry_date = None
+                    edit_expiry_enabled_key = f"inventory_edit_expiry_enabled_{company_key}_{edit_item_id}"
+                    edit_expiry_date_key = f"inventory_edit_expiry_date_{company_key}_{edit_item_id}"
+                    st.checkbox(
+                        "Set Expiry Date",
+                        value=default_expiry_date is not None,
+                        key=edit_expiry_enabled_key,
+                    )
+                    edit_expiry_enabled = bool(st.session_state.get(edit_expiry_enabled_key, False))
+                    if edit_expiry_enabled:
+                        st.date_input(
+                            "Expiry Date",
+                            value=default_expiry_date or datetime.now().date(),
+                            key=edit_expiry_date_key,
+                        )
+                    else:
+                        st.caption("Expiry date will be cleared for this item.")
                     with st.form(f"inventory_edit_form_{company_key}_{edit_item_id}", clear_on_submit=True):
                         edit_item_code = st.text_input("Item Code (SKU)", value=str(edit_row.get("item_code") or ""))
                         edit_barcode = st.text_input("Barcode", value=str(edit_row.get("barcode") or ""))
@@ -7686,26 +7892,6 @@ def show_inventory(company_key, role):
                         edit_description = st.text_area("Description", value=str(edit_row.get("description") or ""))
                         edit_brand = st.text_input("Brand", value=str(edit_row.get("brand") or ""))
                         edit_supplier_name = st.text_input("Supplier Name", value=str(edit_row.get("supplier_name") or ""))
-                        existing_expiry_value = str(edit_row.get("expiry_date") or "").strip()
-                        try:
-                            default_expiry_date = (
-                                datetime.fromisoformat(existing_expiry_value).date()
-                                if existing_expiry_value
-                                else None
-                            )
-                        except ValueError:
-                            default_expiry_date = None
-                        edit_expiry_enabled = st.checkbox(
-                            "Set Expiry Date",
-                            value=default_expiry_date is not None,
-                            key=f"inventory_edit_expiry_enabled_{company_key}_{edit_item_id}",
-                        )
-                        edit_expiry_date = st.date_input(
-                            "Expiry Date",
-                            value=default_expiry_date or datetime.now().date(),
-                            key=f"inventory_edit_expiry_date_{company_key}_{edit_item_id}",
-                            disabled=not edit_expiry_enabled,
-                        )
                         edit_batch_number = st.text_input("Batch Number", value=str(edit_row.get("batch_number") or ""))
                         edit_vat_category = st.text_input("VAT Category", value=str(edit_row.get("vat_category") or ""))
                         edit_qty = st.number_input("Quantity", min_value=0.0, value=float(edit_row["quantity"] or 0.0))
@@ -7716,6 +7902,10 @@ def show_inventory(company_key, role):
                         edit_warehouse_location = st.text_input("Shelf / Location", value=str(edit_row.get("warehouse_location") or ""))
                         edit_is_active = st.checkbox("Active", value=bool(edit_row.get("is_active", 1)))
                         if st.form_submit_button("Edit Item"):
+                            edit_expiry_enabled = bool(st.session_state.get(edit_expiry_enabled_key, False))
+                            edit_expiry_date = (
+                                st.session_state.get(edit_expiry_date_key) if edit_expiry_enabled else None
+                            )
                             try:
                                 conn = get_connection()
                                 conn.execute(
@@ -7936,35 +8126,117 @@ def show_inventory(company_key, role):
         if role == "Demo":
             st.info("Items management is disabled in Demo mode.")
             return
-        with st.form("add_inventory_form", clear_on_submit=True):
-            item_code = st.text_input("Item Code (SKU)")
-            barcode = st.text_input("New Barcode", value=str(st.session_state.get(inventory_new_barcode_key, "") or ""))
-            item_name = st.text_input("Item Name")
-            unit = st.text_input("Unit", value="pcs")
-            category = st.text_input("Category")
-            description = st.text_area("Description")
-            brand = st.text_input("Brand")
-            supplier_name = st.text_input("Supplier Name")
-            expiry_enabled = st.checkbox("Set Expiry Date", key=f"inventory_expiry_enabled_{company_key}")
-            expiry_date = st.date_input(
+        inventory_form_reset_key = f"inventory_add_form_reset_{company_key}"
+        inventory_supplier_options = _load_registered_supplier_names(company_key)
+        pending_inventory_barcode_value = str(st.session_state.pop(inventory_new_barcode_key, "") or "")
+        inventory_expiry_enabled_key = _form_widget_key(
+            f"inventory_expiry_enabled_{company_key}", inventory_form_reset_key
+        )
+        inventory_expiry_date_key = _form_widget_key(
+            f"inventory_expiry_date_{company_key}", inventory_form_reset_key
+        )
+        st.checkbox("Set Expiry Date", key=inventory_expiry_enabled_key)
+        expiry_enabled = bool(st.session_state.get(inventory_expiry_enabled_key, False))
+        if expiry_enabled:
+            st.date_input(
                 "Expiry Date",
                 value=datetime.now().date(),
-                key=f"inventory_expiry_date_{company_key}",
-                disabled=not expiry_enabled,
+                key=inventory_expiry_date_key,
             )
-            batch_number = st.text_input("Batch Number")
-            vat_category = st.text_input("VAT Category")
-            transaction_date = st.date_input("Transaction Date", value=datetime.now().date(), key=f"inventory_transaction_date_{company_key}")
-            opening_stock = st.number_input("Opening Stock Quantity", min_value=0.0, value=0.0)
-            min_stock_level = st.number_input("Reorder Level", min_value=0.0, value=10.0)
-            funding_source = st.selectbox("Inventory Funding Source", ["Cash", "Bank", "Mobile Money", "Accounts Payable"])
-            price = st.number_input(f"Selling Price ({st.session_state.currency_symbol})", min_value=0.0, value=0.0)
-            cost_price = st.number_input(f"Cost Price ({st.session_state.currency_symbol})", min_value=0.0, value=0.0)
-            tax_rate = st.number_input("Tax Rate", min_value=0.0, value=0.0)
-            warehouse_location = st.text_input("Shelf / Location")
-            is_active = st.checkbox("Active", value=True)
+        else:
+            st.caption("Expiry date will not be saved for this item.")
+
+        with st.form("add_inventory_form", clear_on_submit=True):
+            item_code = st.text_input("Item Code (SKU)", key=_form_widget_key(f"inventory_item_code_{company_key}", inventory_form_reset_key))
+            barcode = st.text_input(
+                "New Barcode",
+                value=pending_inventory_barcode_value,
+                key=_form_widget_key(f"inventory_form_barcode_{company_key}", inventory_form_reset_key),
+            )
+            item_name = st.text_input("Item Name", key=_form_widget_key(f"inventory_item_name_{company_key}", inventory_form_reset_key))
+            unit = st.text_input("Unit", value="pcs", key=_form_widget_key(f"inventory_unit_{company_key}", inventory_form_reset_key))
+            category = st.text_input("Category", key=_form_widget_key(f"inventory_category_{company_key}", inventory_form_reset_key))
+            description = st.text_area("Description", key=_form_widget_key(f"inventory_description_{company_key}", inventory_form_reset_key))
+            brand = st.text_input("Brand", key=_form_widget_key(f"inventory_brand_{company_key}", inventory_form_reset_key))
+            if inventory_supplier_options:
+                selected_supplier_name = st.selectbox(
+                    "Supplier Name",
+                    inventory_supplier_options,
+                    key=_form_widget_key(f"inventory_supplier_select_{company_key}", inventory_form_reset_key),
+                )
+                use_custom_supplier = st.checkbox(
+                    "Use custom supplier name",
+                    key=_form_widget_key(f"inventory_supplier_custom_enabled_{company_key}", inventory_form_reset_key),
+                )
+                if use_custom_supplier:
+                    supplier_name = st.text_input(
+                        "Custom Supplier Name",
+                        key=_form_widget_key(f"inventory_supplier_custom_{company_key}", inventory_form_reset_key),
+                    ).strip()
+                else:
+                    supplier_name = str(selected_supplier_name or "").strip()
+            else:
+                supplier_name = st.text_input(
+                    "Supplier Name",
+                    key=_form_widget_key(f"inventory_supplier_name_{company_key}", inventory_form_reset_key),
+                )
+            batch_number = st.text_input("Batch Number", key=_form_widget_key(f"inventory_batch_{company_key}", inventory_form_reset_key))
+            vat_category = st.text_input("VAT Category", key=_form_widget_key(f"inventory_vat_category_{company_key}", inventory_form_reset_key))
+            transaction_date = st.date_input(
+                "Transaction Date",
+                value=datetime.now().date(),
+                key=_form_widget_key(f"inventory_transaction_date_{company_key}", inventory_form_reset_key),
+            )
+            opening_stock = st.number_input(
+                "Opening Stock Quantity",
+                min_value=0.0,
+                value=0.0,
+                key=_form_widget_key(f"inventory_opening_stock_{company_key}", inventory_form_reset_key),
+            )
+            min_stock_level = st.number_input(
+                "Reorder Level",
+                min_value=0.0,
+                value=10.0,
+                key=_form_widget_key(f"inventory_min_stock_{company_key}", inventory_form_reset_key),
+            )
+            funding_source = st.selectbox(
+                "Inventory Funding Source",
+                ["Cash", "Bank", "Mobile Money", "Accounts Payable"],
+                key=_form_widget_key(f"inventory_funding_source_{company_key}", inventory_form_reset_key),
+            )
+            price = st.number_input(
+                f"Selling Price ({st.session_state.currency_symbol})",
+                min_value=0.0,
+                value=0.0,
+                key=_form_widget_key(f"inventory_price_{company_key}", inventory_form_reset_key),
+            )
+            cost_price = st.number_input(
+                f"Cost Price ({st.session_state.currency_symbol})",
+                min_value=0.0,
+                value=0.0,
+                key=_form_widget_key(f"inventory_cost_price_{company_key}", inventory_form_reset_key),
+            )
+            tax_rate = st.number_input(
+                "Tax Rate",
+                min_value=0.0,
+                value=0.0,
+                key=_form_widget_key(f"inventory_tax_rate_{company_key}", inventory_form_reset_key),
+            )
+            warehouse_location = st.text_input(
+                "Shelf / Location",
+                key=_form_widget_key(f"inventory_warehouse_{company_key}", inventory_form_reset_key),
+            )
+            is_active = st.checkbox(
+                "Active",
+                value=True,
+                key=_form_widget_key(f"inventory_is_active_{company_key}", inventory_form_reset_key),
+            )
             submitted = st.form_submit_button("➕ Add New Item")
             if submitted and item_name:
+                expiry_enabled = bool(st.session_state.get(inventory_expiry_enabled_key, False))
+                expiry_date_value = (
+                    st.session_state.get(inventory_expiry_date_key) if expiry_enabled else None
+                )
                 if not require_permission(
                     role,
                     "manage_inventory",
@@ -8002,7 +8274,7 @@ def show_inventory(company_key, role):
                             description.strip(),
                             brand.strip(),
                             supplier_name.strip(),
-                            expiry_date.isoformat() if expiry_enabled else None,
+                            expiry_date_value.isoformat() if expiry_date_value else None,
                             batch_number.strip(),
                             vat_category.strip(),
                             opening_stock,
@@ -8037,7 +8309,7 @@ def show_inventory(company_key, role):
                         )
                     conn.commit()
                     conn.close()
-                    st.session_state.pop(inventory_new_barcode_key, None)
+                    _increment_form_reset(inventory_form_reset_key)
                     st.session_state[success_key] = True
                     st.rerun()
                 except Exception as e:
@@ -8818,6 +9090,7 @@ def show_pos(company_key, company_name, role):
     pos_pending_scan_key = f"pos_pending_scan_{company_key}"
     pos_product_search_key = f"pos_product_search_{company_key}"
     pos_product_select_key = f"pos_product_select_{company_key}"
+    pos_scan_focus_key = f"pos_scan_focus_request_{company_key}"
     pos_return_lookup_result_key = f"pos_return_lookup_result_{company_key}"
     pos_manager_approval_identifier_key = f"pos_manager_approval_identifier_{company_key}"
     pos_manager_approval_reason_key = f"pos_manager_approval_reason_{company_key}"
@@ -8945,7 +9218,7 @@ def show_pos(company_key, company_name, role):
                                 st.session_state[checkout_complete_key] = False
                                 st.session_state.pop(receipt_key, None)
                                 st.session_state.pop(receipt_html_key, None)
-                                cart_line = _add_item_to_pos_cart(company_key, matched_item)
+                                cart_line = _add_item_to_pos_cart(company_key, _normalize_pos_item_row(matched_item))
                                 logger.info(
                                     "POS scanner input matched item '%s' via %s for company %s",
                                     matched_item["item_name"],
@@ -8965,6 +9238,7 @@ def show_pos(company_key, company_name, role):
                                 low_stock_warning = _get_pos_low_stock_warning(cart_line)
                                 if low_stock_warning:
                                     st.warning(low_stock_warning)
+                                _request_pos_barcode_scan_focus(company_key)
                             elif matched_item and match_scope == "in_company":
                                 logger.info(
                                     "POS scanner found item '%s' with zero stock for company %s",
@@ -9007,18 +9281,20 @@ def show_pos(company_key, company_name, role):
             if items_df.empty:
                 st.info("No stock available for sale. Switch to Manual Entry to continue.")
             else:
-                with st.expander("Search / pick item (optional)", expanded=False):
-                    product_search_term = st.text_input(
+                search_expanded = bool(str(st.session_state.get(pos_product_search_key, "") or "").strip())
+                with st.expander("Search / pick item (optional)", expanded=search_expanded):
+                    st.text_input(
                         "Search Product",
                         key=pos_product_search_key,
-                        placeholder="Search by name, barcode, or item code",
-                    ).strip()
+                        placeholder="Search by name, barcode, or item code (starts after 1 character)",
+                    )
+                    product_search_term = str(st.session_state.get(pos_product_search_key, "") or "").strip()
                     manual_search_options = []
-                    if product_search_term:
+                    if len(product_search_term) >= 1:
                         conn = None
                         try:
                             conn = get_connection()
-                            manual_search_options = _search_inventory_for_pos(conn, company_key, product_search_term)
+                            manual_search_options = _pos_inventory_search_rows(conn, company_key, product_search_term)
                         except Exception as exc:
                             st.warning(build_user_safe_error(exc, role))
                         finally:
@@ -9060,6 +9336,7 @@ def show_pos(company_key, company_name, role):
                             low_stock_warning = _get_pos_low_stock_warning(cart_line)
                             if low_stock_warning:
                                 st.warning(low_stock_warning)
+                            _request_pos_barcode_scan_focus(company_key)
                             st.rerun()
                     selected_item = st.selectbox("Select Item", items_df["Item Name"].tolist(), key=f"pos_item_{company_key}")
                     qty_to_sell = st.number_input("Quantity", min_value=1, value=1, key=f"pos_qty_{company_key}")
@@ -9088,8 +9365,9 @@ def show_pos(company_key, company_name, role):
                         low_stock_warning = _get_pos_low_stock_warning(added_line)
                         if low_stock_warning:
                             st.warning(low_stock_warning)
+                        _request_pos_barcode_scan_focus(company_key)
                         st.rerun()
-            if not st.session_state.get(checkout_complete_key):
+            if st.session_state.pop(pos_scan_focus_key, False) and not st.session_state.get(checkout_complete_key):
                 _focus_pos_barcode_scanner()
         else:
             st.subheader("Manual Item Entry")
@@ -9130,6 +9408,7 @@ def show_pos(company_key, company_name, role):
                     cart.append(manual_line)
                     st.session_state[cart_key] = cart
                     _trigger_scan_feedback(pos_message_key, f"Added manual item {manual_item_name.strip()} to the cart.")
+                    _request_pos_barcode_scan_focus(company_key)
                     st.rerun()
                 else:
                     st.warning("Enter a valid manual item and price before adding it.")
@@ -9163,12 +9442,13 @@ def show_pos(company_key, company_name, role):
                 row_cols = st.columns([3, 2, 1, 1, 1, 1, 1, 1, 1, 1])
                 row_cols[0].write(str(line.get("name") or ""))
                 row_cols[1].caption(str(identifier))
+                qty_widget_key = f"pos_line_qty_{company_key}_{index}"
                 updated_qty = row_cols[2].number_input(
                     "Qty",
                     min_value=1,
                     value=int(line.get("qty") or 1),
                     step=1,
-                    key=f"pos_line_qty_{company_key}_{index}",
+                    key=qty_widget_key,
                     label_visibility="collapsed",
                 )
                 updated_discount_type = row_cols[4].selectbox(
@@ -9193,12 +9473,18 @@ def show_pos(company_key, company_name, role):
                 row_cols[3].write(format_currency(float(line.get("price") or 0.0)))
                 row_cols[6].write(format_currency(float(line.get("line_total") or 0.0)))
                 if row_cols[7].button("+", key=f"pos_line_inc_{company_key}_{index}", use_container_width=True):
-                    line["qty"] = int(line.get("qty") or 1) + 1
+                    new_qty = int(line.get("qty") or 1) + 1
+                    line["qty"] = new_qty
+                    st.session_state[qty_widget_key] = new_qty
                     _recalculate_pos_line(line)
+                    st.session_state[cart_key] = cart
                     st.rerun()
                 if row_cols[8].button("-", key=f"pos_line_dec_{company_key}_{index}", use_container_width=True):
-                    line["qty"] = max(int(line.get("qty") or 1) - 1, 1)
+                    new_qty = max(int(line.get("qty") or 1) - 1, 1)
+                    line["qty"] = new_qty
+                    st.session_state[qty_widget_key] = new_qty
                     _recalculate_pos_line(line)
+                    st.session_state[cart_key] = cart
                     st.rerun()
                 if row_cols[9].button("Remove", key=f"pos_line_remove_{company_key}_{index}", use_container_width=True):
                     cart.pop(index)
@@ -9210,6 +9496,19 @@ def show_pos(company_key, company_name, role):
         else:
             st.info("Scan a barcode or add an item manually to start the sale.")
         st.markdown("</div>", unsafe_allow_html=True)
+        if cart:
+            section_header("Live Receipt Preview")
+            with card_container():
+                st.markdown(
+                    '<p class="pos-receipt-live-label"><strong>SALE PREVIEW</strong> — NOT FINAL RECEIPT</p>',
+                    unsafe_allow_html=True,
+                )
+                live_receipt_data = _build_pos_live_receipt_data(company_key, company_label, branch_label, role)
+                _render_pos_receipt_html_panel(
+                    _build_receipt_html(live_receipt_data),
+                    variant="live",
+                    height=440,
+                )
         section_header("Payment & Discounts")
         st.markdown('<div class="eka-card pos-checkout-panel">', unsafe_allow_html=True)
         payment_method = "Cash"
@@ -10346,13 +10645,10 @@ def show_pos(company_key, company_name, role):
                     )
                 if receipt_data.get("discount_approved_by"):
                     st.caption(f"Discount approved by manager: {receipt_data['discount_approved_by']}")
-                st.markdown("**Receipt Preview**")
+                st.markdown("**Final Receipt Preview**")
+                st.caption(f"Receipt No: {receipt_data.get('receipt_number') or 'N/A'} — posted sale receipt")
                 receipt_preview_html = str(st.session_state.get(receipt_html_key) or "").strip()
-                components.html(
-                    f'<div style="background:#f8fafc;padding:0.75rem;border:1px solid #e6eef6;border-radius:8px;">{receipt_preview_html}</div>',
-                    height=520,
-                    scrolling=True,
-                )
+                _render_pos_receipt_html_panel(receipt_preview_html, variant="final", height=520)
                 receipt_action_col1, receipt_action_col2, receipt_action_col3 = st.columns(3)
                 if receipt_action_col1.button("Print Receipt", key=f"receipt_print_btn_{company_key}", use_container_width=True):
                     st.session_state[do_print_key] = True
@@ -11445,12 +11741,28 @@ def show_aging(company_key, aging_type="Receivable"):
                 register_col, transaction_col = st.columns(2)
                 with register_col:
                     st.subheader("Add Supplier")
+                    supplier_form_reset_key = f"supplier_register_form_reset_{company_key}"
                     with st.form(f"supplier_register_form_{company_key}", clear_on_submit=True):
-                        supplier_name = st.text_input("Supplier Name")
-                        supplier_phone = st.text_input("Phone")
-                        supplier_email = st.text_input("Email")
-                        supplier_address = st.text_area("Address")
-                        supplier_category = st.text_input("Category")
+                        supplier_name = st.text_input(
+                            "Supplier Name",
+                            key=_form_widget_key(f"supplier_register_name_{company_key}", supplier_form_reset_key),
+                        )
+                        supplier_phone = st.text_input(
+                            "Phone",
+                            key=_form_widget_key(f"supplier_register_phone_{company_key}", supplier_form_reset_key),
+                        )
+                        supplier_email = st.text_input(
+                            "Email",
+                            key=_form_widget_key(f"supplier_register_email_{company_key}", supplier_form_reset_key),
+                        )
+                        supplier_address = st.text_area(
+                            "Address",
+                            key=_form_widget_key(f"supplier_register_address_{company_key}", supplier_form_reset_key),
+                        )
+                        supplier_category = st.text_input(
+                            "Category",
+                            key=_form_widget_key(f"supplier_register_category_{company_key}", supplier_form_reset_key),
+                        )
                         register_submitted = st.form_submit_button("Save Supplier")
                     if register_submitted:
                         if not supplier_name.strip():
@@ -11475,8 +11787,9 @@ def show_aging(company_key, aging_type="Receivable"):
                                 f"Registered supplier {supplier_name.strip()}",
                                 branch_id=None,
                             )
-                            st.success("Supplier saved.")
                             conn.close()
+                            _increment_form_reset(supplier_form_reset_key)
+                            st.success("Supplier saved.")
                             st.rerun()
 
                 with transaction_col:
