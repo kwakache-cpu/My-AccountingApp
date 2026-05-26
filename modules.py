@@ -178,9 +178,113 @@ def render_ui_standard_styles():
             text-align: center;
             letter-spacing: 0.04em;
         }
+        /* POS active cart — touch-friendly line rows */
+        .pos-cart-panel { padding-bottom: 4px; }
+        .pos-cart-line {
+            border: 1px solid #e2e8f0;
+            border-radius: 10px;
+            padding: 12px 14px;
+            margin-bottom: 12px;
+            background: #f8fafc;
+        }
+        .pos-cart-line-header {
+            display: flex;
+            flex-wrap: wrap;
+            align-items: baseline;
+            justify-content: space-between;
+            gap: 6px 12px;
+            margin-bottom: 4px;
+        }
+        .pos-cart-line-name {
+            font-size: 1.08rem;
+            font-weight: 600;
+            color: #0f172a;
+            line-height: 1.3;
+        }
+        .pos-cart-line-meta {
+            color: #64748b;
+            font-size: 0.88rem;
+            margin-bottom: 10px;
+        }
+        .pos-cart-line-qty {
+            margin: 8px 0 10px 0;
+        }
+        .pos-cart-panel .pos-cart-line-qty .stButton>button {
+            min-height: 48px !important;
+            min-width: 48px !important;
+            font-size: 1.35rem !important;
+            font-weight: 700 !important;
+            padding: 8px 12px !important;
+        }
+        .pos-cart-panel .pos-cart-line-qty [data-testid="stNumberInput"] input {
+            min-height: 48px !important;
+            font-size: 1.15rem !important;
+            font-weight: 600 !important;
+            text-align: center !important;
+        }
+        .pos-cart-line-total-row {
+            display: flex;
+            flex-wrap: wrap;
+            align-items: center;
+            justify-content: space-between;
+            gap: 8px;
+            margin: 8px 0 10px 0;
+            padding-top: 8px;
+            border-top: 1px dashed #e2e8f0;
+        }
+        .pos-cart-line-total-label {
+            font-size: 0.82rem;
+            color: #64748b;
+            text-transform: uppercase;
+            letter-spacing: 0.04em;
+        }
+        .pos-cart-line-total-value {
+            font-size: 1.15rem;
+            font-weight: 700;
+            color: #0f766e;
+        }
+        .pos-cart-discount-badge {
+            display: inline-block;
+            padding: 4px 10px;
+            border-radius: 6px;
+            background: #ecfdf5;
+            color: #047857;
+            font-size: 0.85rem;
+            font-weight: 600;
+        }
+        .pos-cart-line-remove {
+            margin-top: 4px;
+        }
+        .pos-cart-panel .pos-cart-line-remove .stButton>button {
+            min-height: 48px !important;
+            border: 2px solid #dc2626 !important;
+            color: #dc2626 !important;
+            background: #fef2f2 !important;
+            font-weight: 600 !important;
+            font-size: 1rem !important;
+        }
+        .pos-cart-panel .pos-cart-line-remove .stButton>button:hover {
+            background: #fee2e2 !important;
+            border-color: #b91c1c !important;
+            color: #b91c1c !important;
+        }
+        .pos-cart-panel [data-testid="stExpander"] {
+            margin-bottom: 4px;
+        }
         @media (max-width: 640px) {
             .eka-card { padding: 10px 12px; }
             .stButton>button { width: 100% !important; }
+            .pos-cart-line { padding: 10px 12px; margin-bottom: 10px; }
+            .pos-cart-line-name { font-size: 1rem; }
+            .pos-cart-line-meta { font-size: 0.82rem; }
+            .pos-cart-panel .pos-cart-line-qty .stButton>button {
+                min-height: 52px !important;
+                width: 100% !important;
+            }
+            .pos-cart-panel .pos-cart-line-qty [data-testid="stNumberInput"] input {
+                min-height: 52px !important;
+            }
+            .pos-cart-line-total-value { font-size: 1.2rem; }
         }
         </style>
         """,
@@ -9421,29 +9525,48 @@ def show_pos(company_key, company_name, role):
         cash_tendered = 0.0
         payment_reference = ""
         section_header("Active Cart")
-        st.markdown('<div class="eka-card">', unsafe_allow_html=True)
+        st.markdown('<div class="eka-card pos-cart-panel">', unsafe_allow_html=True)
         if cart:
             st.markdown("**Line Items**")
-            header_cols = st.columns([3, 2, 1, 1, 1, 1, 1, 1, 1, 1])
-            header_cols[0].markdown("**Item**")
-            header_cols[1].markdown("**Barcode / Code**")
-            header_cols[2].markdown("**Qty**")
-            header_cols[3].markdown("**Unit Price**")
-            header_cols[4].markdown("**Disc Type**")
-            header_cols[5].markdown("**Discount**")
-            header_cols[6].markdown("**Line Total**")
-            header_cols[7].markdown("**+**")
-            header_cols[8].markdown("**-**")
-            header_cols[9].markdown("**Remove**")
 
             for index, line in enumerate(list(cart)):
                 _recalculate_pos_line(line)
                 identifier = line.get("barcode") or line.get("item_code") or "Manual"
-                row_cols = st.columns([3, 2, 1, 1, 1, 1, 1, 1, 1, 1])
-                row_cols[0].write(str(line.get("name") or ""))
-                row_cols[1].caption(str(identifier))
+                item_name = str(line.get("name") or "")
+                unit_price = float(line.get("price") or 0.0)
                 qty_widget_key = f"pos_line_qty_{company_key}_{index}"
-                updated_qty = row_cols[2].number_input(
+                discount_type_key = f"pos_line_discount_type_{company_key}_{index}"
+                discount_value_key = f"pos_line_discount_value_{company_key}_{index}"
+                line_discount_preview = float(
+                    line.get("line_discount_value", line.get("line_discount") or 0.0) or 0.0
+                )
+                discount_expander_key = f"pos_line_discount_expanded_{company_key}_{index}"
+                if line_discount_preview > 0:
+                    st.session_state[discount_expander_key] = True
+                discount_expanded = bool(st.session_state.get(discount_expander_key, False))
+
+                st.markdown('<div class="pos-cart-line">', unsafe_allow_html=True)
+                st.markdown(
+                    f'<div class="pos-cart-line-header"><span class="pos-cart-line-name">{item_name}</span></div>',
+                    unsafe_allow_html=True,
+                )
+                st.markdown(
+                    f'<div class="pos-cart-line-meta">{identifier} · {format_currency(unit_price)} each</div>',
+                    unsafe_allow_html=True,
+                )
+
+                st.markdown('<div class="pos-cart-line-qty">', unsafe_allow_html=True)
+                qty_row = st.columns([1, 2, 1])
+                dec_clicked = qty_row[0].button(
+                    "-",
+                    key=f"pos_line_dec_{company_key}_{index}",
+                    use_container_width=True,
+                )
+                cart_qty = int(line.get("qty") or 1)
+                qty_sync_key = f"pos_line_qty_sync_{company_key}_{index}"
+                if st.session_state.pop(qty_sync_key, False):
+                    st.session_state[qty_widget_key] = cart_qty
+                updated_qty = qty_row[1].number_input(
                     "Qty",
                     min_value=1,
                     value=int(line.get("qty") or 1),
@@ -9451,42 +9574,78 @@ def show_pos(company_key, company_name, role):
                     key=qty_widget_key,
                     label_visibility="collapsed",
                 )
-                updated_discount_type = row_cols[4].selectbox(
-                    "Disc Type",
-                    ["Amount", "Percent"],
-                    index=0 if str(line.get("line_discount_type") or "amount").lower() == "amount" else 1,
-                    key=f"pos_line_discount_type_{company_key}_{index}",
-                    label_visibility="collapsed",
+                inc_clicked = qty_row[2].button(
+                    "+",
+                    key=f"pos_line_inc_{company_key}_{index}",
+                    use_container_width=True,
                 )
-                updated_discount = row_cols[5].number_input(
-                    "Discount",
-                    min_value=0.0,
-                    value=float(line.get("line_discount_value", line.get("line_discount") or 0.0) or 0.0),
-                    step=0.01,
-                    key=f"pos_line_discount_value_{company_key}_{index}",
-                    label_visibility="collapsed",
-                )
+                st.markdown("</div>", unsafe_allow_html=True)
+
+                with st.expander("Line discount", expanded=discount_expanded):
+                    discount_cols = st.columns([1, 1])
+                    updated_discount_type = discount_cols[0].selectbox(
+                        "Disc Type",
+                        ["Amount", "Percent"],
+                        index=0 if str(line.get("line_discount_type") or "amount").lower() == "amount" else 1,
+                        key=discount_type_key,
+                        label_visibility="visible",
+                    )
+                    updated_discount = discount_cols[1].number_input(
+                        "Discount",
+                        min_value=0.0,
+                        value=float(line.get("line_discount_value", line.get("line_discount") or 0.0) or 0.0),
+                        step=0.01,
+                        key=discount_value_key,
+                        label_visibility="visible",
+                    )
+
                 line["qty"] = int(updated_qty)
                 line["line_discount_type"] = str(updated_discount_type or "Amount").lower()
                 line["line_discount_value"] = float(updated_discount)
                 _recalculate_pos_line(line)
-                row_cols[3].write(format_currency(float(line.get("price") or 0.0)))
-                row_cols[6].write(format_currency(float(line.get("line_total") or 0.0)))
-                if row_cols[7].button("+", key=f"pos_line_inc_{company_key}_{index}", use_container_width=True):
+
+                line_total = float(line.get("line_total") or 0.0)
+                applied_discount = float(line.get("line_discount") or 0.0)
+                if applied_discount > 0:
+                    total_html = (
+                        f'<div class="pos-cart-line-total-row">'
+                        f'<span class="pos-cart-discount-badge">Disc: {format_currency(applied_discount)}</span>'
+                        f'<span class="pos-cart-line-total-value">{format_currency(line_total)}</span>'
+                        f'</div>'
+                    )
+                else:
+                    total_html = (
+                        f'<div class="pos-cart-line-total-row">'
+                        f'<span class="pos-cart-line-total-label">Line total</span>'
+                        f'<span class="pos-cart-line-total-value">{format_currency(line_total)}</span>'
+                        f'</div>'
+                    )
+                st.markdown(total_html, unsafe_allow_html=True)
+
+                st.markdown('<div class="pos-cart-line-remove">', unsafe_allow_html=True)
+                remove_clicked = st.button(
+                    "Remove",
+                    key=f"pos_line_remove_{company_key}_{index}",
+                    use_container_width=True,
+                )
+                st.markdown("</div>", unsafe_allow_html=True)
+                st.markdown("</div>", unsafe_allow_html=True)
+
+                if inc_clicked:
                     new_qty = int(line.get("qty") or 1) + 1
                     line["qty"] = new_qty
-                    st.session_state[qty_widget_key] = new_qty
+                    st.session_state[qty_sync_key] = True
                     _recalculate_pos_line(line)
                     st.session_state[cart_key] = cart
                     st.rerun()
-                if row_cols[8].button("-", key=f"pos_line_dec_{company_key}_{index}", use_container_width=True):
+                if dec_clicked:
                     new_qty = max(int(line.get("qty") or 1) - 1, 1)
                     line["qty"] = new_qty
-                    st.session_state[qty_widget_key] = new_qty
+                    st.session_state[qty_sync_key] = True
                     _recalculate_pos_line(line)
                     st.session_state[cart_key] = cart
                     st.rerun()
-                if row_cols[9].button("Remove", key=f"pos_line_remove_{company_key}_{index}", use_container_width=True):
+                if remove_clicked:
                     cart.pop(index)
                     st.session_state[cart_key] = cart
                     st.rerun()
