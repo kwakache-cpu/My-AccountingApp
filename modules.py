@@ -137,6 +137,34 @@ def render_ui_standard_styles():
         .pos-checkout-panel .pos-checkout-actions [data-testid="stButton"]:first-child button {
             font-weight: 600 !important;
         }
+        /* POS checkout actions — sticky footer */
+        @supports (position: sticky) {
+            .pos-checkout-panel {
+                /* Reserve space so the sticky bar doesn't cover content below */
+                padding-bottom: 110px;
+            }
+            .pos-checkout-panel .pos-checkout-actions {
+                position: sticky;
+                bottom: 0.5rem;
+                z-index: 60;
+                background: rgba(255, 255, 255, 0.96);
+                backdrop-filter: blur(6px);
+                -webkit-backdrop-filter: blur(6px);
+                border: 1px solid #e6eef6;
+                border-radius: 12px;
+                padding: 10px 10px;
+                box-shadow: 0 10px 26px rgba(15, 23, 42, 0.10);
+            }
+        }
+        @media (max-width: 760px) {
+            @supports (position: sticky) {
+                .pos-checkout-panel { padding-bottom: 130px; }
+                .pos-checkout-panel .pos-checkout-actions {
+                    bottom: 0.35rem;
+                    padding: 10px 8px;
+                }
+            }
+        }
         .pos-suspended-panel {
             position: sticky;
             top: 0.75rem;
