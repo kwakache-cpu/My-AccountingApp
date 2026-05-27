@@ -137,6 +137,10 @@ def render_ui_standard_styles():
         .pos-checkout-panel .pos-checkout-actions [data-testid="stButton"]:first-child button {
             font-weight: 600 !important;
         }
+        .pos-checkout-panel.pos-checkout-highlight {
+            box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.35), 0 10px 26px rgba(15, 23, 42, 0.10) !important;
+            transition: box-shadow 120ms ease-in-out;
+        }
         /* POS checkout actions — sticky footer */
         @supports (position: sticky) {
             .pos-checkout-panel {
@@ -5878,6 +5882,103 @@ def _focus_text_input(input_label):
     )
 
 
+def _inject_pos_keyboard_shortcuts(company_key):
+    """
+    Safe keyboard UX helpers for POS.
+    - F1: focus Scan Barcode input
+    - F2: switch to Manual Entry mode (clicks the radio option)
+    - F3: focus Search Product input
+    - F4: scroll/focus attention to checkout panel (no posting)
+    """
+    components.html(
+        f"""
+        <script>
+        (function () {{
+            const parentDoc = window.parent.document;
+            if (parentDoc.__ekaPosShortcutsInstalled) {{
+                return;
+            }}
+            parentDoc.__ekaPosShortcutsInstalled = true;
+
+            const focusWithRetries = (selector) => {{
+                const attempt = () => {{
+                    const el = parentDoc.querySelector(selector);
+                    if (el) {{
+                        el.focus();
+                        try {{ el.select(); }} catch (e) {{}}
+                    }}
+                }};
+                [0, 80, 180, 320].forEach((delay) => setTimeout(attempt, delay));
+            }};
+
+            const focusSearch = () => focusWithRetries('input[aria-label="Search Product"]');
+            const focusScan = () => focusWithRetries('input[aria-label="Scan Barcode"]');
+
+            const switchManualEntry = () => {{
+                // Streamlit radio renders as labels with nested inputs. We pick the option label text.
+                const labels = Array.from(parentDoc.querySelectorAll('label')).filter((l) => {{
+                    const text = (l.innerText || '').trim();
+                    return text === 'Manual Entry';
+                }});
+                if (labels.length) {{
+                    labels[0].click();
+                }}
+            }};
+
+            const focusCheckoutPanel = () => {{
+                const anchor = parentDoc.getElementById('pos-checkout-anchor-{company_key}');
+                const panel = parentDoc.querySelector('.pos-checkout-panel');
+                const target = anchor || panel;
+                if (target && target.scrollIntoView) {{
+                    target.scrollIntoView({{ behavior: 'smooth', block: 'start' }});
+                }}
+                if (panel) {{
+                    panel.classList.add('pos-checkout-highlight');
+                    setTimeout(() => panel.classList.remove('pos-checkout-highlight'), 1200);
+                }}
+            }};
+
+            parentDoc.addEventListener('keydown', (e) => {{
+                const key = (e.key || '').toLowerCase();
+                const active = parentDoc.activeElement;
+                const activeTag = active ? (active.tagName || '').toLowerCase() : '';
+                const inTypingField = activeTag === 'input' || activeTag === 'textarea' || activeTag === 'select';
+
+                if (key === 'f1') {{
+                    e.preventDefault();
+                    focusScan();
+                    return;
+                }}
+
+                if (key === 'f3') {{
+                    e.preventDefault();
+                    focusSearch();
+                    return;
+                }}
+
+                if (key === 'f2') {{
+                    if (inTypingField) {{
+                        e.preventDefault();
+                    }}
+                    switchManualEntry();
+                    return;
+                }}
+
+                if (key === 'f4') {{
+                    if (inTypingField) {{
+                        e.preventDefault();
+                    }}
+                    focusCheckoutPanel();
+                    return;
+                }}
+            }}, true);
+        }})();
+        </script>
+        """,
+        height=0,
+    )
+
+
 def _request_pos_barcode_scan_focus(company_key):
     st.session_state[f"pos_scan_focus_request_{company_key}"] = True
 
@@ -9433,7 +9534,21 @@ def show_pos(company_key, company_name, role):
             st.session_state[checkout_complete_key] = False
             _trigger_scan_feedback(pos_message_key, "Cart cleared.", "info")
             st.rerun()
-    st.caption("Cashier shortcuts: Scan + Enter = add item | Ctrl/Cmd + K = focus search | F2 = manual entry mode | F4 = checkout")
+    st.markdown(
+        """
+        <div class="eka-card" style="padding:10px 12px;">
+            <div style="display:flex;flex-wrap:wrap;gap:8px 12px;align-items:center;">
+                <strong style="color:#0f172a;">Keyboard</strong>
+                <span style="color:#475569;">F1 = Scan</span>
+                <span style="color:#475569;">F2 = Manual Entry</span>
+                <span style="color:#475569;">F3 = Search</span>
+                <span style="color:#475569;">F4 = Checkout Panel</span>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    _inject_pos_keyboard_shortcuts(company_key)
 
     try:
         conn = get_connection()
@@ -9868,6 +9983,10 @@ def show_pos(company_key, company_name, role):
                         height=440,
                     )
             section_header("Payment & Discounts")
+            st.markdown(
+                f'<div id="pos-checkout-anchor-{company_key}" style="position:relative;top:-6px;"></div>',
+                unsafe_allow_html=True,
+            )
             st.markdown('<div class="eka-card pos-checkout-panel">', unsafe_allow_html=True)
             payment_method = "Cash"
             selected_credit_customer_id = None
