@@ -140,29 +140,32 @@ class PosSuspendedSalesTests(ERPIsolatedTestCase):
         still_suspended = self._fetch_suspended_rows("CashierA")
         self.assertEqual(len(still_suspended), 0)
 
-    def test_show_pos_resume_ui_outside_cart_branch(self):
+    def test_show_pos_suspended_sales_side_panel_layout(self):
         source = Path(self.modules.__file__).read_text(encoding="utf-8")
+        self.assertIn("def _render_pos_suspended_sales_side_panel(", source)
+        self.assertIn('st.columns([1, 2])', source)
+        self.assertIn('key=f"pos_resume_latest_sale_{company_key}"', source)
+        self.assertIn('key=f"pos_resume_sale_{company_key}"', source)
+        self.assertIn('key=f"pos_cancel_suspend_{company_key}"', source)
+        self.assertIn('key=f"pos_suspended_select_{company_key}"', source)
+
         show_pos_start = source.index("def show_pos(")
         show_pos_end = source.index("\ndef show_sales_purchase", show_pos_start)
         show_pos_source = source[show_pos_start:show_pos_end]
 
-        resume_marker = 'key=f"pos_resume_sale_{company_key}"'
-        self.assertIn(resume_marker, show_pos_source)
+        self.assertIn("_render_pos_suspended_sales_side_panel(", show_pos_source)
+        self.assertIn("def _render_pos_workflow_column(barcode_input_source):", show_pos_source)
+        self.assertIn("_render_pos_workflow_column(barcode_input_source)", show_pos_source)
+        self.assertNotIn("resume_col, cancel_suspend_col = st.columns", show_pos_source)
 
         payment_panel = 'section_header("Payment & Discounts")'
         payment_idx = show_pos_source.index(payment_panel)
-        resume_idx = show_pos_source.index(resume_marker, payment_idx)
-
-        cart_branch = 'if not cart:\n            st.markdown("#### Payment")'
-        cart_idx = show_pos_source.index(cart_branch, payment_idx)
-        cart_else_idx = show_pos_source.index("\n        else:\n", cart_idx)
-
-        self.assertGreater(resume_idx, cart_else_idx)
-        resume_line = show_pos_source[:resume_idx].splitlines()[-1].strip()
-        self.assertTrue(resume_line.startswith("if resume_col.button("), resume_line)
-
         suspend_in_actions = 'if suspend_action_col.button("Suspend Sale"'
         suspend_idx = show_pos_source.index(suspend_in_actions, payment_idx)
-        resume_after_suspend = show_pos_source.index(resume_marker, suspend_idx)
-        between = show_pos_source[suspend_idx:resume_after_suspend]
-        self.assertIn('st.markdown("</div>", unsafe_allow_html=True)', between)
+        panel_close_idx = show_pos_source.index(
+            'st.markdown("</div>", unsafe_allow_html=True)',
+            suspend_idx,
+        )
+        between = show_pos_source[suspend_idx:panel_close_idx]
+        self.assertNotIn("pos_resume_sale_", between)
+        self.assertNotIn("pos_suspended_select_", between)
