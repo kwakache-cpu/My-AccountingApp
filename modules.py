@@ -9973,124 +9973,126 @@ def show_pos(company_key, company_name, role):
                 finally:
                     if suspend_conn:
                         suspend_conn.close()
-            resume_col, cancel_suspend_col = st.columns([2, 1])
-            suspended_rows = []
-            suspended_conn = None
-            try:
-                suspended_conn = get_connection()
-                ensure_pos_sales_schema(suspended_conn)
-                cashier_identity = _get_pos_cashier_identity(role)
-                suspend_query = """
-                    SELECT id, suspend_reference, cashier, note, created_at
-                    FROM pos_suspended_sales
-                    WHERE company_key = ?
-                      AND status = 'suspended'
-                """
-                suspend_params = [company_key]
-                if active_branch_id:
-                    suspend_query += " AND COALESCE(branch_id, '') = ?"
-                    suspend_params.append(str(active_branch_id))
-                suspend_query += " AND cashier = ? ORDER BY created_at DESC"
-                suspend_params.append(cashier_identity)
-                suspended_rows = suspended_conn.execute(suspend_query, tuple(suspend_params)).fetchall()
-            except Exception as exc:
-                st.warning(build_user_safe_error(exc, role))
-            finally:
-                if suspended_conn:
-                    suspended_conn.close()
-            if suspended_rows:
-                suspended_options = [
-                    "{ref} | {cashier} | {created} | {note}".format(
-                        ref=row["suspend_reference"],
-                        cashier=row["cashier"] or "Unknown",
-                        created=row["created_at"],
-                        note=(row["note"] or "No note")[:40],
-                    )
-                    for row in suspended_rows
-                ]
-                selected_suspended_label = resume_col.selectbox(
-                    "Resume Suspended Sale",
-                    suspended_options,
-                    key=f"pos_suspended_select_{company_key}",
+            st.markdown("</div>", unsafe_allow_html=True)
+        resume_col, cancel_suspend_col = st.columns([2, 1])
+        suspended_rows = []
+        suspended_conn = None
+        try:
+            suspended_conn = get_connection()
+            ensure_pos_sales_schema(suspended_conn)
+            cashier_identity = _get_pos_cashier_identity(role)
+            suspend_query = """
+                SELECT id, suspend_reference, cashier, note, created_at
+                FROM pos_suspended_sales
+                WHERE company_key = ?
+                  AND status = 'suspended'
+            """
+            suspend_params = [company_key]
+            if active_branch_id:
+                suspend_query += " AND COALESCE(branch_id, '') = ?"
+                suspend_params.append(str(active_branch_id))
+            suspend_query += " AND cashier = ? ORDER BY created_at DESC"
+            suspend_params.append(cashier_identity)
+            suspended_rows = suspended_conn.execute(suspend_query, tuple(suspend_params)).fetchall()
+        except Exception as exc:
+            st.warning(build_user_safe_error(exc, role))
+        finally:
+            if suspended_conn:
+                suspended_conn.close()
+        if suspended_rows:
+            suspended_options = [
+                "{ref} | {cashier} | {created} | {note}".format(
+                    ref=row["suspend_reference"],
+                    cashier=row["cashier"] or "Unknown",
+                    created=row["created_at"],
+                    note=(row["note"] or "No note")[:40],
                 )
-                selected_suspended_row = suspended_rows[suspended_options.index(selected_suspended_label)]
-                if resume_col.button("Resume Sale", key=f"pos_resume_sale_{company_key}", use_container_width=True):
-                    resume_conn = None
+                for row in suspended_rows
+            ]
+            selected_suspended_label = resume_col.selectbox(
+                "Resume Suspended Sale",
+                suspended_options,
+                key=f"pos_suspended_select_{company_key}",
+            )
+            selected_suspended_row = suspended_rows[suspended_options.index(selected_suspended_label)]
+            if resume_col.button("Resume Sale", key=f"pos_resume_sale_{company_key}", use_container_width=True):
+                resume_conn = None
+                try:
+                    resume_conn = get_connection()
+                    ensure_pos_sales_schema(resume_conn)
+                    payload_row = resume_conn.execute(
+                        "SELECT cart_json FROM pos_suspended_sales WHERE id = ? AND company_key = ? AND status = 'suspended' LIMIT 1",
+                        (int(selected_suspended_row["id"]), company_key),
+                    ).fetchone()
+                    if not payload_row:
+                        st.warning("This suspended sale is no longer available.")
+                    else:
+                        _restore_pos_cart_payload(company_key, payload_row["cart_json"])
+                        resume_conn.execute(
+                            "UPDATE pos_suspended_sales SET status = 'resumed', resumed_at = CURRENT_TIMESTAMP WHERE id = ?",
+                            (int(selected_suspended_row["id"]),),
+                        )
+                        log_audit_action(
+                            resume_conn,
+                            company_key,
+                            role,
+                            "POS Sale Resumed",
+                            "POS",
+                            details=f"suspend_reference={selected_suspended_row['suspend_reference']}",
+                            branch_id=active_branch_id,
+                            action_type="admin",
+                            document_ref=selected_suspended_row["suspend_reference"],
+                        )
+                        resume_conn.commit()
+                        log_system_event("INFO", "POS", f"Resumed suspended sale {selected_suspended_row['suspend_reference']} for company_key={company_key}")
+                        st.session_state[checkout_complete_key] = False
+                        st.rerun()
+                except Exception as exc:
+                    if resume_conn:
+                        resume_conn.rollback()
+                    st.error(build_user_safe_error(exc, role))
+                finally:
+                    if resume_conn:
+                        resume_conn.close()
+            cancel_confirm = cancel_suspend_col.checkbox(
+                "Confirm Cancel",
+                key=f"pos_cancel_suspend_confirm_{company_key}",
+            )
+            if cancel_suspend_col.button("Cancel Suspended", key=f"pos_cancel_suspend_{company_key}", use_container_width=True):
+                if not cancel_confirm:
+                    st.warning("Confirm the suspended sale cancellation first.")
+                else:
+                    cancel_conn = None
                     try:
-                        resume_conn = get_connection()
-                        ensure_pos_sales_schema(resume_conn)
-                        payload_row = resume_conn.execute(
-                            "SELECT cart_json FROM pos_suspended_sales WHERE id = ? AND company_key = ? AND status = 'suspended' LIMIT 1",
+                        cancel_conn = get_connection()
+                        ensure_pos_sales_schema(cancel_conn)
+                        cancel_conn.execute(
+                            "UPDATE pos_suspended_sales SET status = 'cancelled', cancelled_at = CURRENT_TIMESTAMP WHERE id = ? AND company_key = ? AND status = 'suspended'",
                             (int(selected_suspended_row["id"]), company_key),
-                        ).fetchone()
-                        if not payload_row:
-                            st.warning("This suspended sale is no longer available.")
-                        else:
-                            _restore_pos_cart_payload(company_key, payload_row["cart_json"])
-                            resume_conn.execute(
-                                "UPDATE pos_suspended_sales SET status = 'resumed', resumed_at = CURRENT_TIMESTAMP WHERE id = ?",
-                                (int(selected_suspended_row["id"]),),
-                            )
-                            log_audit_action(
-                                resume_conn,
-                                company_key,
-                                role,
-                                "POS Sale Resumed",
-                                "POS",
-                                details=f"suspend_reference={selected_suspended_row['suspend_reference']}",
-                                branch_id=active_branch_id,
-                                action_type="admin",
-                                document_ref=selected_suspended_row["suspend_reference"],
-                            )
-                            resume_conn.commit()
-                            log_system_event("INFO", "POS", f"Resumed suspended sale {selected_suspended_row['suspend_reference']} for company_key={company_key}")
-                            st.session_state[checkout_complete_key] = False
-                            st.rerun()
+                        )
+                        log_audit_action(
+                            cancel_conn,
+                            company_key,
+                            role,
+                            "POS Suspended Sale Cancelled",
+                            "POS",
+                            details=f"suspend_reference={selected_suspended_row['suspend_reference']}",
+                            branch_id=active_branch_id,
+                            action_type="admin",
+                            document_ref=selected_suspended_row["suspend_reference"],
+                        )
+                        cancel_conn.commit()
+                        log_system_event("INFO", "POS", f"Cancelled suspended sale {selected_suspended_row['suspend_reference']} for company_key={company_key}")
+                        st.rerun()
                     except Exception as exc:
-                        if resume_conn:
-                            resume_conn.rollback()
+                        if cancel_conn:
+                            cancel_conn.rollback()
                         st.error(build_user_safe_error(exc, role))
                     finally:
-                        if resume_conn:
-                            resume_conn.close()
-                cancel_confirm = cancel_suspend_col.checkbox(
-                    "Confirm Cancel",
-                    key=f"pos_cancel_suspend_confirm_{company_key}",
-                )
-                if cancel_suspend_col.button("Cancel Suspended", key=f"pos_cancel_suspend_{company_key}", use_container_width=True):
-                    if not cancel_confirm:
-                        st.warning("Confirm the suspended sale cancellation first.")
-                    else:
-                        cancel_conn = None
-                        try:
-                            cancel_conn = get_connection()
-                            ensure_pos_sales_schema(cancel_conn)
-                            cancel_conn.execute(
-                                "UPDATE pos_suspended_sales SET status = 'cancelled', cancelled_at = CURRENT_TIMESTAMP WHERE id = ? AND company_key = ? AND status = 'suspended'",
-                                (int(selected_suspended_row["id"]), company_key),
-                            )
-                            log_audit_action(
-                                cancel_conn,
-                                company_key,
-                                role,
-                                "POS Suspended Sale Cancelled",
-                                "POS",
-                                details=f"suspend_reference={selected_suspended_row['suspend_reference']}",
-                                branch_id=active_branch_id,
-                                action_type="admin",
-                                document_ref=selected_suspended_row["suspend_reference"],
-                            )
-                            cancel_conn.commit()
-                            log_system_event("INFO", "POS", f"Cancelled suspended sale {selected_suspended_row['suspend_reference']} for company_key={company_key}")
-                            st.rerun()
-                        except Exception as exc:
-                            if cancel_conn:
-                                cancel_conn.rollback()
-                            st.error(build_user_safe_error(exc, role))
-                        finally:
-                            if cancel_conn:
-                                cancel_conn.close()
-            st.markdown("</div>", unsafe_allow_html=True)
+                        if cancel_conn:
+                            cancel_conn.close()
+        else:
+            st.caption("No suspended sales for this cashier at this branch.")
         st.markdown("</div>", unsafe_allow_html=True)
 
         def process_pos_sale(print_receipt=False):
