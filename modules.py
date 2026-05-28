@@ -295,6 +295,22 @@ def render_ui_standard_styles():
             font-size: 0.85rem;
             font-weight: 600;
         }
+        .pos-cart-warning-badges {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 6px;
+            margin: 4px 0 6px;
+        }
+        .pos-cart-warning-badge {
+            display: inline-block;
+            padding: 3px 8px;
+            border-radius: 6px;
+            background: #fff7ed;
+            color: #c2410c;
+            font-size: 0.75rem;
+            font-weight: 700;
+            letter-spacing: 0.02em;
+        }
         .pos-cart-line-remove {
             margin-top: 4px;
         }
@@ -6174,10 +6190,195 @@ def _render_camera_scanner(module_key, pending_key):
     st.info("No barcode or QR code was detected in that image yet.")
 
 
+INVENTORY_POS_LOOKUP_COLUMNS = (
+    "id, item_name, item_code, category, brand, qty, price, cost_price, barcode, "
+    "min_stock_level, tax_rate, expiry_date"
+)
+INVENTORY_EXPIRY_WARNING_DAYS = 30
+
+
+def _parse_inventory_expiry_date(expiry_value):
+    expiry_text = str(expiry_value or "").strip()
+    if not expiry_text:
+        return None
+    try:
+        return datetime.fromisoformat(expiry_text).date()
+    except ValueError:
+        try:
+            return datetime.strptime(expiry_text, "%Y-%m-%d").date()
+        except ValueError:
+            return None
+
+
+def _compute_days_to_expiry(expiry_value):
+    expiry_date = _parse_inventory_expiry_date(expiry_value)
+    if expiry_date is None:
+        return None
+    return (expiry_date - datetime.now().date()).days
+
+
+def _get_inventory_stock_status(quantity, reorder_level):
+    qty = max(float(quantity or 0.0), 0.0)
+    reorder = max(float(reorder_level or 0.0), 0.0)
+    if qty <= 0:
+        return "OUT OF STOCK"
+    if qty <= reorder:
+        return "LOW STOCK"
+    return "OK"
+
+
+def _get_inventory_expiry_status(expiry_value):
+    days_to_expiry = _compute_days_to_expiry(expiry_value)
+    if days_to_expiry is None:
+        return "OK"
+    if days_to_expiry <= 0:
+        return "EXPIRED"
+    if days_to_expiry <= INVENTORY_EXPIRY_WARNING_DAYS:
+        return "EXPIRING SOON"
+    return "OK"
+
+
+def _inventory_stock_status_badge(stock_status):
+    if stock_status == "OUT OF STOCK":
+        return "⛔ OUT OF STOCK"
+    if stock_status == "LOW STOCK":
+        return "🔴 LOW STOCK"
+    return ""
+
+
+def _inventory_expiry_status_badge(expiry_status):
+    if expiry_status == "EXPIRED":
+        return "⛔ EXPIRED"
+    if expiry_status == "EXPIRING SOON":
+        return "⚠ EXPIRING SOON"
+    return ""
+
+
+def _format_pos_search_status_suffix(item_row):
+    item_row = _normalize_pos_item_row(item_row)
+    stock_status = _get_inventory_stock_status(item_row.get("qty"), item_row.get("min_stock_level"))
+    expiry_status = _get_inventory_expiry_status(item_row.get("expiry_date"))
+    suffix_parts = []
+    if stock_status == "OUT OF STOCK":
+        suffix_parts.append("⛔ OUT OF STOCK")
+    elif stock_status == "LOW STOCK":
+        suffix_parts.append("⚠ LOW STOCK")
+    if expiry_status == "EXPIRED":
+        suffix_parts.append("⛔ EXPIRED")
+    elif expiry_status == "EXPIRING SOON":
+        suffix_parts.append("⚠ EXPIRING SOON")
+    return f" | {' | '.join(suffix_parts)}" if suffix_parts else ""
+
+
+def _get_pos_add_block_reason(item_row):
+    item_row = _normalize_pos_item_row(item_row)
+    stock_status = _get_inventory_stock_status(item_row.get("qty"), item_row.get("min_stock_level"))
+    if stock_status == "OUT OF STOCK":
+        return "Out of stock — cannot add to cart."
+    expiry_status = _get_inventory_expiry_status(item_row.get("expiry_date"))
+    if expiry_status == "EXPIRED":
+        return "Expired item — cannot add to cart."
+    return None
+
+
+def _get_pos_cart_line_warning_badges(cart_line):
+    if not cart_line or bool(cart_line.get("is_manual")) or cart_line.get("inventory_item_id") is None:
+        return []
+    badges = []
+    stock_status = _get_inventory_stock_status(
+        cart_line.get("available_qty"),
+        cart_line.get("min_stock_level"),
+    )
+    if stock_status == "LOW STOCK":
+        badges.append("LOW STOCK")
+    expiry_status = _get_inventory_expiry_status(cart_line.get("expiry_date"))
+    if expiry_status == "EXPIRING SOON":
+        badges.append("EXPIRING SOON")
+    return badges
+
+
+def _render_pos_cart_warning_badges(cart_line):
+    badges = _get_pos_cart_line_warning_badges(cart_line)
+    if not badges:
+        return
+    badge_html = " ".join(
+        f'<span class="pos-cart-warning-badge">{html.escape(badge)}</span>' for badge in badges
+    )
+    st.markdown(f'<div class="pos-cart-warning-badges">{badge_html}</div>', unsafe_allow_html=True)
+
+
+def _compute_inventory_health_metrics(df):
+    if df is None or df.empty:
+        return {
+            "total_items": 0,
+            "low_stock_items": 0,
+            "expiring_soon": 0,
+            "out_of_stock": 0,
+            "inventory_value": 0.0,
+        }
+    quantity_series = df["quantity"] if "quantity" in df.columns else df.get("qty", pd.Series(dtype=float))
+    reorder_series = df["min_stock_level"] if "min_stock_level" in df.columns else pd.Series([0.0] * len(df))
+    expiry_series = df["expiry_date"] if "expiry_date" in df.columns else pd.Series([None] * len(df))
+    total_value_series = df["total_value"] if "total_value" in df.columns else pd.Series([0.0] * len(df))
+    stock_statuses = [
+        _get_inventory_stock_status(quantity_series.iloc[index], reorder_series.iloc[index])
+        for index in range(len(df))
+    ]
+    expiry_statuses = [_get_inventory_expiry_status(expiry_series.iloc[index]) for index in range(len(df))]
+    return {
+        "total_items": int(len(df)),
+        "low_stock_items": int(sum(status == "LOW STOCK" for status in stock_statuses)),
+        "expiring_soon": int(sum(status == "EXPIRING SOON" for status in expiry_statuses)),
+        "out_of_stock": int(sum(status == "OUT OF STOCK" for status in stock_statuses)),
+        "inventory_value": float(total_value_series.fillna(0).sum()),
+    }
+
+
+def _prepare_inventory_overview_dataframe(df):
+    if df is None or df.empty:
+        return df
+    enriched = df.copy()
+    enriched["stock_status"] = [
+        _get_inventory_stock_status(row.get("quantity"), row.get("min_stock_level"))
+        for _, row in enriched.iterrows()
+    ]
+    enriched["expiry_status"] = [
+        _get_inventory_expiry_status(row.get("expiry_date")) for _, row in enriched.iterrows()
+    ]
+    enriched["days_to_expiry"] = [
+        _compute_days_to_expiry(row.get("expiry_date")) for _, row in enriched.iterrows()
+    ]
+    enriched["Status"] = enriched["stock_status"]
+    enriched["Expiry Alert"] = [
+        _inventory_expiry_status_badge(status) or "OK"
+        for status in enriched["expiry_status"]
+    ]
+    return enriched
+
+
+def _invalidate_inventory_search_cache():
+    _cached_pos_inventory_search_rows.clear()
+
+
+@st.cache_data(ttl=60)
+def _cached_pos_inventory_search_rows(company_key, search_value):
+    normalized_search = str(search_value or "").strip()
+    if not normalized_search:
+        return []
+    conn = get_connection()
+    try:
+        return [
+            dict(row) if not isinstance(row, dict) else row
+            for row in _pos_inventory_search_rows(conn, company_key, normalized_search)
+        ]
+    finally:
+        conn.close()
+
+
 def _lookup_inventory_by_barcode(conn, company_key, barcode_value):
     return conn.execute(
-        """
-        SELECT id, item_name, item_code, category, brand, qty, price, cost_price, barcode, min_stock_level
+        f"""
+        SELECT {INVENTORY_POS_LOOKUP_COLUMNS}
         FROM inventory
         WHERE company_key = ? AND barcode = ?
         """,
@@ -6191,8 +6392,8 @@ def _lookup_inventory_for_pos(conn, company_key, search_value):
         return None, None, None
 
     exact_match = conn.execute(
-        """
-        SELECT id, item_name, item_code, category, brand, qty, price, cost_price, barcode, min_stock_level
+        f"""
+        SELECT {INVENTORY_POS_LOOKUP_COLUMNS}
         FROM inventory
         WHERE company_key = ?
           AND (
@@ -6215,8 +6416,8 @@ def _lookup_inventory_for_pos(conn, company_key, search_value):
         return exact_match, "item_name", "in_company"
 
     fallback_match = conn.execute(
-        """
-        SELECT id, item_name, item_code, category, brand, qty, price, cost_price, barcode, min_stock_level
+        f"""
+        SELECT {INVENTORY_POS_LOOKUP_COLUMNS}
         FROM inventory
         WHERE company_key = ?
           AND (
@@ -6281,11 +6482,10 @@ def _search_inventory_for_pos(conn, company_key, search_value):
     if not normalized_value:
         return []
     return conn.execute(
-        """
-        SELECT id, item_name, item_code, category, brand, qty, price, cost_price, barcode, min_stock_level, tax_rate
+        f"""
+        SELECT {INVENTORY_POS_LOOKUP_COLUMNS}
         FROM inventory
         WHERE company_key = ?
-          AND qty > 0
           AND (
               LOWER(item_name) LIKE LOWER(?)
               OR LOWER(COALESCE(item_code, '')) LIKE LOWER(?)
@@ -6874,6 +7074,7 @@ def _add_item_to_pos_cart(company_key, item_row):
         "tax_rate": float(tax_rate or 0.0),
         "available_qty": float(item_row["qty"] or 0.0),
         "min_stock_level": float(min_stock_level or 0.0),
+        "expiry_date": item_row.get("expiry_date"),
         "qty": 1,
         "is_manual": False,
         "line_discount_type": "amount",
@@ -8268,7 +8469,48 @@ def show_inventory(company_key, role):
                 conn.close()
             st.session_state.pop(inventory_pending_scan_key, None)
             st.session_state[inventory_scan_input_key] = ""
+            _invalidate_inventory_search_cache()
             st.rerun()
+
+    inventory_metrics = None
+    if role == "Demo":
+        demo_metrics_df = pd.DataFrame({
+            "quantity": [50, 8, 0],
+            "min_stock_level": [10, 10, 5],
+            "expiry_date": [None, (datetime.now().date() + timedelta(days=12)).isoformat(), None],
+            "total_value": [6000.0, 600.0, 0.0],
+        })
+        inventory_metrics = _compute_inventory_health_metrics(demo_metrics_df)
+    else:
+        metrics_conn = None
+        try:
+            metrics_conn = get_connection()
+            metrics_df = pd.read_sql_query(
+                """
+                SELECT qty as quantity, min_stock_level, expiry_date, (qty * cost_price) as total_value
+                FROM inventory
+                WHERE company_key = ?
+                """,
+                metrics_conn,
+                params=(company_key,),
+            )
+            inventory_metrics = _compute_inventory_health_metrics(metrics_df)
+        except Exception as exc:
+            logger.warning("Inventory metrics load failed: %s", sanitize_error_message(exc))
+        finally:
+            if metrics_conn:
+                metrics_conn.close()
+
+    if inventory_metrics is not None:
+        metrics_col1, metrics_col2, metrics_col3, metrics_col4, metrics_col5 = st.columns(5)
+        metrics_col1.metric("Total Items", inventory_metrics["total_items"])
+        metrics_col2.metric("Low Stock Items", inventory_metrics["low_stock_items"])
+        metrics_col3.metric("Expiring Soon", inventory_metrics["expiring_soon"])
+        metrics_col4.metric("Out of Stock", inventory_metrics["out_of_stock"])
+        metrics_col5.metric(
+            f"Inventory Value ({get_currency_symbol()})",
+            format_currency(inventory_metrics["inventory_value"]),
+        )
 
     tabs = st.tabs(["Stock Overview", "Stock In/Out", "Items Management"])
 
@@ -8298,8 +8540,17 @@ def show_inventory(company_key, role):
             conn.close()
 
             if not df.empty:
-                st.dataframe(format_currency_dataframe(df), use_container_width=True)
-                excel_bin = get_excel_bin(df)
+                overview_df = _prepare_inventory_overview_dataframe(df)
+                display_columns = [
+                    column
+                    for column in overview_df.columns
+                    if column not in {"stock_status", "expiry_status", "days_to_expiry"}
+                ]
+                st.dataframe(
+                    format_currency_dataframe(overview_df[display_columns]),
+                    use_container_width=True,
+                )
+                excel_bin = get_excel_bin(overview_df[display_columns])
                 if excel_bin:
                     st.download_button(
                         "📥 Export to Excel",
@@ -8308,19 +8559,19 @@ def show_inventory(company_key, role):
                         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                         key=f"inventory_export_{company_key}",
                     )
-                col1, col2, col3 = st.columns(3)
-                col1.metric("Total Items", len(df))
-                col2.metric(f"Total Value ({get_currency_symbol()})", format_currency(df["total_value"].sum()))
-                col3.metric("Low Stock Alerts", len(df[df['quantity'] < 10]))
                 if user_has_permission(role, "manage_inventory") and "id" in df.columns:
                     st.markdown("Edit Stock Item")
                     selected_edit_key = f"inventory_edit_selected_{company_key}"
                     delete_confirm_key = f"inventory_delete_confirm_{company_key}"
-                    for _, stock_row in df.iterrows():
+                    for _, stock_row in overview_df.iterrows():
                         name_col, edit_col, delete_col = st.columns([4, 1, 1])
+                        stock_badge = _inventory_stock_status_badge(stock_row.get("stock_status"))
+                        expiry_badge = _inventory_expiry_status_badge(stock_row.get("expiry_status"))
+                        badge_text = " ".join(part for part in (stock_badge, expiry_badge) if part)
                         name_col.caption(
                             f"{stock_row['item_name']} | Barcode {stock_row.get('barcode') or 'N/A'} | Qty {float(stock_row['quantity']):,.2f} | "
                             f"Sell GHS {float(stock_row['unit_price']):,.2f}"
+                            + (f" | {badge_text}" if badge_text else "")
                         )
                         if edit_col.button("Edit", key=f"inventory_edit_btn_{company_key}_{int(stock_row['id'])}"):
                             st.session_state[selected_edit_key] = int(stock_row["id"])
@@ -8339,6 +8590,7 @@ def show_inventory(company_key, role):
                             conn.commit()
                             log_audit_action(conn, company_key, role, "Inventory Item Deleted", "Inventory", f"Deleted item ID {int(delete_item_id)}")
                             conn.close()
+                            _invalidate_inventory_search_cache()
                             _clear_streamlit_state(delete_confirm_key, selected_edit_key)
                             st.session_state[delete_success_key] = True
                             st.rerun()
@@ -8430,6 +8682,7 @@ def show_inventory(company_key, role):
                                 conn.commit()
                                 log_audit_action(conn, company_key, role, "Inventory Item Updated", "Inventory", f"Updated item ID {int(edit_item_id)}")
                                 conn.close()
+                                _invalidate_inventory_search_cache()
                                 _clear_streamlit_state(selected_edit_key, delete_confirm_key)
                                 st.success("Entry Updated")
                                 st.rerun()
@@ -8584,6 +8837,7 @@ def show_inventory(company_key, role):
                                     branch_id=branch_id,
                                 )
                                 st.success(f"Recorded stock {movement_type.lower()} for {selected_item['item_name']}. New quantity: {new_qty:,.2f}.")
+                                _invalidate_inventory_search_cache()
                                 st.rerun()
 
                     movement_rows = conn.execute(
@@ -8797,6 +9051,7 @@ def show_inventory(company_key, role):
                         )
                     conn.commit()
                     conn.close()
+                    _invalidate_inventory_search_cache()
                     _increment_form_reset(inventory_form_reset_key)
                     st.session_state[success_key] = True
                     st.rerun()
@@ -9023,6 +9278,7 @@ def show_inventory(company_key, role):
                                     st.session_state.pop(inventory_import_validation_key, None)
                                     st.session_state.pop(inventory_import_preview_key, None)
                                     st.session_state.pop(inventory_import_mapping_key, None)
+                                    _invalidate_inventory_search_cache()
                                 except Exception as exc:
                                     if conn:
                                         conn.rollback()
@@ -9649,7 +9905,7 @@ def show_pos(company_key, company_name, role):
                 (company_key, active_branch_id),
             ).fetchone()
         items = conn.execute(
-            "SELECT id, item_name, item_code, barcode, category, brand, price, cost_price, tax_rate, qty, min_stock_level FROM inventory WHERE company_key = ? AND qty > 0",
+            f"SELECT {INVENTORY_POS_LOOKUP_COLUMNS} FROM inventory WHERE company_key = ? AND qty > 0",
             (company_key,),
         ).fetchall()
         customers = get_customer_balances(company_key, conn=conn)
@@ -9659,10 +9915,18 @@ def show_pos(company_key, company_name, role):
         branch_label = branch_row["branch_name"] if branch_row and "branch_name" in branch_row.keys() else ""
         barcode_input_source = company_row[1] if company_row and company_row[1] else "Keyboard Entry"
         items_df = (
-            pd.DataFrame(items, columns=["ID", "Item Name", "Item Code", "Barcode", "Category", "Brand", "Price", "Cost Price", "Tax Rate", "Qty", "Min Stock Level"])
+            pd.DataFrame(
+                items,
+                columns=[
+                    "ID", "Item Name", "Item Code", "Category", "Brand", "Qty", "Price",
+                    "Cost Price", "Barcode", "Min Stock Level", "Tax Rate", "Expiry Date",
+                ],
+            )
             if items
             else pd.DataFrame()
         )
+        if not items_df.empty:
+            items_df["Barcode"] = items_df["Barcode"].fillna("")
         receipt_html_key = f"pos_receipt_html_{company_key}"
         receipt_print_trigger_key = f"pos_receipt_print_trigger_{company_key}"
         do_print_key = "do_print"
@@ -9719,11 +9983,13 @@ def show_pos(company_key, company_name, role):
                             try:
                                 conn = get_connection()
                                 matched_item, lookup_source, match_scope = _lookup_inventory_for_pos(conn, company_key, pending_pos_barcode)
-                                if matched_item and match_scope == "in_company" and float(matched_item["qty"] or 0) > 0:
+                                normalized_match = _normalize_pos_item_row(matched_item) if matched_item else {}
+                                add_block_reason = _get_pos_add_block_reason(normalized_match) if matched_item and match_scope == "in_company" else None
+                                if matched_item and match_scope == "in_company" and not add_block_reason:
                                     st.session_state[checkout_complete_key] = False
                                     st.session_state.pop(receipt_key, None)
                                     st.session_state.pop(receipt_html_key, None)
-                                    cart_line = _add_item_to_pos_cart(company_key, _normalize_pos_item_row(matched_item))
+                                    cart_line = _add_item_to_pos_cart(company_key, normalized_match)
                                     scan_added = True
                                     logger.info(
                                         "POS scanner input matched item '%s' via %s for company %s",
@@ -9745,15 +10011,16 @@ def show_pos(company_key, company_name, role):
                                     if low_stock_warning:
                                         st.warning(low_stock_warning)
                                     _request_pos_barcode_scan_focus(company_key)
-                                elif matched_item and match_scope == "in_company":
+                                elif matched_item and match_scope == "in_company" and add_block_reason:
                                     logger.info(
-                                        "POS scanner found item '%s' with zero stock for company %s",
+                                        "POS scanner blocked add for item '%s' (%s) company %s",
                                         matched_item["item_name"],
+                                        add_block_reason,
                                         company_key,
                                     )
                                     _trigger_scan_feedback(
                                         pos_message_key,
-                                        "Product found but stock is zero. Please add stock before sale.",
+                                        add_block_reason,
                                         "warning",
                                     )
                                 elif matched_item and match_scope == "other_company":
@@ -9805,24 +10072,20 @@ def show_pos(company_key, company_name, role):
                         product_search_term = str(st.session_state.get(search_input_key, "") or "").strip()
                         manual_search_options = []
                         if len(product_search_term) >= 1:
-                            conn = None
                             try:
-                                conn = get_connection()
-                                manual_search_options = _pos_inventory_search_rows(conn, company_key, product_search_term)
+                                manual_search_options = _cached_pos_inventory_search_rows(company_key, product_search_term)
                             except Exception as exc:
                                 st.warning(build_user_safe_error(exc, role))
-                            finally:
-                                if conn:
-                                    conn.close()
                             if not manual_search_options:
                                 st.info("No matching stock items found for that search.")
                         if manual_search_options:
                             manual_option_labels = [
-                                "{name} | {identifier} | {price} | Stock {qty:,.2f}".format(
+                                "{name} | {identifier} | {price} | Stock {qty:,.2f}{suffix}".format(
                                     name=row["item_name"],
                                     identifier=row["barcode"] or row["item_code"] or "N/A",
                                     price=format_currency(float(row["price"] or 0.0)),
                                     qty=float(row["qty"] or 0.0),
+                                    suffix=_format_pos_search_status_suffix(row),
                                 )
                                 for row in manual_search_options
                             ]
@@ -9831,8 +10094,31 @@ def show_pos(company_key, company_name, role):
                                 manual_option_labels,
                                 key=search_results_key,
                             )
-                            if st.button("Add Search Result", key=f"pos_add_search_result_{company_key}", use_container_width=True):
-                                selected_search_row = manual_search_options[manual_option_labels.index(selected_search_label)]
+                            selected_search_row = manual_search_options[manual_option_labels.index(selected_search_label)]
+                            preview_stock_status = _get_inventory_stock_status(
+                                selected_search_row.get("qty"),
+                                selected_search_row.get("min_stock_level"),
+                            )
+                            preview_expiry_status = _get_inventory_expiry_status(selected_search_row.get("expiry_date"))
+                            preview_badges = " ".join(
+                                part
+                                for part in (
+                                    _inventory_stock_status_badge(preview_stock_status),
+                                    _inventory_expiry_status_badge(preview_expiry_status),
+                                )
+                                if part
+                            )
+                            if preview_badges:
+                                st.caption(f"Selected item: {preview_badges}")
+                            selected_add_block_reason = _get_pos_add_block_reason(selected_search_row)
+                            if selected_add_block_reason:
+                                st.warning(selected_add_block_reason)
+                            if st.button(
+                                "Add Search Result",
+                                key=f"pos_add_search_result_{company_key}",
+                                use_container_width=True,
+                                disabled=bool(selected_add_block_reason),
+                            ):
                                 st.session_state[checkout_complete_key] = False
                                 st.session_state.pop(receipt_key, None)
                                 st.session_state.pop(receipt_html_key, None)
@@ -9855,26 +10141,33 @@ def show_pos(company_key, company_name, role):
                                 st.rerun()
                         selected_item = st.selectbox("Select Item", items_df["Item Name"].tolist(), key=stock_item_key)
                         qty_to_sell = st.number_input("Quantity", min_value=1, value=1, key=stock_qty_key)
-                        if st.button("Add Selected Item", key=f"pos_add_selected_{company_key}", use_container_width=True):
+                        selected_picker_row = items_df.loc[items_df["Item Name"] == selected_item].iloc[0]
+                        picker_payload = {
+                            "id": int(selected_picker_row["ID"]),
+                            "item_name": selected_picker_row["Item Name"],
+                            "item_code": selected_picker_row["Item Code"],
+                            "barcode": selected_picker_row["Barcode"],
+                            "price": float(selected_picker_row["Price"] or 0.0),
+                            "cost_price": float(selected_picker_row["Cost Price"] or 0.0),
+                            "tax_rate": float(selected_picker_row["Tax Rate"] or 0.0),
+                            "qty": float(selected_picker_row["Qty"] or 0.0),
+                            "min_stock_level": float(selected_picker_row["Min Stock Level"] or 0.0),
+                            "expiry_date": selected_picker_row.get("Expiry Date"),
+                        }
+                        picker_add_block_reason = _get_pos_add_block_reason(picker_payload)
+                        if picker_add_block_reason:
+                            st.warning(picker_add_block_reason)
+                        if st.button(
+                            "Add Selected Item",
+                            key=f"pos_add_selected_{company_key}",
+                            use_container_width=True,
+                            disabled=bool(picker_add_block_reason),
+                        ):
                             st.session_state[checkout_complete_key] = False
                             st.session_state.pop(receipt_key, None)
                             st.session_state.pop(receipt_html_key, None)
-                            item_row = items_df.loc[items_df["Item Name"] == selected_item].iloc[0]
                             for _ in range(int(qty_to_sell)):
-                                _add_item_to_pos_cart(
-                                    company_key,
-                                    {
-                                        "id": int(item_row["ID"]),
-                                        "item_name": item_row["Item Name"],
-                                        "item_code": item_row["Item Code"],
-                                        "barcode": item_row["Barcode"],
-                                        "price": float(item_row["Price"] or 0.0),
-                                        "cost_price": float(item_row["Cost Price"] or 0.0),
-                                        "tax_rate": float(item_row["Tax Rate"] or 0.0),
-                                        "qty": float(item_row["Qty"] or 0.0),
-                                        "min_stock_level": float(item_row["Min Stock Level"] or 0.0),
-                                    },
-                                )
+                                _add_item_to_pos_cart(company_key, picker_payload)
                             added_line = next((line for line in st.session_state.get(cart_key, []) if str(line.get("item_name") or line.get("name")) == str(selected_item)), None)
                             _trigger_scan_feedback(pos_message_key, f"Added {selected_item} x{int(qty_to_sell)} to the cart.")
                             low_stock_warning = _get_pos_low_stock_warning(added_line)
@@ -9966,6 +10259,7 @@ def show_pos(company_key, company_name, role):
                         f'<div class="pos-cart-line-meta">{identifier} · {format_currency(unit_price)} each</div>',
                         unsafe_allow_html=True,
                     )
+                    _render_pos_cart_warning_badges(line)
 
                     st.markdown('<div class="pos-cart-line-qty">', unsafe_allow_html=True)
                     qty_row = st.columns([1, 2, 1])
@@ -10600,6 +10894,7 @@ def show_pos(company_key, company_name, role):
                             conn=conn,
                         )
                     conn.commit()
+                    _invalidate_inventory_search_cache()
                     log_audit_action(
                         conn,
                         company_key,
@@ -10861,6 +11156,7 @@ def show_pos(company_key, company_name, role):
                                     return_reference=_generate_pos_return_reference(),
                                 )
                                 return_conn.commit()
+                                _invalidate_inventory_search_cache()
                                 st.success(
                                     f"Return processed successfully. Return Reference: {return_result['return_reference']} | Refund Total: {format_currency(return_result['refund_total'])}"
                                 )
