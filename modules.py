@@ -694,6 +694,7 @@ from database import (
     ensure_company_trial_subscription,
     ensure_cashier_closings_schema,
     ensure_inventory_schema_integrity,
+    ensure_stock_movements_schema_integrity,
     ensure_pos_sales_schema,
     force_backup_after_company_creation,
     get_firebase_service_account_info,
@@ -4660,13 +4661,17 @@ def _serialize_pos_cart_payload(company_key, cashier, note=""):
     )
 
 
-def _restore_pos_cart_payload(company_key, payload_json):
+def _restore_pos_cart_payload(company_key, payload_json, conn=None):
     payload = json.loads(str(payload_json or "{}") or "{}")
     restored_cart = payload.get("cart") or []
     for line in restored_cart:
         line.setdefault("line_discount_type", "amount")
         line.setdefault("line_discount_value", float(line.get("line_discount") or 0.0))
         _recalculate_pos_line(line)
+    if conn is not None:
+        restored_cart, adjustment_messages = _revalidate_pos_cart_inventory(conn, company_key, restored_cart)
+        if adjustment_messages:
+            payload["revalidation_messages"] = adjustment_messages
     st.session_state[f"pos_cart_{company_key}"] = restored_cart
     discount_state = payload.get("discount_state") or {"type": "amount", "value": 0.0, "computed": 0.0}
     st.session_state[f"pos_cart_discount_{company_key}"] = {
@@ -4724,7 +4729,10 @@ def _resume_pos_suspended_sale(company_key, role, active_branch_id, checkout_com
         if not payload_row:
             st.warning("This suspended sale is no longer available.")
             return
-        _restore_pos_cart_payload(company_key, payload_row["cart_json"])
+        restored_payload = _restore_pos_cart_payload(company_key, payload_row["cart_json"], conn=resume_conn)
+        revalidation_messages = restored_payload.get("revalidation_messages") or []
+        if revalidation_messages:
+            st.warning("Suspended sale adjusted: " + " ".join(revalidation_messages))
         resume_conn.execute(
             "UPDATE pos_suspended_sales SET status = 'resumed', resumed_at = CURRENT_TIMESTAMP WHERE id = ?",
             (int(suspended_row["id"]),),
@@ -6211,10 +6219,23 @@ def _parse_inventory_expiry_date(expiry_value):
 
 
 def _compute_days_to_expiry(expiry_value):
-    expiry_date = _parse_inventory_expiry_date(expiry_value)
-    if expiry_date is None:
-        return None
-    return (expiry_date - datetime.now().date()).days
+    validation = _get_inventory_expiry_validation(expiry_value)
+    return validation.get("days_to_expiry")
+
+
+def _get_inventory_expiry_validation(expiry_value):
+    expiry_text = str(expiry_value or "").strip()
+    if not expiry_text:
+        return {"status": "OK", "days_to_expiry": None, "parsed_date": None}
+    parsed_date = _parse_inventory_expiry_date(expiry_value)
+    if parsed_date is None:
+        return {"status": "INVALID", "days_to_expiry": None, "parsed_date": None}
+    days_to_expiry = (parsed_date - datetime.now().date()).days
+    if days_to_expiry <= 0:
+        return {"status": "EXPIRED", "days_to_expiry": days_to_expiry, "parsed_date": parsed_date}
+    if days_to_expiry <= INVENTORY_EXPIRY_WARNING_DAYS:
+        return {"status": "EXPIRING_SOON", "days_to_expiry": days_to_expiry, "parsed_date": parsed_date}
+    return {"status": "OK", "days_to_expiry": days_to_expiry, "parsed_date": parsed_date}
 
 
 def _get_inventory_stock_status(quantity, reorder_level):
@@ -6228,14 +6249,13 @@ def _get_inventory_stock_status(quantity, reorder_level):
 
 
 def _get_inventory_expiry_status(expiry_value):
-    days_to_expiry = _compute_days_to_expiry(expiry_value)
-    if days_to_expiry is None:
-        return "OK"
-    if days_to_expiry <= 0:
-        return "EXPIRED"
-    if days_to_expiry <= INVENTORY_EXPIRY_WARNING_DAYS:
-        return "EXPIRING SOON"
-    return "OK"
+    status_map = {
+        "EXPIRING_SOON": "EXPIRING SOON",
+        "EXPIRED": "EXPIRED",
+        "INVALID": "INVALID",
+        "OK": "OK",
+    }
+    return status_map.get(_get_inventory_expiry_validation(expiry_value)["status"], "OK")
 
 
 def _inventory_stock_status_badge(stock_status):
@@ -6249,6 +6269,8 @@ def _inventory_stock_status_badge(stock_status):
 def _inventory_expiry_status_badge(expiry_status):
     if expiry_status == "EXPIRED":
         return "⛔ EXPIRED"
+    if expiry_status == "INVALID":
+        return "⚠ INVALID EXPIRY"
     if expiry_status == "EXPIRING SOON":
         return "⚠ EXPIRING SOON"
     return ""
@@ -6265,6 +6287,8 @@ def _format_pos_search_status_suffix(item_row):
         suffix_parts.append("⚠ LOW STOCK")
     if expiry_status == "EXPIRED":
         suffix_parts.append("⛔ EXPIRED")
+    elif expiry_status == "INVALID":
+        suffix_parts.append("⚠ INVALID EXPIRY")
     elif expiry_status == "EXPIRING SOON":
         suffix_parts.append("⚠ EXPIRING SOON")
     return f" | {' | '.join(suffix_parts)}" if suffix_parts else ""
@@ -6275,10 +6299,116 @@ def _get_pos_add_block_reason(item_row):
     stock_status = _get_inventory_stock_status(item_row.get("qty"), item_row.get("min_stock_level"))
     if stock_status == "OUT OF STOCK":
         return "Out of stock — cannot add to cart."
-    expiry_status = _get_inventory_expiry_status(item_row.get("expiry_date"))
-    if expiry_status == "EXPIRED":
+    expiry_validation = _get_inventory_expiry_validation(item_row.get("expiry_date"))
+    if expiry_validation["status"] == "EXPIRED":
         return "Expired item — cannot add to cart."
+    if expiry_validation["status"] == "INVALID":
+        return "Invalid expiry date — cannot add to cart."
     return None
+
+
+def _fetch_live_inventory_row_for_pos(conn, company_key, inventory_item_id):
+    return conn.execute(
+        f"""
+        SELECT {INVENTORY_POS_LOOKUP_COLUMNS}
+        FROM inventory
+        WHERE id = ? AND company_key = ?
+        LIMIT 1
+        """,
+        (int(inventory_item_id), company_key),
+    ).fetchone()
+
+
+def _validate_pos_checkout_inventory_line(conn, company_key, sale_line):
+    if bool(sale_line.get("is_manual")) or sale_line.get("inventory_item_id") is None:
+        return None
+    item_name = str(sale_line.get("item_name") or sale_line.get("name") or "Item")
+    live_row = _fetch_live_inventory_row_for_pos(conn, company_key, int(sale_line["inventory_item_id"]))
+    if not live_row:
+        return f"{item_name} is no longer in inventory."
+    live_item = _normalize_pos_item_row(live_row)
+    cart_qty = float(sale_line.get("qty") or 0.0)
+    available_qty = float(live_item.get("qty") or 0.0)
+    if cart_qty > available_qty:
+        return (
+            f"Insufficient stock for {item_name}. "
+            f"Available: {available_qty:,.2f}, in cart: {cart_qty:,.0f}."
+        )
+    add_block_reason = _get_pos_add_block_reason(live_item)
+    if add_block_reason:
+        return f"{item_name}: {add_block_reason}"
+    return None
+
+
+def _validate_pos_cart_at_checkout(conn, company_key, sale_cart):
+    for sale_line in sale_cart:
+        checkout_error = _validate_pos_checkout_inventory_line(conn, company_key, sale_line)
+        if checkout_error:
+            return checkout_error
+    return None
+
+
+def _revalidate_pos_cart_inventory(conn, company_key, cart_lines):
+    validated_lines = []
+    adjustment_messages = []
+    for line in cart_lines or []:
+        if bool(line.get("is_manual")) or line.get("inventory_item_id") is None:
+            validated_lines.append(line)
+            continue
+        item_name = str(line.get("item_name") or line.get("name") or "Item")
+        live_row = _fetch_live_inventory_row_for_pos(conn, company_key, int(line["inventory_item_id"]))
+        if not live_row:
+            adjustment_messages.append(f"Removed {item_name}: no longer in inventory.")
+            continue
+        live_item = _normalize_pos_item_row(live_row)
+        expiry_validation = _get_inventory_expiry_validation(live_item.get("expiry_date"))
+        if expiry_validation["status"] == "EXPIRED":
+            adjustment_messages.append(f"Removed {item_name}: expired.")
+            continue
+        if expiry_validation["status"] == "INVALID":
+            adjustment_messages.append(f"Removed {item_name}: invalid expiry date.")
+            continue
+        if float(live_item.get("qty") or 0.0) <= 0:
+            adjustment_messages.append(f"Removed {item_name}: out of stock.")
+            continue
+        line["available_qty"] = float(live_item.get("qty") or 0.0)
+        line["expiry_date"] = live_item.get("expiry_date")
+        line["tax_rate"] = float(live_item.get("tax_rate") or 0.0)
+        line["price"] = float(live_item.get("price") or line.get("price") or 0.0)
+        line["cost_price"] = float(live_item.get("cost_price") or line.get("cost_price") or 0.0)
+        line["min_stock_level"] = float(live_item.get("min_stock_level") or 0.0)
+        line["item_name"] = live_item.get("item_name") or line.get("item_name")
+        line["name"] = line["item_name"]
+        cart_qty = max(int(line.get("qty") or 1), 1)
+        max_available_qty = max(int(float(live_item.get("qty") or 0.0)), 1)
+        if cart_qty > max_available_qty:
+            line["qty"] = max_available_qty
+            adjustment_messages.append(
+                f"Reduced {item_name} quantity to {max_available_qty} (available stock)."
+            )
+        _recalculate_pos_line(line)
+        validated_lines.append(line)
+    return validated_lines, adjustment_messages
+
+
+def _get_pos_line_max_qty(line):
+    if bool(line.get("is_manual")) or line.get("inventory_item_id") is None:
+        return None
+    available_qty = float(line.get("available_qty") or 0.0)
+    if available_qty <= 0:
+        return 1
+    return max(int(available_qty), 1)
+
+
+def _apply_pos_cart_line_qty_limit(line, requested_qty):
+    if bool(line.get("is_manual")) or line.get("inventory_item_id") is None:
+        return max(int(requested_qty or 1), 1), False, None
+    requested = max(int(requested_qty or 1), 1)
+    max_qty = _get_pos_line_max_qty(line)
+    if max_qty is not None and requested > max_qty:
+        item_name = str(line.get("item_name") or line.get("name") or "Item")
+        return max_qty, True, f"{item_name}: quantity limited to available stock ({max_qty})."
+    return requested, False, None
 
 
 def _get_pos_cart_line_warning_badges(cart_line):
@@ -6294,6 +6424,8 @@ def _get_pos_cart_line_warning_badges(cart_line):
     expiry_status = _get_inventory_expiry_status(cart_line.get("expiry_date"))
     if expiry_status == "EXPIRING SOON":
         badges.append("EXPIRING SOON")
+    elif expiry_status == "INVALID":
+        badges.append("INVALID EXPIRY")
     return badges
 
 
@@ -6332,6 +6464,276 @@ def _compute_inventory_health_metrics(df):
         "out_of_stock": int(sum(status == "OUT OF STOCK" for status in stock_statuses)),
         "inventory_value": float(total_value_series.fillna(0).sum()),
     }
+
+
+STOCK_MOVEMENT_TYPE_ALIASES = {
+    "in": "STOCK_IN",
+    "stock_in": "STOCK_IN",
+    "out": "STOCK_OUT",
+    "stock_out": "STOCK_OUT",
+    "invoice sale": "POS_SALE",
+    "pos sale": "POS_SALE",
+    "return_refund_restock": "POS_RETURN",
+    "pos return": "POS_RETURN",
+    "adjustment": "ADJUSTMENT",
+    "import": "IMPORT",
+    "transfer": "TRANSFER",
+}
+
+
+def _normalize_stock_movement_type(movement_type):
+    normalized = str(movement_type or "").strip()
+    if not normalized:
+        return "ADJUSTMENT"
+    lowered = " ".join(
+        normalized.lower().replace("/", " ").replace("-", " ").replace("_", " ").split()
+    ).replace(" ", "_")
+    if lowered in STOCK_MOVEMENT_TYPE_ALIASES:
+        return STOCK_MOVEMENT_TYPE_ALIASES[lowered]
+    spaced = lowered.replace("_", " ")
+    if spaced in STOCK_MOVEMENT_TYPE_ALIASES:
+        return STOCK_MOVEMENT_TYPE_ALIASES[spaced]
+    return normalized.upper().replace(" ", "_")
+
+
+def _stock_movement_qty_change(movement_type, quantity):
+    normalized_type = _normalize_stock_movement_type(movement_type)
+    qty = abs(float(quantity or 0.0))
+    if normalized_type in {"STOCK_OUT", "POS_SALE"}:
+        return -qty
+    return qty
+
+
+def _insert_stock_movement_record(
+    conn,
+    *,
+    company_key,
+    inventory_item_id,
+    item_name,
+    movement_type,
+    quantity,
+    previous_qty,
+    new_qty,
+    created_by,
+    branch_id=None,
+    reason=None,
+    reference=None,
+    notes=None,
+):
+    movement_cursor = conn.execute(
+        """
+        INSERT INTO stock_movements (
+            company_key, branch_id, inventory_item_id, item_name, movement_type,
+            quantity, reason, previous_qty, new_qty, created_by, created_at,
+            reference, notes, status, approval_status
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?, ?, 'Approved', 'Approved')
+        """,
+        (
+            company_key,
+            str(branch_id) if branch_id else None,
+            int(inventory_item_id),
+            str(item_name or ""),
+            _normalize_stock_movement_type(movement_type),
+            abs(float(quantity or 0.0)),
+            str(reason or "").strip() or None,
+            float(previous_qty or 0.0),
+            float(new_qty or 0.0),
+            str(created_by or ""),
+            str(reference or "").strip() or None,
+            str(notes or "").strip() or None,
+        ),
+    )
+    return int(movement_cursor.lastrowid)
+
+
+def _fetch_recent_inventory_movement_rows(conn, company_key, branch_id=None, limit=50):
+    query = """
+        SELECT
+            created_at,
+            item_name,
+            movement_type,
+            quantity,
+            previous_qty,
+            new_qty,
+            created_by,
+            reference,
+            COALESCE(notes, reason) AS notes
+        FROM stock_movements
+        WHERE company_key = ?
+    """
+    params = [company_key]
+    if branch_id:
+        query += " AND COALESCE(branch_id, '') = ?"
+        params.append(str(branch_id))
+    query += " ORDER BY created_at DESC, id DESC LIMIT ?"
+    params.append(int(limit))
+    rows = conn.execute(query, tuple(params)).fetchall()
+    movement_rows = []
+    for row in rows:
+        movement_row = dict(row)
+        movement_row["movement_type"] = _normalize_stock_movement_type(movement_row.get("movement_type"))
+        movement_row["qty_change"] = _stock_movement_qty_change(
+            movement_row.get("movement_type"),
+            movement_row.get("quantity"),
+        )
+        movement_rows.append(movement_row)
+    return movement_rows
+
+
+def _receive_inventory_stock(
+    conn,
+    company_key,
+    role,
+    *,
+    inventory_item_id,
+    qty_received,
+    unit_cost=None,
+    supplier_name=None,
+    batch_number=None,
+    expiry_date=None,
+    reference_number=None,
+    notes=None,
+    branch_id=None,
+):
+    qty_value = float(qty_received or 0.0)
+    if qty_value <= 0:
+        raise ValueError("Quantity received must be greater than zero.")
+    expiry_value = None
+    if expiry_date is not None:
+        if hasattr(expiry_date, "isoformat"):
+            expiry_value = expiry_date.isoformat()
+        else:
+            expiry_value = str(expiry_date).strip() or None
+        if expiry_value and _get_inventory_expiry_validation(expiry_value)["status"] == "INVALID":
+            raise ValueError("Invalid expiry date.")
+
+    item_row = conn.execute(
+        """
+        SELECT id, item_name, qty, cost_price, supplier_name, batch_number, expiry_date
+        FROM inventory
+        WHERE id = ? AND company_key = ?
+        LIMIT 1
+        """,
+        (int(inventory_item_id), company_key),
+    ).fetchone()
+    if not item_row:
+        raise ValueError("Inventory item could not be found.")
+
+    previous_qty = float(item_row["qty"] or 0.0)
+    new_qty = previous_qty + qty_value
+    update_fields = ["qty = ?", "updated_at = CURRENT_TIMESTAMP"]
+    update_values = [new_qty]
+    if unit_cost is not None and float(unit_cost or 0.0) > 0:
+        update_fields.append("cost_price = ?")
+        update_values.append(float(unit_cost))
+    if supplier_name:
+        update_fields.append("supplier_name = ?")
+        update_values.append(str(supplier_name).strip())
+    if batch_number:
+        update_fields.append("batch_number = ?")
+        update_values.append(str(batch_number).strip())
+    if expiry_value:
+        update_fields.append("expiry_date = ?")
+        update_values.append(expiry_value)
+    update_values.extend([int(inventory_item_id), company_key])
+    conn.execute(
+        f"""
+        UPDATE inventory
+        SET {", ".join(update_fields)}
+        WHERE id = ? AND company_key = ?
+        """,
+        tuple(update_values),
+    )
+    movement_reference = str(reference_number or "").strip() or f"RCV-{int(inventory_item_id)}-{datetime.now().strftime('%Y%m%d%H%M%S')}"
+    movement_notes = str(notes or "").strip()
+    if supplier_name:
+        movement_notes = (movement_notes + f" | Supplier: {supplier_name}").strip(" |")
+    _insert_stock_movement_record(
+        conn,
+        company_key=company_key,
+        inventory_item_id=int(inventory_item_id),
+        item_name=item_row["item_name"],
+        movement_type="STOCK_IN",
+        quantity=qty_value,
+        previous_qty=previous_qty,
+        new_qty=new_qty,
+        created_by=role,
+        branch_id=branch_id,
+        reason="Receive Stock",
+        reference=movement_reference,
+        notes=movement_notes or None,
+    )
+    return {
+        "item_name": item_row["item_name"],
+        "previous_qty": previous_qty,
+        "new_qty": new_qty,
+        "reference": movement_reference,
+    }
+
+
+def _filter_inventory_overview_dataframe(overview_df, filter_label):
+    if overview_df is None or overview_df.empty or str(filter_label or "All").strip() == "All":
+        return overview_df
+    label = str(filter_label or "").strip().upper()
+    if label == "OK":
+        return overview_df[
+            (overview_df["stock_status"] == "OK") & (overview_df["expiry_status"] == "OK")
+        ]
+    if label == "LOW STOCK":
+        return overview_df[overview_df["stock_status"] == "LOW STOCK"]
+    if label == "OUT OF STOCK":
+        return overview_df[overview_df["stock_status"] == "OUT OF STOCK"]
+    if label == "EXPIRING SOON":
+        return overview_df[overview_df["expiry_status"] == "EXPIRING SOON"]
+    if label == "EXPIRED":
+        return overview_df[overview_df["expiry_status"] == "EXPIRED"]
+    if label == "INVALID EXPIRY":
+        return overview_df[overview_df["expiry_status"] == "INVALID"]
+    return overview_df
+
+
+def _render_recent_inventory_movements_panel(company_key, role, branch_id=None):
+    if role == "Demo":
+        st.caption("Movement history is disabled in Demo mode.")
+        return
+    with st.expander("Recent Inventory Movements", expanded=False):
+        movement_conn = None
+        try:
+            movement_conn = get_connection()
+            ensure_stock_movements_schema_integrity(movement_conn)
+            movement_rows = _fetch_recent_inventory_movement_rows(
+                movement_conn,
+                company_key,
+                branch_id=branch_id,
+                limit=50,
+            )
+        except Exception as exc:
+            st.warning(build_user_safe_error(exc, role))
+            return
+        finally:
+            if movement_conn:
+                movement_conn.close()
+        if not movement_rows:
+            st.caption("No inventory movements recorded yet.")
+            return
+        movement_df = pd.DataFrame(
+            [
+                {
+                    "Date/Time": row.get("created_at"),
+                    "Item": row.get("item_name"),
+                    "Movement Type": row.get("movement_type"),
+                    "Qty Change": row.get("qty_change"),
+                    "Before Qty": row.get("previous_qty"),
+                    "After Qty": row.get("new_qty"),
+                    "User/Cashier": row.get("created_by"),
+                    "Reference": row.get("reference"),
+                    "Notes": row.get("notes"),
+                }
+                for row in movement_rows
+            ]
+        )
+        st.dataframe(movement_df, use_container_width=True, hide_index=True)
 
 
 def _prepare_inventory_overview_dataframe(df):
@@ -8512,6 +8914,12 @@ def show_inventory(company_key, role):
             format_currency(inventory_metrics["inventory_value"]),
         )
 
+    _render_recent_inventory_movements_panel(
+        company_key,
+        role,
+        branch_id=st.session_state.get("active_branch_id"),
+    )
+
     tabs = st.tabs(["Stock Overview", "Stock In/Out", "Items Management"])
 
     with tabs[0]:
@@ -8541,16 +8949,51 @@ def show_inventory(company_key, role):
 
             if not df.empty:
                 overview_df = _prepare_inventory_overview_dataframe(df)
+                inventory_health_filter_key = f"inventory_health_filter_{company_key}"
+                inventory_receive_prefill_key = f"inventory_receive_prefill_id_{company_key}"
+                health_filter = st.radio(
+                    "Inventory Health Filter",
+                    ["All", "OK", "LOW STOCK", "OUT OF STOCK", "EXPIRING SOON", "EXPIRED", "INVALID EXPIRY"],
+                    horizontal=True,
+                    key=inventory_health_filter_key,
+                )
+                filtered_overview_df = _filter_inventory_overview_dataframe(overview_df, health_filter)
+                low_stock_df = overview_df[overview_df["stock_status"].isin(["LOW STOCK", "OUT OF STOCK"])]
+                with st.expander("Low Stock Action Center", expanded=not low_stock_df.empty):
+                    if low_stock_df.empty:
+                        st.caption("No low-stock or out-of-stock items right now.")
+                    else:
+                        for _, low_stock_row in low_stock_df.iterrows():
+                            action_cols = st.columns([3, 1, 1, 1])
+                            action_cols[0].markdown(
+                                f"**{low_stock_row['item_name']}** — Qty {float(low_stock_row['quantity']):,.2f} "
+                                f"(reorder {float(low_stock_row.get('min_stock_level') or 0):,.2f})"
+                            )
+                            action_cols[1].caption(
+                                f"Supplier: {low_stock_row.get('supplier_name') or 'N/A'}"
+                            )
+                            action_cols[2].caption(_inventory_stock_status_badge(low_stock_row.get("stock_status")))
+                            if action_cols[3].button(
+                                "Quick Stock-In",
+                                key=f"inventory_quick_stock_in_{company_key}_{int(low_stock_row['id'])}",
+                            ):
+                                st.session_state[inventory_receive_prefill_key] = int(low_stock_row["id"])
+                                st.info(
+                                    f"{low_stock_row['item_name']} is ready in Stock In/Out → Receive Stock."
+                                )
                 display_columns = [
                     column
-                    for column in overview_df.columns
+                    for column in filtered_overview_df.columns
                     if column not in {"stock_status", "expiry_status", "days_to_expiry"}
                 ]
-                st.dataframe(
-                    format_currency_dataframe(overview_df[display_columns]),
-                    use_container_width=True,
-                )
-                excel_bin = get_excel_bin(overview_df[display_columns])
+                if filtered_overview_df.empty:
+                    st.info(f"No items match the selected filter: {health_filter}.")
+                else:
+                    st.dataframe(
+                        format_currency_dataframe(filtered_overview_df[display_columns]),
+                        use_container_width=True,
+                    )
+                excel_bin = get_excel_bin(filtered_overview_df[display_columns])
                 if excel_bin:
                     st.download_button(
                         "📥 Export to Excel",
@@ -8716,6 +9159,7 @@ def show_inventory(company_key, role):
                 if not stock_items:
                     st.info("Add inventory items first before recording stock movements.")
                 else:
+                    ensure_stock_movements_schema_integrity(conn)
                     stock_options = [
                         (
                             f"{row['item_name']} | Barcode {row['barcode'] or 'N/A'} | Available {float(row['qty'] or 0):,.2f}",
@@ -8724,6 +9168,155 @@ def show_inventory(company_key, role):
                         for row in stock_items
                     ]
                     option_labels = [label for label, _ in stock_options]
+                    inventory_receive_prefill_key = f"inventory_receive_prefill_id_{company_key}"
+                    inventory_receive_form_reset_key = f"inventory_receive_form_reset_{company_key}"
+                    receive_prefill_id = st.session_state.get(inventory_receive_prefill_key)
+                    receive_default_index = 0
+                    if receive_prefill_id is not None:
+                        for option_index, (_, option_item_id) in enumerate(stock_options):
+                            if int(option_item_id) == int(receive_prefill_id):
+                                receive_default_index = option_index
+                                break
+                        st.info("Item pre-selected from Low Stock Action Center.")
+                    supplier_options = _load_registered_supplier_names(company_key)
+                    st.markdown("### Receive Stock")
+                    with st.form(f"inventory_receive_stock_form_{company_key}", clear_on_submit=True):
+                        receive_supplier_key = _form_widget_key(
+                            f"inventory_receive_supplier_{company_key}",
+                            inventory_receive_form_reset_key,
+                        )
+                        receive_item_key = _form_widget_key(
+                            f"inventory_receive_item_{company_key}",
+                            inventory_receive_form_reset_key,
+                        )
+                        receive_qty_key = _form_widget_key(
+                            f"inventory_receive_qty_{company_key}",
+                            inventory_receive_form_reset_key,
+                        )
+                        receive_cost_key = _form_widget_key(
+                            f"inventory_receive_unit_cost_{company_key}",
+                            inventory_receive_form_reset_key,
+                        )
+                        receive_batch_key = _form_widget_key(
+                            f"inventory_receive_batch_{company_key}",
+                            inventory_receive_form_reset_key,
+                        )
+                        receive_expiry_enabled_key = _form_widget_key(
+                            f"inventory_receive_expiry_enabled_{company_key}",
+                            inventory_receive_form_reset_key,
+                        )
+                        receive_expiry_date_key = _form_widget_key(
+                            f"inventory_receive_expiry_date_{company_key}",
+                            inventory_receive_form_reset_key,
+                        )
+                        receive_reference_key = _form_widget_key(
+                            f"inventory_receive_reference_{company_key}",
+                            inventory_receive_form_reset_key,
+                        )
+                        receive_notes_key = _form_widget_key(
+                            f"inventory_receive_notes_{company_key}",
+                            inventory_receive_form_reset_key,
+                        )
+                        if supplier_options:
+                            st.selectbox(
+                                "Supplier (optional)",
+                                [""] + supplier_options,
+                                key=receive_supplier_key,
+                            )
+                        else:
+                            st.text_input("Supplier (optional)", key=receive_supplier_key)
+                        receive_item_label = st.selectbox(
+                            "Item",
+                            option_labels,
+                            index=receive_default_index,
+                            key=receive_item_key,
+                        )
+                        receive_qty = st.number_input(
+                            "Qty Received",
+                            min_value=0.01,
+                            value=1.0,
+                            step=1.0,
+                            key=receive_qty_key,
+                        )
+                        receive_unit_cost = st.number_input(
+                            f"Unit Cost ({get_currency_symbol()})",
+                            min_value=0.0,
+                            value=0.0,
+                            step=0.01,
+                            key=receive_cost_key,
+                        )
+                        receive_batch_number = st.text_input("Batch Number", key=receive_batch_key)
+                        st.checkbox("Set Expiry Date", key=receive_expiry_enabled_key)
+                        if bool(st.session_state.get(receive_expiry_enabled_key, False)):
+                            st.date_input(
+                                "Expiry Date",
+                                value=datetime.now().date(),
+                                key=receive_expiry_date_key,
+                            )
+                        receive_reference_number = st.text_input("Reference Number", key=receive_reference_key)
+                        receive_notes = st.text_area("Notes", key=receive_notes_key)
+                        receive_submitted = st.form_submit_button("Receive Stock")
+
+                    if receive_submitted:
+                        if not require_permission(
+                            role,
+                            "manage_inventory",
+                            action_label="receive inventory stock",
+                            company_key=company_key,
+                            branch_id=branch_id,
+                        ):
+                            return
+                        try:
+                            receive_item_id = next(
+                                item_id for label, item_id in stock_options if label == receive_item_label
+                            )
+                            receive_supplier_value = str(st.session_state.get(receive_supplier_key, "") or "").strip()
+                            receive_expiry_value = (
+                                st.session_state.get(receive_expiry_date_key)
+                                if bool(st.session_state.get(receive_expiry_enabled_key, False))
+                                else None
+                            )
+                            receive_result = _receive_inventory_stock(
+                                conn,
+                                company_key,
+                                role,
+                                inventory_item_id=int(receive_item_id),
+                                qty_received=float(receive_qty or 0.0),
+                                unit_cost=float(receive_unit_cost or 0.0),
+                                supplier_name=receive_supplier_value or None,
+                                batch_number=str(st.session_state.get(receive_batch_key, "") or "").strip(),
+                                expiry_date=receive_expiry_value,
+                                reference_number=str(st.session_state.get(receive_reference_key, "") or "").strip(),
+                                notes=str(st.session_state.get(receive_notes_key, "") or "").strip(),
+                                branch_id=branch_id,
+                            )
+                            conn.commit()
+                            log_audit_action(
+                                conn,
+                                company_key,
+                                role,
+                                "Inventory Stock Received",
+                                "Inventory",
+                                (
+                                    f"{receive_result['item_name']} | +{float(receive_qty or 0.0):,.2f} | "
+                                    f"{receive_result['previous_qty']:,.2f} -> {receive_result['new_qty']:,.2f} | "
+                                    f"Ref {receive_result['reference']}"
+                                ),
+                                branch_id=branch_id,
+                            )
+                            st.session_state.pop(inventory_receive_prefill_key, None)
+                            _invalidate_inventory_search_cache()
+                            _increment_form_reset(inventory_receive_form_reset_key)
+                            st.success(
+                                f"Received stock for {receive_result['item_name']}. "
+                                f"New quantity: {receive_result['new_qty']:,.2f}."
+                            )
+                            st.rerun()
+                        except Exception as exc:
+                            conn.rollback()
+                            st.error(build_user_safe_error(exc, role))
+
+                    st.markdown("### Adjust Stock (In/Out)")
                     selected_label = st.selectbox(
                         "Select Item",
                         option_labels,
@@ -8767,31 +9360,27 @@ def show_inventory(company_key, role):
                                 )
                                 movement_value = round(float(selected_item["cost_price"] or 0.0) * movement_qty, 2)
                                 movement_status = "Posted" if movement_value > 0 else "Approved"
-                                movement_cursor = conn.execute(
-                                    """
-                                    INSERT INTO stock_movements (
-                                        company_key, branch_id, inventory_item_id, item_name,
-                                        movement_type, quantity, reason, previous_qty, new_qty,
-                                        status, approval_status, created_by
-                                    )
-                                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                                    """,
-                                    (
-                                        company_key,
-                                        branch_id,
-                                        selected_item_id,
-                                        selected_item["item_name"],
-                                        movement_type,
-                                        movement_qty,
-                                        reason,
-                                        current_qty,
-                                        new_qty,
-                                        movement_status,
-                                        movement_status,
-                                        role,
-                                    ),
+                                reason_key = str(reason or "").strip().lower()
+                                if reason_key == "transfer":
+                                    recorded_movement_type = "TRANSFER"
+                                elif reason_key == "adjustment":
+                                    recorded_movement_type = "ADJUSTMENT"
+                                else:
+                                    recorded_movement_type = "STOCK_IN" if movement_type == "In" else "STOCK_OUT"
+                                movement_id = _insert_stock_movement_record(
+                                    conn,
+                                    company_key=company_key,
+                                    inventory_item_id=selected_item_id,
+                                    item_name=selected_item["item_name"],
+                                    movement_type=recorded_movement_type,
+                                    quantity=movement_qty,
+                                    previous_qty=current_qty,
+                                    new_qty=new_qty,
+                                    created_by=role,
+                                    branch_id=branch_id,
+                                    reason=reason,
+                                    reference=f"STK-{selected_item_id}-{datetime.now().strftime('%Y%m%d%H%M%S')}",
                                 )
-                                movement_id = int(movement_cursor.lastrowid)
                                 if movement_value > 0:
                                     inventory_account_id = int(selected_item["inventory_account_id"] or get_account_id(conn, "Inventory", "Asset"))
                                     cogs_account_id = int(selected_item["cogs_account_id"] or get_account_id(conn, "Cost of Goods Sold", "Expense"))
@@ -8839,24 +9428,6 @@ def show_inventory(company_key, role):
                                 st.success(f"Recorded stock {movement_type.lower()} for {selected_item['item_name']}. New quantity: {new_qty:,.2f}.")
                                 _invalidate_inventory_search_cache()
                                 st.rerun()
-
-                    movement_rows = conn.execute(
-                        """
-                        SELECT created_at, item_name, movement_type, quantity, reason, previous_qty, new_qty, created_by
-                        FROM stock_movements
-                        WHERE company_key = ?
-                        ORDER BY created_at DESC, id DESC
-                        LIMIT 25
-                        """,
-                        (company_key,),
-                    ).fetchall()
-                    if movement_rows:
-                        st.markdown("Recent Stock Movements")
-                        movement_df = pd.DataFrame(
-                            movement_rows,
-                            columns=["Date", "Item", "Type", "Qty", "Reason", "Previous Qty", "New Qty", "Recorded By"],
-                        )
-                        st.dataframe(movement_df, use_container_width=True, hide_index=True)
             except Exception as exc:
                 st.error(build_user_safe_error(exc, st.session_state.get("user", {}).get("role")))
             finally:
@@ -10232,6 +10803,10 @@ def show_pos(company_key, company_name, role):
             section_header("Active Cart")
             st.markdown('<div class="eka-card pos-cart-panel">', unsafe_allow_html=True)
             if cart:
+                pos_qty_clamp_notice_key = f"pos_qty_clamp_notice_{company_key}"
+                clamp_notice = st.session_state.pop(pos_qty_clamp_notice_key, None)
+                if clamp_notice:
+                    st.warning(clamp_notice)
                 st.markdown("**Line Items**")
 
                 for index, line in enumerate(list(cart)):
@@ -10274,13 +10849,16 @@ def show_pos(company_key, company_name, role):
                         st.session_state[qty_widget_key] = cart_qty
                     if qty_widget_key not in st.session_state:
                         st.session_state[qty_widget_key] = cart_qty
-                    updated_qty = qty_row[1].number_input(
-                        "Qty",
-                        min_value=1,
-                        step=1,
-                        key=qty_widget_key,
-                        label_visibility="collapsed",
-                    )
+                    line_max_qty = _get_pos_line_max_qty(line)
+                    number_input_kwargs = {
+                        "min_value": 1,
+                        "step": 1,
+                        "key": qty_widget_key,
+                        "label_visibility": "collapsed",
+                    }
+                    if line_max_qty is not None:
+                        number_input_kwargs["max_value"] = line_max_qty
+                    updated_qty = qty_row[1].number_input("Qty", **number_input_kwargs)
                     inc_clicked = qty_row[2].button(
                         "+",
                         key=f"pos_line_inc_{company_key}_{index}",
@@ -10306,7 +10884,10 @@ def show_pos(company_key, company_name, role):
                             label_visibility="visible",
                         )
 
-                    line["qty"] = int(updated_qty)
+                    applied_qty, qty_clamped, qty_clamp_message = _apply_pos_cart_line_qty_limit(line, updated_qty)
+                    line["qty"] = applied_qty
+                    if qty_clamped and qty_clamp_message:
+                        st.session_state[pos_qty_clamp_notice_key] = qty_clamp_message
                     line["line_discount_type"] = str(updated_discount_type or "Amount").lower()
                     line["line_discount_value"] = float(updated_discount)
                     _recalculate_pos_line(line)
@@ -10339,8 +10920,11 @@ def show_pos(company_key, company_name, role):
                     st.markdown("</div>", unsafe_allow_html=True)
 
                     if inc_clicked:
-                        new_qty = int(line.get("qty") or 1) + 1
-                        line["qty"] = new_qty
+                        requested_qty = int(line.get("qty") or 1) + 1
+                        applied_qty, qty_clamped, qty_clamp_message = _apply_pos_cart_line_qty_limit(line, requested_qty)
+                        line["qty"] = applied_qty
+                        if qty_clamped and qty_clamp_message:
+                            st.session_state[pos_qty_clamp_notice_key] = qty_clamp_message
                         st.session_state[qty_sync_key] = True
                         _recalculate_pos_line(line)
                         st.session_state[cart_key] = cart
@@ -10735,6 +11319,12 @@ def show_pos(company_key, company_name, role):
                 try:
                     conn = get_connection()
                     ensure_pos_sales_schema(conn)
+                    checkout_inventory_error = _validate_pos_cart_at_checkout(conn, company_key, sale_cart)
+                    if checkout_inventory_error:
+                        st.session_state[checkout_complete_key] = False
+                        st.error(checkout_inventory_error)
+                        conn.close()
+                        return
                     line_items = []
                     total = round(float(current_summary["grand_total"] or 0.0), 2)
                     pos_tax_total = round(float(current_summary["tax_total"] or 0.0), 2)

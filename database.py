@@ -5299,6 +5299,60 @@ def ensure_inventory_schema_integrity(conn):
             cursor.execute(f"ALTER TABLE inventory_import_batches ADD COLUMN {column_name} {column_def}")
     cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_inventory_import_batches_reference ON inventory_import_batches(import_reference)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_inventory_import_batches_company ON inventory_import_batches(company_key, created_at)")
+    ensure_stock_movements_schema_integrity(conn)
+
+
+def ensure_stock_movements_schema_integrity(conn):
+    """
+    Ensure additive stock movement audit columns exist for inventory intake traceability.
+    """
+    if conn is None:
+        raise RuntimeError("Database connection is required for stock movement schema integrity checks.")
+
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS stock_movements (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            company_key TEXT NOT NULL,
+            branch_id TEXT,
+            inventory_item_id INTEGER NOT NULL,
+            item_name TEXT NOT NULL,
+            movement_type TEXT NOT NULL,
+            quantity REAL NOT NULL,
+            reason TEXT,
+            previous_qty REAL DEFAULT 0,
+            new_qty REAL DEFAULT 0,
+            created_by TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (inventory_item_id) REFERENCES inventory(id) ON DELETE CASCADE,
+            FOREIGN KEY (company_key) REFERENCES companies(key) ON DELETE CASCADE
+        )
+        """
+    )
+    cursor.execute("PRAGMA table_info(stock_movements)")
+    stock_movement_columns = {row[1] for row in cursor.fetchall()}
+    stock_movement_column_defs = {
+        "branch_id": "TEXT",
+        "reference": "TEXT",
+        "notes": "TEXT",
+        "status": "TEXT DEFAULT 'Approved'",
+        "approval_status": "TEXT DEFAULT 'Approved'",
+        "posted_entry_id": "INTEGER",
+        "last_journal_sync_at": "TIMESTAMP",
+        "submitted_at": "TIMESTAMP",
+        "approved_at": "TIMESTAMP",
+        "approved_by": "TEXT",
+        "cancelled_at": "TIMESTAMP",
+        "cancelled_by": "TEXT",
+    }
+    for column_name, column_def in stock_movement_column_defs.items():
+        if column_name not in stock_movement_columns:
+            cursor.execute(f"ALTER TABLE stock_movements ADD COLUMN {column_name} {column_def}")
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_stock_movements_company_created ON stock_movements(company_key, created_at DESC)"
+    )
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_stock_movements_item ON stock_movements(inventory_item_id)")
 
 
 def ensure_cashier_closings_schema(conn):
