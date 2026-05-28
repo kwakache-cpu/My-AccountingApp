@@ -4454,6 +4454,92 @@ def _build_pos_receipt_print_document(receipt_html_fragment):
     )
 
 
+def _fetch_pos_receipt_data(conn, *, company_key, sale_id, branch_id=None, cashier=None):
+    """
+    Fetch a POS sale from the additive POS tables and rebuild a receipt_data dict compatible with:
+    - _build_receipt()
+    - _build_receipt_html()
+
+    Phase 2E limitation: payment_reference and discount_approved_by may be unavailable and are omitted.
+    """
+    ensure_pos_sales_schema(conn)
+    params = [company_key, int(sale_id)]
+    query = """
+        SELECT *
+        FROM pos_sales
+        WHERE company_key = ?
+          AND id = ?
+    """
+    if branch_id:
+        query += " AND COALESCE(branch_id, '') = ?"
+        params.append(str(branch_id))
+    if cashier:
+        query += " AND COALESCE(cashier, '') = ?"
+        params.append(str(cashier))
+    query += " LIMIT 1"
+    sale_row = conn.execute(query, tuple(params)).fetchone()
+    if not sale_row:
+        return None
+
+    sale = dict(sale_row)
+    company_row = conn.execute(
+        "SELECT name FROM companies WHERE key = ? LIMIT 1",
+        (company_key,),
+    ).fetchone()
+    company_name = str(company_row["name"] if company_row and "name" in company_row.keys() else "")
+
+    branch_name = ""
+    normalized_branch_id = str(sale.get("branch_id") or "").strip()
+    if normalized_branch_id:
+        branch_row = conn.execute(
+            "SELECT branch_name FROM branches WHERE company_key = ? AND branch_id = ? LIMIT 1",
+            (company_key, normalized_branch_id),
+        ).fetchone()
+        if branch_row and "branch_name" in branch_row.keys():
+            branch_name = str(branch_row["branch_name"] or "")
+
+    line_rows = conn.execute(
+        """
+        SELECT item_name, qty_sold, unit_price, line_total
+        FROM pos_sale_lines
+        WHERE company_key = ?
+          AND pos_sale_id = ?
+        ORDER BY id ASC
+        """,
+        (company_key, int(sale["id"])),
+    ).fetchall()
+
+    items = [
+        {
+            "name": str(row["item_name"] or ""),
+            "qty": int(float(row["qty_sold"] or 0.0)),
+            "price": float(row["unit_price"] or 0.0),
+            "line_total": float(row["line_total"] or 0.0),
+        }
+        for row in line_rows
+    ]
+
+    receipt_number = str(sale.get("receipt_number") or sale.get("sale_reference") or "")
+    return {
+        "company_key": company_key,
+        "company_name": company_name,
+        "branch_name": branch_name,
+        "receipt_number": receipt_number,
+        "sale_reference": str(sale.get("sale_reference") or receipt_number),
+        "sale_date": str(sale.get("sale_date") or ""),
+        "sale_datetime": str(sale.get("sale_datetime") or ""),
+        "cashier": str(sale.get("cashier") or ""),
+        "payment_method": str(sale.get("payment_method") or ""),
+        "subtotal": float(sale.get("subtotal") or 0.0),
+        "discount_total": float(sale.get("discount_total") or 0.0),
+        "tax_total": float(sale.get("tax_total") or 0.0),
+        "grand_total": float(sale.get("grand_total") or 0.0),
+        "amount_tendered": float(sale.get("amount_tendered") or 0.0),
+        "change_due": float(sale.get("change_due") or 0.0),
+        "items": items,
+    }
+
+
 def _get_pos_cashier_identity(role):
     current_user = st.session_state.get("user", {}) if isinstance(st.session_state.get("user", {}), dict) else {}
     return (
@@ -9628,6 +9714,7 @@ def show_pos(company_key, company_name, role):
                     if submitted:
                         pending_pos_barcode = str(st.session_state.get(pos_scan_input_key, "") or "").strip()
                         if pending_pos_barcode:
+                            scan_added = False
                             conn = None
                             try:
                                 conn = get_connection()
@@ -9637,6 +9724,7 @@ def show_pos(company_key, company_name, role):
                                     st.session_state.pop(receipt_key, None)
                                     st.session_state.pop(receipt_html_key, None)
                                     cart_line = _add_item_to_pos_cart(company_key, _normalize_pos_item_row(matched_item))
+                                    scan_added = True
                                     logger.info(
                                         "POS scanner input matched item '%s' via %s for company %s",
                                         matched_item["item_name"],
@@ -9694,19 +9782,27 @@ def show_pos(company_key, company_name, role):
                             finally:
                                 if conn:
                                     conn.close()
-                                st.rerun()
+                                if scan_added:
+                                    st.rerun()
 
                 if items_df.empty:
                     st.info("No stock available for sale. Switch to Manual Entry to continue.")
                 else:
-                    search_expanded = bool(str(st.session_state.get(pos_product_search_key, "") or "").strip())
+                    picker_reset_key = f"pos_picker_reset_{company_key}"
+                    picker_nonce = int(st.session_state.get(picker_reset_key) or 0)
+                    search_input_key = f"{pos_product_search_key}_{picker_nonce}"
+                    search_results_key = f"{pos_product_select_key}_{picker_nonce}"
+                    stock_item_key = f"pos_item_{company_key}_{picker_nonce}"
+                    stock_qty_key = f"pos_qty_{company_key}_{picker_nonce}"
+
+                    search_expanded = bool(str(st.session_state.get(search_input_key, "") or "").strip())
                     with st.expander("Search / pick item (optional)", expanded=search_expanded):
                         st.text_input(
                             "Search Product",
-                            key=pos_product_search_key,
+                            key=search_input_key,
                             placeholder="Search by name, barcode, or item code (starts after 1 character)",
                         )
-                        product_search_term = str(st.session_state.get(pos_product_search_key, "") or "").strip()
+                        product_search_term = str(st.session_state.get(search_input_key, "") or "").strip()
                         manual_search_options = []
                         if len(product_search_term) >= 1:
                             conn = None
@@ -9733,7 +9829,7 @@ def show_pos(company_key, company_name, role):
                             selected_search_label = st.selectbox(
                                 "Manual Product Search Results",
                                 manual_option_labels,
-                                key=pos_product_select_key,
+                                key=search_results_key,
                             )
                             if st.button("Add Search Result", key=f"pos_add_search_result_{company_key}", use_container_width=True):
                                 selected_search_row = manual_search_options[manual_option_labels.index(selected_search_label)]
@@ -9755,9 +9851,10 @@ def show_pos(company_key, company_name, role):
                                 if low_stock_warning:
                                     st.warning(low_stock_warning)
                                 _request_pos_barcode_scan_focus(company_key)
+                                st.session_state[picker_reset_key] = picker_nonce + 1
                                 st.rerun()
-                        selected_item = st.selectbox("Select Item", items_df["Item Name"].tolist(), key=f"pos_item_{company_key}")
-                        qty_to_sell = st.number_input("Quantity", min_value=1, value=1, key=f"pos_qty_{company_key}")
+                        selected_item = st.selectbox("Select Item", items_df["Item Name"].tolist(), key=stock_item_key)
+                        qty_to_sell = st.number_input("Quantity", min_value=1, value=1, key=stock_qty_key)
                         if st.button("Add Selected Item", key=f"pos_add_selected_{company_key}", use_container_width=True):
                             st.session_state[checkout_complete_key] = False
                             st.session_state.pop(receipt_key, None)
@@ -9784,6 +9881,7 @@ def show_pos(company_key, company_name, role):
                             if low_stock_warning:
                                 st.warning(low_stock_warning)
                             _request_pos_barcode_scan_focus(company_key)
+                            st.session_state[picker_reset_key] = picker_nonce + 1
                             st.rerun()
                 if st.session_state.pop(pos_scan_focus_key, False) and not st.session_state.get(checkout_complete_key):
                     _focus_pos_barcode_scanner()
@@ -9880,10 +9978,11 @@ def show_pos(company_key, company_name, role):
                     qty_sync_key = f"pos_line_qty_sync_{company_key}_{index}"
                     if st.session_state.pop(qty_sync_key, False):
                         st.session_state[qty_widget_key] = cart_qty
+                    if qty_widget_key not in st.session_state:
+                        st.session_state[qty_widget_key] = cart_qty
                     updated_qty = qty_row[1].number_input(
                         "Qty",
                         min_value=1,
-                        value=int(line.get("qty") or 1),
                         step=1,
                         key=qty_widget_key,
                         label_visibility="collapsed",
@@ -10980,11 +11079,15 @@ def show_pos(company_key, company_name, role):
                 if summary_conn:
                     summary_conn.close()
 
-            if st.session_state.get(checkout_complete_key) and st.session_state.get(receipt_html_key):
-                section_header("Receipt Actions")
-                with card_container():
-                    _inject_print_styles()
-                    receipt_data = st.session_state.get(last_receipt_data_key) or st.session_state.get("last_receipt_data") or {}
+            section_header("Receipt Actions")
+            with card_container():
+                _inject_print_styles()
+
+                has_receipt_preview = bool(st.session_state.get(checkout_complete_key) and st.session_state.get(receipt_html_key))
+                receipt_data = st.session_state.get(last_receipt_data_key) or st.session_state.get("last_receipt_data") or {}
+                receipt_preview_html = str(st.session_state.get(receipt_html_key) or "").strip()
+
+                if has_receipt_preview:
                     st.success("SALE COMPLETED SUCCESSFULLY")
                     summary_col1, summary_col2, summary_col3 = st.columns(3)
                     summary_col1.caption(f"Receipt No: {receipt_data.get('receipt_number') or 'N/A'}")
@@ -11007,42 +11110,157 @@ def show_pos(company_key, company_name, role):
                         st.caption(f"Discount approved by manager: {receipt_data['discount_approved_by']}")
                     st.markdown("**Final Receipt Preview**")
                     st.caption(f"Receipt No: {receipt_data.get('receipt_number') or 'N/A'} — posted sale receipt")
-                    receipt_preview_html = str(st.session_state.get(receipt_html_key) or "").strip()
                     _render_pos_receipt_html_panel(receipt_preview_html, variant="final", height=520)
-                    receipt_action_col1, receipt_action_col2, receipt_action_col3 = st.columns(3)
-                    if receipt_action_col1.button("Print Receipt", key=f"receipt_print_btn_{company_key}", use_container_width=True):
+
+                receipt_action_col1, receipt_action_col2, receipt_action_col3 = st.columns(3)
+                if receipt_action_col1.button("Print Receipt", key=f"receipt_print_btn_{company_key}", use_container_width=True):
+                    if receipt_preview_html:
                         st.session_state[do_print_key] = True
-                    if receipt_action_col2.button("Reprint Last Receipt", key=f"receipt_reprint_btn_{company_key}", use_container_width=True):
-                        last_receipt_data = st.session_state.get(last_receipt_data_key) or st.session_state.get("last_receipt_data")
-                        if last_receipt_data:
-                            st.session_state[receipt_key] = _build_receipt(last_receipt_data)
-                            st.session_state[receipt_html_key] = _build_receipt_html(last_receipt_data)
-                            st.session_state[checkout_complete_key] = True
-                            st.session_state[do_print_key] = True
-                            st.rerun()
-                        st.warning("No previous receipt is available for reprint.")
-                    if receipt_action_col3.button("New Sale", key=f"receipt_new_sale_btn_{company_key}", use_container_width=True):
-                        _clear_pos_cart_state(company_key)
-                        st.session_state[checkout_complete_key] = False
-                        st.session_state.pop(receipt_key, None)
-                        st.session_state.pop(receipt_html_key, None)
-                        _clear_streamlit_state(
-                            f"pos_item_{company_key}",
-                            f"pos_qty_{company_key}",
-                            f"manual_pos_item_{company_key}",
-                            f"manual_pos_price_{company_key}",
-                            f"manual_pos_qty_{company_key}",
-                            pos_scan_input_key,
-                        )
+                    else:
+                        st.warning("No receipt is available to print yet.")
+                if receipt_action_col2.button("Reprint Last Receipt", key=f"receipt_reprint_btn_{company_key}", use_container_width=True):
+                    last_receipt_data = st.session_state.get(last_receipt_data_key) or st.session_state.get("last_receipt_data")
+                    if last_receipt_data:
+                        st.session_state[receipt_key] = _build_receipt(last_receipt_data)
+                        st.session_state[receipt_html_key] = _build_receipt_html(last_receipt_data)
+                        st.session_state[checkout_complete_key] = True
+                        st.session_state[do_print_key] = True
                         st.rerun()
-                    st.download_button(
-                        "Download Receipt",
-                        data=st.session_state.get(receipt_key, ""),
-                        file_name=f"receipt_{company_key}.txt",
-                        mime="text/plain",
-                        key=f"receipt_download_{company_key}",
-                        use_container_width=True,
+                    else:
+                        fallback_conn = None
+                        try:
+                            fallback_conn = get_connection()
+                            ensure_pos_sales_schema(fallback_conn)
+                            recent_cashier = _get_pos_cashier_identity(role)
+                            fallback_query = """
+                                SELECT id
+                                FROM pos_sales
+                                WHERE company_key = ?
+                            """
+                            fallback_params = [company_key]
+                            if active_branch_id:
+                                fallback_query += " AND COALESCE(branch_id, '') = ?"
+                                fallback_params.append(str(active_branch_id))
+                            fallback_query += " AND COALESCE(cashier, '') = ?"
+                            fallback_params.append(str(recent_cashier))
+                            fallback_query += " ORDER BY created_at DESC, id DESC LIMIT 1"
+                            fallback_row = fallback_conn.execute(fallback_query, tuple(fallback_params)).fetchone()
+                            if not fallback_row:
+                                st.warning("No previous receipt is available for reprint.")
+                            else:
+                                db_receipt_data = _fetch_pos_receipt_data(
+                                    fallback_conn,
+                                    company_key=company_key,
+                                    sale_id=int(fallback_row["id"]),
+                                    branch_id=str(active_branch_id) if active_branch_id else None,
+                                    cashier=_get_pos_cashier_identity(role),
+                                )
+                                if not db_receipt_data:
+                                    st.warning("No previous receipt is available for reprint.")
+                                else:
+                                    st.session_state[receipt_key] = _build_receipt(db_receipt_data)
+                                    st.session_state[receipt_html_key] = _build_receipt_html(db_receipt_data)
+                                    st.session_state[checkout_complete_key] = True
+                                    st.session_state[do_print_key] = True
+                                    st.rerun()
+                        except Exception as exc:
+                            st.error(build_user_safe_error(exc, role))
+                        finally:
+                            if fallback_conn:
+                                fallback_conn.close()
+                if receipt_action_col3.button("New Sale", key=f"receipt_new_sale_btn_{company_key}", use_container_width=True):
+                    _clear_pos_cart_state(company_key)
+                    st.session_state[checkout_complete_key] = False
+                    st.session_state.pop(receipt_key, None)
+                    st.session_state.pop(receipt_html_key, None)
+                    _clear_streamlit_state(
+                        f"pos_item_{company_key}",
+                        f"pos_qty_{company_key}",
+                        f"manual_pos_item_{company_key}",
+                        f"manual_pos_price_{company_key}",
+                        f"manual_pos_qty_{company_key}",
+                        pos_scan_input_key,
                     )
+                    st.rerun()
+
+                refresh_col, _ = st.columns([1, 3])
+                refresh_col.button(
+                    "Refresh Recent Receipts",
+                    key=f"pos_recent_receipts_refresh_{company_key}",
+                    use_container_width=True,
+                )
+
+                st.markdown("**Recent Receipts**")
+                recent_conn = None
+                recent_receipts = []
+                try:
+                    recent_conn = get_connection()
+                    ensure_pos_sales_schema(recent_conn)
+                    recent_cashier = _get_pos_cashier_identity(role)
+                    recent_query = """
+                        SELECT id, receipt_number, sale_datetime, grand_total, payment_method
+                        FROM pos_sales
+                        WHERE company_key = ?
+                    """
+                    recent_params = [company_key]
+                    if active_branch_id:
+                        recent_query += " AND COALESCE(branch_id, '') = ?"
+                        recent_params.append(str(active_branch_id))
+                    recent_query += " AND COALESCE(cashier, '') = ?"
+                    recent_params.append(str(recent_cashier))
+                    recent_query += " ORDER BY created_at DESC, id DESC LIMIT 10"
+                    recent_receipts = recent_conn.execute(recent_query, tuple(recent_params)).fetchall()
+                except Exception as exc:
+                    st.warning(build_user_safe_error(exc, role))
+                finally:
+                    if recent_conn:
+                        recent_conn.close()
+
+                if recent_receipts:
+                    for row in recent_receipts:
+                        row_cols = st.columns([2, 2, 1, 1])
+                        row_cols[0].caption(str(row["receipt_number"] or "N/A"))
+                        row_cols[1].caption(str(row["sale_datetime"] or ""))
+                        row_cols[2].caption(format_currency(float(row["grand_total"] or 0.0)))
+                        if row_cols[3].button(
+                            "Reprint",
+                            key=f"pos_recent_receipt_reprint_{company_key}_{int(row['id'])}",
+                            use_container_width=True,
+                        ):
+                            fetch_conn = None
+                            try:
+                                fetch_conn = get_connection()
+                                db_receipt_data = _fetch_pos_receipt_data(
+                                    fetch_conn,
+                                    company_key=company_key,
+                                    sale_id=int(row["id"]),
+                                    branch_id=str(active_branch_id) if active_branch_id else None,
+                                    cashier=_get_pos_cashier_identity(role),
+                                )
+                                if not db_receipt_data:
+                                    st.warning("That receipt could not be found for reprint.")
+                                else:
+                                    st.session_state[receipt_key] = _build_receipt(db_receipt_data)
+                                    st.session_state[receipt_html_key] = _build_receipt_html(db_receipt_data)
+                                    st.session_state[checkout_complete_key] = True
+                                    st.session_state[do_print_key] = True
+                                    st.rerun()
+                            except Exception as exc:
+                                st.error(build_user_safe_error(exc, role))
+                            finally:
+                                if fetch_conn:
+                                    fetch_conn.close()
+                else:
+                    st.caption("No recent receipts found for this cashier.")
+
+                st.download_button(
+                    "Download Receipt",
+                    data=st.session_state.get(receipt_key, ""),
+                    file_name=f"receipt_{company_key}.txt",
+                    mime="text/plain",
+                    key=f"receipt_download_{company_key}",
+                    use_container_width=True,
+                )
             if st.session_state.get(do_print_key):
                 print_receipt_html = str(st.session_state.get(receipt_html_key) or "").strip()
                 if print_receipt_html:
