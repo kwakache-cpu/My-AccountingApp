@@ -4299,6 +4299,297 @@ def ensure_database_integrity():
     return startup_database()
 
 
+BRANCH_TYPE_CATALOG_SEEDS = (
+    ("retail", "Retail", "Point-of-sale and customer-facing branch operations."),
+    ("warehouse", "Warehouse", "Inventory, stock movement, and fulfillment operations."),
+    ("main", "Main", "Primary operating branch with full ERP modules except licensing."),
+    (
+        "subsidiary_main",
+        "Subsidiary Main",
+        "Subsidiary headquarters with full operating modules except licensing.",
+    ),
+    ("office", "Office", "Back-office invoicing, banking, and customer management."),
+    ("other", "Other", "Minimal dashboard access; extend grants per branch as needed."),
+)
+
+BRANCH_TYPE_MODULE_TEMPLATE_SEEDS = {
+    "retail": (
+        "Dashboard",
+        "Point of Sale",
+        "Create Invoice",
+        "Receive Payment",
+        "Create Bill",
+        "Supplier Payment",
+        "Inventory",
+        "Customers",
+        "Suppliers",
+        "Reports",
+    ),
+    "warehouse": (
+        "Dashboard",
+        "Inventory",
+        "Reports",
+    ),
+    "office": (
+        "Dashboard",
+        "Create Invoice",
+        "Receive Payment",
+        "Banking & Cash",
+        "Reports",
+        "Customers",
+        "Suppliers",
+    ),
+    "other": (
+        "Dashboard",
+    ),
+}
+
+BRANCH_MAIN_OPERATING_MODULE_KEYS = (
+    "Dashboard",
+    "Point of Sale",
+    "Create Invoice",
+    "Receive Payment",
+    "Create Bill",
+    "Supplier Payment",
+    "Inventory",
+    "Customers",
+    "Suppliers",
+    "Reports",
+    "Sales Invoicing",
+    "Purchase Invoicing",
+    "Banking & Cash",
+    "General Journal",
+    "Vouchers & Journals",
+    "Chart of Accounts",
+    "Accounts Receivable",
+    "Accounts Payable",
+    "Taxation (VAT/NHIL)",
+    "Asset Register",
+    "Financial Reports",
+    "Data Analytics",
+    "Payroll & Salaries",
+    "System Audit Trail",
+)
+
+
+def _normalize_branch_type_key(branch_type_value):
+    """Map legacy branch_type labels to stable catalog keys."""
+    raw = str(branch_type_value or "").strip().lower().replace(" ", "_").replace("-", "_")
+    aliases = {
+        "retail": "retail",
+        "warehouse": "warehouse",
+        "main": "main",
+        "subsidiary_main": "subsidiary_main",
+        "subsidiary": "subsidiary_main",
+        "office": "office",
+        "other": "other",
+    }
+    if raw in aliases:
+        return aliases[raw]
+    catalog_keys = {row[0] for row in BRANCH_TYPE_CATALOG_SEEDS}
+    return raw if raw in catalog_keys else "other"
+
+
+def _branch_licensing_table_exists(conn, table_name):
+    row = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
+        (table_name,),
+    ).fetchone()
+    return bool(row)
+
+
+def _branch_licensing_column_exists(conn, table_name, column_name):
+    if not _branch_licensing_table_exists(conn, table_name):
+        return False
+    columns = {row[1] for row in conn.execute(f"PRAGMA table_info({table_name})").fetchall()}
+    return column_name in columns
+
+
+def _ensure_branch_licensing_column(conn, table_name, column_name, column_def):
+    if _branch_licensing_column_exists(conn, table_name, column_name):
+        return False
+    conn.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_def}")
+    return True
+
+
+def seed_branch_type_catalog(conn):
+    """Insert default branch types idempotently."""
+    if not _branch_licensing_table_exists(conn, "branch_type_catalog"):
+        return 0
+    inserted = 0
+    for branch_type_key, branch_type_name, description in BRANCH_TYPE_CATALOG_SEEDS:
+        cursor = conn.execute(
+            """
+            INSERT OR IGNORE INTO branch_type_catalog (
+                branch_type_key, branch_type_name, description, is_active
+            )
+            VALUES (?, ?, ?, 1)
+            """,
+            (branch_type_key, branch_type_name, description),
+        )
+        inserted += int(cursor.rowcount or 0)
+    return inserted
+
+
+def seed_branch_type_module_defaults(conn):
+    """Insert default module templates per branch type idempotently."""
+    if not _branch_licensing_table_exists(conn, "branch_type_module_defaults"):
+        return 0
+    inserted = 0
+    templates = dict(BRANCH_TYPE_MODULE_TEMPLATE_SEEDS)
+    templates["main"] = BRANCH_MAIN_OPERATING_MODULE_KEYS
+    templates["subsidiary_main"] = BRANCH_MAIN_OPERATING_MODULE_KEYS
+    for branch_type_key, module_keys in templates.items():
+        for module_key in module_keys:
+            cursor = conn.execute(
+                """
+                INSERT OR IGNORE INTO branch_type_module_defaults (
+                    branch_type_key, module_key, is_enabled
+                )
+                VALUES (?, ?, 1)
+                """,
+                (branch_type_key, module_key),
+            )
+            inserted += int(cursor.rowcount or 0)
+    return inserted
+
+
+def ensure_branch_module_grants_for_branch(conn, company_key, branch_id, branch_type_key=None):
+    """
+    Copy module defaults into branch_module_grants for one branch.
+    Safe to call repeatedly; existing grants are left unchanged.
+    """
+    normalized_company_key = str(company_key or "").strip()
+    normalized_branch_id = str(branch_id or "").strip()
+    if not normalized_company_key or not normalized_branch_id:
+        return {"ok": False, "reason": "company_key and branch_id are required", "inserted": 0}
+
+    ensure_branch_licensing_schema_integrity(conn)
+    resolved_type_key = _normalize_branch_type_key(branch_type_key)
+    if not branch_type_key:
+        branch_row = conn.execute(
+            "SELECT branch_type FROM branches WHERE company_key = ? AND branch_id = ?",
+            (normalized_company_key, normalized_branch_id),
+        ).fetchone()
+        if branch_row is not None:
+            resolved_type_key = _normalize_branch_type_key(branch_row[0])
+
+    default_rows = conn.execute(
+        """
+        SELECT module_key, COALESCE(is_enabled, 1)
+        FROM branch_type_module_defaults
+        WHERE branch_type_key = ?
+        ORDER BY module_key
+        """,
+        (resolved_type_key,),
+    ).fetchall()
+    if not default_rows and resolved_type_key != "other":
+        resolved_type_key = "other"
+        default_rows = conn.execute(
+            """
+            SELECT module_key, COALESCE(is_enabled, 1)
+            FROM branch_type_module_defaults
+            WHERE branch_type_key = ?
+            ORDER BY module_key
+            """,
+            (resolved_type_key,),
+        ).fetchall()
+
+    inserted = 0
+    for module_key, is_enabled in default_rows:
+        cursor = conn.execute(
+            """
+            INSERT OR IGNORE INTO branch_module_grants (
+                company_key, branch_id, module_key, is_enabled
+            )
+            VALUES (?, ?, ?, ?)
+            """,
+            (
+                normalized_company_key,
+                normalized_branch_id,
+                str(module_key),
+                int(is_enabled or 0),
+            ),
+        )
+        inserted += int(cursor.rowcount or 0)
+
+    return {
+        "ok": True,
+        "company_key": normalized_company_key,
+        "branch_id": normalized_branch_id,
+        "branch_type_key": resolved_type_key,
+        "inserted": inserted,
+        "template_count": len(default_rows),
+    }
+
+
+def ensure_branch_licensing_schema_integrity(conn):
+    """
+    Additive branch licensing tables/columns. Safe on every startup; PostgreSQL-friendly types.
+    """
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS branch_type_catalog (
+            branch_type_key TEXT PRIMARY KEY,
+            branch_type_name TEXT NOT NULL,
+            description TEXT,
+            is_active INTEGER DEFAULT 1,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS branch_type_module_defaults (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            branch_type_key TEXT NOT NULL,
+            module_key TEXT NOT NULL,
+            is_enabled INTEGER DEFAULT 1,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(branch_type_key, module_key),
+            FOREIGN KEY (branch_type_key) REFERENCES branch_type_catalog (branch_type_key)
+        )
+        """
+    )
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS branch_module_grants (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            company_key TEXT NOT NULL,
+            branch_id TEXT NOT NULL,
+            module_key TEXT NOT NULL,
+            is_enabled INTEGER DEFAULT 1,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(company_key, branch_id, module_key),
+            FOREIGN KEY (company_key) REFERENCES companies (key) ON DELETE CASCADE,
+            FOREIGN KEY (branch_id) REFERENCES branches (branch_id) ON DELETE CASCADE
+        )
+        """
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_branch_module_grants_company_branch "
+        "ON branch_module_grants(company_key, branch_id)"
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_branch_type_module_defaults_type "
+        "ON branch_type_module_defaults(branch_type_key)"
+    )
+
+    if _branch_licensing_table_exists(conn, "branches"):
+        branch_column_defs = {
+            "is_active": "INTEGER DEFAULT 1",
+            "manager_user_id": "TEXT",
+            "deployment_status": "TEXT DEFAULT 'active'",
+            "branch_tier": "TEXT DEFAULT 'standard'",
+        }
+        for column_name, column_def in branch_column_defs.items():
+            _ensure_branch_licensing_column(conn, "branches", column_name, column_def)
+
+    seed_branch_type_catalog(conn)
+    seed_branch_type_module_defaults(conn)
+
+
 def ensure_schema_integrity(conn):
     """Protect critical columns during upgrades to avoid missing-column crashes."""
     cursor = conn.cursor()
@@ -4372,7 +4663,15 @@ def ensure_schema_integrity(conn):
         "payment_allocations": {"company_key": "TEXT", "payment_id": "INTEGER", "invoice_id": "INTEGER", "bill_id": "INTEGER", "amount": "REAL DEFAULT 0", "currency": "TEXT DEFAULT 'GHS'", "branch_id": "TEXT", "created_by": "TEXT", "allocated_at": "TIMESTAMP DEFAULT CURRENT_TIMESTAMP"},
         "recurring_transactions": {"company_key": "TEXT", "branch_id": "TEXT", "description": "TEXT", "frequency": "TEXT", "next_run_date": "TEXT", "last_run_at": "TIMESTAMP", "is_active": "INTEGER DEFAULT 1", "created_by": "TEXT", "created_at": "TIMESTAMP DEFAULT CURRENT_TIMESTAMP", "source_module": "TEXT", "source_table": "TEXT", "source_id": "INTEGER", "recurrence_payload": "TEXT"},
         "accounting_periods": {"status": "TEXT DEFAULT 'Open'", "closed_at": "TIMESTAMP", "closed_by": "TEXT", "reopened_at": "TIMESTAMP", "reopened_by": "TEXT"},
-        "branches": {"contact_number": "TEXT", "branch_manager": "TEXT", "branch_access_key": "TEXT"},
+        "branches": {
+            "contact_number": "TEXT",
+            "branch_manager": "TEXT",
+            "branch_access_key": "TEXT",
+            "is_active": "INTEGER DEFAULT 1",
+            "manager_user_id": "TEXT",
+            "deployment_status": "TEXT DEFAULT 'active'",
+            "branch_tier": "TEXT DEFAULT 'standard'",
+        },
         "fixed_assets": FIXED_ASSET_SCHEMA_COLUMN_DEFS,
         "suppliers": {"address": "TEXT", "category": "TEXT", "currency": "TEXT DEFAULT 'GHS'", "created_at": "TIMESTAMP DEFAULT CURRENT_TIMESTAMP"},
     }
@@ -5181,6 +5480,7 @@ def ensure_schema_integrity(conn):
     )
     ensure_cashier_closings_schema(conn)
     ensure_pos_sales_schema(conn)
+    ensure_branch_licensing_schema_integrity(conn)
 
 
 def ensure_inventory_schema_integrity(conn):
@@ -5871,6 +6171,10 @@ def _deploy_full_schema(conn):
             "branch_access_key": "TEXT",
             "contact_number": "TEXT",
             "branch_manager": "TEXT",
+            "is_active": "INTEGER DEFAULT 1",
+            "manager_user_id": "TEXT",
+            "deployment_status": "TEXT DEFAULT 'active'",
+            "branch_tier": "TEXT DEFAULT 'standard'",
             "created_at": "TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
         }
         for column_name, column_def in branch_column_defs.items():

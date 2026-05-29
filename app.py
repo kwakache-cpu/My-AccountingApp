@@ -555,17 +555,30 @@ def update_activity():
 
 def _init_session(user_dict):
     """Initialize standard session keys and diagnostics for a successful login."""
+    user_dict = dict(user_dict or {})
     st.session_state.auth = True
     st.session_state.user = user_dict
-    st.session_state.company_id = user_dict.get("key") or user_dict.get("company_key") or st.session_state.get("company_id")
+    company_key = user_dict.get("key") or user_dict.get("company_key")
+    st.session_state.company_id = company_key or st.session_state.get("company_id")
+    st.session_state.page = "Dashboard"
+    st.session_state.active_page = "Dashboard"
+    branch_id = user_dict.get("branch_id")
+    role = user_dict.get("role")
+    if branch_id and role in {"Branch_Bookkeeper", "Cashier", "Staff"}:
+        st.session_state.active_branch_id = str(branch_id).strip()
+    elif role in {"Dev", "Master Admin", "System Admin", "Owner / CEO"}:
+        st.session_state.pop("active_branch_id", None)
+    else:
+        st.session_state.pop("active_branch_id", None)
     session_uuid = str(uuid.uuid4())
     st.session_state.session_uuid = session_uuid
     st.session_state.login_attempts = 0
     st.session_state.last_activity = datetime.now()
     logger.info(
-        "Session initialized: company=%s role=%s session_uuid=%s",
+        "Session initialized: company=%s role=%s branch=%s session_uuid=%s",
         st.session_state.company_id,
         user_dict.get("role"),
+        st.session_state.get("active_branch_id"),
         session_uuid,
     )
 
@@ -1030,6 +1043,7 @@ def login_ui():
                     if branch_auth:
                         user_obj = {
                             "key": branch_auth[1],
+                            "company_key": branch_auth[1],
                             "name": branch_auth[4],
                             "role": "Branch_Bookkeeper",
                             "branch_name": branch_auth[2],
@@ -1044,7 +1058,6 @@ def login_ui():
                         except Exception:
                             pass
                         _init_session(user_obj)
-                        st.session_state.active_branch_id = branch_auth[0]
                         st.rerun()
 
                     # Branch Bookkeeper / Staff Check
@@ -1061,19 +1074,22 @@ def login_ui():
                     ).fetchone()
                     if user_login:
                         role_name = user_login[2]
-                        if role_name == "Bookkeeper":
-                            role_name = "Branch_Bookkeeper"
-                        if user_login[4]:
-                            conn.execute(
-                                "UPDATE branches SET branch_access_key = ? WHERE branch_id = ? AND COALESCE(branch_access_key, '') = ''",
-                                (access_key, user_login[4]),
+                        branch_id = user_login[4]
+                        if role_name == "Branch_Bookkeeper" and not branch_id:
+                            st.session_state.login_attempts += 1
+                            conn.close()
+                            st.error(
+                                "Branch access is not configured for this user. "
+                                "Contact your company administrator to assign a branch."
                             )
+                            return
                         user_obj = {
                             "key": user_login[0],
+                            "company_key": user_login[0],
                             "name": user_login[1],
                             "role": role_name,
                             "staff_name": user_login[3],
-                            "branch_id": user_login[4],
+                            "branch_id": branch_id,
                         }
                         try:
                             log_audit_action(conn, user_login[0], role_name, "Successful login", "Authentication", branch_id=user_login[4])
@@ -1084,7 +1100,6 @@ def login_ui():
                         except Exception:
                             pass
                         _init_session(user_obj)
-                        st.session_state.active_branch_id = user_login[4]
                         st.rerun()
 
                     # Failed login attempt
@@ -2039,6 +2054,7 @@ def _render_sidebar_navigation(user, current_page):
 
 
 def _render_primary_sidebar(user, include_settings=True):
+    eka_modules.enforce_branch_session_lock(user)
     st.sidebar.markdown(
         f"""
         <div style='background-color:#f0f2f6; padding:20px; border-radius:15px; border: 1px solid #d1d5db;'>
@@ -2073,6 +2089,27 @@ def _render_primary_sidebar(user, include_settings=True):
             st.session_state.active_branch_id = None
     elif user.get("branch_id"):
         st.session_state.active_branch_id = user.get("branch_id")
+
+    if user.get("role") in {"Branch_Bookkeeper", "Cashier", "Staff"} or user.get("branch_id"):
+        branch_name = user.get("branch_name")
+        if not branch_name and user.get("branch_id") and user.get("key"):
+            try:
+                conn = get_connection()
+                branch_row = conn.execute(
+                    "SELECT branch_name FROM branches WHERE company_key = ? AND branch_id = ?",
+                    (user["key"], user["branch_id"]),
+                ).fetchone()
+                conn.close()
+                branch_name = branch_row[0] if branch_row else None
+            except Exception:
+                branch_name = None
+        if branch_name:
+            st.sidebar.caption(f"Branch: {branch_name}")
+        elif user.get("branch_id"):
+            st.sidebar.caption(f"Branch: {user.get('branch_id')}")
+
+    if eka_modules.is_branch_scoped_user(user):
+        eka_modules.render_branch_session_diagnostics(user=user)
 
     current_page = _ensure_valid_page()
     _render_sidebar_nav_styles()
@@ -2212,11 +2249,17 @@ def _render_primary_sidebar(user, include_settings=True):
 
 
 def _render_primary_page(user):
+    eka_modules.enforce_branch_session_lock(user)
     current_page = _ensure_valid_page()
     if not _user_can_access_page(user, current_page):
-        st.warning("You do not have permission to access that page.")
-        _set_active_page("Dashboard")
-        current_page = "Dashboard"
+        fallback_page = "Dashboard" if _user_can_access_page(user, "Dashboard") else None
+        if fallback_page and current_page != fallback_page:
+            st.warning("You do not have permission to access that page.")
+            _set_active_page(fallback_page)
+            current_page = fallback_page
+        elif not fallback_page:
+            st.error("You do not have permission to access this workspace.")
+            return
     if current_page == "Dashboard":
         if user["role"] == "Demo":
             show_dashboard_module("DEMO", "Demo Corporation Ltd", "Demo")
@@ -2276,6 +2319,8 @@ def _render_primary_page(user):
         show_audit_trail(user["key"], user["role"], st.session_state.get("active_branch_id"))
     elif current_page == "System Configuration":
         show_company_setup(user["key"], user["name"], user["role"])
+    elif current_page == "branch_management":
+        show_branch_management(user["key"], user["role"])
     elif current_page == "Vouchers & Journals":
         show_vouchers(user["key"], user["role"])
     elif current_page in {"Sales Invoicing", "Sales History", "Sales/Purchase"}:
