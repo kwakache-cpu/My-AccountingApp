@@ -283,7 +283,7 @@ class PermissionSecurityTests(ERPIsolatedTestCase):
     def test_branch_access_helper_restricts_assigned_users(self):
         branch_user = {"role": "Branch_Bookkeeper", "branch_id": "BR-001"}
         self.assertTrue(self.modules.can_access_branch(branch_user, "BR-001"))
-        self.assertTrue(self.modules.can_access_branch(branch_user, None))
+        self.assertFalse(self.modules.can_access_branch(branch_user, None))
         self.assertFalse(self.modules.can_access_branch(branch_user, "BR-002"))
         self.assertTrue(self.modules.can_access_branch({"role": "Master Admin"}, "BR-002"))
 

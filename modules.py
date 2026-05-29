@@ -125,6 +125,40 @@ def render_ui_standard_styles():
         .eka-page-header h1 { margin: 0 0 6px 0; font-size: 1.6rem; }
         .eka-subtitle { margin:0 0 10px 0; color:#6b7280; }
         .eka-section { margin-top:18px; margin-bottom:8px; color:#0f172a; }
+        .dashboard-kpi-grid [data-testid="stMetric"] {
+            background: linear-gradient(180deg, #ffffff 0%, #f8fafc 100%);
+            border: 1px solid #e2e8f0;
+            border-radius: 10px;
+            padding: 10px 12px;
+        }
+        .dashboard-chart-card { min-height: 280px; }
+        .dashboard-empty-state {
+            min-height: 180px;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            text-align: center;
+            padding: 24px 16px;
+            margin-top: 8px;
+            border: 1px dashed #cbd5e1;
+            border-radius: 8px;
+            background: #f8fafc;
+            color: #475569;
+            font-size: 0.92rem;
+            line-height: 1.45;
+        }
+        .dashboard-empty-hint {
+            margin-top: 8px;
+            font-size: 0.82rem;
+            color: #64748b;
+        }
+        .dashboard-section-title {
+            margin: 18px 0 10px 0;
+            color: #0f172a;
+            font-size: 1.05rem;
+            font-weight: 700;
+        }
         /* Table */
         .stDataFrame table { border-collapse: collapse; }
         .stDataFrame thead th { background:#f8fafc; color:#0f172a; }
@@ -841,19 +875,114 @@ def has_permission(user, permission_key):
     return user_has_permission(_extract_role_from_user(user), permission_key)
 
 
+BRANCH_SCOPED_ROLES = frozenset({"Branch_Bookkeeper", "Cashier", "Staff"})
+
+
 def _extract_user_branch_id(user):
     if isinstance(user, dict):
         return user.get("branch_id") or user.get("active_branch_id") or user.get("assigned_branch_id")
     return None
 
 
+def is_branch_scoped_user(user):
+    normalized_role = _normalize_role_name(_extract_role_from_user(user))
+    if normalized_role in BRANCH_SCOPED_ROLES:
+        return True
+    assigned_branch_id = _extract_user_branch_id(user)
+    return bool(assigned_branch_id) and normalized_role not in {
+        "Dev",
+        "Master Admin",
+        "System Admin",
+        "Owner / CEO",
+        "Sub-Admin",
+        "Bookkeeper",
+        "Accountant",
+    }
+
+
+def resolve_effective_branch_id(user=None):
+    """Resolve the branch filter for queries: assigned branch wins for branch-scoped users."""
+    user = user or st.session_state.get("user") or {}
+    assigned_branch_id = _extract_user_branch_id(user)
+    if is_branch_scoped_user(user):
+        if assigned_branch_id:
+            return str(assigned_branch_id).strip()
+        return None
+    session_branch_id = st.session_state.get("active_branch_id")
+    return str(session_branch_id).strip() if session_branch_id else None
+
+
+def enforce_branch_session_lock(user=None):
+    """Pin branch-scoped sessions to their assigned branch; never fall back to all branches."""
+    user = user or st.session_state.get("user") or {}
+    if not isinstance(user, dict):
+        return None
+    assigned_branch_id = _extract_user_branch_id(user)
+    if is_branch_scoped_user(user):
+        if assigned_branch_id:
+            locked_branch_id = str(assigned_branch_id).strip()
+            st.session_state.active_branch_id = locked_branch_id
+            if not user.get("branch_id"):
+                user["branch_id"] = locked_branch_id
+            st.session_state.user = user
+            return locked_branch_id
+        st.session_state.active_branch_id = None
+        return None
+    return st.session_state.get("active_branch_id")
+
+
+def get_user_allowed_branch_ids(company_key, user=None):
+    user = user or st.session_state.get("user") or {}
+    assigned_branch_id = _extract_user_branch_id(user)
+    if is_branch_scoped_user(user):
+        return [str(assigned_branch_id).strip()] if assigned_branch_id else []
+    try:
+        conn = get_connection()
+        try:
+            rows = conn.execute(
+                "SELECT branch_id FROM branches WHERE company_key = ? ORDER BY branch_name",
+                (company_key,),
+            ).fetchall()
+            return [str(row["branch_id"]) for row in rows]
+        finally:
+            conn.close()
+    except Exception:
+        return []
+
+
+def render_branch_session_diagnostics(user=None, company_key=None):
+    user = user or st.session_state.get("user") or {}
+    company_key = company_key or user.get("key") or st.session_state.get("company_id")
+    with st.sidebar.expander("Session context", expanded=False):
+        st.caption(f"User key: {user.get('key') or company_key or '—'}")
+        st.caption(f"Role: {user.get('role') or '—'}")
+        st.caption(f"Company: {company_key or '—'}")
+        st.caption(f"Active branch: {st.session_state.get('active_branch_id') or '—'}")
+        allowed = get_user_allowed_branch_ids(company_key, user=user)
+        st.caption(f"Allowed branches: {', '.join(allowed) if allowed else '—'}")
+
+
 def can_access_branch(user, branch_id):
     normalized_role = _normalize_role_name(_extract_role_from_user(user))
-    if not branch_id:
-        return True
     if normalized_role in {"Dev", "Master Admin", "System Admin", "Owner / CEO"}:
         return True
     assigned_branch_id = _extract_user_branch_id(user)
+    if normalized_role in BRANCH_SCOPED_ROLES or (assigned_branch_id and normalized_role not in {
+        "Dev",
+        "Master Admin",
+        "System Admin",
+        "Owner / CEO",
+        "Sub-Admin",
+        "Bookkeeper",
+        "Accountant",
+    }):
+        if not assigned_branch_id:
+            return False
+        if not branch_id:
+            return False
+        return str(assigned_branch_id).strip() == str(branch_id).strip()
+    if not branch_id:
+        return True
     if not assigned_branch_id:
         return True
     return str(assigned_branch_id).strip() == str(branch_id).strip()
@@ -866,6 +995,10 @@ def filter_by_user_branch(records, user, branch_key="branch_id"):
     if normalized_role in {"Dev", "Master Admin", "System Admin", "Owner / CEO"}:
         return records
     assigned_branch_id = _extract_user_branch_id(user)
+    if normalized_role in BRANCH_SCOPED_ROLES and not assigned_branch_id:
+        if isinstance(records, pd.DataFrame):
+            return records.iloc[0:0]
+        return []
     if not assigned_branch_id:
         return records
     if isinstance(records, pd.DataFrame):
@@ -14826,86 +14959,906 @@ def show_reports(company_key, branch_id=None):
         show_record_transaction(company_key, st.session_state.get("user", {}).get("role", "System"))
 
 
+def _dashboard_pos_branch_sql(branch_id, alias=""):
+    prefix = f"{alias}." if alias else ""
+    if branch_id:
+        return f" AND COALESCE({prefix}branch_id, '') = ? ", [str(branch_id)]
+    return "", []
+
+
+def _dashboard_stock_movement_branch_sql(conn, branch_id):
+    try:
+        movement_columns = {row[1] for row in conn.execute("PRAGMA table_info(stock_movements)").fetchall()}
+    except Exception:
+        movement_columns = set()
+    if branch_id and "branch_id" in movement_columns:
+        return " AND COALESCE(branch_id, '') = ? ", [str(branch_id)]
+    return "", []
+
+
+def _dashboard_branch_ledger_balance(conn, company_key, branch_id, account_name_patterns):
+    if not branch_id:
+        return 0.0
+    pattern_sql = " OR ".join(
+        [
+            "lower(COALESCE(NULLIF(c.name, ''), NULLIF(c.account_name, ''), '')) LIKE ?"
+            for _ in account_name_patterns
+        ]
+    )
+    params = [company_key, str(branch_id)] + [f"%{pattern.lower()}%" for pattern in account_name_patterns]
+    row = conn.execute(
+        f"""
+        SELECT COALESCE(SUM(jl.debit - jl.credit), 0) AS balance
+        FROM journal_entries je
+        JOIN journal_lines jl ON jl.entry_id = je.id
+        JOIN chart_of_accounts c ON c.id = jl.account_id
+        WHERE je.company_key = ?
+          AND COALESCE(je.branch_id, '') = ?
+          AND ({pattern_sql})
+          AND COALESCE(je.is_voided, 0) = 0
+          AND COALESCE(je.approval_status, 'Posted') = 'Posted'
+        """,
+        tuple(params),
+    ).fetchone()
+    return float(row["balance"] or 0.0) if row else 0.0
+
+
+def _fetch_dashboard_kpi_snapshot(conn, company_key, branch_id=None):
+    today = datetime.now().date()
+    month_key = today.strftime("%Y-%m")
+    month_start = today.replace(day=1)
+    branch_sql, branch_params = _dashboard_pos_branch_sql(branch_id)
+    inv_branch_sql, inv_branch_params = "", []
+    try:
+        inventory_columns = {row[1] for row in conn.execute("PRAGMA table_info(inventory)").fetchall()}
+        if branch_id and "branch_id" in inventory_columns:
+            inv_branch_sql = " AND COALESCE(branch_id, '') = ? "
+            inv_branch_params = [str(branch_id)]
+    except Exception:
+        pass
+
+    inv_row = conn.execute(
+        f"SELECT COALESCE(SUM(qty * cost_price), 0) AS total FROM inventory WHERE company_key = ?{inv_branch_sql}",
+        tuple([company_key, *inv_branch_params]),
+    ).fetchone()
+    inventory_value = float(inv_row["total"] or 0.0) if inv_row else 0.0
+
+    inventory_rows = conn.execute(
+        f"SELECT qty, min_stock_level FROM inventory WHERE company_key = ?{inv_branch_sql}",
+        tuple([company_key, *inv_branch_params]),
+    ).fetchall()
+    low_stock_count = sum(
+        1
+        for row in inventory_rows
+        if _get_inventory_stock_status(row["qty"], row["min_stock_level"]) in {"LOW STOCK", "OUT OF STOCK"}
+    )
+
+    month_sales = float(get_month_sales_total(company_key, year_month=month_key, branch_id=branch_id, conn=conn) or 0.0)
+    today_sales = 0.0
+    try:
+        ensure_pos_sales_schema(conn)
+        pos_today_sql = f"""
+            SELECT COALESCE(SUM(grand_total), 0) AS total
+            FROM pos_sales
+            WHERE company_key = ?
+              AND date(sale_date) = date(?)
+              {branch_sql}
+        """
+        pos_today_params = [company_key, today.isoformat(), *branch_params]
+        pos_today_row = conn.execute(pos_today_sql, tuple(pos_today_params)).fetchone()
+        today_sales = float(pos_today_row["total"] or 0.0) if pos_today_row else 0.0
+    except Exception:
+        today_sales = 0.0
+    if today_sales <= 0:
+        journal_today_sql = """
+            SELECT COALESCE(SUM(jl.credit), 0) AS sales_total
+            FROM journal_entries je
+            JOIN journal_lines jl ON jl.entry_id = je.id
+            JOIN chart_of_accounts c ON c.id = jl.account_id
+            WHERE je.company_key = ?
+              AND date(je.date) = date(?)
+              AND lower(COALESCE(NULLIF(c.name, ''), NULLIF(c.account_name, ''), '')) LIKE 'sales%'
+              AND COALESCE(je.is_voided, 0) = 0
+              AND COALESCE(je.approval_status, 'Posted') = 'Posted'
+        """
+        journal_params = [company_key, today.isoformat()]
+        if branch_id:
+            journal_today_sql += " AND je.branch_id = ?"
+            journal_params.append(str(branch_id))
+        journal_row = conn.execute(journal_today_sql, tuple(journal_params)).fetchone()
+        today_sales = float(journal_row["sales_total"] or 0.0) if journal_row else 0.0
+
+    gross_profit = 0.0
+    try:
+        income_rows = generate_income_statement(
+            company_key,
+            month_start.isoformat(),
+            today.isoformat(),
+            branch_id=branch_id,
+        )
+        gross_profit = float(
+            next(
+                (row["amount"] for row in income_rows if str(row.get("account_name") or "") == "Gross Profit"),
+                0.0,
+            )
+        )
+    except Exception:
+        gross_profit = 0.0
+
+    if branch_id:
+        receivables_total = round(
+            max(
+                _dashboard_branch_ledger_balance(
+                    conn,
+                    company_key,
+                    branch_id,
+                    ("receivable", "debtor", "trade debtor"),
+                ),
+                0.0,
+            ),
+            2,
+        )
+        payables_total = round(
+            max(
+                -_dashboard_branch_ledger_balance(
+                    conn,
+                    company_key,
+                    branch_id,
+                    ("payable", "creditor", "trade creditor"),
+                ),
+                0.0,
+            ),
+            2,
+        )
+    else:
+        receivables_total = round(
+            sum(float(row.get("balance") or 0.0) for row in get_customer_balances(company_key, conn=conn) if float(row.get("balance") or 0.0) > 0),
+            2,
+        )
+        payables_total = round(
+            sum(float(row.get("balance") or 0.0) for row in get_supplier_balances(company_key, conn=conn) if float(row.get("balance") or 0.0) > 0),
+            2,
+        )
+
+    cash_bank_row = conn.execute(
+        """
+        SELECT COALESCE(SUM(jl.debit - jl.credit), 0) AS balance
+        FROM journal_entries je
+        JOIN journal_lines jl ON jl.entry_id = je.id
+        JOIN chart_of_accounts c ON c.id = jl.account_id
+        WHERE je.company_key = ?
+          AND lower(COALESCE(NULLIF(c.type, ''), NULLIF(c.account_type, ''), NULLIF(c.category, ''), '')) = 'asset'
+          AND (
+              lower(COALESCE(NULLIF(c.name, ''), NULLIF(c.account_name, ''), '')) LIKE 'cash%'
+              OR lower(COALESCE(NULLIF(c.name, ''), NULLIF(c.account_name, ''), '')) LIKE 'bank%'
+              OR lower(COALESCE(NULLIF(c.name, ''), NULLIF(c.account_name, ''), '')) LIKE 'mobile money%'
+          )
+          AND COALESCE(je.is_voided, 0) = 0
+          AND COALESCE(je.approval_status, 'Posted') = 'Posted'
+        """
+        + (" AND je.branch_id = ?" if branch_id else ""),
+        tuple([company_key, str(branch_id)] if branch_id else [company_key]),
+    ).fetchone()
+    cash_bank_balance = float(cash_bank_row["balance"] or 0.0) if cash_bank_row else 0.0
+
+    return {
+        "today_sales": round(today_sales, 2),
+        "month_sales": round(month_sales, 2),
+        "gross_profit": round(gross_profit, 2),
+        "inventory_value": round(inventory_value, 2),
+        "low_stock_count": int(low_stock_count),
+        "receivables_total": receivables_total,
+        "payables_total": payables_total,
+        "cash_bank_balance": round(cash_bank_balance, 2),
+    }
+
+
+def _fetch_dashboard_sales_analytics(conn, company_key, branch_id=None):
+    branch_sql, branch_params = _dashboard_pos_branch_sql(branch_id, alias="ps")
+    analytics = {
+        "daily_sales": [],
+        "top_items": [],
+        "payment_methods": [],
+        "cashier_sales": [],
+        "branch_sales": [],
+        "has_pos_data": False,
+    }
+    try:
+        ensure_pos_sales_schema(conn)
+        window_start = (datetime.now().date() - timedelta(days=29)).isoformat()
+        daily_rows = conn.execute(
+            f"""
+            SELECT sale_date AS sale_day, COALESCE(SUM(grand_total), 0) AS sales_total
+            FROM pos_sales ps
+            WHERE company_key = ?
+              AND date(sale_date) >= date(?)
+              {branch_sql}
+            GROUP BY sale_date
+            ORDER BY sale_date
+            """,
+            tuple([company_key, window_start, *branch_params]),
+        ).fetchall()
+        analytics["daily_sales"] = [
+            {"sale_day": str(row["sale_day"]), "sales_total": float(row["sales_total"] or 0.0)} for row in daily_rows
+        ]
+        top_rows = conn.execute(
+            f"""
+            SELECT psl.item_name AS item_name,
+                   COALESCE(SUM(psl.qty_sold), 0) AS qty_sold,
+                   COALESCE(SUM(psl.line_total), 0) AS revenue
+            FROM pos_sale_lines psl
+            JOIN pos_sales ps ON ps.id = psl.pos_sale_id AND ps.company_key = psl.company_key
+            WHERE ps.company_key = ?
+              AND date(ps.sale_date) >= date(?)
+              {branch_sql}
+            GROUP BY psl.item_name
+            ORDER BY qty_sold DESC, revenue DESC
+            LIMIT 10
+            """,
+            tuple([company_key, window_start, *branch_params]),
+        ).fetchall()
+        analytics["top_items"] = [
+            {
+                "item_name": str(row["item_name"] or "Item"),
+                "qty_sold": float(row["qty_sold"] or 0.0),
+                "revenue": float(row["revenue"] or 0.0),
+            }
+            for row in top_rows
+        ]
+        payment_rows = conn.execute(
+            f"""
+            SELECT COALESCE(NULLIF(payment_method, ''), 'Unknown') AS payment_method,
+                   COALESCE(SUM(grand_total), 0) AS sales_total,
+                   COUNT(*) AS sale_count
+            FROM pos_sales ps
+            WHERE company_key = ?
+              AND date(sale_date) >= date(?)
+              {branch_sql}
+            GROUP BY COALESCE(NULLIF(payment_method, ''), 'Unknown')
+            ORDER BY sales_total DESC
+            """,
+            tuple([company_key, window_start, *branch_params]),
+        ).fetchall()
+        analytics["payment_methods"] = [
+            {
+                "payment_method": str(row["payment_method"]),
+                "sales_total": float(row["sales_total"] or 0.0),
+                "sale_count": int(row["sale_count"] or 0),
+            }
+            for row in payment_rows
+        ]
+        cashier_rows = conn.execute(
+            f"""
+            SELECT COALESCE(NULLIF(cashier, ''), 'Unknown') AS cashier,
+                   COALESCE(SUM(grand_total), 0) AS sales_total
+            FROM pos_sales ps
+            WHERE company_key = ?
+              AND date(sale_date) >= date(?)
+              {branch_sql}
+            GROUP BY COALESCE(NULLIF(cashier, ''), 'Unknown')
+            ORDER BY sales_total DESC
+            LIMIT 10
+            """,
+            tuple([company_key, window_start, *branch_params]),
+        ).fetchall()
+        analytics["cashier_sales"] = [
+            {"cashier": str(row["cashier"]), "sales_total": float(row["sales_total"] or 0.0)} for row in cashier_rows
+        ]
+        branch_filter_sql, branch_filter_params = _dashboard_pos_branch_sql(branch_id)
+        branch_rows = conn.execute(
+            f"""
+            SELECT COALESCE(NULLIF(branch_id, ''), 'Unassigned') AS branch_id,
+                   COALESCE(SUM(grand_total), 0) AS sales_total
+            FROM pos_sales
+            WHERE company_key = ?
+              AND date(sale_date) >= date(?)
+              {branch_filter_sql}
+            GROUP BY COALESCE(NULLIF(branch_id, ''), 'Unassigned')
+            ORDER BY sales_total DESC
+            """,
+            tuple([company_key, window_start, *branch_filter_params]),
+        ).fetchall()
+        analytics["branch_sales"] = [
+            {"branch_id": str(row["branch_id"]), "sales_total": float(row["sales_total"] or 0.0)} for row in branch_rows
+        ]
+        analytics["has_pos_data"] = bool(
+            analytics["daily_sales"] or analytics["top_items"] or analytics["payment_methods"]
+        )
+    except Exception as exc:
+        logger.debug("Dashboard POS analytics skipped: %s", sanitize_error_message(exc))
+    return analytics
+
+
+def _fetch_dashboard_inventory_insights(conn, company_key, branch_id=None):
+    window_start = (datetime.now().date() - timedelta(days=29)).isoformat()
+    branch_sql, branch_params = _dashboard_pos_branch_sql(branch_id, alias="ps")
+    inv_branch_sql, inv_branch_params = "", []
+    try:
+        inventory_columns = {row[1] for row in conn.execute("PRAGMA table_info(inventory)").fetchall()}
+        if branch_id and "branch_id" in inventory_columns:
+            inv_branch_sql = " AND COALESCE(branch_id, '') = ? "
+            inv_branch_params = [str(branch_id)]
+    except Exception:
+        pass
+    movement_branch_sql, movement_branch_params = _dashboard_stock_movement_branch_sql(conn, branch_id)
+    insights = {
+        "fast_moving": [],
+        "dead_stock": [],
+        "expiring_summary": {"expiring_soon": 0, "expired": 0, "invalid": 0},
+        "most_profitable": [],
+        "movement_trend": [],
+    }
+    try:
+        ensure_pos_sales_schema(conn)
+        fast_rows = conn.execute(
+            f"""
+            SELECT psl.item_name AS item_name, COALESCE(SUM(psl.qty_sold), 0) AS qty_sold
+            FROM pos_sale_lines psl
+            JOIN pos_sales ps ON ps.id = psl.pos_sale_id AND ps.company_key = psl.company_key
+            WHERE ps.company_key = ? AND date(ps.sale_date) >= date(?)
+              {branch_sql}
+            GROUP BY psl.item_name
+            HAVING qty_sold > 0
+            ORDER BY qty_sold DESC
+            LIMIT 8
+            """,
+            tuple([company_key, window_start, *branch_params]),
+        ).fetchall()
+        insights["fast_moving"] = [
+            {"item_name": str(row["item_name"]), "qty_sold": float(row["qty_sold"] or 0.0)} for row in fast_rows
+        ]
+        profitable_rows = conn.execute(
+            f"""
+            SELECT psl.item_name AS item_name,
+                   COALESCE(SUM(psl.line_total), 0) AS revenue,
+                   COALESCE(SUM(psl.qty_sold * COALESCE(psl.cost_price, 0)), 0) AS cost_total
+            FROM pos_sale_lines psl
+            JOIN pos_sales ps ON ps.id = psl.pos_sale_id AND ps.company_key = psl.company_key
+            WHERE ps.company_key = ? AND date(ps.sale_date) >= date(?)
+              {branch_sql}
+            GROUP BY psl.item_name
+            ORDER BY (revenue - cost_total) DESC
+            LIMIT 8
+            """,
+            tuple([company_key, window_start, *branch_params]),
+        ).fetchall()
+        insights["most_profitable"] = [
+            {
+                "item_name": str(row["item_name"]),
+                "profit": round(float(row["revenue"] or 0.0) - float(row["cost_total"] or 0.0), 2),
+            }
+            for row in profitable_rows
+        ]
+    except Exception:
+        pass
+
+    inventory_rows = conn.execute(
+        f"""
+        SELECT item_name, qty, expiry_date
+        FROM inventory
+        WHERE company_key = ?
+        {inv_branch_sql}
+        """,
+        tuple([company_key, *inv_branch_params]),
+    ).fetchall()
+    sold_names = set()
+    try:
+        sold_rows = conn.execute(
+            f"""
+            SELECT DISTINCT psl.item_name
+            FROM pos_sale_lines psl
+            JOIN pos_sales ps ON ps.id = psl.pos_sale_id AND ps.company_key = psl.company_key
+            WHERE ps.company_key = ?
+              AND date(ps.sale_date) >= date(?)
+              {branch_sql}
+            """,
+            tuple([company_key, (datetime.now().date() - timedelta(days=90)).isoformat(), *branch_params]),
+        ).fetchall()
+        sold_names = {str(row["item_name"]) for row in sold_rows}
+    except Exception:
+        pass
+
+    dead_stock_rows = []
+    for row in inventory_rows:
+        qty = float(row["qty"] or 0.0)
+        if qty <= 0:
+            continue
+        item_name = str(row["item_name"] or "")
+        if item_name not in sold_names:
+            dead_stock_rows.append({"item_name": item_name, "qty": qty})
+    insights["dead_stock"] = sorted(dead_stock_rows, key=lambda item: item["qty"], reverse=True)[:8]
+
+    for row in inventory_rows:
+        expiry_status = _get_inventory_expiry_status(row["expiry_date"])
+        if expiry_status == "EXPIRING SOON":
+            insights["expiring_summary"]["expiring_soon"] += 1
+        elif expiry_status == "EXPIRED":
+            insights["expiring_summary"]["expired"] += 1
+        elif expiry_status == "INVALID":
+            insights["expiring_summary"]["invalid"] += 1
+
+    try:
+        ensure_stock_movements_schema_integrity(conn)
+        movement_rows = conn.execute(
+            f"""
+            SELECT date(created_at) AS movement_day,
+                   COALESCE(SUM(
+                       CASE
+                           WHEN upper(COALESCE(movement_type, '')) IN ('STOCK_IN', 'IMPORT', 'POS_RETURN') THEN quantity
+                           WHEN upper(COALESCE(movement_type, '')) IN ('STOCK_OUT', 'POS_SALE') THEN -quantity
+                           ELSE 0
+                       END
+                   ), 0) AS net_qty
+            FROM stock_movements
+            WHERE company_key = ?
+              AND date(created_at) >= date(?)
+              {movement_branch_sql}
+            GROUP BY date(created_at)
+            ORDER BY movement_day
+            """,
+            tuple([company_key, window_start, *movement_branch_params]),
+        ).fetchall()
+        insights["movement_trend"] = [
+            {"movement_day": str(row["movement_day"]), "net_qty": float(row["net_qty"] or 0.0)} for row in movement_rows
+        ]
+    except Exception:
+        pass
+    return insights
+
+
+def _fetch_dashboard_receivable_payable_health(company_key, branch_id=None):
+    as_of_date = datetime.now().date()
+    ar_rows = get_ar_aging_report(company_key, as_of_date=as_of_date) or []
+    ap_rows = get_ap_aging_report(company_key, as_of_date=as_of_date) or []
+    if branch_id:
+        branch_key = str(branch_id)
+        ar_rows = [row for row in ar_rows if str(row.get("branch_id") or "") == branch_key]
+        ap_rows = [row for row in ap_rows if str(row.get("branch_id") or "") == branch_key]
+    ar_overdue = [row for row in ar_rows if int(row.get("days_overdue") or 0) > 0]
+    ap_overdue = [row for row in ap_rows if int(row.get("days_overdue") or 0) > 0]
+
+    def _bucket_summary(rows):
+        summary = {"Current": 0.0, "1-30 Days": 0.0, "31-60 Days": 0.0, "61-90 Days": 0.0, "90+ Days": 0.0}
+        for row in rows:
+            bucket = str(row.get("bucket") or "Current")
+            summary[bucket] = round(summary.get(bucket, 0.0) + float(row.get("remaining_balance") or row.get("balance") or 0.0), 2)
+        return summary
+
+    debtor_totals = {}
+    for row in ar_rows:
+        name = str(row.get("customer_name") or "Customer")
+        debtor_totals[name] = round(debtor_totals.get(name, 0.0) + float(row.get("remaining_balance") or 0.0), 2)
+    creditor_totals = {}
+    for row in ap_rows:
+        name = str(row.get("supplier_name") or "Supplier")
+        creditor_totals[name] = round(creditor_totals.get(name, 0.0) + float(row.get("remaining_balance") or 0.0), 2)
+
+    return {
+        "ar_overdue_count": len(ar_overdue),
+        "ar_overdue_total": round(sum(float(row.get("remaining_balance") or 0.0) for row in ar_overdue), 2),
+        "ap_overdue_count": len(ap_overdue),
+        "ap_overdue_total": round(sum(float(row.get("remaining_balance") or 0.0) for row in ap_overdue), 2),
+        "ar_aging": _bucket_summary(ar_rows),
+        "ap_aging": _bucket_summary(ap_rows),
+        "top_debtors": sorted(
+            [{"name": name, "balance": balance} for name, balance in debtor_totals.items() if balance > 0],
+            key=lambda item: item["balance"],
+            reverse=True,
+        )[:5],
+        "top_creditors": sorted(
+            [{"name": name, "balance": balance} for name, balance in creditor_totals.items() if balance > 0],
+            key=lambda item: item["balance"],
+            reverse=True,
+        )[:5],
+    }
+
+
+@st.cache_data(ttl=120, show_spinner=False)
+def _cached_dashboard_analytics_bundle(company_key, branch_id_key, period_key):
+    conn = get_connection()
+    try:
+        branch_id = branch_id_key or None
+        kpis = _fetch_dashboard_kpi_snapshot(conn, company_key, branch_id=branch_id)
+        sales = _fetch_dashboard_sales_analytics(conn, company_key, branch_id=branch_id)
+        inventory = _fetch_dashboard_inventory_insights(conn, company_key, branch_id=branch_id)
+        return {
+            "kpis": kpis,
+            "sales": sales,
+            "inventory": inventory,
+            "receivable_payable": _fetch_dashboard_receivable_payable_health(company_key, branch_id=branch_id),
+        }
+    finally:
+        conn.close()
+
+
+def _dashboard_chart_has_data(chart_df):
+    if chart_df is None or chart_df.empty:
+        return False
+    numeric_columns = chart_df.select_dtypes(include="number")
+    if numeric_columns.empty:
+        return len(chart_df.index) > 0
+    return bool((numeric_columns.fillna(0).abs().sum() > 0).any())
+
+
+def _render_dashboard_empty_state(message, hint=None):
+    hint_html = (
+        f'<div class="dashboard-empty-hint">{html.escape(str(hint))}</div>'
+        if hint
+        else ""
+    )
+    st.markdown(
+        (
+            f'<div class="dashboard-empty-state">{html.escape(str(message or "No data available yet."))}'
+            f"{hint_html}</div>"
+        ),
+        unsafe_allow_html=True,
+    )
+
+
+def _render_dashboard_chart_card(
+    title,
+    caption,
+    chart_df,
+    chart_kind="bar",
+    empty_message=None,
+    empty_hint=None,
+):
+    st.markdown('<div class="eka-card dashboard-chart-card">', unsafe_allow_html=True)
+    st.markdown(f"**{title}**")
+    if caption:
+        st.caption(caption)
+    if not _dashboard_chart_has_data(chart_df):
+        _render_dashboard_empty_state(
+            empty_message or "No data available for this view yet.",
+            empty_hint,
+        )
+    else:
+        try:
+            if chart_kind == "line":
+                st.line_chart(chart_df, use_container_width=True)
+            else:
+                st.bar_chart(chart_df, use_container_width=True)
+        except Exception:
+            _render_dashboard_empty_state(
+                empty_message or "Chart could not be rendered for the current dataset.",
+                empty_hint,
+            )
+    st.markdown("</div>", unsafe_allow_html=True)
+
+
+def _render_dashboard_balance_card(title, rows, *, empty_message, empty_hint=None, column_labels=None):
+    st.markdown('<div class="eka-card dashboard-chart-card">', unsafe_allow_html=True)
+    st.markdown(f"**{title}**")
+    if rows:
+        display_df = pd.DataFrame(rows)
+        if column_labels:
+            display_df = display_df.rename(columns=column_labels)
+        st.dataframe(display_df, use_container_width=True, hide_index=True)
+    else:
+        _render_dashboard_empty_state(empty_message, empty_hint)
+    st.markdown("</div>", unsafe_allow_html=True)
+
+
 def show_dashboard(company_key, company_name, role):
-    """Primary business dashboard restored in modules.py for safe routing."""
-    st.title("📊 Enterprise Dashboard")
-    st.markdown(f"#### Operational snapshot for {company_name}")
-    st.markdown("##### Current business performance, cash flow, inventory alerts and quick actions.")
+    """Executive operational dashboard with cached analytics snapshots."""
+    render_ui_standard_styles()
+    page_header("📊 Enterprise Dashboard", f"Operational intelligence for {company_name}")
+    enforce_branch_session_lock(st.session_state.get("user"))
+    active_branch_id = resolve_effective_branch_id(st.session_state.get("user"))
+    if active_branch_id:
+        branch_label = active_branch_id
+        try:
+            conn = get_connection()
+            branch_row = conn.execute(
+                "SELECT branch_name FROM branches WHERE company_key = ? AND branch_id = ?",
+                (company_key, active_branch_id),
+            ).fetchone()
+            conn.close()
+            if branch_row and branch_row[0]:
+                branch_label = f"{branch_row[0]} ({active_branch_id})"
+        except Exception:
+            pass
+        st.caption(f"Branch context: {branch_label}")
+    elif is_branch_scoped_user(st.session_state.get("user")):
+        st.warning("No branch is assigned to this user. Contact your administrator.")
 
     if role == "Demo":
-        st.markdown("#### Demo Summary")
-        st.caption("Sample enterprise metrics and operational indicators for the demo environment.")
-        col1, col2, col3, col4 = st.columns(4)
-        col1.metric("Inventory Value", format_currency(25000.0))
-        col2.metric("Month Sales", format_currency(15000.0))
-        col3.metric("Employees", "5")
-        col4.metric("Asset Value", format_currency(50000.0))
+        st.markdown('<div class="dashboard-kpi-grid">', unsafe_allow_html=True)
+        demo_row1 = st.columns(4)
+        demo_row1[0].metric("Today Sales", format_currency(1250.0))
+        demo_row1[1].metric("This Month Sales", format_currency(15000.0))
+        demo_row1[2].metric("Gross Profit", format_currency(6200.0))
+        demo_row1[3].metric("Inventory Value", format_currency(25000.0))
+        demo_row2 = st.columns(4)
+        demo_row2[0].metric("Low Stock Count", "3")
+        demo_row2[1].metric("Outstanding Receivables", format_currency(4800.0))
+        demo_row2[2].metric("Outstanding Payables", format_currency(2100.0))
+        demo_row2[3].metric("Cash/Bank Balance", format_currency(18250.0))
+        st.markdown("</div>", unsafe_allow_html=True)
+        st.info("Demo mode shows sample executive metrics. Live analytics are available in company workspaces.")
         return
 
-    conn = None
     try:
-        conn = get_connection()
-        col1, col2, col3, col4 = st.columns(4)
+        analytics_bundle = _cached_dashboard_analytics_bundle(
+            company_key,
+            str(active_branch_id or ""),
+            datetime.now().strftime("%Y-%m-%d"),
+        )
+        kpis = analytics_bundle.get("kpis") or {}
+        sales = analytics_bundle.get("sales") or {}
+        inventory = analytics_bundle.get("inventory") or {}
+        receivable_payable = analytics_bundle.get("receivable_payable") or {}
 
-        inv_val = conn.execute(
-            "SELECT COALESCE(SUM(qty * cost_price), 0) FROM inventory WHERE company_key = ?",
-            (company_key,),
-        ).fetchone()[0]
-        month_sales = get_month_sales_total(company_key, year_month=datetime.now().strftime('%Y-%m'), conn=conn)
-        emp_count = conn.execute(
-            "SELECT COUNT(DISTINCT emp_name) FROM payroll WHERE company_key = ? AND COALESCE(status, 'Active') != 'Void'",
-            (company_key,),
-        ).fetchone()[0] or 0
-        fa_val = conn.execute(
-            "SELECT COALESCE(SUM(book_value), 0) FROM fixed_assets WHERE company_key = ?",
-            (company_key,),
-        ).fetchone()[0]
+        st.markdown('<div class="dashboard-section-title">Executive KPIs</div>', unsafe_allow_html=True)
+        st.markdown('<div class="dashboard-kpi-grid">', unsafe_allow_html=True)
+        kpi_row1 = st.columns(4)
+        kpi_row1[0].metric("Today Sales", format_currency(kpis.get("today_sales", 0.0)))
+        kpi_row1[1].metric("This Month Sales", format_currency(kpis.get("month_sales", 0.0)))
+        kpi_row1[2].metric("Gross Profit (MTD)", format_currency(kpis.get("gross_profit", 0.0)))
+        kpi_row1[3].metric("Inventory Value", format_currency(kpis.get("inventory_value", 0.0)))
+        kpi_row2 = st.columns(4)
+        kpi_row2[0].metric("Low Stock Count", str(kpis.get("low_stock_count", 0)))
+        kpi_row2[1].metric("Outstanding Receivables", format_currency(kpis.get("receivables_total", 0.0)))
+        kpi_row2[2].metric("Outstanding Payables", format_currency(kpis.get("payables_total", 0.0)))
+        kpi_row2[3].metric("Cash/Bank Balance", format_currency(kpis.get("cash_bank_balance", 0.0)))
+        st.markdown("</div>", unsafe_allow_html=True)
 
-        col1.metric("Inventory Value", format_currency(inv_val))
-        col2.metric("Month Sales", format_currency(month_sales))
-        col3.metric("Employees", str(emp_count))
-        col4.metric("Asset Value", format_currency(fa_val))
-
-        st.markdown("---")
-        st.markdown("### Live Activity")
-        left_col, right_col = st.columns([2, 1])
-
-        with left_col:
-            st.subheader("Recent Transactions")
-            st.caption("Latest posted activity across accounts, sorted by date.")
-            recent_txns = pd.DataFrame(get_recent_accounting_activity(company_key, limit=10, conn=conn))
-            if recent_txns.empty:
-                st.info("No recent transactions found.")
-            else:
-                recent_txns["Amount"] = recent_txns["amount"].map(format_currency)
-                recent_txns = recent_txns.drop(columns=[column for column in ["amount"] if column in recent_txns.columns]).rename(
-                    columns={"date": "Date", "activity_type": "Type", "description": "Description", "reference": "Reference"}
-                )
-                recent_txns = recent_txns[[col for col in ["Date", "Type", "Reference", "Description", "Amount"] if col in recent_txns.columns]]
-                st.dataframe(format_currency_dataframe(recent_txns), use_container_width=True, hide_index=True)
-        compare_legacy_and_journal_totals(company_key, logger_instance=logger, conn=conn)
-
-        with right_col:
-            st.subheader("Low Stock Items")
-            st.caption("Low inventory items that need attention.")
-            low_stock = pd.read_sql_query(
-                """
-                SELECT item_name AS Item, qty AS Quantity, unit AS Unit
-                FROM inventory
-                WHERE company_key = ? AND qty <= 10
-                ORDER BY qty ASC
-                LIMIT 10
-                """,
-                conn,
-                params=(company_key,),
+        st.markdown('<div class="dashboard-section-title">Sales Analytics</div>', unsafe_allow_html=True)
+        sales_col1, sales_col2 = st.columns(2)
+        daily_sales_df = pd.DataFrame(sales.get("daily_sales") or [])
+        if not daily_sales_df.empty:
+            daily_sales_df = daily_sales_df.set_index("sale_day")[["sales_total"]]
+            daily_sales_df.columns = ["Sales"]
+        with sales_col1:
+            _render_dashboard_chart_card(
+                "Daily Sales Trend",
+                "Last 30 days from POS sales.",
+                daily_sales_df,
+                chart_kind="line",
+                empty_message="No sales recorded in the selected period.",
+                empty_hint="Complete POS sales to populate this trend.",
             )
-            if low_stock.empty:
-                st.success("All stock levels are adequate!")
-            else:
-                st.dataframe(low_stock, use_container_width=True, hide_index=True)
+        top_items_df = pd.DataFrame(sales.get("top_items") or [])
+        if not top_items_df.empty:
+            top_items_df = top_items_df.set_index("item_name")[["qty_sold"]]
+            top_items_df.columns = ["Qty Sold"]
+        with sales_col2:
+            _render_dashboard_chart_card(
+                "Top Selling Items",
+                "Last 30 days by quantity sold.",
+                top_items_df,
+                empty_message="No sales activity available yet.",
+                empty_hint="Top sellers appear after items are sold through POS.",
+            )
 
-        st.markdown("---")
-        st.subheader("Quick Actions")
+        sales_col3, sales_col4 = st.columns(2)
+        payment_df = pd.DataFrame(sales.get("payment_methods") or [])
+        if not payment_df.empty:
+            payment_df = payment_df.set_index("payment_method")[["sales_total"]]
+            payment_df.columns = ["Sales"]
+        with sales_col3:
+            _render_dashboard_chart_card(
+                "Payment Method Breakdown",
+                "Last 30 days POS totals.",
+                payment_df,
+                empty_message="No completed POS payments yet.",
+                empty_hint="Payment mix is available after checkout activity is recorded.",
+            )
+        cashier_df = pd.DataFrame(sales.get("cashier_sales") or [])
+        if not cashier_df.empty:
+            cashier_df = cashier_df.set_index("cashier")[["sales_total"]]
+            cashier_df.columns = ["Sales"]
+        with sales_col4:
+            _render_dashboard_chart_card(
+                "Sales by Cashier",
+                "Last 30 days POS totals.",
+                cashier_df,
+                empty_message="No cashier sales available yet.",
+                empty_hint="Cashier totals appear once POS sales are posted.",
+            )
+
+        branch_df = pd.DataFrame(sales.get("branch_sales") or [])
+        branch_chart_df = pd.DataFrame()
+        branch_empty_message = "No completed POS payments yet."
+        branch_empty_hint = "Branch analytics use posted POS sales from the last 30 days."
+        if len(branch_df) > 1:
+            branch_chart_df = branch_df.set_index("branch_id")[["sales_total"]]
+            branch_chart_df.columns = ["Sales"]
+        elif len(branch_df) == 1:
+            branch_empty_message = "Branch comparison requires sales from multiple branches."
+            branch_empty_hint = "Record sales in more than one branch to compare performance."
+        _render_dashboard_chart_card(
+            "Branch Comparison",
+            "Last 30 days POS totals by branch.",
+            branch_chart_df,
+            empty_message=branch_empty_message,
+            empty_hint=branch_empty_hint,
+        )
+
+        st.markdown('<div class="dashboard-section-title">Inventory Insights</div>', unsafe_allow_html=True)
+        inv_col1, inv_col2 = st.columns(2)
+        fast_df = pd.DataFrame(inventory.get("fast_moving") or [])
+        if not fast_df.empty:
+            fast_df = fast_df.set_index("item_name")[["qty_sold"]]
+        with inv_col1:
+            _render_dashboard_chart_card(
+                "Fast-Moving Items",
+                "Highest units sold in the last 30 days.",
+                fast_df,
+                empty_message="No sales activity available yet.",
+                empty_hint="Fast movers are ranked from recent POS line sales.",
+            )
+        dead_df = pd.DataFrame(inventory.get("dead_stock") or [])
+        if not dead_df.empty:
+            dead_df = dead_df.set_index("item_name")[["qty"]]
+            dead_df.columns = ["On Hand Qty"]
+        with inv_col2:
+            _render_dashboard_chart_card(
+                "Dead Stock",
+                "In stock but no POS sales in the last 90 days.",
+                dead_df,
+                empty_message="No dead stock detected.",
+                empty_hint="Items with on-hand stock and no recent POS activity appear here.",
+            )
+
+        inv_col3, inv_col4 = st.columns(2)
+        profit_df = pd.DataFrame(inventory.get("most_profitable") or [])
+        if not profit_df.empty:
+            profit_df = profit_df.set_index("item_name")[["profit"]]
+        with inv_col3:
+            _render_dashboard_chart_card(
+                "Most Profitable Items",
+                "Estimated POS margin last 30 days.",
+                profit_df,
+                empty_message="No sales activity available yet.",
+                empty_hint="Profitability is estimated from POS revenue and cost price.",
+            )
+        movement_df = pd.DataFrame(inventory.get("movement_trend") or [])
+        if not movement_df.empty:
+            movement_df = movement_df.set_index("movement_day")[["net_qty"]]
+            movement_df.columns = ["Net Qty"]
+        with inv_col4:
+            _render_dashboard_chart_card(
+                "Stock Movement Trend",
+                "Net stock movement last 30 days.",
+                movement_df,
+                chart_kind="line",
+                empty_message="No inventory movement history yet.",
+                empty_hint="Stock receipts, adjustments, and sales movements will appear here.",
+            )
+
+        expiring_summary = inventory.get("expiring_summary") or {}
+        exp_col1, exp_col2, exp_col3 = st.columns(3)
+        exp_col1.metric("Expiring Soon", int(expiring_summary.get("expiring_soon", 0)))
+        exp_col2.metric("Expired", int(expiring_summary.get("expired", 0)))
+        exp_col3.metric("Invalid Expiry", int(expiring_summary.get("invalid", 0)))
+
+        st.markdown('<div class="dashboard-section-title">Receivable / Payable Health</div>', unsafe_allow_html=True)
+        rp_col1, rp_col2, rp_col3, rp_col4 = st.columns(4)
+        rp_col1.metric("Overdue Receivables", format_currency(receivable_payable.get("ar_overdue_total", 0.0)))
+        rp_col2.metric("Overdue Payables", format_currency(receivable_payable.get("ap_overdue_total", 0.0)))
+        rp_col3.metric("AR Documents Overdue", str(receivable_payable.get("ar_overdue_count", 0)))
+        rp_col4.metric("AP Documents Overdue", str(receivable_payable.get("ap_overdue_count", 0)))
+
+        aging_col1, aging_col2 = st.columns(2)
+        ar_aging = receivable_payable.get("ar_aging") or {}
+        ap_aging = receivable_payable.get("ap_aging") or {}
+        with aging_col1:
+            st.markdown('<div class="eka-card dashboard-chart-card">', unsafe_allow_html=True)
+            st.markdown("**Receivables Aging**")
+            if sum(float(amount or 0.0) for amount in ar_aging.values()) > 0:
+                for bucket, amount in ar_aging.items():
+                    st.caption(f"{bucket}: {format_currency(amount)}")
+            else:
+                _render_dashboard_empty_state(
+                    "No receivable balances available yet.",
+                    "Posted customer invoices and credits will populate aging buckets.",
+                )
+            st.markdown("</div>", unsafe_allow_html=True)
+        with aging_col2:
+            st.markdown('<div class="eka-card dashboard-chart-card">', unsafe_allow_html=True)
+            st.markdown("**Payables Aging**")
+            if sum(float(amount or 0.0) for amount in ap_aging.values()) > 0:
+                for bucket, amount in ap_aging.items():
+                    st.caption(f"{bucket}: {format_currency(amount)}")
+            else:
+                _render_dashboard_empty_state(
+                    "No payable balances available yet.",
+                    "Supplier bills and payments will populate aging buckets.",
+                )
+            st.markdown("</div>", unsafe_allow_html=True)
+
+        debtor_col, creditor_col = st.columns(2)
+        with debtor_col:
+            _render_dashboard_balance_card(
+                "Biggest Debtors",
+                receivable_payable.get("top_debtors") or [],
+                empty_message="No balances available.",
+                empty_hint="Outstanding customer balances will appear here.",
+                column_labels={"name": "Customer", "balance": "Balance"},
+            )
+        with creditor_col:
+            _render_dashboard_balance_card(
+                "Biggest Suppliers Owed",
+                receivable_payable.get("top_creditors") or [],
+                empty_message="No balances available.",
+                empty_hint="Outstanding supplier balances will appear here.",
+                column_labels={"name": "Supplier", "balance": "Balance"},
+            )
+
+        st.markdown('<div class="dashboard-section-title">Live Activity</div>', unsafe_allow_html=True)
+        conn = None
+        try:
+            conn = get_connection()
+            left_col, right_col = st.columns([2, 1])
+            with left_col:
+                st.markdown('<div class="eka-card">', unsafe_allow_html=True)
+                st.markdown("**Recent Transactions**")
+                st.caption("Latest posted journal activity (last 10 entries).")
+                recent_txns = pd.DataFrame(
+                    get_recent_accounting_activity(company_key, branch_id=active_branch_id, limit=10, conn=conn)
+                )
+                if recent_txns.empty:
+                    st.info("No recent transactions found.")
+                else:
+                    recent_txns["Amount"] = recent_txns["amount"].map(format_currency)
+                    recent_txns = recent_txns.drop(
+                        columns=[column for column in ["amount"] if column in recent_txns.columns]
+                    ).rename(
+                        columns={
+                            "date": "Date",
+                            "activity_type": "Type",
+                            "description": "Description",
+                            "reference": "Reference",
+                        }
+                    )
+                    recent_txns = recent_txns[
+                        [col for col in ["Date", "Type", "Reference", "Description", "Amount"] if col in recent_txns.columns]
+                    ]
+                    st.dataframe(format_currency_dataframe(recent_txns), use_container_width=True, hide_index=True)
+                st.markdown("</div>", unsafe_allow_html=True)
+            compare_legacy_and_journal_totals(
+                company_key,
+                branch_id=active_branch_id,
+                logger_instance=logger,
+                conn=conn,
+            )
+            with right_col:
+                st.markdown('<div class="eka-card">', unsafe_allow_html=True)
+                st.markdown("**Low Stock Items**")
+                low_stock_sql = """
+                    SELECT item_name AS Item, qty AS Quantity, min_stock_level AS Reorder
+                    FROM inventory
+                    WHERE company_key = ?
+                      AND (
+                          qty <= 0
+                          OR qty <= COALESCE(min_stock_level, 0)
+                      )
+                """
+                low_stock_params = [company_key]
+                try:
+                    inventory_columns = {row[1] for row in conn.execute("PRAGMA table_info(inventory)").fetchall()}
+                    if active_branch_id and "branch_id" in inventory_columns:
+                        low_stock_sql += " AND COALESCE(branch_id, '') = ?"
+                        low_stock_params.append(str(active_branch_id))
+                except Exception:
+                    pass
+                low_stock_sql += " ORDER BY qty ASC LIMIT 10"
+                low_stock = pd.read_sql_query(
+                    low_stock_sql,
+                    conn,
+                    params=tuple(low_stock_params),
+                )
+                if low_stock.empty:
+                    st.success("All stock levels are adequate.")
+                else:
+                    st.dataframe(low_stock, use_container_width=True, hide_index=True)
+                st.markdown("</div>", unsafe_allow_html=True)
+        finally:
+            if conn:
+                conn.close()
+
+        st.markdown('<div class="dashboard-section-title">Quick Actions</div>', unsafe_allow_html=True)
         action_col1, action_col2, action_col3, action_col4, action_col5 = st.columns(5)
         if action_col1.button("🛒 New Sale", key=f"dashboard_pos_{company_key}", use_container_width=True):
             st.session_state.page = "Point of Sale"
@@ -14924,9 +15877,6 @@ def show_dashboard(company_key, company_name, role):
             st.rerun()
     except Exception as exc:
         st.error(build_user_safe_error(exc, st.session_state.get("user", {}).get("role")))
-    finally:
-        if conn:
-            conn.close()
 
 
 def show_accounts_receivable(company_key):
