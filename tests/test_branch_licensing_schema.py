@@ -68,6 +68,26 @@ class BranchLicensingSchemaTests(ERPIsolatedTestCase):
         ).fetchone()[0]
         self.assertEqual(int(excluded), 0)
 
+    def test_branch_code_column_backfills_from_branch_name(self):
+        branch_id = f"{self.company_key}-retail-1"
+        self.conn.execute(
+            """
+            INSERT INTO branches (
+                branch_id, company_key, branch_name, branch_type, branch_access_key, is_active
+            )
+            VALUES (?, ?, ?, ?, ?, 1)
+            """,
+            (branch_id, self.company_key, "Retail One", "Retail", f"{branch_id}-KEY"),
+        )
+        self.commit()
+        self.database.ensure_branch_licensing_schema_integrity(self.conn)
+        self.commit()
+        row = self.conn.execute(
+            "SELECT branch_code FROM branches WHERE branch_id = ?",
+            (branch_id,),
+        ).fetchone()
+        self.assertEqual(row[0], "Retail One")
+
     def test_branch_module_grants_created_idempotently(self):
         branch_id = f"{self.company_key}-retail-1"
         self.conn.execute(

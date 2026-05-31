@@ -1,5 +1,8 @@
+import hashlib
 import sqlite3
 import logging
+import random
+import string
 from datetime import datetime, timedelta
 import os
 import shutil
@@ -4454,7 +4457,7 @@ def seed_branch_type_module_defaults(conn):
     return inserted
 
 
-def ensure_branch_module_grants_for_branch(conn, company_key, branch_id, branch_type_key=None):
+def ensure_branch_module_grants_for_branch(conn, company_key, branch_id, branch_type_key=None, *, ensure_schema=True):
     """
     Copy module defaults into branch_module_grants for one branch.
     Safe to call repeatedly; existing grants are left unchanged.
@@ -4464,7 +4467,8 @@ def ensure_branch_module_grants_for_branch(conn, company_key, branch_id, branch_
     if not normalized_company_key or not normalized_branch_id:
         return {"ok": False, "reason": "company_key and branch_id are required", "inserted": 0}
 
-    ensure_branch_licensing_schema_integrity(conn)
+    if ensure_schema:
+        ensure_branch_licensing_schema_integrity(conn)
     resolved_type_key = _normalize_branch_type_key(branch_type_key)
     if not branch_type_key:
         branch_row = conn.execute(
@@ -4582,12 +4586,1295 @@ def ensure_branch_licensing_schema_integrity(conn):
             "manager_user_id": "TEXT",
             "deployment_status": "TEXT DEFAULT 'active'",
             "branch_tier": "TEXT DEFAULT 'standard'",
+            "branch_code": "TEXT",
         }
         for column_name, column_def in branch_column_defs.items():
             _ensure_branch_licensing_column(conn, "branches", column_name, column_def)
 
+    backfill_branch_codes(conn)
+
     seed_branch_type_catalog(conn)
     seed_branch_type_module_defaults(conn)
+
+
+def _slugify_branch_token(value):
+    normalized = str(value or "").strip().lower()
+    if not normalized:
+        return ""
+    slug = re.sub(r"[^a-z0-9]+", "-", normalized)
+    return re.sub(r"-+", "-", slug).strip("-")
+
+
+def _fetch_company_name(conn, company_key):
+    normalized_company_key = str(company_key or "").strip()
+    if not normalized_company_key:
+        return ""
+    row = conn.execute(
+        "SELECT name FROM companies WHERE key = ? LIMIT 1",
+        (normalized_company_key,),
+    ).fetchone()
+    if row is None:
+        return ""
+    if isinstance(row, sqlite3.Row):
+        return str(row["name"] or "").strip()
+    return str(row[0] or "").strip()
+
+
+def _derive_branch_code(branch_name):
+    """Human-facing branch code slug derived from branch name only."""
+    slug = _slugify_branch_token(branch_name)
+    return slug or str(branch_name or "").strip()
+
+
+def backfill_branch_codes(conn):
+    """Populate branch_code for legacy rows without renaming branch_id."""
+    if not _branch_licensing_table_exists(conn, "branches"):
+        return 0
+    if not _branch_licensing_column_exists(conn, "branches", "branch_code"):
+        return 0
+    rows = conn.execute(
+        """
+        SELECT branch_id, branch_name
+        FROM branches
+        WHERE branch_code IS NULL OR TRIM(branch_code) = ''
+        """
+    ).fetchall()
+    updated = 0
+    for row in rows:
+        if isinstance(row, sqlite3.Row):
+            branch_id = row["branch_id"]
+            branch_name = row["branch_name"]
+        else:
+            branch_id, branch_name = row[0], row[1]
+        fallback_code = str(branch_name or "").strip() or str(branch_id or "").strip()
+        conn.execute(
+            "UPDATE branches SET branch_code = ? WHERE branch_id = ?",
+            (fallback_code, branch_id),
+        )
+        updated += 1
+    return updated
+
+
+def _allocate_unique_branch_code(conn, company_key, base_branch_code, exclude_branch_id=None):
+    normalized_company_key = str(company_key or "").strip()
+    normalized_base = str(base_branch_code or "").strip()
+    if not normalized_company_key or not normalized_base:
+        return normalized_base
+    candidate = normalized_base
+    suffix = 2
+    while True:
+        query = """
+            SELECT branch_id FROM branches
+            WHERE company_key = ? AND LOWER(TRIM(branch_code)) = LOWER(TRIM(?))
+        """
+        params = [normalized_company_key, candidate]
+        if exclude_branch_id:
+            query += " AND branch_id != ?"
+            params.append(str(exclude_branch_id).strip())
+        query += " LIMIT 1"
+        conflict = conn.execute(query, tuple(params)).fetchone()
+        if not conflict:
+            return candidate
+        candidate = f"{normalized_base}-{suffix}"
+        suffix += 1
+        if suffix > 1000:
+            candidate = f"{normalized_base}-{''.join(random.choices(string.ascii_lowercase + string.digits, k=4))}"
+            return candidate
+
+
+def _derive_branch_id(conn, company_key, branch_name, company_name=None):
+    """
+    Build a human-readable branch code from company name + branch name.
+    Example: PERFECTO PREMIUM + KUMASI -> perfecto-premium-kumasi
+    Existing records are never renamed; this applies only to new branches.
+    """
+    branch_slug = _slugify_branch_token(branch_name)
+    if not branch_slug:
+        return ""
+    resolved_company_name = str(company_name or "").strip()
+    if not resolved_company_name and conn is not None:
+        resolved_company_name = _fetch_company_name(conn, company_key)
+    company_slug = _slugify_branch_token(resolved_company_name) or _slugify_branch_token(company_key)
+    if not company_slug:
+        return branch_slug
+    return f"{company_slug}-{branch_slug}"
+
+
+def _allocate_unique_branch_id(conn, base_branch_id):
+    normalized_base = str(base_branch_id or "").strip()
+    if not normalized_base:
+        return ""
+    candidate = normalized_base
+    if not conn.execute("SELECT 1 FROM branches WHERE branch_id = ? LIMIT 1", (candidate,)).fetchone():
+        return candidate
+    for suffix in range(2, 1000):
+        candidate = f"{normalized_base}-{suffix}"
+        if not conn.execute("SELECT 1 FROM branches WHERE branch_id = ? LIMIT 1", (candidate,)).fetchone():
+            return candidate
+    return f"{normalized_base}-{''.join(random.choices(string.ascii_lowercase + string.digits, k=6))}"
+
+
+def _generate_branch_access_key(branch_id):
+    normalized_branch_id = str(branch_id or "").strip()
+    suffix = "".join(random.choices(string.ascii_uppercase + string.digits, k=12))
+    return f"{normalized_branch_id}-{suffix}"
+
+
+def count_active_branches(conn, company_key, exclude_branch_id=None):
+    normalized_company_key = str(company_key or "").strip()
+    if not normalized_company_key:
+        return 0
+    query = """
+        SELECT COUNT(*) AS active_count
+        FROM branches
+        WHERE company_key = ?
+          AND COALESCE(is_active, 1) = 1
+    """
+    params = [normalized_company_key]
+    if exclude_branch_id:
+        query += " AND branch_id != ?"
+        params.append(str(exclude_branch_id).strip())
+    row = conn.execute(query, tuple(params)).fetchone()
+    if row is None:
+        return 0
+    if isinstance(row, sqlite3.Row):
+        return int(row["active_count"] or 0)
+    return int(row[0] or 0)
+
+
+def get_company_branch_license_snapshot(conn, company_key, *, ensure_schema=True):
+    normalized_company_key = str(company_key or "").strip()
+    if ensure_schema:
+        ensure_branch_licensing_schema_integrity(conn)
+    row = conn.execute(
+        """
+        SELECT COALESCE(max_branches, 1), COALESCE(number_of_branches, 1)
+        FROM companies
+        WHERE key = ?
+        """,
+        (normalized_company_key,),
+    ).fetchone()
+    max_branches = 1
+    number_of_branches = 1
+    if row is not None:
+        max_branches = max(int(row[0] or 1), 1)
+        number_of_branches = max(int(row[1] or 1), 1)
+    active_branch_count = count_active_branches(conn, normalized_company_key)
+    remaining_active_slots = max(0, max_branches - active_branch_count)
+    return {
+        "company_key": normalized_company_key,
+        "max_branches": max_branches,
+        "number_of_branches": number_of_branches,
+        "active_branch_count": active_branch_count,
+        "remaining_active_slots": remaining_active_slots,
+        "can_create_active_branch": active_branch_count < max_branches,
+    }
+
+
+def evaluate_active_branch_creation(conn, company_key, *, is_active=True, exclude_branch_id=None, ensure_schema=True):
+    snapshot = get_company_branch_license_snapshot(conn, company_key, ensure_schema=ensure_schema)
+    if not is_active:
+        return {
+            "ok": True,
+            "allowed": True,
+            "reason": None,
+            **snapshot,
+        }
+    active_branch_count = count_active_branches(conn, company_key, exclude_branch_id=exclude_branch_id)
+    snapshot = dict(snapshot)
+    snapshot["active_branch_count"] = active_branch_count
+    snapshot["remaining_active_slots"] = max(0, snapshot["max_branches"] - active_branch_count)
+    snapshot["can_create_active_branch"] = active_branch_count < snapshot["max_branches"]
+    if snapshot["can_create_active_branch"]:
+        return {"ok": True, "allowed": True, "reason": None, **snapshot}
+    return {
+        "ok": True,
+        "allowed": False,
+        "reason": (
+            f"Active branch limit reached ({active_branch_count}/{snapshot['max_branches']}). "
+            "Deactivate an existing branch or contact support to increase your licensed branch count."
+        ),
+        **snapshot,
+    }
+
+
+def get_branch_type_catalog(conn):
+    ensure_branch_licensing_schema_integrity(conn)
+    rows = conn.execute(
+        """
+        SELECT branch_type_key, branch_type_name, description
+        FROM branch_type_catalog
+        WHERE COALESCE(is_active, 1) = 1
+        ORDER BY branch_type_name
+        """
+    ).fetchall()
+    catalog = []
+    for row in rows:
+        if isinstance(row, sqlite3.Row):
+            catalog.append(
+                {
+                    "branch_type_key": row["branch_type_key"],
+                    "branch_type_name": row["branch_type_name"],
+                    "description": row["description"],
+                }
+            )
+        else:
+            catalog.append(
+                {
+                    "branch_type_key": row[0],
+                    "branch_type_name": row[1],
+                    "description": row[2],
+                }
+            )
+    return catalog
+
+
+def list_company_branches_with_grants(conn, company_key):
+    normalized_company_key = str(company_key or "").strip()
+    ensure_branch_licensing_schema_integrity(conn)
+    rows = conn.execute(
+        """
+        SELECT
+            b.branch_id,
+            b.branch_name,
+            COALESCE(NULLIF(TRIM(b.branch_code), ''), b.branch_name, b.branch_id) AS branch_code,
+            b.branch_type,
+            COALESCE(b.is_active, 1) AS is_active,
+            COALESCE(b.deployment_status, 'active') AS deployment_status,
+            COALESCE(b.branch_tier, 'standard') AS branch_tier,
+            COALESCE(b.branch_manager, '') AS branch_manager,
+            b.manager_user_id,
+            COALESCE(u.full_name, '') AS manager_user_name,
+            (
+                SELECT COUNT(*)
+                FROM branch_module_grants g
+                WHERE g.company_key = b.company_key
+                  AND g.branch_id = b.branch_id
+                  AND COALESCE(g.is_enabled, 1) = 1
+            ) AS module_grant_count,
+            b.branch_access_key,
+            b.location,
+            b.created_at
+        FROM branches b
+        LEFT JOIN users u
+            ON u.company_key = b.company_key
+           AND u.user_id = b.manager_user_id
+        WHERE b.company_key = ?
+        ORDER BY b.created_at DESC
+        """,
+        (normalized_company_key,),
+    ).fetchall()
+    catalog_by_key = {item["branch_type_key"]: item["branch_type_name"] for item in get_branch_type_catalog(conn)}
+    branches = []
+    for row in rows:
+        if isinstance(row, sqlite3.Row):
+            branch_type_value = row["branch_type"]
+            branches.append(
+                {
+                    "branch_id": row["branch_id"],
+                    "branch_name": row["branch_name"],
+                    "branch_code": row["branch_code"],
+                    "branch_type": branch_type_value,
+                    "branch_type_key": _normalize_branch_type_key(branch_type_value),
+                    "branch_type_name": catalog_by_key.get(
+                        _normalize_branch_type_key(branch_type_value),
+                        str(branch_type_value or ""),
+                    ),
+                    "is_active": int(row["is_active"] or 0),
+                    "deployment_status": row["deployment_status"],
+                    "branch_tier": row["branch_tier"],
+                    "branch_manager": row["branch_manager"],
+                    "manager_user_id": row["manager_user_id"],
+                    "manager_user_name": row["manager_user_name"],
+                    "module_grant_count": int(row["module_grant_count"] or 0),
+                    "branch_access_key": row["branch_access_key"],
+                    "location": row["location"],
+                    "created_at": row["created_at"],
+                }
+            )
+        else:
+            branch_type_value = row[3]
+            type_key = _normalize_branch_type_key(branch_type_value)
+            branches.append(
+                {
+                    "branch_id": row[0],
+                    "branch_name": row[1],
+                    "branch_code": row[2],
+                    "branch_type": branch_type_value,
+                    "branch_type_key": type_key,
+                    "branch_type_name": catalog_by_key.get(type_key, str(branch_type_value or "")),
+                    "is_active": int(row[4] or 0),
+                    "deployment_status": row[5],
+                    "branch_tier": row[6],
+                    "branch_manager": row[7],
+                    "manager_user_id": row[8],
+                    "manager_user_name": row[9],
+                    "module_grant_count": int(row[10] or 0),
+                    "branch_access_key": row[11],
+                    "location": row[12],
+                    "created_at": row[13],
+                }
+            )
+    return branches
+
+
+def repair_branch_module_grants(conn, company_key, *, ensure_schema=True):
+    normalized_company_key = str(company_key or "").strip()
+    if ensure_schema:
+        ensure_branch_licensing_schema_integrity(conn)
+    rows = conn.execute(
+        "SELECT branch_id, branch_type FROM branches WHERE company_key = ? ORDER BY branch_name",
+        (normalized_company_key,),
+    ).fetchall()
+    branches_processed = 0
+    grants_inserted = 0
+    for row in rows:
+        if isinstance(row, sqlite3.Row):
+            branch_id = row["branch_id"]
+            branch_type = row["branch_type"]
+        else:
+            branch_id, branch_type = row[0], row[1]
+        result = ensure_branch_module_grants_for_branch(
+            conn,
+            normalized_company_key,
+            branch_id,
+            branch_type_key=_normalize_branch_type_key(branch_type),
+            ensure_schema=False,
+        )
+        if result.get("ok"):
+            branches_processed += 1
+            grants_inserted += int(result.get("inserted") or 0)
+    return {
+        "ok": True,
+        "company_key": normalized_company_key,
+        "branches_processed": branches_processed,
+        "grants_inserted": grants_inserted,
+    }
+
+
+def create_company_branch(
+    conn,
+    company_key,
+    *,
+    branch_name,
+    branch_type_key,
+    branch_access_key=None,
+    manager_user_id=None,
+    is_active=1,
+    deployment_status="active",
+    branch_tier="standard",
+    location="",
+    contact_number="",
+    branch_manager="",
+    create_default_bookkeeper_user=False,
+    bookkeeper_password_hash=None,
+    ensure_schema=True,
+):
+    """
+    Create a new branch row, apply module grants, and optionally seed a default bookkeeper login.
+    Preserves existing branch IDs by refusing duplicate branch_id inserts.
+    """
+    normalized_company_key = str(company_key or "").strip()
+    normalized_branch_name = str(branch_name or "").strip()
+    normalized_type_key = _normalize_branch_type_key(branch_type_key)
+    active_flag = 1 if int(is_active or 0) else 0
+    normalized_deployment_status = str(deployment_status or "active").strip() or "active"
+    normalized_branch_tier = str(branch_tier or "standard").strip() or "standard"
+    normalized_manager_user_id = str(manager_user_id).strip() if manager_user_id else None
+
+    if not normalized_company_key or not normalized_branch_name:
+        return {"ok": False, "reason": "Branch name and company context are required."}
+
+    if ensure_schema:
+        ensure_branch_licensing_schema_integrity(conn)
+    base_branch_id = _derive_branch_id(conn, normalized_company_key, normalized_branch_name)
+    if not base_branch_id:
+        return {"ok": False, "reason": "Could not derive a branch identifier from the branch name."}
+    branch_id = _allocate_unique_branch_id(conn, base_branch_id)
+
+    existing_name = conn.execute(
+        """
+        SELECT branch_id FROM branches
+        WHERE company_key = ? AND LOWER(TRIM(branch_name)) = LOWER(TRIM(?))
+        LIMIT 1
+        """,
+        (normalized_company_key, normalized_branch_name),
+    ).fetchone()
+    if existing_name:
+        existing_branch_id = existing_name[0] if not isinstance(existing_name, sqlite3.Row) else existing_name["branch_id"]
+        return {
+            "ok": False,
+            "reason": f"Branch '{normalized_branch_name}' already exists (ID: {existing_branch_id}).",
+            "branch_id": existing_branch_id,
+        }
+
+    license_check = evaluate_active_branch_creation(
+        conn,
+        normalized_company_key,
+        is_active=bool(active_flag),
+        ensure_schema=False,
+    )
+    if not license_check.get("allowed"):
+        return {
+            "ok": False,
+            "reason": license_check.get("reason"),
+            "license": license_check,
+            "branch_id": branch_id,
+        }
+
+    resolved_access_key = str(branch_access_key or "").strip() or _generate_branch_access_key(branch_id)
+    duplicate_key = conn.execute(
+        "SELECT branch_id FROM branches WHERE branch_access_key = ? LIMIT 1",
+        (resolved_access_key,),
+    ).fetchone()
+    if duplicate_key:
+        return {"ok": False, "reason": "Branch access key is already in use. Choose a different key."}
+
+    branch_code = _allocate_unique_branch_code(
+        conn,
+        normalized_company_key,
+        _derive_branch_code(normalized_branch_name),
+    )
+
+    catalog_row = conn.execute(
+        "SELECT branch_type_name FROM branch_type_catalog WHERE branch_type_key = ?",
+        (normalized_type_key,),
+    ).fetchone()
+    branch_type_label = (
+        catalog_row[0]
+        if catalog_row is not None
+        else normalized_type_key.replace("_", " ").title()
+    )
+
+    conn.execute(
+        """
+        INSERT INTO branches (
+            branch_id,
+            company_key,
+            branch_name,
+            branch_code,
+            location,
+            branch_type,
+            branch_access_key,
+            contact_number,
+            branch_manager,
+            is_active,
+            manager_user_id,
+            deployment_status,
+            branch_tier
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            branch_id,
+            normalized_company_key,
+            normalized_branch_name,
+            branch_code,
+            str(location or ""),
+            normalized_type_key,
+            resolved_access_key,
+            str(contact_number or ""),
+            str(branch_manager or ""),
+            active_flag,
+            normalized_manager_user_id,
+            normalized_deployment_status,
+            normalized_branch_tier,
+        ),
+    )
+
+    grant_result = ensure_branch_module_grants_for_branch(
+        conn,
+        normalized_company_key,
+        branch_id,
+        branch_type_key=normalized_type_key,
+        ensure_schema=False,
+    )
+
+    bookkeeper_created = False
+    if create_default_bookkeeper_user and bookkeeper_password_hash:
+        cursor = conn.execute(
+            """
+            INSERT OR IGNORE INTO users (
+                company_key, branch_id, full_name, login_key, password_hash, role, status
+            )
+            VALUES (?, ?, ?, ?, ?, 'Branch_Bookkeeper', 'Active')
+            """,
+            (
+                normalized_company_key,
+                branch_id,
+                str(branch_manager or "Branch Manager"),
+                resolved_access_key,
+                bookkeeper_password_hash,
+            ),
+        )
+        bookkeeper_created = int(cursor.rowcount or 0) > 0
+
+    return {
+        "ok": True,
+        "branch_id": branch_id,
+        "branch_code": branch_code,
+        "branch_name": normalized_branch_name,
+        "branch_type_key": normalized_type_key,
+        "branch_type_label": branch_type_label,
+        "branch_access_key": resolved_access_key,
+        "is_active": active_flag,
+        "deployment_status": normalized_deployment_status,
+        "branch_tier": normalized_branch_tier,
+        "manager_user_id": normalized_manager_user_id,
+        "module_grants": grant_result,
+        "bookkeeper_created": bookkeeper_created,
+        "license": license_check,
+    }
+
+
+PRIVILEGED_COMPANY_USER_ROLES = frozenset(
+    {
+        "Dev",
+        "Master Admin",
+        "System Admin",
+        "Gatekeeper",
+        "Owner / CEO",
+        "Sub-Admin",
+    }
+)
+
+BRANCH_MANAGER_CREATABLE_ROLES = frozenset(
+    {
+        "Cashier",
+        "Sales Officer",
+        "Inventory Officer",
+        "Branch_Bookkeeper",
+        "Staff",
+        "Auditor / Read Only",
+    }
+)
+
+
+def _generate_unique_branch_user_login_key(conn, company_key, branch_id, role_name):
+    branch_slug = str(branch_id or "").split("-")[-1][:10] or "BR"
+    role_slug = "".join(part[:2] for part in str(role_name or "USR").replace("/", " ").split() if part).upper()[:6] or "USR"
+    for _attempt in range(25):
+        candidate = f"{company_key}-{branch_slug}-{role_slug}-{random.randint(10000, 99999)}"
+        login_conflict = conn.execute(
+            "SELECT 1 FROM users WHERE login_key = ? LIMIT 1",
+            (candidate,),
+        ).fetchone()
+        branch_key_conflict = conn.execute(
+            "SELECT 1 FROM branches WHERE branch_access_key = ? LIMIT 1",
+            (candidate,),
+        ).fetchone()
+        if not login_conflict and not branch_key_conflict:
+            return candidate
+    raise RuntimeError("Unable to generate a unique branch user login key.")
+
+
+def _fetch_company_user_by_user_id(conn, company_key, user_id):
+    if not user_id:
+        return None
+    row = conn.execute(
+        """
+        SELECT id, user_id, company_key, branch_id, full_name, role, status, login_key
+        FROM users
+        WHERE company_key = ? AND user_id = ?
+        LIMIT 1
+        """,
+        (str(company_key or "").strip(), str(user_id).strip()),
+    ).fetchone()
+    if row is None:
+        return None
+    if isinstance(row, sqlite3.Row):
+        return dict(row)
+    return {
+        "id": row[0],
+        "user_id": row[1],
+        "company_key": row[2],
+        "branch_id": row[3],
+        "full_name": row[4],
+        "role": row[5],
+        "status": row[6],
+        "login_key": row[7],
+    }
+
+
+def assign_branch_manager(
+    conn,
+    company_key,
+    branch_id,
+    manager_user_id,
+    *,
+    promote_to_branch_manager=True,
+):
+    normalized_company_key = str(company_key or "").strip()
+    normalized_branch_id = str(branch_id or "").strip()
+    normalized_manager_user_id = str(manager_user_id or "").strip()
+    if not normalized_company_key or not normalized_branch_id or not normalized_manager_user_id:
+        return {"ok": False, "reason": "Company, branch, and manager user are required."}
+
+    branch_row = conn.execute(
+        "SELECT branch_id, branch_name, branch_access_key FROM branches WHERE company_key = ? AND branch_id = ?",
+        (normalized_company_key, normalized_branch_id),
+    ).fetchone()
+    if not branch_row:
+        return {"ok": False, "reason": "Branch not found for this company."}
+
+    manager_user = _fetch_company_user_by_user_id(conn, normalized_company_key, normalized_manager_user_id)
+    if not manager_user:
+        return {"ok": False, "reason": "Manager user not found in this company."}
+
+    manager_role = str(manager_user.get("role") or "").strip()
+    if manager_role in PRIVILEGED_COMPANY_USER_ROLES:
+        return {"ok": False, "reason": "Privileged company roles cannot be assigned as branch managers."}
+
+    existing_branch_id = str(manager_user.get("branch_id") or "").strip()
+    if existing_branch_id and existing_branch_id != normalized_branch_id:
+        return {
+            "ok": False,
+            "reason": "Manager must be unassigned or already assigned to this branch.",
+        }
+
+    target_role = "Branch Manager" if promote_to_branch_manager else manager_role
+    conn.execute(
+        """
+        UPDATE users
+        SET branch_id = ?, role = ?, status = COALESCE(status, 'Active')
+        WHERE company_key = ? AND user_id = ?
+        """,
+        (normalized_branch_id, target_role, normalized_company_key, normalized_manager_user_id),
+    )
+    conn.execute(
+        """
+        UPDATE branches
+        SET manager_user_id = ?, branch_manager = ?
+        WHERE company_key = ? AND branch_id = ?
+        """,
+        (
+            normalized_manager_user_id,
+            str(manager_user.get("full_name") or "Branch Manager"),
+            normalized_company_key,
+            normalized_branch_id,
+        ),
+    )
+    return {
+        "ok": True,
+        "company_key": normalized_company_key,
+        "branch_id": normalized_branch_id,
+        "manager_user_id": normalized_manager_user_id,
+        "manager_role": target_role,
+        "branch_access_key": branch_row[2] if not isinstance(branch_row, sqlite3.Row) else branch_row["branch_access_key"],
+    }
+
+
+def list_branch_users(conn, company_key, branch_id):
+    normalized_company_key = str(company_key or "").strip()
+    normalized_branch_id = str(branch_id or "").strip()
+    rows = conn.execute(
+        """
+        SELECT id, user_id, full_name, role, login_key, status, branch_id
+        FROM users
+        WHERE company_key = ?
+          AND branch_id = ?
+        ORDER BY full_name
+        """,
+        (normalized_company_key, normalized_branch_id),
+    ).fetchall()
+    users = []
+    for row in rows:
+        if isinstance(row, sqlite3.Row):
+            users.append(dict(row))
+        else:
+            users.append(
+                {
+                    "id": row[0],
+                    "user_id": row[1],
+                    "full_name": row[2],
+                    "role": row[3],
+                    "login_key": row[4],
+                    "status": row[5],
+                    "branch_id": row[6],
+                }
+            )
+    return users
+
+
+def create_branch_scoped_user(
+    conn,
+    company_key,
+    branch_id,
+    *,
+    full_name,
+    role,
+    login_key=None,
+    status="Active",
+    allowed_roles=None,
+):
+    normalized_company_key = str(company_key or "").strip()
+    normalized_branch_id = str(branch_id or "").strip()
+    normalized_full_name = str(full_name or "").strip()
+    normalized_role = str(role or "").strip()
+    normalized_status = str(status or "Active").strip() or "Active"
+    allowed = set(allowed_roles or BRANCH_MANAGER_CREATABLE_ROLES)
+
+    if not normalized_company_key or not normalized_branch_id or not normalized_full_name:
+        return {"ok": False, "reason": "Full name, company, and branch are required."}
+    if normalized_role not in allowed:
+        return {"ok": False, "reason": f"Role '{normalized_role}' cannot be created for this branch."}
+    if normalized_role in PRIVILEGED_COMPANY_USER_ROLES:
+        return {"ok": False, "reason": "Privileged roles cannot be created from branch user administration."}
+
+    branch_row = conn.execute(
+        "SELECT branch_id FROM branches WHERE company_key = ? AND branch_id = ?",
+        (normalized_company_key, normalized_branch_id),
+    ).fetchone()
+    if not branch_row:
+        return {"ok": False, "reason": "Branch not found for this company."}
+
+    branch_access_key_before = conn.execute(
+        "SELECT branch_access_key FROM branches WHERE company_key = ? AND branch_id = ?",
+        (normalized_company_key, normalized_branch_id),
+    ).fetchone()
+
+    resolved_login_key = str(login_key or "").strip()
+    if resolved_login_key:
+        login_conflict = conn.execute(
+            "SELECT 1 FROM users WHERE login_key = ? LIMIT 1",
+            (resolved_login_key,),
+        ).fetchone()
+        branch_key_conflict = conn.execute(
+            "SELECT 1 FROM branches WHERE branch_access_key = ? LIMIT 1",
+            (resolved_login_key,),
+        ).fetchone()
+        if login_conflict or branch_key_conflict:
+            return {"ok": False, "reason": "Login key is already in use."}
+    else:
+        resolved_login_key = _generate_unique_branch_user_login_key(
+            conn,
+            normalized_company_key,
+            normalized_branch_id,
+            normalized_role,
+        )
+
+    user_id_seed = f"{normalized_company_key}|{normalized_full_name}|{resolved_login_key}|{datetime.now().isoformat()}|{random.randint(1000, 9999)}"
+    user_id = hashlib.sha256(user_id_seed.encode("utf-8")).hexdigest()
+
+    conn.execute(
+        """
+        INSERT INTO users (
+            company_key, branch_id, full_name, user_id, login_key, role, status
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            normalized_company_key,
+            normalized_branch_id,
+            normalized_full_name,
+            user_id,
+            resolved_login_key,
+            normalized_role,
+            normalized_status,
+        ),
+    )
+
+    branch_access_key_after = conn.execute(
+        "SELECT branch_access_key FROM branches WHERE company_key = ? AND branch_id = ?",
+        (normalized_company_key, normalized_branch_id),
+    ).fetchone()
+    before_key = branch_access_key_before[0] if branch_access_key_before else None
+    after_key = branch_access_key_after[0] if branch_access_key_after else None
+
+    return {
+        "ok": True,
+        "company_key": normalized_company_key,
+        "branch_id": normalized_branch_id,
+        "user_id": user_id,
+        "full_name": normalized_full_name,
+        "role": normalized_role,
+        "login_key": resolved_login_key,
+        "status": normalized_status,
+        "branch_access_key_unchanged": before_key == after_key,
+    }
+
+
+def update_branch_user_status(
+    conn,
+    company_key,
+    branch_id,
+    user_pk_id,
+    status,
+    *,
+    allowed_roles=None,
+    company_admin=False,
+):
+    normalized_company_key = str(company_key or "").strip()
+    normalized_branch_id = str(branch_id or "").strip()
+    normalized_status = str(status or "").strip()
+    allowed = set(allowed_roles or BRANCH_MANAGER_CREATABLE_ROLES)
+
+    row = conn.execute(
+        """
+        SELECT id, role, branch_id
+        FROM users
+        WHERE id = ? AND company_key = ?
+        """,
+        (int(user_pk_id), normalized_company_key),
+    ).fetchone()
+    if not row:
+        return {"ok": False, "reason": "User not found."}
+    user_role = row[1] if not isinstance(row, sqlite3.Row) else row["role"]
+    user_branch_id = row[2] if not isinstance(row, sqlite3.Row) else row["branch_id"]
+    if str(user_branch_id or "").strip() != normalized_branch_id:
+        return {"ok": False, "reason": "User does not belong to this branch."}
+    if str(user_role or "").strip() in PRIVILEGED_COMPANY_USER_ROLES:
+        return {"ok": False, "reason": "Privileged users cannot be changed from branch administration."}
+    if str(user_role or "").strip() == "Branch Manager" and not company_admin:
+        return {"ok": False, "reason": "Branch Manager accounts must be updated by company administration."}
+    if (
+        not company_admin
+        and str(user_role or "").strip() not in allowed
+        and str(user_role or "").strip() != "Branch Manager"
+    ):
+        return {"ok": False, "reason": "This user role cannot be managed from branch administration."}
+
+    conn.execute(
+        "UPDATE users SET status = ? WHERE id = ? AND company_key = ?",
+        (normalized_status, int(user_pk_id), normalized_company_key),
+    )
+    return {"ok": True, "status": normalized_status, "user_pk_id": int(user_pk_id)}
+
+
+def fetch_branch_manager_candidates(conn, company_key, branch_id):
+    normalized_company_key = str(company_key or "").strip()
+    normalized_branch_id = str(branch_id or "").strip()
+    privileged = tuple(PRIVILEGED_COMPANY_USER_ROLES)
+    placeholders = ", ".join("?" for _ in privileged)
+    rows = conn.execute(
+        f"""
+        SELECT user_id, full_name, role, branch_id
+        FROM users
+        WHERE company_key = ?
+          AND COALESCE(status, 'Active') = 'Active'
+          AND role NOT IN ({placeholders})
+          AND (
+                branch_id IS NULL
+             OR TRIM(branch_id) = ''
+             OR branch_id = ?
+          )
+        ORDER BY full_name
+        """,
+        (normalized_company_key, *privileged, normalized_branch_id),
+    ).fetchall()
+    candidates = []
+    for row in rows:
+        if isinstance(row, sqlite3.Row):
+            candidates.append(dict(row))
+        else:
+            candidates.append(
+                {"user_id": row[0], "full_name": row[1], "role": row[2], "branch_id": row[3]}
+            )
+    return candidates
+
+
+def fetch_branch_manager_select_options(conn, company_key, branch_id, current_manager_user_id=None):
+    """Eligible managers for selectbox; always includes current manager when set."""
+    candidates = fetch_branch_manager_candidates(conn, company_key, branch_id)
+    seen = {row["user_id"] for row in candidates}
+    current_id = str(current_manager_user_id or "").strip()
+    if current_id and current_id not in seen:
+        current_user = _fetch_company_user_by_user_id(conn, company_key, current_id)
+        if current_user and str(current_user.get("role") or "") not in PRIVILEGED_COMPANY_USER_ROLES:
+            candidates.insert(
+                0,
+                {
+                    "user_id": current_user["user_id"],
+                    "full_name": current_user["full_name"],
+                    "role": current_user["role"],
+                    "branch_id": current_user.get("branch_id"),
+                },
+            )
+    return candidates
+
+
+def _fetch_branch_type_default_module_keys(conn, branch_type_key):
+    normalized_key = _normalize_branch_type_key(branch_type_key)
+    rows = conn.execute(
+        """
+        SELECT module_key
+        FROM branch_type_module_defaults
+        WHERE branch_type_key = ?
+          AND COALESCE(is_enabled, 1) = 1
+        """,
+        (normalized_key,),
+    ).fetchall()
+    return {str(row[0] if not isinstance(row, sqlite3.Row) else row["module_key"]) for row in rows}
+
+
+def get_branch_enabled_modules(conn, company_key, branch_id):
+    normalized_company_key = str(company_key or "").strip()
+    normalized_branch_id = str(branch_id or "").strip()
+    ensure_branch_licensing_schema_integrity(conn)
+    rows = conn.execute(
+        """
+        SELECT module_key
+        FROM branch_module_grants
+        WHERE company_key = ?
+          AND branch_id = ?
+          AND COALESCE(is_enabled, 1) = 1
+        """,
+        (normalized_company_key, normalized_branch_id),
+    ).fetchall()
+    return {str(row[0] if not isinstance(row, sqlite3.Row) else row["module_key"]) for row in rows}
+
+
+def refresh_branch_module_grants_for_type_change(
+    conn,
+    company_key,
+    branch_id,
+    old_branch_type_key,
+    new_branch_type_key,
+):
+    normalized_company_key = str(company_key or "").strip()
+    normalized_branch_id = str(branch_id or "").strip()
+    old_key = _normalize_branch_type_key(old_branch_type_key) if old_branch_type_key else None
+    new_key = _normalize_branch_type_key(new_branch_type_key)
+    old_defaults = _fetch_branch_type_default_module_keys(conn, old_key) if old_key else set()
+    new_defaults = _fetch_branch_type_default_module_keys(conn, new_key)
+
+    insert_result = ensure_branch_module_grants_for_branch(
+        conn,
+        normalized_company_key,
+        normalized_branch_id,
+        branch_type_key=new_key,
+        ensure_schema=False,
+    )
+
+    disabled_count = 0
+    enabled_count = 0
+    for module_key in old_defaults - new_defaults:
+        cursor = conn.execute(
+            """
+            UPDATE branch_module_grants
+            SET is_enabled = 0
+            WHERE company_key = ?
+              AND branch_id = ?
+              AND module_key = ?
+            """,
+            (normalized_company_key, normalized_branch_id, module_key),
+        )
+        disabled_count += int(cursor.rowcount or 0)
+
+    for module_key in new_defaults:
+        cursor = conn.execute(
+            """
+            UPDATE branch_module_grants
+            SET is_enabled = 1
+            WHERE company_key = ?
+              AND branch_id = ?
+              AND module_key = ?
+            """,
+            (normalized_company_key, normalized_branch_id, module_key),
+        )
+        if int(cursor.rowcount or 0) > 0:
+            enabled_count += int(cursor.rowcount or 0)
+
+    return {
+        "ok": True,
+        "inserted": int(insert_result.get("inserted") or 0),
+        "disabled_count": disabled_count,
+        "enabled_count": enabled_count,
+        "new_branch_type_key": new_key,
+    }
+
+
+def update_company_branch(
+    conn,
+    company_key,
+    branch_id,
+    *,
+    branch_name=None,
+    branch_code=None,
+    location=None,
+    branch_type_key=None,
+    branch_access_key=None,
+    manager_user_id=None,
+    branch_manager_name=None,
+    is_active=None,
+    deployment_status=None,
+    branch_tier=None,
+    promote_manager=False,
+):
+    normalized_company_key = str(company_key or "").strip()
+    normalized_branch_id = str(branch_id or "").strip()
+    row = conn.execute(
+        """
+        SELECT branch_id, branch_name, branch_code, location, branch_type, branch_access_key,
+               manager_user_id, branch_manager, COALESCE(is_active, 1) AS is_active,
+               deployment_status, branch_tier
+        FROM branches
+        WHERE company_key = ? AND branch_id = ?
+        """,
+        (normalized_company_key, normalized_branch_id),
+    ).fetchone()
+    if not row:
+        return {"ok": False, "reason": "Branch not found."}
+
+    if isinstance(row, sqlite3.Row):
+        current = dict(row)
+    else:
+        current = {
+            "branch_id": row[0],
+            "branch_name": row[1],
+            "branch_code": row[2],
+            "location": row[3],
+            "branch_type": row[4],
+            "branch_access_key": row[5],
+            "manager_user_id": row[6],
+            "branch_manager": row[7],
+            "is_active": row[8],
+            "deployment_status": row[9],
+            "branch_tier": row[10],
+        }
+
+    old_type_key = _normalize_branch_type_key(current.get("branch_type"))
+    old_active = int(current.get("is_active") or 0)
+    new_active = old_active if is_active is None else (1 if int(is_active or 0) else 0)
+
+    if new_active and not old_active:
+        license_check = evaluate_active_branch_creation(
+            conn,
+            normalized_company_key,
+            is_active=True,
+            exclude_branch_id=normalized_branch_id,
+            ensure_schema=False,
+        )
+        if not license_check.get("allowed"):
+            return {"ok": False, "reason": license_check.get("reason"), "license": license_check}
+
+    resolved_access_key = (
+        str(branch_access_key).strip()
+        if branch_access_key is not None and str(branch_access_key).strip()
+        else str(current.get("branch_access_key") or "").strip()
+    )
+    if resolved_access_key != str(current.get("branch_access_key") or "").strip():
+        conflict = conn.execute(
+            """
+            SELECT branch_id FROM branches
+            WHERE branch_access_key = ? AND branch_id != ?
+            LIMIT 1
+            """,
+            (resolved_access_key, normalized_branch_id),
+        ).fetchone()
+        if conflict:
+            return {"ok": False, "reason": "Branch access key is already in use."}
+
+    new_type_key = (
+        _normalize_branch_type_key(branch_type_key)
+        if branch_type_key is not None
+        else old_type_key
+    )
+
+    resolved_branch_code = (
+        str(branch_code).strip()
+        if branch_code is not None and str(branch_code).strip()
+        else str(current.get("branch_code") or current.get("branch_name") or "").strip()
+    )
+    if not resolved_branch_code:
+        resolved_branch_code = _derive_branch_code(
+            branch_name if branch_name is not None else current.get("branch_name")
+        )
+    resolved_branch_code = _allocate_unique_branch_code(
+        conn,
+        normalized_company_key,
+        resolved_branch_code,
+        exclude_branch_id=normalized_branch_id,
+    )
+
+    conn.execute(
+        """
+        UPDATE branches
+        SET branch_name = ?,
+            branch_code = ?,
+            location = ?,
+            branch_type = ?,
+            branch_access_key = ?,
+            manager_user_id = ?,
+            branch_manager = ?,
+            is_active = ?,
+            deployment_status = ?,
+            branch_tier = ?
+        WHERE company_key = ? AND branch_id = ?
+        """,
+        (
+            str(branch_name if branch_name is not None else current.get("branch_name") or "").strip(),
+            resolved_branch_code,
+            str(location if location is not None else current.get("location") or ""),
+            new_type_key,
+            resolved_access_key,
+            str(manager_user_id).strip()
+            if manager_user_id is not None and str(manager_user_id).strip()
+            else current.get("manager_user_id"),
+            str(branch_manager_name if branch_manager_name is not None else current.get("branch_manager") or ""),
+            new_active,
+            str(
+                deployment_status
+                if deployment_status is not None
+                else current.get("deployment_status") or "active"
+            ).strip(),
+            str(branch_tier if branch_tier is not None else current.get("branch_tier") or "standard").strip(),
+            normalized_company_key,
+            normalized_branch_id,
+        ),
+    )
+
+    grant_refresh = None
+    if new_type_key != old_type_key:
+        grant_refresh = refresh_branch_module_grants_for_type_change(
+            conn,
+            normalized_company_key,
+            normalized_branch_id,
+            old_type_key,
+            new_type_key,
+        )
+
+    manager_result = None
+    resolved_manager_id = (
+        str(manager_user_id).strip()
+        if manager_user_id is not None and str(manager_user_id).strip()
+        else None
+    )
+    if resolved_manager_id and resolved_manager_id != str(current.get("manager_user_id") or "").strip():
+        manager_result = assign_branch_manager(
+            conn,
+            normalized_company_key,
+            normalized_branch_id,
+            resolved_manager_id,
+            promote_to_branch_manager=bool(promote_manager),
+        )
+        if not manager_result.get("ok"):
+            return manager_result
+
+    return {
+        "ok": True,
+        "branch_id": normalized_branch_id,
+        "branch_code": resolved_branch_code,
+        "branch_type_changed": new_type_key != old_type_key,
+        "grant_refresh": grant_refresh,
+        "manager_result": manager_result,
+    }
+
+
+def list_company_staff_for_assignment(conn, company_key):
+    normalized_company_key = str(company_key or "").strip()
+    privileged = tuple(PRIVILEGED_COMPANY_USER_ROLES)
+    placeholders = ", ".join("?" for _ in privileged)
+    rows = conn.execute(
+        f"""
+        SELECT id, user_id, full_name, role, branch_id, status, login_key
+        FROM users
+        WHERE company_key = ?
+          AND role NOT IN ({placeholders})
+        ORDER BY full_name
+        """,
+        (normalized_company_key, *privileged),
+    ).fetchall()
+    staff = []
+    for row in rows:
+        if isinstance(row, sqlite3.Row):
+            entry = dict(row)
+        else:
+            entry = {
+                "id": row[0],
+                "user_id": row[1],
+                "full_name": row[2],
+                "role": row[3],
+                "branch_id": row[4],
+                "status": row[5],
+                "login_key": row[6],
+            }
+        user_pk = entry.get("id")
+        full_name = str(entry.get("full_name") or "").strip()
+        role = str(entry.get("role") or "").strip()
+        if user_pk is None or not full_name or not role:
+            continue
+        user_id = entry.get("user_id")
+        login_key = entry.get("login_key")
+        branch_id = entry.get("branch_id")
+        entry["user_id"] = str(user_id).strip() if user_id else None
+        entry["login_key"] = str(login_key).strip() if login_key else None
+        entry["branch_id"] = str(branch_id).strip() if branch_id else None
+        entry["status"] = str(entry.get("status") or "Active").strip() or "Active"
+        entry["user_id_display"] = entry["user_id"] or entry["login_key"] or "(no user id)"
+        entry["login_key_display"] = entry["login_key"] or "(missing)"
+        staff.append(entry)
+    return staff
+
+
+def update_company_staff_branch_assignment(
+    conn,
+    company_key,
+    user_pk_id,
+    branch_id,
+    *,
+    role=None,
+    actor_role=None,
+):
+    normalized_company_key = str(company_key or "").strip()
+    normalized_branch_id = str(branch_id).strip() if branch_id else None
+    normalized_actor_role = str(actor_role or "").strip()
+    if normalized_actor_role == "Branch Manager":
+        return {
+            "ok": False,
+            "reason": "Branch Managers cannot transfer or assign staff across branches.",
+        }
+    row = conn.execute(
+        """
+        SELECT id, role, branch_id, login_key
+        FROM users
+        WHERE id = ? AND company_key = ?
+        """,
+        (int(user_pk_id), normalized_company_key),
+    ).fetchone()
+    if not row:
+        return {"ok": False, "reason": "User not found."}
+    user_role = row[1] if not isinstance(row, sqlite3.Row) else row["role"]
+    if str(user_role or "").strip() in PRIVILEGED_COMPANY_USER_ROLES:
+        return {"ok": False, "reason": "Privileged users cannot be reassigned from staff administration."}
+
+    if normalized_branch_id:
+        branch_row = conn.execute(
+            "SELECT branch_id FROM branches WHERE company_key = ? AND branch_id = ?",
+            (normalized_company_key, normalized_branch_id),
+        ).fetchone()
+        if not branch_row:
+            return {"ok": False, "reason": "Target branch not found."}
+
+    if role is not None:
+        normalized_role = str(role or "").strip()
+        if normalized_role in PRIVILEGED_COMPANY_USER_ROLES:
+            return {"ok": False, "reason": "Cannot assign a privileged role from staff administration."}
+        conn.execute(
+            """
+            UPDATE users
+            SET branch_id = ?, role = ?
+            WHERE id = ? AND company_key = ?
+            """,
+            (normalized_branch_id, normalized_role, int(user_pk_id), normalized_company_key),
+        )
+    else:
+        conn.execute(
+            """
+            UPDATE users
+            SET branch_id = ?
+            WHERE id = ? AND company_key = ?
+            """,
+            (normalized_branch_id, int(user_pk_id), normalized_company_key),
+        )
+
+    return {
+        "ok": True,
+        "user_pk_id": int(user_pk_id),
+        "branch_id": normalized_branch_id,
+        "role": role,
+        "login_key_unchanged": True,
+    }
 
 
 def ensure_schema_integrity(conn):
