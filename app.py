@@ -1926,12 +1926,8 @@ def _page_permission(page_name):
 
 
 def _user_can_access_page(user, page_name):
-    if not user:
-        return False
-    if user.get("role") == "Demo":
-        return page_name in {"Dashboard", "Point of Sale", "Inventory Management"}
-    permission = _page_permission(page_name)
-    return True if not permission else user_has_permission(user.get("role"), permission)
+    company_key = user.get("key") if user else None
+    return eka_modules.user_can_access_page(user, page_name, company_key=company_key)
 
 
 def _normalize_page_state(page_name):
@@ -2090,7 +2086,7 @@ def _render_primary_sidebar(user, include_settings=True):
     elif user.get("branch_id"):
         st.session_state.active_branch_id = user.get("branch_id")
 
-    if user.get("role") in {"Branch_Bookkeeper", "Cashier", "Staff"} or user.get("branch_id"):
+    if eka_modules.is_branch_scoped_user(user):
         branch_name = user.get("branch_name")
         if not branch_name and user.get("branch_id") and user.get("key"):
             try:
@@ -2254,11 +2250,17 @@ def _render_primary_page(user):
     if not _user_can_access_page(user, current_page):
         fallback_page = "Dashboard" if _user_can_access_page(user, "Dashboard") else None
         if fallback_page and current_page != fallback_page:
-            st.warning("You do not have permission to access that page.")
+            if eka_modules.is_branch_scoped_user(user):
+                st.warning("This module is not enabled for your branch.")
+            else:
+                st.warning("You do not have permission to access that page.")
             _set_active_page(fallback_page)
             current_page = fallback_page
         elif not fallback_page:
-            st.error("You do not have permission to access this workspace.")
+            if eka_modules.is_branch_scoped_user(user):
+                st.error("No modules are available for this branch. Contact your administrator.")
+            else:
+                st.error("You do not have permission to access this workspace.")
             return
     if current_page == "Dashboard":
         if user["role"] == "Demo":

@@ -110,6 +110,8 @@ ALL_ENTERPRISE_PERMISSIONS = {
     "process_pos_return",
     "apply_pos_discount",
     "approve_pos_discount",
+    "manage_branch_users",
+    "view_branch_configuration",
 }
 # ------------------
 # UI Standardization Helpers
@@ -444,6 +446,7 @@ PERMISSION_ALIASES = {
     "payroll": {"view_payroll", "manage_payroll"},
     "fixed_assets": {"view_fixed_assets", "manage_fixed_assets"},
     "inventory": {"view_inventory", "manage_inventory"},
+    "manage_company_branches": {"manage_branches"},
 }
 ENTERPRISE_ROLE_PERMISSIONS = {
     "Dev": set(ALL_ENTERPRISE_PERMISSIONS),
@@ -491,6 +494,8 @@ ENTERPRISE_ROLE_PERMISSIONS = {
         "process_pos_return",
         "apply_pos_discount",
         "approve_pos_discount",
+        "manage_branch_users",
+        "view_branch_configuration",
     },
     "System Admin": {
         "view_dashboard",
@@ -630,6 +635,8 @@ ENTERPRISE_ROLE_PERMISSIONS = {
         "process_pos_return",
         "apply_pos_discount",
         "approve_pos_discount",
+        "manage_branch_users",
+        "view_branch_configuration",
     },
     "Sub-Admin": {
         "view_dashboard",
@@ -724,8 +731,28 @@ logger = logging.getLogger(__name__)
 # Import shared utilities from database
 from database import (
     activate_company_subscription,
+    assign_branch_manager,
+    BRANCH_MANAGER_CREATABLE_ROLES,
+    PRIVILEGED_COMPANY_USER_ROLES,
+    create_branch_scoped_user,
+    create_company_branch,
     create_company_record,
     ensure_company_trial_subscription,
+    ensure_branch_licensing_schema_integrity,
+    execute_write_transaction,
+    fetch_branch_manager_candidates,
+    fetch_branch_manager_select_options,
+    get_branch_enabled_modules,
+    get_branch_type_catalog,
+    get_company_branch_license_snapshot,
+    list_branch_users,
+    list_company_branches_with_grants,
+    list_company_staff_for_assignment,
+    repair_branch_module_grants,
+    refresh_branch_module_grants_for_type_change,
+    update_branch_user_status,
+    update_company_branch,
+    update_company_staff_branch_assignment,
     ensure_cashier_closings_schema,
     ensure_inventory_schema_integrity,
     ensure_stock_movements_schema_integrity,
@@ -875,7 +902,94 @@ def has_permission(user, permission_key):
     return user_has_permission(_extract_role_from_user(user), permission_key)
 
 
-BRANCH_SCOPED_ROLES = frozenset({"Branch_Bookkeeper", "Cashier", "Staff"})
+BRANCH_SCOPED_ROLES = frozenset({"Branch_Bookkeeper", "Cashier", "Staff", "Branch Manager"})
+
+PAGE_PERMISSION_MAP = {
+    "Dashboard": "view_dashboard",
+    "Point of Sale": "sell_pos",
+    "Inventory Management": "view_inventory",
+    "Vouchers & Journals": "post_accounting_document",
+    "General Journal": "view_reports",
+    "General Ledger": "view_reports",
+    "Chart of Accounts": "view_reports",
+    "Customer Ledger": "view_reports",
+    "Supplier Ledger": "view_reports",
+    "Accounts Receivable": "view_reports",
+    "Accounts Payable": "view_reports",
+    "Customers": "create_customer",
+    "Suppliers": "create_supplier",
+    "Create Invoice": "create_invoice",
+    "Receive Payment (Customer)": "receive_customer_payment",
+    "Supplier Payment": "make_supplier_payment",
+    "Create Bill": "create_bill",
+    "Banking & Cash": "view_banking",
+    "Banking": "view_banking",
+    "Taxation (VAT/NHIL)": "view_reports",
+    "Payroll & Salaries": "view_payroll",
+    "Asset Register": "view_fixed_assets",
+    "Data Analytics": "view_reports",
+    "Financial Reports": "view_reports",
+    "Gatekeeper Admin": "use_ai_assistant",
+    "System Audit Trail": "view_audit_trail",
+    "System Configuration": "manage_company",
+    "branch_management": "manage_branches",
+    "Sales History": "create_invoice",
+    "Sales Invoicing": "create_invoice",
+    "Purchase History": "create_bill",
+    "Purchase Orders": "create_bill",
+    "Purchase Invoicing": "create_bill",
+}
+
+PAGE_MODULE_KEY_MAP = {
+    "Dashboard": "Dashboard",
+    "Point of Sale": "Point of Sale",
+    "Inventory Management": "Inventory",
+    "Create Invoice": "Create Invoice",
+    "Sales Invoicing": "Create Invoice",
+    "Sales History": "Create Invoice",
+    "Sales/Purchase": "Create Invoice",
+    "Receive Payment (Customer)": "Receive Payment",
+    "Create Bill": "Create Bill",
+    "Purchase Invoicing": "Create Bill",
+    "Purchase History": "Create Bill",
+    "Purchase Orders": "Create Bill",
+    "Supplier Payment": "Supplier Payment",
+    "Customers": "Customers",
+    "Suppliers": "Suppliers",
+    "General Journal": "Reports",
+    "General Ledger": "Reports",
+    "Chart of Accounts": "Reports",
+    "Customer Ledger": "Reports",
+    "Supplier Ledger": "Reports",
+    "Accounts Receivable": "Reports",
+    "Accounts Payable": "Reports",
+    "Taxation (VAT/NHIL)": "Reports",
+    "Vouchers & Journals": "Reports",
+    "Data Analytics": "Reports",
+    "Financial Reports": "Financial Reports",
+    "Banking & Cash": "Banking & Cash",
+    "Banking": "Banking & Cash",
+    "Asset Register": "Asset Register",
+    "Payroll & Salaries": "Payroll & Salaries",
+    "System Configuration": "System Configuration",
+    "System Audit Trail": "Reports",
+    "Gatekeeper Admin": "Gatekeeper Admin",
+    "branch_management": "branch_management",
+}
+
+COMPANY_STAFF_ASSIGNABLE_ROLES = frozenset(
+    {
+        "Cashier",
+        "Sales Officer",
+        "Inventory Officer",
+        "Branch_Bookkeeper",
+        "Staff",
+        "Auditor / Read Only",
+        "Bookkeeper",
+        "Accountant",
+        "Branch Manager",
+    }
+)
 
 
 def _extract_user_branch_id(user):
@@ -986,6 +1100,111 @@ def can_access_branch(user, branch_id):
     if not assigned_branch_id:
         return True
     return str(assigned_branch_id).strip() == str(branch_id).strip()
+
+
+def is_branch_module_gating_exempt(user):
+    normalized_role = _normalize_role_name(_extract_role_from_user(user))
+    if normalized_role in {"Dev", "Master Admin", "System Admin", "Owner / CEO"}:
+        return True
+    return user_has_permission(normalized_role, "manage_branches")
+
+
+def can_manage_branch_users_role(role):
+    normalized_role = _normalize_role_name(role)
+    return (
+        user_has_permission(normalized_role, "manage_branch_users")
+        or user_has_permission(normalized_role, "manage_users")
+        or user_has_permission(normalized_role, "manage_branches")
+    )
+
+
+def is_company_branch_admin(role):
+    """Master Admin and other company-wide branch administrators."""
+    normalized_role = _normalize_role_name(role)
+    return user_has_permission(normalized_role, "manage_branches") or user_has_permission(
+        normalized_role, "manage_users"
+    )
+
+
+def _close_sqlite_connection(conn):
+    """Release a read connection before an exclusive write (avoids SQLite lock errors)."""
+    if conn is None:
+        return
+    try:
+        conn.close()
+    except Exception:
+        pass
+
+
+def _run_branch_db_write(operation_name, callback, *, release_conn=None):
+    """Single lock-safe write transaction for branch governance actions."""
+    if release_conn is not None:
+        _close_sqlite_connection(release_conn)
+
+    def _operation(conn):
+        ensure_branch_licensing_schema_integrity(conn)
+        return callback(conn)
+
+    return execute_write_transaction(_operation, operation_name=operation_name)
+
+
+def _safe_select_index(options, value, default_value=None):
+    if value in options:
+        return options.index(value)
+    if default_value is not None and default_value in options:
+        return options.index(default_value)
+    return 0
+
+
+def page_key_to_module_key(page_key):
+    return PAGE_MODULE_KEY_MAP.get(str(page_key or "").strip(), str(page_key or "").strip())
+
+
+def branch_allows_page(user, page_key, company_key=None, conn=None):
+    if is_branch_module_gating_exempt(user):
+        return True
+    if not is_branch_scoped_user(user):
+        return True
+    company_key = company_key or (user.get("key") if isinstance(user, dict) else None) or st.session_state.get("company_id")
+    branch_id = resolve_effective_branch_id(user)
+    if not company_key or not branch_id:
+        return False
+    module_key = page_key_to_module_key(page_key)
+    if module_key == "branch_management":
+        return can_access_branch_management(_extract_role_from_user(user))
+    if module_key == "Gatekeeper Admin":
+        return _normalize_role_name(_extract_role_from_user(user)) == "Dev"
+    close_conn = False
+    if conn is None:
+        conn = get_connection()
+        close_conn = True
+    try:
+        enabled_modules = get_branch_enabled_modules(conn, company_key, branch_id)
+    finally:
+        if close_conn and conn:
+            conn.close()
+    return module_key in enabled_modules
+
+
+def user_can_access_page(user, page_name, company_key=None, conn=None):
+    if not user:
+        return False
+    role = _extract_role_from_user(user)
+    if isinstance(user, dict) and user.get("role") == "Demo":
+        return page_name in {"Dashboard", "Point of Sale", "Inventory Management"}
+    if page_name == "branch_management":
+        return can_access_branch_management(role)
+    permission = PAGE_PERMISSION_MAP.get(page_name)
+    role_allowed = True if not permission else user_has_permission(role, permission)
+    if not role_allowed:
+        return False
+    if is_branch_module_gating_exempt(user):
+        return True
+    if page_name == "Gatekeeper Admin" and _normalize_role_name(role) == "Dev":
+        return True
+    if not is_branch_scoped_user(user):
+        return True
+    return branch_allows_page(user, page_name, company_key=company_key, conn=conn)
 
 
 def filter_by_user_branch(records, user, branch_key="branch_id"):
@@ -10329,101 +10548,35 @@ def show_company_setup(company_key, company_name, role):
             if user_has_permission(role, "manage_branches") or user_has_permission(role, "manage_users"):
                 st.markdown("---")
                 st.subheader("Branch Deployment")
+                deploy_conn = get_connection()
                 try:
-                    conn = get_connection()
-                    branch_count = conn.execute("SELECT COUNT(*) FROM branches WHERE company_key = ?", (company_key,)).fetchone()[0] or 0
-                    max_branches_row = conn.execute("SELECT COALESCE(max_branches, 1) FROM companies WHERE key = ?", (company_key,)).fetchone()
-                    max_branches = int(max_branches_row[0]) if max_branches_row and max_branches_row[0] is not None else 1
-                    branches = conn.execute(
-                        "SELECT branch_id, branch_name, location, branch_access_key, branch_manager, created_at FROM branches WHERE company_key = ? ORDER BY created_at DESC",
-                        (company_key,),
-                    ).fetchall()
-                    conn.close()
+                    ensure_branch_licensing_schema_integrity(deploy_conn)
+                    _render_branch_list_with_grants(deploy_conn, company_key)
+                    license_snapshot = get_company_branch_license_snapshot(deploy_conn, company_key)
+                    if license_snapshot.get("can_create_active_branch"):
+                        _render_branch_creation_form(
+                            deploy_conn,
+                            company_key,
+                            role,
+                            form_key_prefix="company_setup_deploy",
+                        )
+                    else:
+                        _render_branch_license_status(deploy_conn, company_key)
+                        st.warning(
+                            "Active branch license limit reached. Add an inactive branch below or contact support to increase max_branches."
+                        )
+                        with st.expander("Deploy inactive branch"):
+                            _render_branch_creation_form(
+                                deploy_conn,
+                                company_key,
+                                role,
+                                form_key_prefix="company_setup_deploy_inactive",
+                                default_active=False,
+                            )
                 except Exception as exc:
                     st.error(build_user_safe_error(exc, role))
-                    branches = []
-                    branch_count = 0
-                    max_branches = 1
-
-                if branches:
-                    branch_df = pd.DataFrame(branches, columns=["Branch ID", "Branch Name", "Location", "Access Key", "Manager", "Created At"])
-                    st.dataframe(branch_df, use_container_width=True)
-
-                st.info(f"Current Branches: {branch_count} / {max_branches}")
-                if branch_count >= max_branches:
-                    st.warning("You have reached the maximum branch deployment limit. Contact your developer or system administrator to increase your limit.")
-                else:
-                    with st.form("branch_deployment_form"):
-                        branch_name = st.text_input("Branch Name", key="deploy_branch_name")
-                        location = st.text_input("Location / Physical Address", key="deploy_branch_location")
-                        branch_manager = st.text_input("Branch Manager Name", key="deploy_branch_manager")
-                        branch_type = st.selectbox("Branch Type", ["Retail", "Warehouse", "Office", "Other"], key="deploy_branch_type")
-                        if st.form_submit_button("Deploy Branch"):
-                            if not require_permission(
-                                role,
-                                "manage_branches",
-                                action_label="manage branches",
-                                company_key=company_key,
-                            ):
-                                return
-                            if not branch_name.strip():
-                                st.error("Enter a branch name.")
-                            else:
-                                conn = get_connection()
-                                try:
-                                    branch_id = f"{company_key}-{branch_name.replace(' ', '_').lower()}"
-                                    existing_branch = conn.execute("SELECT branch_access_key FROM branches WHERE branch_id = ?", (branch_id,)).fetchone()
-                                    if existing_branch and existing_branch[0]:
-                                        branch_access_key = existing_branch[0]
-                                    else:
-                                        branch_access_key = f"{branch_id}-{''.join(random.choices(string.ascii_uppercase + string.digits, k=12))}"
-                                    conn.execute(
-                                        """
-                                        INSERT OR REPLACE INTO branches
-                                        (branch_id, company_key, branch_name, location, branch_type, branch_access_key, branch_manager)
-                                        VALUES (?, ?, ?, ?, ?, ?, ?)
-                                        """,
-                                        (
-                                            branch_id,
-                                            company_key,
-                                            branch_name,
-                                            location or "",
-                                            branch_type,
-                                            branch_access_key,
-                                            branch_manager or "Branch Manager",
-                                        ),
-                                    )
-                                    hashed_password = _hash_security_answer("default123")
-                                    conn.execute(
-                                        """
-                                        INSERT OR IGNORE INTO users
-                                        (company_key, branch_id, full_name, login_key, password_hash, role, status)
-                                        VALUES (?, ?, ?, ?, ?, ?, 'Active')
-                                        """,
-                                        (
-                                            company_key,
-                                            branch_id,
-                                            branch_manager or "Branch Manager",
-                                            branch_access_key,
-                                            hashed_password,
-                                            "Branch_Bookkeeper",
-                                        ),
-                                    )
-                                    conn.commit()
-                                    log_audit_action(
-                                        conn,
-                                        company_key,
-                                        role,
-                                        f"Deployed branch {branch_name}",
-                                        "Branch Deployment",
-                                        branch_id=branch_id,
-                                    )
-                                    st.success(f"Branch {branch_name} deployed successfully. Access Key: {branch_access_key}")
-                                    st.rerun()
-                                except Exception as exc:
-                                    st.error(build_user_safe_error(exc, role))
-                                finally:
-                                    conn.close()
+                finally:
+                    deploy_conn.close()
 
                 st.markdown("---")
                 st.subheader("Staff Management")
@@ -16188,208 +16341,1091 @@ def show_audit_trail(company_key, role="User", branch_id=None):
         st.error(build_user_safe_error(e, role))
 
 
-def show_branch_management(company_key, role):
-    if not require_permission(role, "manage_branches", action_label="manage branches", company_key=company_key):
+def _branch_type_catalog_selectbox(conn, key, label="Branch Type"):
+    catalog = get_branch_type_catalog(conn)
+    if not catalog:
+        ensure_branch_licensing_schema_integrity(conn)
+        catalog = get_branch_type_catalog(conn)
+    if not catalog:
+        return st.selectbox(label, options=["other"], format_func=lambda value: "Other", key=key)
+    options = [row["branch_type_key"] for row in catalog]
+    labels = {row["branch_type_key"]: row["branch_type_name"] for row in catalog}
+    return st.selectbox(label, options=options, format_func=lambda value: labels.get(value, value), key=key)
+
+
+def _render_branch_license_status(conn, company_key):
+    license_snapshot = get_company_branch_license_snapshot(conn, company_key, ensure_schema=False)
+    st.info(
+        "Licensed active branches: {active}/{max} "
+        "(purchased/deployed: {purchased}; inactive branches do not count toward the active limit).".format(
+            active=license_snapshot["active_branch_count"],
+            max=license_snapshot["max_branches"],
+            purchased=license_snapshot["number_of_branches"],
+        )
+    )
+    return license_snapshot
+
+
+def _branch_manager_display_label(branch):
+    """Prefer full manager name, then user_id, then legacy branch_manager text."""
+    full_name = str(branch.get("manager_user_name") or "").strip()
+    user_id = str(branch.get("manager_user_id") or "").strip()
+    legacy_name = str(branch.get("branch_manager") or "").strip()
+    if full_name:
+        return full_name
+    if user_id:
+        return user_id
+    if legacy_name:
+        return legacy_name
+    return "—"
+
+
+def _staff_branch_display(branch_id, branch_options):
+    normalized_branch_id = str(branch_id or "").strip()
+    if not normalized_branch_id:
+        return "Unassigned"
+    return branch_options.get(normalized_branch_id, normalized_branch_id)
+
+
+def _branch_display_code(branch):
+    return str(
+        branch.get("branch_code")
+        or branch.get("branch_name")
+        or branch.get("branch_id")
+        or ""
+    ).strip()
+
+
+def _render_branch_internal_id_diagnostics(conn, company_key, role):
+    if _normalize_role_name(role) != "Dev":
+        return
+    rows = conn.execute(
+        """
+        SELECT branch_name,
+               COALESCE(NULLIF(TRIM(branch_code), ''), branch_name, branch_id) AS branch_code,
+               branch_id
+        FROM branches
+        WHERE company_key = ?
+        ORDER BY branch_name
+        """,
+        (company_key,),
+    ).fetchall()
+    if not rows:
+        return
+    with st.expander("Developer diagnostics — internal branch IDs", expanded=False):
+        st.caption("Internal branch_id values are stable foreign keys and are not shown in normal branch views.")
+        st.dataframe(
+            pd.DataFrame(
+                [
+                    {
+                        "Branch Name": row[0],
+                        "Branch Code": row[1],
+                        "Internal branch_id": row[2],
+                    }
+                    for row in rows
+                ]
+            ),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+
+def _render_branch_list_with_grants(conn, company_key, role):
+    branches = list_company_branches_with_grants(conn, company_key)
+    if not branches:
+        st.info("No branches found. Add your first branch below.")
+        return []
+    display_rows = []
+    for branch in branches:
+        manager_label = _branch_manager_display_label(branch)
+        display_rows.append(
+            {
+                "Branch Name": branch["branch_name"],
+                "Branch Type": branch.get("branch_type_name") or branch.get("branch_type"),
+                "Active": "Yes" if int(branch.get("is_active") or 0) else "No",
+                "Deployment": branch.get("deployment_status"),
+                "Tier": branch.get("branch_tier"),
+                "Manager": manager_label,
+                "Module Grants": int(branch.get("module_grant_count") or 0),
+                "Branch Code": _branch_display_code(branch),
+            }
+        )
+    st.dataframe(pd.DataFrame(display_rows), use_container_width=True, hide_index=True)
+    _render_branch_internal_id_diagnostics(conn, company_key, role)
+    return branches
+
+
+def _render_branch_creation_form(conn, company_key, role, *, form_key_prefix="branch_mgmt", default_active=True):
+    license_snapshot = get_company_branch_license_snapshot(conn, company_key, ensure_schema=False)
+    if default_active:
+        _render_branch_license_status(conn, company_key)
+    can_add_active = bool(license_snapshot.get("can_create_active_branch"))
+
+    with st.form(f"{form_key_prefix}_branch_form"):
+        branch_name = st.text_input("Branch Name", key=f"{form_key_prefix}_branch_name")
+        branch_type_key = _branch_type_catalog_selectbox(conn, key=f"{form_key_prefix}_branch_type")
+        branch_access_key = st.text_input(
+            "Branch Access Key (optional — auto-generated if blank)",
+            key=f"{form_key_prefix}_branch_access_key",
+        )
+        branch_manager = st.text_input("Branch Manager Display Name (optional)", key=f"{form_key_prefix}_branch_manager")
+        location = st.text_input("Location / Physical Address", key=f"{form_key_prefix}_branch_location")
+        contact_number = st.text_input("Contact Number", key=f"{form_key_prefix}_branch_contact")
+        col_active, col_deploy, col_tier = st.columns(3)
+        with col_active:
+            is_active = st.checkbox("Active branch", value=default_active, key=f"{form_key_prefix}_is_active")
+        with col_deploy:
+            deployment_status = st.selectbox(
+                "Deployment Status",
+                ["active", "pending", "suspended"],
+                index=0,
+                key=f"{form_key_prefix}_deployment_status",
+            )
+        with col_tier:
+            branch_tier = st.selectbox(
+                "Branch Tier",
+                ["standard", "premium", "enterprise"],
+                index=0,
+                key=f"{form_key_prefix}_branch_tier",
+            )
+        create_bookkeeper = st.checkbox(
+            "Create default Branch Bookkeeper login (uses branch access key)",
+            value=False,
+            key=f"{form_key_prefix}_create_bookkeeper",
+        )
+        submitted = st.form_submit_button("Save Branch")
+
+    if not submitted:
         return
 
-    from financials import get_income_statement
+    if not is_company_branch_admin(role):
+        st.warning("You do not have permission to create branches.")
+        return
+    if not branch_name.strip():
+        st.error("Branch Name is required.")
+        return
+    if is_active and not can_add_active:
+        st.error(
+            "Active branch limit reached. Deactivate an existing branch or increase the licensed branch count before adding another active branch."
+        )
+        return
+
+    bookkeeper_password_hash = None
+    if create_bookkeeper:
+        bookkeeper_password_hash = _hash_security_answer("default123")
+
+    def _create_branch(write_conn):
+        result = create_company_branch(
+            write_conn,
+            company_key,
+            branch_name=branch_name.strip(),
+            branch_type_key=branch_type_key,
+            branch_access_key=branch_access_key.strip() or None,
+            manager_user_id=None,
+            is_active=1 if is_active else 0,
+            deployment_status=deployment_status,
+            branch_tier=branch_tier,
+            location=location,
+            contact_number=contact_number,
+            branch_manager=branch_manager,
+            create_default_bookkeeper_user=bool(create_bookkeeper),
+            bookkeeper_password_hash=bookkeeper_password_hash,
+            ensure_schema=False,
+        )
+        if not result.get("ok"):
+            return result
+        grants_inserted = int((result.get("module_grants") or {}).get("inserted") or 0)
+        log_audit_action(
+            write_conn,
+            company_key,
+            role,
+            f"Added branch: {result.get('branch_name')} ({result.get('branch_id')})",
+            "Branch Management",
+            branch_id=result.get("branch_id"),
+            details=f"module_grants_inserted={grants_inserted}",
+        )
+        result["grants_inserted"] = grants_inserted
+        return result
+
+    try:
+        result = _run_branch_db_write(
+            f"create_branch_{form_key_prefix}",
+            _create_branch,
+            release_conn=conn,
+        )
+    except Exception as exc:
+        st.error(build_user_safe_error(exc, role))
+        return
+    if not result or not result.get("ok"):
+        st.error((result or {}).get("reason") or "Branch could not be created.")
+        return
+    st.success(
+        "Branch '{name}' saved. Access key: {key}. Module grants created: {grants}.".format(
+            name=result.get("branch_name"),
+            key=result.get("branch_access_key"),
+            grants=result.get("grants_inserted", 0),
+        )
+    )
+    _clear_streamlit_state(f"{form_key_prefix}_branch_name", f"{form_key_prefix}_branch_access_key")
+    _increment_form_reset(f"{form_key_prefix}_branch_form_reset")
+    st.rerun()
+
+
+def can_access_branch_management(role):
+    return (
+        user_has_permission(role, "manage_branches")
+        or user_has_permission(role, "manage_branch_users")
+        or user_has_permission(role, "view_branch_configuration")
+    )
+
+
+def _branch_user_creatable_roles(actor_role):
+    normalized_role = _normalize_role_name(actor_role)
+    if user_has_permission(normalized_role, "manage_branches") or user_has_permission(normalized_role, "manage_users"):
+        return sorted(set(BRANCH_MANAGER_CREATABLE_ROLES) | {"Bookkeeper", "Accountant"})
+    return sorted(BRANCH_MANAGER_CREATABLE_ROLES)
+
+
+def _resolve_branch_manager_session_branch(user, company_key):
+    normalized_role = _normalize_role_name(_extract_role_from_user(user))
+    if user_has_permission(normalized_role, "manage_branches"):
+        return None
+    if normalized_role == "Branch Manager":
+        branch_id = _extract_user_branch_id(user)
+        if not branch_id:
+            return None
+        conn = get_connection()
+        try:
+            row = conn.execute(
+                "SELECT branch_id FROM branches WHERE company_key = ? AND manager_user_id = ?",
+                (company_key, user.get("user_id")),
+            ).fetchone()
+            if row:
+                return str(row[0])
+        except Exception:
+            pass
+        finally:
+            conn.close()
+        return str(branch_id).strip()
+    return _extract_user_branch_id(user)
+
+
+def _render_branch_users_panel(company_key, branch_id, role, *, panel_key_prefix="branch_users", conn=None):
+    if not can_manage_branch_users_role(role):
+        st.warning("You do not have permission to manage branch users.")
+        return
+
+    owns_connection = conn is None
+    if owns_connection:
+        conn = get_connection()
+    company_admin = is_company_branch_admin(role)
+    try:
+        branch_row = conn.execute(
+            """
+            SELECT branch_name,
+                   COALESCE(NULLIF(TRIM(branch_code), ''), branch_name, branch_id) AS branch_code
+            FROM branches
+            WHERE company_key = ? AND branch_id = ?
+            """,
+            (company_key, branch_id),
+        ).fetchone()
+        branch_label = branch_row[0] if branch_row else branch_id
+        branch_code = branch_row[1] if branch_row else branch_id
+        st.subheader(f"Branch Users — {branch_label}")
+        st.caption(f"Branch Code: {branch_code}")
+
+        users = list_branch_users(conn, company_key, branch_id)
+        if users:
+            display_rows = [
+                {
+                    "Name": row["full_name"],
+                    "Role": row["role"],
+                    "Login Key": row["login_key"],
+                    "Status": row.get("status") or "Active",
+                    "User ID": row.get("user_id"),
+                }
+                for row in users
+            ]
+            st.dataframe(pd.DataFrame(display_rows), use_container_width=True, hide_index=True)
+        else:
+            st.info("No users have been created for this branch yet.")
+
+        allowed_roles = _branch_user_creatable_roles(role)
+        with st.form(f"{panel_key_prefix}_create_user_form"):
+            full_name = st.text_input("Full Name", key=f"{panel_key_prefix}_full_name")
+            staff_role = st.selectbox("Role", allowed_roles, key=f"{panel_key_prefix}_role")
+            manual_login_key = st.text_input(
+                "Login / Access Key (optional — auto-generated if blank)",
+                key=f"{panel_key_prefix}_login_key",
+            )
+            if st.form_submit_button("Create Branch User"):
+                form_full_name = full_name.strip()
+                form_role = staff_role
+                form_login_key = manual_login_key.strip() or None
+
+                def _create_user(write_conn):
+                    result = create_branch_scoped_user(
+                        write_conn,
+                        company_key,
+                        branch_id,
+                        full_name=form_full_name,
+                        role=form_role,
+                        login_key=form_login_key,
+                        status="Active",
+                        allowed_roles=set(allowed_roles),
+                    )
+                    if not result.get("ok"):
+                        return result
+                    log_audit_action(
+                        write_conn,
+                        company_key,
+                        role,
+                        f"Created branch user {result.get('full_name')} ({result.get('role')})",
+                        "Branch User Administration",
+                        branch_id=branch_id,
+                        details=f"login_key={result.get('login_key')}",
+                    )
+                    return result
+
+                try:
+                    result = _run_branch_db_write(
+                        f"create_branch_user_{panel_key_prefix}",
+                        _create_user,
+                        release_conn=None if owns_connection else conn,
+                    )
+                except Exception as exc:
+                    st.error(build_user_safe_error(exc, role))
+                    return
+                if not result or not result.get("ok"):
+                    st.error((result or {}).get("reason") or "User could not be created.")
+                    return
+                st.success("User created. Login key: {key}".format(key=result.get("login_key")))
+                _clear_streamlit_state(
+                    f"{panel_key_prefix}_full_name",
+                    f"{panel_key_prefix}_login_key",
+                )
+                _increment_form_reset(f"{panel_key_prefix}_create_user_reset")
+                st.rerun()
+
+        st.markdown("#### Activate / Deactivate Users")
+        if not users:
+            st.caption("No users have been created for this branch yet.")
+        for row in users:
+            if str(row.get("role") or "") in PRIVILEGED_COMPANY_USER_ROLES:
+                continue
+            if str(row.get("role") or "") == "Branch Manager" and not company_admin:
+                continue
+            status_col, action_col = st.columns([3, 1])
+            current_status = str(row.get("status") or "Active")
+            status_col.write(
+                f"{row['full_name']} ({row['role']}) — Login: {row.get('login_key')} — {current_status}"
+            )
+            next_status = "Deactivate" if current_status == "Active" else "Activate"
+            if action_col.button(
+                next_status,
+                key=f"{panel_key_prefix}_toggle_{row['id']}",
+            ):
+                user_pk = row["id"]
+
+                def _toggle_user(write_conn):
+                    update_result = update_branch_user_status(
+                        write_conn,
+                        company_key,
+                        branch_id,
+                        user_pk,
+                        "Inactive" if current_status == "Active" else "Active",
+                        allowed_roles=set(_branch_user_creatable_roles(role)),
+                        company_admin=company_admin,
+                    )
+                    if not update_result.get("ok"):
+                        return update_result
+                    log_audit_action(
+                        write_conn,
+                        company_key,
+                        role,
+                        f"Set {row['full_name']} to {'Inactive' if current_status == 'Active' else 'Active'}",
+                        "Branch User Administration",
+                        branch_id=branch_id,
+                    )
+                    return update_result
+
+                try:
+                    update_result = _run_branch_db_write(
+                        f"toggle_branch_user_{panel_key_prefix}_{user_pk}",
+                        _toggle_user,
+                        release_conn=None if owns_connection else conn,
+                    )
+                except Exception as exc:
+                    st.error(build_user_safe_error(exc, role))
+                    return
+                if not update_result or not update_result.get("ok"):
+                    st.error((update_result or {}).get("reason") or "Status update failed.")
+                    return
+                st.success(f"{row['full_name']} is now {'Inactive' if current_status == 'Active' else 'Active'}.")
+                st.rerun()
+    except Exception as exc:
+        st.error(build_user_safe_error(exc, role))
+    finally:
+        if owns_connection and conn:
+            conn.close()
+
+
+def _render_branch_edit_panels(conn, company_key, role, branches):
+    if not is_company_branch_admin(role):
+        return
+    catalog = get_branch_type_catalog(conn)
+    type_options = [row["branch_type_key"] for row in catalog] or ["other"]
+    type_labels = {row["branch_type_key"]: row["branch_type_name"] for row in catalog}
+    st.subheader("Edit Branches")
+    for branch in branches:
+        branch_id = branch["branch_id"]
+        manager_options = fetch_branch_manager_select_options(
+            conn,
+            company_key,
+            branch_id,
+            branch.get("manager_user_id"),
+        )
+        manager_ids = [""] + [row["user_id"] for row in manager_options]
+        manager_labels = {"": "No manager"}
+        for candidate in manager_options:
+            manager_labels[candidate["user_id"]] = (
+                f"{candidate['full_name']} ({candidate['role']}) — {candidate['user_id']}"
+            )
+        current_manager_id = str(branch.get("manager_user_id") or "").strip()
+        branch_code_label = _branch_display_code(branch)
+        with st.expander(f"Edit: {branch['branch_name']} ({branch_code_label})"):
+            with st.form(f"edit_branch_form_{branch_id}"):
+                branch_name = st.text_input("Branch Name", value=branch.get("branch_name") or "", key=f"edit_name_{branch_id}")
+                branch_code = st.text_input(
+                    "Branch Code",
+                    value=_branch_display_code(branch),
+                    key=f"edit_code_{branch_id}",
+                )
+                location = st.text_input("Location", value=branch.get("location") or "", key=f"edit_location_{branch_id}")
+                branch_type_key = st.selectbox(
+                    "Branch Type",
+                    type_options,
+                    index=_safe_select_index(type_options, branch.get("branch_type_key") or "other", "other"),
+                    format_func=lambda value: type_labels.get(value, value),
+                    key=f"edit_type_{branch_id}",
+                )
+                branch_access_key = st.text_input(
+                    "Branch Access Key",
+                    value=branch.get("branch_access_key") or "",
+                    key=f"edit_access_{branch_id}",
+                )
+                manager_user_id = st.selectbox(
+                    "Branch Manager",
+                    manager_ids,
+                    index=_safe_select_index(manager_ids, current_manager_id, ""),
+                    format_func=lambda value: manager_labels.get(value, "No manager"),
+                    key=f"edit_manager_id_{branch_id}",
+                )
+                is_active = st.checkbox(
+                    "Active",
+                    value=bool(int(branch.get("is_active") or 0)),
+                    key=f"edit_active_{branch_id}",
+                )
+                deployment_status = st.selectbox(
+                    "Deployment Status",
+                    ["active", "pending", "suspended"],
+                    index=["active", "pending", "suspended"].index(branch.get("deployment_status") or "active")
+                    if (branch.get("deployment_status") or "active") in {"active", "pending", "suspended"}
+                    else 0,
+                    key=f"edit_deploy_{branch_id}",
+                )
+                branch_tier = st.selectbox(
+                    "Branch Tier",
+                    ["standard", "premium", "enterprise"],
+                    index=["standard", "premium", "enterprise"].index(branch.get("branch_tier") or "standard")
+                    if (branch.get("branch_tier") or "standard") in {"standard", "premium", "enterprise"}
+                    else 0,
+                    key=f"edit_tier_{branch_id}",
+                )
+                promote_manager = st.checkbox(
+                    "Promote manager to Branch Manager role",
+                    value=False,
+                    key=f"edit_promote_{branch_id}",
+                )
+                if st.form_submit_button("Save Branch Changes"):
+                    save_payload = {
+                        "branch_name": branch_name,
+                        "branch_code": branch_code,
+                        "location": location,
+                        "branch_type_key": branch_type_key,
+                        "branch_access_key": branch_access_key,
+                        "manager_user_id": manager_user_id.strip() or None,
+                        "is_active": 1 if is_active else 0,
+                        "deployment_status": deployment_status,
+                        "branch_tier": branch_tier,
+                        "promote_manager": promote_manager,
+                    }
+
+                    def _save_branch(write_conn):
+                        result = update_company_branch(
+                            write_conn,
+                            company_key,
+                            branch_id,
+                            **save_payload,
+                        )
+                        if not result.get("ok"):
+                            return result
+                        log_audit_action(
+                            write_conn,
+                            company_key,
+                            role,
+                            f"Updated branch {branch_name}",
+                            "Branch Management",
+                            branch_id=branch_id,
+                        )
+                        return result
+
+                    try:
+                        result = _run_branch_db_write(
+                            f"update_branch_{branch_id}",
+                            _save_branch,
+                            release_conn=conn,
+                        )
+                    except Exception as exc:
+                        st.error(build_user_safe_error(exc, role))
+                        return
+                    if not result or not result.get("ok"):
+                        st.error((result or {}).get("reason") or "Branch update failed.")
+                        return
+                    if result.get("branch_type_changed"):
+                        st.info("Module grants updated for new branch type.")
+                    st.success("Branch updated successfully.")
+                    _increment_form_reset(f"edit_branch_form_reset_{branch_id}")
+                    st.rerun()
+
+
+def _render_staff_assignment_tab(company_key, role):
+    if not is_company_branch_admin(role):
+        st.warning("Staff assignment is available to company branch administrators only.")
+        return
+    conn = get_connection()
+    try:
+        ensure_branch_licensing_schema_integrity(conn)
+        branches = conn.execute(
+            "SELECT branch_id, branch_name FROM branches WHERE company_key = ? ORDER BY branch_name",
+            (company_key,),
+        ).fetchall()
+        branch_keys = [""] + [row[0] for row in branches]
+        branch_options = {"": "Unassigned"}
+        for row in branches:
+            branch_options[row[0]] = row[1]
+        staff_rows = list_company_staff_for_assignment(conn, company_key)
+        if not staff_rows:
+            st.info(
+                "No assignable staff users found for this company. "
+                "Create branch users on the Branch Users tab or add staff in System Configuration."
+            )
+            return
+
+        display_df = pd.DataFrame(
+            [
+                {
+                    "Name": row["full_name"],
+                    "User ID": row.get("user_id_display"),
+                    "Role": row["role"],
+                    "Branch": _staff_branch_display(row.get("branch_id"), branch_options),
+                    "Status": row.get("status") or "Active",
+                    "Login Key": row.get("login_key_display"),
+                }
+                for row in staff_rows
+            ]
+        )
+        st.dataframe(display_df, use_container_width=True, hide_index=True)
+
+        assignable_roles = sorted(COMPANY_STAFF_ASSIGNABLE_ROLES)
+        st.markdown("#### Assign or Transfer Staff")
+        staff_labels = {
+            row["id"]: f"{row['full_name']} ({row['role']}) — {row.get('user_id_display', '(no user id)')}"
+            for row in staff_rows
+        }
+        staff_ids = [row["id"] for row in staff_rows]
+        with st.form("staff_assignment_bulk_form"):
+            selected_user_id = st.selectbox(
+                "Select user",
+                staff_ids,
+                format_func=lambda value: staff_labels.get(value, str(value)),
+                key="staff_assign_user_select",
+            )
+            selected_row = next(row for row in staff_rows if row["id"] == selected_user_id)
+            selected_branch = st.selectbox(
+                "Target branch",
+                branch_keys,
+                index=_safe_select_index(branch_keys, selected_row.get("branch_id") or "", ""),
+                format_func=lambda value: branch_options.get(value, value),
+                key="staff_assign_branch_select",
+            )
+            selected_role = st.selectbox(
+                "Role",
+                assignable_roles,
+                index=_safe_select_index(assignable_roles, selected_row.get("role"), assignable_roles[0]),
+                key="staff_assign_role_select",
+            )
+            if st.form_submit_button("Save Assignment"):
+                target_branch = selected_branch or None
+
+                def _assign_staff(write_conn):
+                    result = update_company_staff_branch_assignment(
+                        write_conn,
+                        company_key,
+                        selected_user_id,
+                        target_branch,
+                        role=selected_role,
+                        actor_role=role,
+                    )
+                    if not result.get("ok"):
+                        return result
+                    log_audit_action(
+                        write_conn,
+                        company_key,
+                        role,
+                        f"Updated staff assignment for {selected_row['full_name']}",
+                        "Staff Assignment",
+                        branch_id=target_branch,
+                    )
+                    return result
+
+                try:
+                    result = _run_branch_db_write(
+                        "staff_assignment_save",
+                        _assign_staff,
+                        release_conn=conn,
+                    )
+                except Exception as exc:
+                    st.error(build_user_safe_error(exc, role))
+                    return
+                if not result or not result.get("ok"):
+                    st.error((result or {}).get("reason") or "Assignment failed.")
+                    return
+                st.success("Assignment updated.")
+                _increment_form_reset("staff_assignment_bulk_reset")
+                st.rerun()
+
+        st.markdown("#### Per-User Quick Actions")
+        for row in staff_rows:
+            with st.expander(f"{row['full_name']} ({row['role']})"):
+                current_branch = row.get("branch_id") or ""
+                branch_key_list = list(branch_keys)
+                selected_branch = st.selectbox(
+                    "Branch assignment",
+                    branch_key_list,
+                    index=_safe_select_index(branch_key_list, current_branch, ""),
+                    format_func=lambda value: branch_options.get(value, value),
+                    key=f"staff_branch_{row['id']}",
+                )
+                selected_role = st.selectbox(
+                    "Role",
+                    assignable_roles,
+                    index=_safe_select_index(assignable_roles, row.get("role"), assignable_roles[0]),
+                    key=f"staff_role_{row['id']}",
+                )
+                col_save, col_clear = st.columns(2)
+                if col_save.button("Save Assignment", key=f"staff_save_{row['id']}"):
+                    user_pk = row["id"]
+                    target_branch = selected_branch or None
+
+                    def _assign_one(write_conn):
+                        result = update_company_staff_branch_assignment(
+                            write_conn,
+                            company_key,
+                            user_pk,
+                            target_branch,
+                            role=selected_role,
+                            actor_role=role,
+                        )
+                        if not result.get("ok"):
+                            return result
+                        log_audit_action(
+                            write_conn,
+                            company_key,
+                            role,
+                            f"Updated staff assignment for {row['full_name']}",
+                            "Staff Assignment",
+                            branch_id=target_branch,
+                        )
+                        return result
+
+                    try:
+                        result = _run_branch_db_write(
+                            f"staff_save_{user_pk}",
+                            _assign_one,
+                            release_conn=conn,
+                        )
+                    except Exception as exc:
+                        st.error(build_user_safe_error(exc, role))
+                        return
+                    if not result or not result.get("ok"):
+                        st.error((result or {}).get("reason") or "Assignment failed.")
+                        return
+                    st.success("Assignment updated.")
+                    st.rerun()
+                if col_clear.button("Remove from branch", key=f"staff_clear_{row['id']}"):
+                    user_pk = row["id"]
+
+                    def _clear_one(write_conn):
+                        return update_company_staff_branch_assignment(
+                            write_conn,
+                            company_key,
+                            user_pk,
+                            None,
+                            role=selected_role,
+                            actor_role=role,
+                        )
+
+                    try:
+                        result = _run_branch_db_write(
+                            f"staff_clear_{user_pk}",
+                            _clear_one,
+                            release_conn=conn,
+                        )
+                    except Exception as exc:
+                        st.error(build_user_safe_error(exc, role))
+                        return
+                    if not result or not result.get("ok"):
+                        st.error((result or {}).get("reason") or "Could not remove branch assignment.")
+                        return
+                    st.success("User removed from branch.")
+                    st.rerun()
+    except Exception as exc:
+        st.error(build_user_safe_error(exc, role))
+    finally:
+        conn.close()
+
+
+def _render_branch_manager_assignment_section(conn, company_key, role):
+    if not is_company_branch_admin(role):
+        return
+    branches = list_company_branches_with_grants(conn, company_key)
+    if not branches:
+        return
+    st.subheader("Assign Branch Managers")
+    for branch in branches:
+        branch_id = branch["branch_id"]
+        manager_label = _branch_manager_display_label(branch)
+        with st.expander(f"{branch['branch_name']} — Manager: {manager_label}"):
+            candidates = fetch_branch_manager_candidates(conn, company_key, branch_id)
+            if not candidates:
+                st.caption("No eligible users. Create a branch user first or unassign users from other branches.")
+            else:
+                candidate_ids = [row["user_id"] for row in candidates]
+                candidate_labels = {
+                    row["user_id"]: f"{row['full_name']} ({row['role']})" for row in candidates
+                }
+                default_index = 0
+                current_manager_id = branch.get("manager_user_id")
+                if current_manager_id in candidate_ids:
+                    default_index = candidate_ids.index(current_manager_id)
+                selected_user_id = st.selectbox(
+                    "Manager user",
+                    candidate_ids,
+                    index=default_index,
+                    format_func=lambda value: candidate_labels.get(value, value),
+                    key=f"branch_manager_select_{branch_id}",
+                )
+                promote = st.checkbox(
+                    "Promote selected user to Branch Manager role",
+                    value=True,
+                    key=f"branch_manager_promote_{branch_id}",
+                )
+                if st.button("Save Branch Manager", key=f"branch_manager_save_{branch_id}"):
+                    selected_manager = selected_user_id
+
+                    def _assign_mgr(write_conn):
+                        result = assign_branch_manager(
+                            write_conn,
+                            company_key,
+                            branch_id,
+                            selected_manager,
+                            promote_to_branch_manager=promote,
+                        )
+                        if not result.get("ok"):
+                            return result
+                        log_audit_action(
+                            write_conn,
+                            company_key,
+                            role,
+                            f"Assigned branch manager for {branch['branch_name']}",
+                            "Branch Management",
+                            branch_id=branch_id,
+                            details=f"manager_user_id={selected_manager}",
+                        )
+                        return result
+
+                    try:
+                        result = _run_branch_db_write(
+                            f"assign_manager_{branch_id}",
+                            _assign_mgr,
+                            release_conn=conn,
+                        )
+                    except Exception as exc:
+                        st.error(build_user_safe_error(exc, role))
+                        return
+                    if not result or not result.get("ok"):
+                        st.error((result or {}).get("reason") or "Could not assign branch manager.")
+                        return
+                    st.success("Branch manager updated.")
+                    st.rerun()
+            with st.expander("Manage users for this branch", expanded=False):
+                _render_branch_users_panel(
+                    company_key,
+                    branch_id,
+                    role,
+                    panel_key_prefix=f"branch_users_{branch_id}",
+                    conn=conn,
+                )
+
+
+def show_branch_management(company_key, role):
+    if not can_access_branch_management(role):
+        require_permission(role, "manage_branches", action_label="access branch management", company_key=company_key)
+        return
+
+    user = st.session_state.get("user") or {}
+    normalized_role = _normalize_role_name(role)
+    can_manage_company_branches = user_has_permission(role, "manage_branches")
+    can_manage_branch_users = user_has_permission(role, "manage_branch_users")
+
+    if can_manage_branch_users and not can_manage_company_branches:
+        branch_id = _resolve_branch_manager_session_branch(user, company_key)
+        if not branch_id:
+            st.error(
+                "Your Branch Manager account is not linked to a branch yet. "
+                "Ask your Master Admin to assign you as branch manager."
+            )
+            return
+        enforce_branch_session_lock(user)
+        st.header("🏢 Branch Users")
+        _render_branch_users_panel(company_key, branch_id, role, panel_key_prefix="branch_manager_users")
+        return
 
     st.header("🏢 Branch Management")
 
-    tabs = st.tabs(["Branch List & Configuration", "Staff Assignment", "Branch Performance"])
+    tabs = st.tabs(["Branch List & Configuration", "Branch Users", "Staff Assignment", "Branch Performance"])
 
     with tabs[0]:
-        # Branch List
         st.subheader("Current Branches")
         conn = get_connection()
         try:
-            branches = conn.execute("SELECT branch_id, branch_name, location, branch_type, branch_access_key, contact_number, branch_manager, created_at FROM branches WHERE company_key = ? ORDER BY created_at DESC", (company_key,)).fetchall()
-            if branches:
-                df = pd.DataFrame(branches, columns=["Branch ID", "Branch Name", "Location", "Type", "Access Key", "Contact Number", "Branch Manager", "Created At"])
-                st.dataframe(df, use_container_width=True)
-            else:
-                st.info("No branches found. Add your first branch below.")
+            ensure_branch_licensing_schema_integrity(conn)
+            branch_rows = _render_branch_list_with_grants(conn, company_key, role)
+            if branch_rows:
+                _render_branch_edit_panels(conn, company_key, role, branch_rows)
         except Exception as e:
             st.error(build_user_safe_error(e, role))
         finally:
             conn.close()
 
-        # Configuration Form
-        st.subheader("Add/Edit Branch")
-        conn = get_connection()
+        st.markdown("---")
+        if is_company_branch_admin(role) and st.button(
+            "Repair / Generate Missing Module Grants",
+            key="repair_branch_module_grants_btn",
+        ):
+            def _repair_grants(write_conn):
+                repair_result = repair_branch_module_grants(
+                    write_conn,
+                    company_key,
+                    ensure_schema=False,
+                )
+                log_audit_action(
+                    write_conn,
+                    company_key,
+                    role,
+                    "Repaired branch module grants",
+                    "Branch Management",
+                    details=(
+                        f"branches_processed={repair_result.get('branches_processed')}; "
+                        f"grants_inserted={repair_result.get('grants_inserted')}"
+                    ),
+                )
+                return repair_result
+
+            try:
+                repair_result = _run_branch_db_write("repair_branch_module_grants", _repair_grants)
+            except Exception as exc:
+                st.error(build_user_safe_error(exc, role))
+            else:
+                st.success(
+                    "Repair complete. Branches scanned: {branches}. New grants inserted: {grants}.".format(
+                        branches=repair_result.get("branches_processed"),
+                        grants=repair_result.get("grants_inserted"),
+                    )
+                )
+                st.rerun()
+
+        st.subheader("Add Branch")
+        list_conn = get_connection()
         try:
-            current_count = conn.execute("SELECT COUNT(*) FROM branches WHERE company_key = ?", (company_key,)).fetchone()[0]
-            max_branches_row = conn.execute("SELECT max_branches FROM companies WHERE key = ?", (company_key,)).fetchone()
-            max_branches = max_branches_row[0] if max_branches_row else 1
-            if current_count >= max_branches:
-                st.warning(f"You have reached the maximum number of branches ({max_branches}). Contact support to increase your limit.")
-                can_add = False
+            ensure_branch_licensing_schema_integrity(list_conn)
+            license_snapshot = get_company_branch_license_snapshot(list_conn, company_key)
+            if license_snapshot.get("can_create_active_branch"):
+                _render_branch_creation_form(list_conn, company_key, role, form_key_prefix="branch_mgmt")
             else:
-                can_add = True
+                _render_branch_license_status(list_conn, company_key)
+                st.warning(
+                    "Cannot add another active branch until the license limit is increased or an active branch is deactivated."
+                )
+                with st.expander("Add inactive branch (does not count toward active limit)"):
+                    _render_branch_creation_form(
+                        list_conn,
+                        company_key,
+                        role,
+                        form_key_prefix="branch_mgmt_inactive",
+                        default_active=False,
+                    )
         except Exception as e:
             st.error(build_user_safe_error(e, role))
-            can_add = False
         finally:
-            conn.close()
+            list_conn.close()
 
-        if can_add:
-            with st.form("branch_form"):
-                branch_name = st.text_input("Branch Name", key="branch_name")
-                location = st.text_input("Location/Physical Address", key="branch_location")
-                contact_number = st.text_input("Contact Number", key="branch_contact")
-                branch_manager = st.text_input("Branch Manager Name", key="branch_manager")
-                branch_type = st.selectbox("Branch Type", ["Retail", "Warehouse", "Office", "Other"], key="branch_type")
-
-                submitted = st.form_submit_button("Save Branch")
-                if submitted:
-                    if branch_name:
-                        conn = get_connection()
-                        try:
-                            branch_id = f"{company_key}-{branch_name.replace(' ', '_').lower()}"
-                            existing_branch = conn.execute("SELECT branch_access_key FROM branches WHERE branch_id = ?", (branch_id,)).fetchone()
-                            if existing_branch and existing_branch[0]:
-                                branch_access_key = existing_branch[0]
-                            else:
-                                branch_access_key = f"{branch_id}-{''.join(random.choices(string.ascii_uppercase + string.digits, k=12))}"
-                            conn.execute("""
-                                INSERT OR REPLACE INTO branches (branch_id, company_key, branch_name, location, branch_type, branch_access_key, contact_number, branch_manager)
-                                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                            """, (branch_id, company_key, branch_name, location or "", branch_type, branch_access_key, contact_number or "", branch_manager or ""))
-                            # Generate Branch Bookkeeper User
-                            hashed_password = _hash_security_answer("default123")  # Default password
-                            conn.execute("""
-                                INSERT OR IGNORE INTO users (company_key, branch_id, full_name, login_key, password_hash, role, status)
-                                VALUES (?, ?, ?, ?, ?, ?, 'Active')
-                            """, (company_key, branch_id, branch_manager or "Branch Manager", branch_access_key, hashed_password, 'Branch_Bookkeeper'))
-                            conn.commit()
-                            log_audit_action(conn, company_key, "Master Admin", f"Added branch: {branch_name} with access key: {branch_access_key}", "Branch Management", branch_id=branch_id)
-                            st.success(f"Branch '{branch_name}' saved successfully. Access Key: {branch_access_key}")
-                            # Sync to Firebase - TODO: implement
-                            # _sync_to_firebase(conn, company_key)
-                            st.rerun()
-                        except Exception as e:
-                            st.error(build_user_safe_error(e, role))
-                        finally:
-                            conn.close()
-                    else:
-                        st.error("Branch Name is required.")
-        else:
-            st.info("Cannot add more branches. Limit reached.")
+        manager_conn = get_connection()
+        try:
+            ensure_branch_licensing_schema_integrity(manager_conn)
+            _render_branch_manager_assignment_section(manager_conn, company_key, role)
+        except Exception as e:
+            st.error(build_user_safe_error(e, role))
+        finally:
+            manager_conn.close()
 
     with tabs[1]:
-        # Staff Assignment
-        st.subheader("Assign Staff to Branches")
-        conn = get_connection()
-        try:
-            # Get branches
-            branches = conn.execute("SELECT branch_id, branch_name FROM branches WHERE company_key = ? ORDER BY branch_name", (company_key,)).fetchall()
-            branch_options = {b[0]: b[1] for b in branches}
-            branch_options[""] = "Unassigned"
-
-            # Get users
-            users = conn.execute("SELECT id, full_name, role, branch_id FROM users WHERE company_key = ? AND role IN ('Bookkeeper', 'Staff') ORDER BY full_name", (company_key,)).fetchall()
-            for user in users:
-                user_id, full_name, user_role, current_branch = user
-                with st.expander(f"{full_name} ({user_role})"):
-                    selected_branch = st.selectbox(f"Assign {full_name} to branch", options=list(branch_options.keys()), format_func=lambda x: branch_options.get(x, "Unassigned"), index=list(branch_options.keys()).index(current_branch or ""), key=f"assign_{user_id}")
-                    if st.button(f"Update Assignment for {full_name}", key=f"update_{user_id}"):
-                        conn.execute("UPDATE users SET branch_id = ? WHERE id = ?", (selected_branch or None, user_id))
-                        conn.commit()
-                        log_audit_action(conn, company_key, "Master Admin", f"Assigned {full_name} to branch {selected_branch}", "Branch Management")
-                        st.success(f"Updated assignment for {full_name}.")
-                        st.rerun()
-        except Exception as e:
-            st.error(build_user_safe_error(e, role))
-        finally:
-            conn.close()
+        st.subheader("Branch Users by Branch")
+        if not can_manage_branch_users_role(role):
+            st.warning("You do not have permission to manage branch users.")
+        else:
+            branch_conn = get_connection()
+            try:
+                ensure_branch_licensing_schema_integrity(branch_conn)
+                branch_rows = branch_conn.execute(
+                    "SELECT branch_id, branch_name FROM branches WHERE company_key = ? ORDER BY branch_name",
+                    (company_key,),
+                ).fetchall()
+                if not branch_rows:
+                    st.info("Create a branch before managing branch users.")
+                else:
+                    branch_ids = [row[0] for row in branch_rows]
+                    branch_name_map = {row[0]: row[1] for row in branch_rows}
+                    selected_branch_id = st.selectbox(
+                        "Select branch",
+                        branch_ids,
+                        format_func=lambda value: branch_name_map.get(value, value),
+                        key="branch_users_admin_branch_select",
+                    )
+                    if selected_branch_id:
+                        _render_branch_users_panel(
+                            company_key,
+                            selected_branch_id,
+                            role,
+                            panel_key_prefix="master_branch_users",
+                            conn=branch_conn,
+                        )
+            except Exception as e:
+                st.error(build_user_safe_error(e, role))
+            finally:
+                branch_conn.close()
 
     with tabs[2]:
-        # Branch Performance
-        st.subheader("Branch Performance Comparison")
-        conn = get_connection()
-        try:
-            branches = conn.execute("SELECT branch_id, branch_name FROM branches WHERE company_key = ? ORDER BY branch_name", (company_key,)).fetchall()
-            branch_options = [b[1] for b in branches]
-            if len(branches) >= 2:
-                col1, col2 = st.columns(2)
-                with col1:
-                    branch1 = st.selectbox("Select Branch 1", branch_options, key="perf_branch1")
-                with col2:
-                    branch2 = st.selectbox("Select Branch 2", branch_options, index=1 if len(branch_options) > 1 else 0, key="perf_branch2")
+        _render_staff_assignment_tab(company_key, role)
 
-                if branch1 and branch2 and branch1 != branch2:
-                    branch1_id = next(b[0] for b in branches if b[1] == branch1)
-                    branch2_id = next(b[0] for b in branches if b[1] == branch2)
+    with tabs[3]:
+        _render_branch_performance_tab(company_key, role)
 
-                    # Get income statements
-                    inc1 = get_income_statement(company_key, branch_id=branch1_id)
-                    inc2 = get_income_statement(company_key, branch_id=branch2_id)
 
-                    if not inc1.empty and not inc2.empty:
-                        def _branch_metrics(df):
-                            revenue = float(df.loc[df["Category"] == "Revenue", "Amount (GHS)"].sum()) if not df.empty else 0.0
-                            expense = float(df.loc[df["Category"] == "Operating Expenses", "Amount (GHS)"].sum()) if not df.empty else 0.0
-                            profit = float(df.loc[df["Account"] == "Net Profit", "Amount (GHS)"].sum()) if not df.empty else 0.0
-                            return revenue, expense, profit
+def _render_branch_performance_tab(company_key, role):
+    st.subheader("Branch Performance Comparison")
+    conn = get_connection()
+    try:
+        branches = conn.execute(
+            """
+            SELECT branch_id, branch_name,
+                   COALESCE(NULLIF(TRIM(branch_code), ''), branch_name, branch_id) AS branch_code
+            FROM branches
+            WHERE company_key = ?
+            ORDER BY branch_name
+            """,
+            (company_key,),
+        ).fetchall()
+        branch_options = [b[1] for b in branches]
+        branch_code_map = {b[0]: b[2] for b in branches}
+        if len(branches) < 2:
+            st.info("At least two branches are required for comparison.")
+            return
 
-                        revenue1, expense1, profit1 = _branch_metrics(inc1)
-                        revenue2, expense2, profit2 = _branch_metrics(inc2)
+        st.info(
+            "Branch-level financial comparison will be enabled after branch-aware financial reporting is completed."
+        )
+        col1, col2 = st.columns(2)
+        with col1:
+            branch1 = st.selectbox("Select Branch 1", branch_options, key="perf_branch1")
+        with col2:
+            branch2 = st.selectbox(
+                "Select Branch 2",
+                branch_options,
+                index=1 if len(branch_options) > 1 else 0,
+                key="perf_branch2",
+            )
+        if not branch1 or not branch2 or branch1 == branch2:
+            st.info("Select two different branches to compare.")
+            return
 
-                        ar1 = get_account_total(company_key, "Accounts Receivable", branch_id=branch1_id, balance_side="debit", conn=conn)
-                        ar2 = get_account_total(company_key, "Accounts Receivable", branch_id=branch2_id, balance_side="debit", conn=conn)
-                        inventory_summary = conn.execute(
-                            "SELECT COUNT(*) AS item_count, COALESCE(SUM(qty * cost_price), 0) AS inventory_value FROM inventory WHERE company_key = ?",
-                            (company_key,),
-                        ).fetchone()
-                        inventory_items = int(inventory_summary[0] or 0)
-                        inventory_value = float(inventory_summary[1] or 0.0)
+        branch1_id = next(b[0] for b in branches if b[1] == branch1)
+        branch2_id = next(b[0] for b in branches if b[1] == branch2)
 
-                        st.subheader(f"Revenue vs Expenses: {branch1} vs {branch2}")
-                        chart_df = pd.DataFrame(
-                            {
-                                "Revenue": [revenue1, revenue2],
-                                "Expenses": [expense1, expense2],
-                            },
-                            index=[branch1, branch2],
-                        )
-                        st.bar_chart(chart_df)
+        ar1 = get_account_total(
+            company_key,
+            "Accounts Receivable",
+            branch_id=branch1_id,
+            balance_side="debit",
+            conn=conn,
+        )
+        ar2 = get_account_total(
+            company_key,
+            "Accounts Receivable",
+            branch_id=branch2_id,
+            balance_side="debit",
+            conn=conn,
+        )
+        inventory_summary = conn.execute(
+            """
+            SELECT COUNT(*) AS item_count, COALESCE(SUM(qty * cost_price), 0) AS inventory_value
+            FROM inventory
+            WHERE company_key = ?
+            """,
+            (company_key,),
+        ).fetchone()
+        inventory_items = int(inventory_summary[0] or 0)
+        inventory_value = float(inventory_summary[1] or 0.0)
 
-                        st.markdown("### Branch Comparison Summary")
-                        summary_df = pd.DataFrame(
-                            [
-                                {
-                                    "Branch": branch1,
-                                    "Revenue": revenue1,
-                                    "Expenses": expense1,
-                                    "Net Profit": profit1,
-                                    "Accounts Receivable": ar1,
-                                },
-                                {
-                                    "Branch": branch2,
-                                    "Revenue": revenue2,
-                                    "Expenses": expense2,
-                                    "Net Profit": profit2,
-                                    "Accounts Receivable": ar2,
-                                },
-                            ]
-                        )
-                        st.dataframe(format_currency_dataframe(summary_df), use_container_width=True)
+        st.markdown("### Branch Comparison Summary")
+        summary_df = pd.DataFrame(
+            [
+                {
+                    "Branch": branch1,
+                    "Branch Code": branch_code_map.get(branch1_id, branch1),
+                    "Accounts Receivable": ar1,
+                },
+                {
+                    "Branch": branch2,
+                    "Branch Code": branch_code_map.get(branch2_id, branch2),
+                    "Accounts Receivable": ar2,
+                },
+            ]
+        )
+        st.dataframe(format_currency_dataframe(summary_df), use_container_width=True)
 
-                        st.markdown("### Consolidated Inventory & A/R Summary")
-                        col1, col2, col3, col4 = st.columns(4)
-                        col1.metric("Inventory Items", f"{inventory_items:,}")
-                        col2.metric("Inventory Value", format_currency(inventory_value))
-                        col3.metric(f"A/R ({branch1})", format_currency(ar1))
-                        col4.metric(f"A/R ({branch2})", format_currency(ar2))
-                        st.markdown("**Company-wide inventory values are consolidated. Branch-specific A/R is displayed for the selected branches.**")
-                    else:
-                        st.info("No data available for selected branches.")
-                else:
-                    st.info("Select two different branches to compare.")
-            else:
-                st.info("At least two branches are required for comparison.")
-        except Exception as e:
-            st.error(build_user_safe_error(e, role))
-        finally:
-            conn.close()
+        st.markdown("### Consolidated Inventory & A/R Summary")
+        col1, col2, col3, col4 = st.columns(4)
+        col1.metric("Inventory Items", f"{inventory_items:,}")
+        col2.metric("Inventory Value", format_currency(inventory_value))
+        col3.metric(f"A/R ({branch1})", format_currency(ar1))
+        col4.metric(f"A/R ({branch2})", format_currency(ar2))
+        st.markdown(
+            "**Company-wide inventory values are consolidated. Branch-specific A/R is displayed for the selected branches.**"
+        )
+    except Exception as e:
+        st.error(build_user_safe_error(e, role))
+    finally:
+        conn.close()
 
