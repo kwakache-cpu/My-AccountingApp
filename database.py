@@ -737,7 +737,7 @@ def get_postgres_readiness_diagnostics(conn=None):
         "database_url_configured": bool(_get_database_url()),
         "database_url_label": _redact_database_url(_get_database_url()),
         "supabase_sslmode": _postgres_sslmode(_get_database_url()) or "missing",
-        "postgres_runtime_enabled": POSTGRES_RUNTIME_ENABLED,
+        "postgres_runtime_enabled": is_postgres_runtime_enabled(),
         "sqlite_concurrency_warning": (
             "SQLite is suitable for pilot/small-client use but not high-concurrency enterprise deployment."
             if get_active_db_backend() == "sqlite"
@@ -824,7 +824,16 @@ def _read_runtime_secret(secret_name, default=None):
 
 
 SUPPORTED_DB_BACKENDS = {"sqlite", "postgres", "postgresql", "supabase"}
-POSTGRES_RUNTIME_ENABLED = str(os.getenv("ERP_ENABLE_POSTGRES_RUNTIME", "0")).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def is_postgres_runtime_enabled():
+    """Return True when ERP_ENABLE_POSTGRES_RUNTIME is explicitly enabled."""
+    return str(
+        _read_runtime_secret("ERP_ENABLE_POSTGRES_RUNTIME", os.getenv("ERP_ENABLE_POSTGRES_RUNTIME", "0"))
+    ).strip().lower() in {"1", "true", "yes", "on"}
+
+
+POSTGRES_RUNTIME_ENABLED = is_postgres_runtime_enabled()
 
 
 def _normalize_db_backend(value=None):
@@ -841,9 +850,14 @@ def get_db_backend():
     return _normalize_db_backend(_read_runtime_secret("DB_BACKEND", os.getenv("DB_BACKEND", "sqlite")))
 
 
+def get_configured_db_backend():
+    """Alias for configured DB_BACKEND (ignores runtime enablement flags)."""
+    return get_db_backend()
+
+
 def get_active_db_backend():
-    configured_backend = get_db_backend()
-    if configured_backend == "postgres" and POSTGRES_RUNTIME_ENABLED:
+    configured_backend = get_configured_db_backend()
+    if configured_backend == "postgres" and is_postgres_runtime_enabled() and get_database_url():
         return "postgres"
     return "sqlite"
 
@@ -854,6 +868,96 @@ def is_sqlite():
 
 def is_postgres():
     return get_active_db_backend() == "postgres"
+
+
+def is_sqlite_backend():
+    """Return True when the active runtime backend is SQLite."""
+    return is_sqlite()
+
+
+def is_postgres_backend():
+    """Return True when PostgreSQL runtime is fully enabled and active."""
+    return is_postgres()
+
+
+def get_database_url():
+    """Return configured DATABASE_URL without redaction."""
+    return _get_database_url()
+
+
+def _get_postgres_driver_info():
+    """Detect an installed PostgreSQL driver without importing at module load."""
+    try:
+        import psycopg2
+
+        return {
+            "available": True,
+            "driver": "psycopg2",
+            "version": str(getattr(psycopg2, "__version__", "") or ""),
+        }
+    except ImportError:
+        pass
+    try:
+        import psycopg
+
+        return {
+            "available": True,
+            "driver": "psycopg",
+            "version": str(getattr(psycopg, "__version__", "") or ""),
+        }
+    except ImportError:
+        pass
+    return {
+        "available": False,
+        "driver": None,
+        "version": "",
+        "message": "Install psycopg2-binary (recommended) or psycopg to enable PostgreSQL connections.",
+    }
+
+
+def validate_postgres_runtime_enabled():
+    """
+    Validate whether PostgreSQL runtime activation requirements are satisfied.
+    Does not open a connection unless all prerequisites pass.
+    """
+    configured_backend = get_configured_db_backend()
+    database_url = get_database_url()
+    runtime_enabled = is_postgres_runtime_enabled()
+    driver_info = _get_postgres_driver_info()
+    reasons = []
+
+    if configured_backend != "postgres":
+        reasons.append("DB_BACKEND is not set to postgres.")
+    if not database_url:
+        reasons.append("DATABASE_URL is not configured.")
+    if not runtime_enabled:
+        reasons.append("ERP_ENABLE_POSTGRES_RUNTIME is not enabled.")
+    if configured_backend == "postgres" and runtime_enabled and database_url and not driver_info.get("available"):
+        reasons.append(driver_info.get("message") or "PostgreSQL driver is not available.")
+
+    postgres_requested = configured_backend == "postgres"
+    ok = (
+        configured_backend == "postgres"
+        and bool(database_url)
+        and runtime_enabled
+        and bool(driver_info.get("available"))
+    )
+    return {
+        "ok": ok,
+        "configured_backend": configured_backend,
+        "active_backend": get_active_db_backend(),
+        "database_url_configured": bool(database_url),
+        "database_url_label": _redact_database_url(database_url),
+        "postgres_runtime_enabled": runtime_enabled,
+        "postgres_requested": postgres_requested,
+        "postgres_blocked": postgres_requested and not ok,
+        "driver": {
+            "available": bool(driver_info.get("available")),
+            "name": driver_info.get("driver"),
+            "version": driver_info.get("version"),
+        },
+        "reasons": reasons,
+    }
 
 
 def is_test_runtime():
@@ -1003,14 +1107,173 @@ def get_engine():
     return create_engine(database_url, poolclass=NullPool, pool_pre_ping=True, connect_args=connect_args)
 
 
+def _ensure_postgres_database_url(database_url=None):
+    normalized_url = str(database_url or get_database_url() or "").strip()
+    if not normalized_url:
+        raise RuntimeError("DATABASE_URL is required for PostgreSQL connections.")
+    if "sslmode=" not in normalized_url:
+        separator = "&" if "?" in normalized_url else "?"
+        normalized_url = f"{normalized_url}{separator}sslmode=require"
+    return normalized_url
+
+
+def test_postgres_connection(database_url=None):
+    """
+    Attempt a lightweight PostgreSQL connectivity check without enabling runtime switching.
+    Never returns the full DATABASE_URL or password.
+    """
+    candidate_url = str(database_url or get_database_url() or "").strip()
+    driver_info = _get_postgres_driver_info()
+    safe_details = {
+        "driver": driver_info.get("driver"),
+        "driver_available": bool(driver_info.get("available")),
+        "database_url_label": _redact_database_url(candidate_url),
+        "sslmode": _postgres_sslmode(candidate_url) or "require",
+    }
+    if not candidate_url:
+        return {
+            "ok": False,
+            "backend": "postgres",
+            "message": "DATABASE_URL is not configured.",
+            "details": safe_details,
+        }
+    if not driver_info.get("available"):
+        return {
+            "ok": False,
+            "backend": "postgres",
+            "message": driver_info.get("message") or "PostgreSQL driver is not available.",
+            "details": safe_details,
+        }
+    try:
+        connect_url = _ensure_postgres_database_url(candidate_url)
+        if driver_info.get("driver") == "psycopg2":
+            import psycopg2
+
+            raw_conn = psycopg2.connect(connect_url)
+            cursor = raw_conn.cursor()
+            cursor.execute("SELECT 1")
+            row = cursor.fetchone()
+            cursor.close()
+            raw_conn.close()
+            probe_value = row[0] if row else None
+        else:
+            import psycopg
+
+            with psycopg.connect(connect_url) as raw_conn:
+                with raw_conn.cursor() as cursor:
+                    cursor.execute("SELECT 1")
+                    row = cursor.fetchone()
+                    probe_value = row[0] if row else None
+        return {
+            "ok": True,
+            "backend": "postgres",
+            "message": "PostgreSQL connection check succeeded.",
+            "details": {**safe_details, "select_one": probe_value},
+        }
+    except Exception as exc:
+        return {
+            "ok": False,
+            "backend": "postgres",
+            "message": sanitize_error_message(exc),
+            "details": safe_details,
+        }
+
+
+def get_postgres_foundation_diagnostics(test_connection=False):
+    """
+    Summarize PostgreSQL foundation readiness without exposing secrets.
+    Set test_connection=True to run test_postgres_connection() when a URL is configured.
+    """
+    validation = validate_postgres_runtime_enabled()
+    readiness = get_postgres_readiness_diagnostics()
+    database_url = get_database_url()
+    switch_blocked_reasons = list(validation.get("reasons") or [])
+    if validation.get("postgres_blocked"):
+        switch_blocked_reasons.append("postgres_configured_but_runtime_blocked")
+    if readiness.get("switch_blocked") and validation.get("ok"):
+        switch_blocked_reasons.append("postgres_code_readiness_blockers_present")
+
+    diagnostics = {
+        "db_backend": get_configured_db_backend(),
+        "database_url_configured": bool(database_url),
+        "database_url_label": _redact_database_url(database_url),
+        "erp_enable_postgres_runtime": is_postgres_runtime_enabled(),
+        "postgres_driver_available": bool(validation.get("driver", {}).get("available")),
+        "postgres_driver": validation.get("driver", {}).get("name"),
+        "postgres_runtime_validated": bool(validation.get("ok")),
+        "active_backend": get_active_db_backend(),
+        "sqlite_active_path": is_sqlite_backend(),
+        "switch_blocked": bool(not validation.get("ok") or readiness.get("switch_blocked")),
+        "switch_blocked_reasons": switch_blocked_reasons,
+        "known_blockers_summary": [
+            blocker.get("key")
+            for blocker in (readiness.get("blockers") or [])[:10]
+            if isinstance(blocker, dict) and blocker.get("key")
+        ],
+        "can_connect": None,
+    }
+    if test_connection and database_url:
+        connection_test = test_postgres_connection(database_url=database_url)
+        diagnostics["can_connect"] = bool(connection_test.get("ok"))
+        diagnostics["connection_test"] = {
+            "ok": connection_test.get("ok"),
+            "backend": connection_test.get("backend"),
+            "message": connection_test.get("message"),
+            "details": connection_test.get("details") or {},
+        }
+    return diagnostics
+
+
 def db_param_placeholder(index=1, backend=None):
     backend = _normalize_db_backend(backend or get_active_db_backend())
-    return f"${int(index)}" if backend == "postgres" else "?"
+    if backend == "postgres":
+        return "%s"
+    return "?"
 
 
 def db_placeholders(count, backend=None):
+    normalized_count = max(int(count or 0), 0)
+    placeholder = db_param_placeholder(1, backend=backend)
+    return ", ".join([placeholder] * normalized_count)
+
+
+def insert_returning_id_sql(table_name, columns, backend=None, returning_column="id"):
+    """
+    Build an INSERT statement for later identity retrieval.
+    SQLite callers should use cursor.lastrowid after execute().
+    PostgreSQL callers should append RETURNING and read the returned row.
+    """
     backend = _normalize_db_backend(backend or get_active_db_backend())
-    return ", ".join(db_param_placeholder(index + 1, backend=backend) for index in range(int(count or 0)))
+    normalized_columns = [str(column).strip() for column in columns if str(column).strip()]
+    if not normalized_columns:
+        raise ValueError("At least one column is required for insert_returning_id_sql().")
+    placeholders = db_placeholders(len(normalized_columns), backend=backend)
+    column_sql = ", ".join(normalized_columns)
+    returning_col = str(returning_column or "id").strip() or "id"
+    base_sql = f"INSERT INTO {table_name} ({column_sql}) VALUES ({placeholders})"
+    if backend == "postgres":
+        return f"{base_sql} RETURNING {returning_col}"
+    return base_sql
+
+
+def fetch_inserted_row_id(cursor, backend=None, returning_column="id"):
+    """Fetch inserted row identity using backend-appropriate semantics."""
+    backend = _normalize_db_backend(backend or get_active_db_backend())
+    if cursor is None:
+        return None
+    if backend == "postgres":
+        row = cursor.fetchone()
+        if row is None:
+            return None
+        if isinstance(row, dict):
+            return row.get(returning_column) or row.get("id")
+        if hasattr(row, "keys"):
+            try:
+                return row[returning_column]
+            except Exception:
+                pass
+        return row[0]
+    return getattr(cursor, "lastrowid", None)
 
 
 def db_current_timestamp_sql(backend=None):
@@ -1240,6 +1503,57 @@ def execute_write_transaction(callback, operation_name="sqlite_write", conn=None
     with sqlite_operation_lock(operation_name):
         with SQLiteWriteTransaction(operation_name=operation_name, conn=conn, immediate=immediate, retries=retries) as tx_conn:
             return callback(tx_conn)
+
+
+class PostgresWriteTransaction:
+    def __init__(self, operation_name="postgres_write", conn=None):
+        self.operation_name = operation_name
+        self.conn = conn
+        self.owns_connection = conn is None
+
+    def __enter__(self):
+        self.conn = self.conn or get_connection()
+        if self.conn is None:
+            raise RuntimeError("Database connection unavailable.")
+        if hasattr(self.conn, "in_transaction"):
+            self.conn.in_transaction = True
+        return self.conn
+
+    def __exit__(self, exc_type, exc, tb):
+        try:
+            if exc_type is None:
+                self.conn.commit()
+            else:
+                self.conn.rollback()
+        finally:
+            if hasattr(self.conn, "in_transaction"):
+                self.conn.in_transaction = False
+            if self.owns_connection and self.conn:
+                self.conn.close()
+        return False
+
+
+def _execute_postgres_write_transaction(callback, operation_name="postgres_write", conn=None):
+    with PostgresWriteTransaction(operation_name=operation_name, conn=conn) as tx_conn:
+        return callback(tx_conn)
+
+
+def execute_db_write_transaction(callback, operation_name="db_write", backend=None, conn=None, immediate=True, retries=None):
+    """
+    Backend-aware write transaction wrapper.
+    SQLite uses the existing immediate lock-safe transaction path.
+    PostgreSQL uses a standard commit/rollback transaction wrapper.
+    """
+    normalized_backend = _normalize_db_backend(backend or get_active_db_backend())
+    if normalized_backend == "postgres":
+        return _execute_postgres_write_transaction(callback, operation_name=operation_name, conn=conn)
+    return execute_write_transaction(
+        callback,
+        operation_name=operation_name,
+        conn=conn,
+        immediate=immediate,
+        retries=retries,
+    )
 
 
 def execute_readonly_query(callback, operation_name="sqlite_read", conn=None, retries=None):
@@ -7340,12 +7654,70 @@ def check_and_repair_db():
 # =================================================================
 # 2. CORE CONNECTION ENGINE
 # =================================================================
+class PostgresManagedConnection:
+    """Thin psycopg2-compatible wrapper exposing sqlite-like execute/commit helpers."""
+
+    def __init__(self, raw_connection):
+        self._conn = raw_connection
+        self.in_transaction = False
+
+    def execute(self, sql, params=()):
+        cursor = self._conn.cursor()
+        cursor.execute(sql, params or ())
+        return cursor
+
+    def cursor(self):
+        return self._conn.cursor()
+
+    def commit(self):
+        self._conn.commit()
+        self.in_transaction = False
+
+    def rollback(self):
+        self._conn.rollback()
+        self.in_transaction = False
+
+    def close(self):
+        if self._conn is not None:
+            try:
+                self._conn.close()
+            finally:
+                self._conn = None
+                _diagnostic_connection_closed()
+
+
+def _open_postgres_connection(database_url=None):
+    driver_info = _get_postgres_driver_info()
+    if not driver_info.get("available"):
+        raise RuntimeError(driver_info.get("message") or "PostgreSQL driver is not available.")
+    connect_url = _ensure_postgres_database_url(database_url)
+    if driver_info.get("driver") == "psycopg2":
+        import psycopg2
+
+        raw_conn = psycopg2.connect(connect_url)
+    else:
+        import psycopg
+
+        raw_conn = psycopg.connect(connect_url)
+    raw_conn.autocommit = False
+    _diagnostic_connection_opened()
+    return PostgresManagedConnection(raw_conn)
+
+
 def get_connection():
     """
-    Establishes a high-performance native SQLite connection.
-    Includes Row Factory for dictionary-style access and PRAGMA 
-    settings for data integrity.
+    Return an active database connection for the configured runtime backend.
+    SQLite remains the default production path unless PostgreSQL runtime is fully enabled.
     """
+    if is_postgres_backend():
+        try:
+            validation = validate_postgres_runtime_enabled()
+            if not validation.get("ok"):
+                raise RuntimeError("; ".join(validation.get("reasons") or ["PostgreSQL runtime is not enabled."]))
+            return _open_postgres_connection()
+        except Exception as exc:
+            logger.critical("POSTGRES CONNECTION FAILURE: %s", sanitize_error_message(exc))
+            return None
     try:
         _ensure_local_db_file()
         return _open_sqlite_connection(enable_persistence_hooks=True)
