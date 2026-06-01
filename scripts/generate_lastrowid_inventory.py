@@ -22,11 +22,19 @@ HIGH_RISK_HINTS = (
     "bill_cursor",
     "payment_cursor",
     "payment_id",
+    "payment_allocation",
+    "allocate_payment",
     "stock_movement",
     "movement_cursor",
     "payroll",
     "depreciation",
     "post_transaction",
+    "show_accounts_payable",
+    "show_create_bill",
+    "show_sales_purchase",
+    "show_fixed_assets",
+    "show_banking",
+    "_process_pos_return",
 )
 MEDIUM_RISK_HINTS = (
     "financials",
@@ -179,7 +187,7 @@ def render_report(entries: list[dict]) -> str:
         lines.append("")
     lines.extend(
         [
-            "## Phase 5B.7 Conversions (this patch)",
+            "## Phase 5B.7 Conversions (completed)",
             "",
             "| Function | File |",
             "|----------|------|",
@@ -189,6 +197,19 @@ def render_report(entries: list[dict]) -> str:
             "| `_register_supplier` | `modules.py` |",
             "| `get_or_create_account` | `accounting_engine.py` |",
             "| `create_bank_account` | `accounting_engine.py` |",
+            "",
+            "## Phase 5B.8 Conversions (completed)",
+            "",
+            "| Function | File |",
+            "|----------|------|",
+            "| `_party_id` | `financials.py` |",
+            "| `show_invoice_manager` (invoice + bill saves) | `financials.py` |",
+            "| `show_create_invoice_page` | `financials.py` |",
+            "| `schedule_recurring_transaction` | `accounting_engine.py` |",
+            "",
+            "## Phase 5B.9 — High-risk conversion plan",
+            "",
+            "See [high_risk_identity_conversion_plan.md](high_risk_identity_conversion_plan.md) for phased conversion order (5B.10A–5B.10G).",
             "",
         ]
     )
