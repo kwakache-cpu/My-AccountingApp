@@ -211,6 +211,12 @@ def render_report(entries: list[dict]) -> str:
             "",
             "See [high_risk_identity_conversion_plan.md](high_risk_identity_conversion_plan.md) for phased conversion order (5B.10A–5B.10G).",
             "",
+            "## Phase 5B.10A Conversions (completed)",
+            "",
+            "| Function | File |",
+            "|----------|------|",
+            "| `_insert_stock_movement_record` | `modules.py` |",
+            "",
         ]
     )
     return "\n".join(lines)

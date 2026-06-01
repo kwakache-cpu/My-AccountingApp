@@ -1,10 +1,10 @@
 # lastrowid Portability Inventory
 
-**Generated at:** 2026-06-01 13:40:32 UTC
+**Generated at:** 2026-06-01 14:09:26 UTC
 **Total lastrowid references (app + tests, excl. .venv):** 34
-**Application code references:** 23
-**Test-only references:** 11
-**Remaining raw lastrowid (application):** 22
+**Application code references:** 22
+**Test-only references:** 12
+**Remaining raw lastrowid (application):** 21
 
 ## Recommended Helper Usage
 
@@ -61,18 +61,18 @@ _None._
 | `accounting_engine.py` | `allocate_payment` | 1587 | `unknown` | no — dedicated transaction testing required | `return int(cursor.lastrowid)` |
 | `modules.py` | `_persist_pos_sale` | 5325 | `unknown` | no — dedicated transaction testing required | `pos_sale_id = int(cursor.lastrowid)` |
 | `modules.py` | `_process_pos_return` | 5600 | `inventory` | no — dedicated transaction testing required | `pos_return_id = int(cursor.lastrowid)` |
-| `modules.py` | `_insert_stock_movement_record` | 6913 | `inventory` | no — dedicated transaction testing required | `return int(movement_cursor.lastrowid)` |
-| `modules.py` | `show_accounts_payable_page` | 8478 | `unknown` | no — dedicated transaction testing required | `bill_id = int(cursor.lastrowid)` |
-| `modules.py` | `show_create_bill_page` | 8674 | `unknown` | no — dedicated transaction testing required | `bill_id = int(cursor.lastrowid)` |
-| `modules.py` | `show_sales_purchase` | 12887 | `invoices` | no — dedicated transaction testing required | `save_invoice_lines(conn, int(invoice_cursor.lastrowid), invoice_items)` |
-| `modules.py` | `show_sales_purchase` | 12928 | `invoices` | no — dedicated transaction testing required | `source_id=int(invoice_cursor.lastrowid),` |
-| `modules.py` | `show_sales_purchase` | 12986 | `bills` | no — dedicated transaction testing required | `source_id=int(bill_cursor.lastrowid),` |
-| `modules.py` | `_journal_method_balance` | 13338 | `unknown` | no — dedicated transaction testing required | `payment_id = int(payment_cursor.lastrowid)` |
-| `modules.py` | `show_payroll` | 14291 | `unknown` | no — dedicated transaction testing required | `payroll_id = int(payroll_cursor.lastrowid)` |
-| `modules.py` | `show_fixed_assets` | 14843 | `unknown` | no — dedicated transaction testing required | `reference=f"FA-{int(asset_cursor.lastrowid)}",` |
-| `modules.py` | `show_fixed_assets` | 14851 | `unknown` | no — dedicated transaction testing required | `source_id=int(asset_cursor.lastrowid),` |
+| `modules.py` | `show_accounts_payable_page` | 8480 | `unknown` | no — dedicated transaction testing required | `bill_id = int(cursor.lastrowid)` |
+| `modules.py` | `show_create_bill_page` | 8676 | `unknown` | no — dedicated transaction testing required | `bill_id = int(cursor.lastrowid)` |
+| `modules.py` | `show_sales_purchase` | 12889 | `invoices` | no — dedicated transaction testing required | `save_invoice_lines(conn, int(invoice_cursor.lastrowid), invoice_items)` |
+| `modules.py` | `show_sales_purchase` | 12930 | `invoices` | no — dedicated transaction testing required | `source_id=int(invoice_cursor.lastrowid),` |
+| `modules.py` | `show_sales_purchase` | 12988 | `bills` | no — dedicated transaction testing required | `source_id=int(bill_cursor.lastrowid),` |
+| `modules.py` | `_journal_method_balance` | 13340 | `unknown` | no — dedicated transaction testing required | `payment_id = int(payment_cursor.lastrowid)` |
+| `modules.py` | `show_payroll` | 14293 | `unknown` | no — dedicated transaction testing required | `payroll_id = int(payroll_cursor.lastrowid)` |
+| `modules.py` | `show_fixed_assets` | 14845 | `unknown` | no — dedicated transaction testing required | `reference=f"FA-{int(asset_cursor.lastrowid)}",` |
+| `modules.py` | `show_fixed_assets` | 14853 | `unknown` | no — dedicated transaction testing required | `source_id=int(asset_cursor.lastrowid),` |
 | `scripts/run_postgres_schema_compatibility_audit.py` | `<module>` | 75 | `pos_sales` | no — dedicated transaction testing required | `(r"payment_cursor\.lastrowid", "modules.py"),` |
 | `scripts/run_postgres_schema_compatibility_audit.py` | `<module>` | 88 | `payments` | no — dedicated transaction testing required | `(r"payroll_cursor\.lastrowid", "modules.py"),` |
+| `tests/test_inventory_movements.py` | `test_insert_stock_movement_record_sqlite_matches_lastrowid` | 148 | `unknown` | done | `self.assertEqual(self.database.get_inserted_id(cursor), cursor.lastrowid)` |
 | `tests/test_migration_cleanup_ui.py` | `_create_pos_sale` | 53 | `unknown` | no — dedicated transaction testing required | `return int(cursor.lastrowid), receipt_number` |
 
 ## Phase 5B.7 Conversions (completed)
@@ -98,3 +98,9 @@ _None._
 ## Phase 5B.9 — High-risk conversion plan
 
 See [high_risk_identity_conversion_plan.md](high_risk_identity_conversion_plan.md) for phased conversion order (5B.10A–5B.10G).
+
+## Phase 5B.10A Conversions (completed)
+
+| Function | File |
+|----------|------|
+| `_insert_stock_movement_record` | `modules.py` |
