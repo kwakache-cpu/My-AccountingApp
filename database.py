@@ -5616,7 +5616,8 @@ def _generate_unique_branch_user_login_key(conn, company_key, branch_id, role_na
 def _fetch_company_user_by_user_id(conn, company_key, user_id):
     if not user_id:
         return None
-    row = conn.execute(
+    row = execute_portable_query(
+        conn,
         """
         SELECT id, user_id, company_key, branch_id, full_name, role, status, login_key
         FROM users
@@ -5712,7 +5713,8 @@ def assign_branch_manager(
 def list_branch_users(conn, company_key, branch_id):
     normalized_company_key = str(company_key or "").strip()
     normalized_branch_id = str(branch_id or "").strip()
-    rows = conn.execute(
+    rows = execute_portable_query(
+        conn,
         """
         SELECT id, user_id, full_name, role, login_key, status, branch_id
         FROM users
@@ -5854,7 +5856,8 @@ def update_branch_user_status(
     normalized_status = str(status or "").strip()
     allowed = set(allowed_roles or BRANCH_MANAGER_CREATABLE_ROLES)
 
-    row = conn.execute(
+    row = execute_portable_query(
+        conn,
         """
         SELECT id, role, branch_id
         FROM users
@@ -5890,14 +5893,15 @@ def fetch_branch_manager_candidates(conn, company_key, branch_id):
     normalized_company_key = str(company_key or "").strip()
     normalized_branch_id = str(branch_id or "").strip()
     privileged = tuple(PRIVILEGED_COMPANY_USER_ROLES)
-    placeholders = ", ".join("?" for _ in privileged)
-    rows = conn.execute(
+    role_placeholders = db_placeholders(len(privileged))
+    rows = execute_portable_query(
+        conn,
         f"""
         SELECT user_id, full_name, role, branch_id
         FROM users
         WHERE company_key = ?
           AND COALESCE(status, 'Active') = 'Active'
-          AND role NOT IN ({placeholders})
+          AND role NOT IN ({role_placeholders})
           AND (
                 branch_id IS NULL
              OR TRIM(branch_id) = ''
@@ -6211,13 +6215,14 @@ def update_company_branch(
 def list_company_staff_for_assignment(conn, company_key):
     normalized_company_key = str(company_key or "").strip()
     privileged = tuple(PRIVILEGED_COMPANY_USER_ROLES)
-    placeholders = ", ".join("?" for _ in privileged)
-    rows = conn.execute(
+    role_placeholders = db_placeholders(len(privileged))
+    rows = execute_portable_query(
+        conn,
         f"""
         SELECT id, user_id, full_name, role, branch_id, status, login_key
         FROM users
         WHERE company_key = ?
-          AND role NOT IN ({placeholders})
+          AND role NOT IN ({role_placeholders})
         ORDER BY full_name
         """,
         (normalized_company_key, *privileged),
@@ -6271,7 +6276,8 @@ def update_company_staff_branch_assignment(
             "ok": False,
             "reason": "Branch Managers cannot transfer or assign staff across branches.",
         }
-    row = conn.execute(
+    row = execute_portable_query(
+        conn,
         """
         SELECT id, role, branch_id, login_key
         FROM users
@@ -6286,7 +6292,8 @@ def update_company_staff_branch_assignment(
         return {"ok": False, "reason": "Privileged users cannot be reassigned from staff administration."}
 
     if normalized_branch_id:
-        branch_row = conn.execute(
+        branch_row = execute_portable_query(
+            conn,
             "SELECT branch_id FROM branches WHERE company_key = ? AND branch_id = ?",
             (normalized_company_key, normalized_branch_id),
         ).fetchone()

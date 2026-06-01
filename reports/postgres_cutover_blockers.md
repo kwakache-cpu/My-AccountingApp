@@ -1,6 +1,6 @@
 # PostgreSQL Runtime Cutover Blockers (Phase 5B.11)
 
-**Audited at:** 2026-06-01 21:15:36 UTC
+**Audited at:** 2026-06-01 21:44:36 UTC
 
 **Assumed env (not enabled in this audit):**
 ```
