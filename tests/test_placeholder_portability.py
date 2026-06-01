@@ -109,7 +109,10 @@ class PlaceholderPortabilityTests(ERPIsolatedTestCase):
         with mock.patch.object(self.database, "execute_portable_query", wraps=self.database.execute_portable_query) as portable:
             branches = self.database.list_company_branches_with_grants(self.conn, self.company_key)
         self.assertIsInstance(branches, list)
-        self.assertTrue(portable.called)
-        first_sql = str(portable.call_args_list[0][0][1])
-        self.assertIn("FROM branches b", first_sql)
-        self.assertIn("company_key = ?", first_sql)
+        branch_list_sql = [
+            str(call[0][1])
+            for call in portable.call_args_list
+            if "FROM branches b" in str(call[0][1])
+        ]
+        self.assertTrue(branch_list_sql)
+        self.assertIn("company_key = ?", branch_list_sql[0])
