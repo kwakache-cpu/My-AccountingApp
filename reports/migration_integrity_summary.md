@@ -1,6 +1,6 @@
 # Migration Integrity Summary
 
-**Audited at:** 2026-06-01 11:04:25 UTC
+**Audited at:** 2026-06-01 11:29:02 UTC
 **Database:** `D:\Emma\My AccountingApp\data\eka_enterprise_v3.db`
 **Database size:** 671,744 bytes
 
@@ -90,7 +90,7 @@ This read-only audit scanned the active SQLite database for migration blockers a
 
 ## Cleanup Readiness (Phase 5B.3)
 
-**Plan generated:** 2026-06-01 11:04:26 UTC
+**Plan generated:** 2026-06-01 11:29:02 UTC
 
 - Warning rows analyzed: **11**
 - Safe to auto-fix later: **1**

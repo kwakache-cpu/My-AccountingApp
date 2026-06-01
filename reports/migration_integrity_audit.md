@@ -1,6 +1,6 @@
 # Migration Integrity Audit (Detailed)
 
-**Audited at:** 2026-06-01 11:04:25 UTC
+**Audited at:** 2026-06-01 11:29:02 UTC
 **Database:** `D:\Emma\My AccountingApp\data\eka_enterprise_v3.db`
 **Overall score:** YELLOW
 **Go/No-Go:** GO WITH WARNINGS

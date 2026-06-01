@@ -800,6 +800,12 @@ from accounting_engine import (
     reverse_journal_entry,
 )
 
+import migration_cleanup as migration_cleanup_service
+
+
+def can_access_migration_cleanup(role):
+    return migration_cleanup_service.can_access_migration_cleanup(role)
+
 
 def log_audit_action(
     conn,
@@ -10461,10 +10467,344 @@ def show_chart_of_accounts(company_key, role):
 # ==========================================
 # COMPANY SETUP
 # ==========================================
+def _render_migration_cleanup_review(role, session_company_key):
+    """Dev / Master Admin panel for Phase 5B migration data cleanup."""
+    st.subheader("Migration Cleanup Review")
+    st.caption(
+        "Review and fix migration warnings. POS branch and manager links are manual; "
+        "payment reference uses a guarded apply with backup."
+    )
+    try:
+        readiness = migration_cleanup_service.build_readiness_snapshot()
+    except OSError as exc:
+        st.warning(f"Could not read migration reports: {exc}")
+        readiness = migration_cleanup_service.ReadinessSnapshot(
+            refresh_hint="Run audit to refresh reports.",
+            reports_stale=True,
+        )
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.metric("Readiness", readiness.overall_score)
+    with col2:
+        st.metric("Go / No-Go", readiness.go_status)
+    with col3:
+        st.metric("Cleanup items", readiness.display_warning_total)
+    st.markdown(
+        f"- Summary: `{readiness.summary_path}`\n"
+        f"- Audit: `{readiness.audit_path}`\n"
+        f"- Cleanup plan: `{readiness.plan_path}`"
+    )
+    if readiness.plan_item_counts:
+        st.caption(f"Plan breakdown: {readiness.plan_item_counts}")
+    if readiness.summary_warning_total and readiness.summary_warning_total != readiness.display_warning_total:
+        st.caption(f"Audit summary warnings: {readiness.warning_counts}")
+    if readiness.reports_stale and readiness.refresh_hint:
+        st.warning(readiness.refresh_hint)
+    elif readiness.refresh_hint:
+        st.info(readiness.refresh_hint)
+
+    if st.button("Re-run Migration Integrity Audit (read-only)", key="migration_rerun_audit"):
+        with st.spinner("Running integrity audit…"):
+            audit_result = migration_cleanup_service.run_readonly_audit_subprocess()
+            plan_result = migration_cleanup_service.run_readonly_plan_subprocess()
+        if audit_result.get("ok") and plan_result.get("ok"):
+            st.success("Audit and cleanup plan regenerated.")
+            if audit_result.get("stdout"):
+                st.code(audit_result["stdout"][-2000:])
+        else:
+            st.error("Audit/plan script failed.")
+            if audit_result.get("stderr"):
+                st.code(audit_result["stderr"])
+            if plan_result.get("stderr"):
+                st.code(plan_result["stderr"])
+        st.info(
+            "After manual fixes, re-run:\n"
+            "`python scripts/run_migration_integrity_audit.py`\n"
+            "`python scripts/plan_migration_data_cleanup.py`"
+        )
+        st.rerun()
+
+    plan = migration_cleanup_service.load_cleanup_plan_json()
+    scope_key = None if _normalize_role_name(role) == "Dev" else session_company_key
+    tab_pos, tab_mgr, tab_pay = st.tabs(
+        ["POS branch assignment", "Branch managers", "Payment reference"]
+    )
+
+    def _readonly_db_unavailable_message(exc):
+        if migration_cleanup_service.is_database_locked_error(exc):
+            return (
+                "Database is temporarily locked (another process or open connection). "
+                "Close other ERP sessions and retry, or refresh after a few seconds."
+            )
+        return build_user_safe_error(exc, role)
+
+    with tab_pos:
+        st.markdown(
+            "Assign `branch_id` on POS sales only. Receipt numbers and journals are not modified."
+        )
+        try:
+            with migration_cleanup_service.readonly_connection() as conn:
+                sales = migration_cleanup_service.list_pos_sales_missing_branch(
+                    conn, role=role, company_key=scope_key
+                )
+                branch_cache: dict[str, list] = {}
+                for sale in sales:
+                    ck = sale["company_key"]
+                    if ck not in branch_cache:
+                        branch_cache[ck] = conn.execute(
+                            """
+                            SELECT branch_id, branch_name, branch_code
+                            FROM branches
+                            WHERE company_key = ? AND COALESCE(is_active, 1) = 1
+                            ORDER BY branch_name
+                            """,
+                            (ck,),
+                        ).fetchall()
+        except sqlite3.OperationalError as exc:
+            st.warning(_readonly_db_unavailable_message(exc))
+            sales = []
+            branch_cache = {}
+        if not sales:
+            st.success("No POS sales missing branch_id in scope.")
+        for sale in sales:
+            sale_id = int(sale["id"])
+            ck = sale["company_key"]
+            branches = branch_cache.get(ck, [])
+            branch_labels = [
+                f"{b[1]} ({b[2] or b[0]})" if not isinstance(b, sqlite3.Row) else
+                f"{b['branch_name']} ({b['branch_code'] or b['branch_id']})"
+                for b in branches
+            ]
+            branch_ids = [
+                b[0] if not isinstance(b, sqlite3.Row) else b["branch_id"] for b in branches
+            ]
+            suggested = sale.get("suggested_branch_id")
+            default_index = branch_ids.index(suggested) if suggested in branch_ids else 0
+            with st.expander(
+                f"Sale #{sale_id} — {sale.get('receipt_number')} — {sale.get('company_name') or ck}",
+                expanded=False,
+            ):
+                st.write(
+                    f"Date: {sale.get('sale_datetime') or sale.get('sale_date')} | "
+                    f"Cashier: {sale.get('cashier')} | Total: {sale.get('grand_total')}"
+                )
+                if suggested:
+                    st.caption(f"Suggested branch (single active branch): {suggested}")
+                if not branch_ids:
+                    st.warning("No active branches for this company.")
+                else:
+                    selected_label = st.selectbox(
+                        "Target branch",
+                        branch_labels,
+                        index=default_index,
+                        key=f"mig_pos_branch_{sale_id}",
+                    )
+                    target_branch = branch_ids[branch_labels.index(selected_label)]
+                    confirm = st.checkbox(
+                        "I confirm assigning this branch to the POS sale",
+                        key=f"mig_pos_confirm_{sale_id}",
+                    )
+                    if st.button("Save branch assignment", key=f"mig_pos_save_{sale_id}"):
+                        write_conn = get_connection()
+                        if not write_conn:
+                            st.error("Could not open database for update.")
+                        else:
+                            try:
+                                result = migration_cleanup_service.assign_pos_sale_branch_id(
+                                    write_conn,
+                                    company_key=ck,
+                                    sale_id=sale_id,
+                                    branch_id=target_branch,
+                                    actor_role=role,
+                                    confirmed=confirm,
+                                )
+                                if result.get("ok"):
+                                    st.success(f"Assigned branch {target_branch} to sale #{sale_id}.")
+                                    st.rerun()
+                                else:
+                                    st.error(result.get("reason", "Update failed."))
+                            except sqlite3.OperationalError as exc:
+                                st.error(_readonly_db_unavailable_message(exc))
+                            finally:
+                                write_conn.close()
+
+    with tab_mgr:
+        st.markdown("Link `manager_user_id` using existing branch manager assignment rules.")
+        try:
+            with migration_cleanup_service.readonly_connection() as conn:
+                branches_missing = migration_cleanup_service.list_branches_missing_manager(
+                    conn, role=role, company_key=scope_key
+                )
+                manager_options_cache = {
+                    (b["company_key"], b["branch_id"]): fetch_branch_manager_select_options(
+                        conn, b["company_key"], b["branch_id"]
+                    )
+                    for b in branches_missing
+                }
+        except sqlite3.OperationalError as exc:
+            st.warning(_readonly_db_unavailable_message(exc))
+            branches_missing = []
+            manager_options_cache = {}
+        if not branches_missing:
+            st.success("No branches missing manager_user_id in scope.")
+        for branch in branches_missing:
+            bid = branch["branch_id"]
+            ck = branch["company_key"]
+            with st.expander(
+                f"{branch.get('branch_name')} — {branch.get('company_name') or ck}",
+                expanded=False,
+            ):
+                st.write(
+                    f"Branch code: {branch.get('branch_code') or '—'} | "
+                    f"Display manager text: {branch.get('branch_manager') or '—'}"
+                )
+                options = manager_options_cache.get((ck, bid), [])
+                eligible = [o for o in options if o.get("user_id")]
+                if not eligible:
+                    st.warning(
+                        "No eligible users with user_id. Create or repair the user record in Staff Management."
+                    )
+                else:
+                    labels = [
+                        f"{o.get('full_name')} ({o.get('role')}) — {o.get('user_id')[:12]}…"
+                        if len(str(o.get("user_id") or "")) > 12
+                        else f"{o.get('full_name')} ({o.get('role')}) — {o.get('user_id')}"
+                        for o in eligible
+                    ]
+                    selected = st.selectbox(
+                        "Manager user",
+                        labels,
+                        key=f"mig_mgr_select_{bid}",
+                    )
+                    manager_user_id = eligible[labels.index(selected)]["user_id"]
+                    promote = st.checkbox(
+                        "Promote to Branch Manager role",
+                        value=True,
+                        key=f"mig_mgr_promote_{bid}",
+                    )
+                    confirm = st.checkbox(
+                        "I confirm assigning this branch manager",
+                        key=f"mig_mgr_confirm_{bid}",
+                    )
+                    if st.button("Save manager", key=f"mig_mgr_save_{bid}"):
+                        if not confirm:
+                            st.error("Confirmation required.")
+                        else:
+                            write_conn = get_connection()
+                            if not write_conn:
+                                st.error("Could not open database for update.")
+                            else:
+                                try:
+                                    result = assign_branch_manager(
+                                        write_conn,
+                                        ck,
+                                        bid,
+                                        manager_user_id,
+                                        promote_to_branch_manager=promote,
+                                    )
+                                    if result.get("ok"):
+                                        log_audit_action(
+                                            write_conn,
+                                            ck,
+                                            role,
+                                            "Migration cleanup: branch manager assigned",
+                                            "Migration Cleanup",
+                                            details=f"branch_id={bid} manager_user_id={manager_user_id}",
+                                            branch_id=bid,
+                                            action_type="data_cleanup",
+                                        )
+                                        write_conn.commit()
+                                        st.success("Branch manager linked.")
+                                        st.rerun()
+                                    else:
+                                        st.error(result.get("reason", "Assignment failed."))
+                                except sqlite3.OperationalError as exc:
+                                    st.error(_readonly_db_unavailable_message(exc))
+                                finally:
+                                    write_conn.close()
+
+    with tab_pay:
+        st.markdown(
+            "Guarded fix for payment customer/reference only. Requires backup and explicit confirmation."
+        )
+        try:
+            with migration_cleanup_service.readonly_connection() as conn:
+                payments = migration_cleanup_service.list_payment_reference_candidates(
+                    conn, plan, role=role, company_key=scope_key
+                )
+        except sqlite3.OperationalError as exc:
+            st.warning(_readonly_db_unavailable_message(exc))
+            payments = []
+        if not payments:
+            st.info("No auto-fix-safe payment candidates in the current plan.")
+        for payment in payments:
+            pid = int(payment["id"])
+            ck = payment["company_key"]
+            proposed = payment.get("proposed_values") or {}
+            with st.expander(
+                f"Payment #{pid} — {payment.get('company_name') or ck} — GHS {payment.get('amount')}",
+                expanded=True,
+            ):
+                st.write(f"Type: {payment.get('payment_type')}")
+                st.write(f"Current customer_id: {payment.get('customer_id')}")
+                st.write(f"Current reference: {payment.get('reference')!r}")
+                st.write(
+                    f"Proposed customer_id: {proposed.get('customer_id')} | "
+                    f"reference: {proposed.get('reference')!r}"
+                )
+                if not payment.get("still_needs_fix"):
+                    st.warning("Payment no longer matches expected bad state.")
+                else:
+                    confirm = st.checkbox(
+                        "I confirm applying the payment reference fix",
+                        key=f"mig_pay_confirm_{pid}",
+                    )
+                    confirm_text = st.text_input(
+                        "Type confirmation phrase",
+                        key=f"mig_pay_text_{pid}",
+                        placeholder=migration_cleanup_service.CONFIRM_PAYMENT_APPLY_TEXT,
+                    )
+                    if st.button("Apply payment fix (creates backup)", key=f"mig_pay_apply_{pid}"):
+                        write_conn = get_connection()
+                        if not write_conn:
+                            st.error("Could not open database for update.")
+                        else:
+                            try:
+                                result = migration_cleanup_service.apply_payment_reference_fix(
+                                    write_conn,
+                                    company_key=ck,
+                                    payment_id=pid,
+                                    customer_id=int(proposed["customer_id"]),
+                                    reference=str(proposed["reference"]),
+                                    actor_role=role,
+                                    confirmed=confirm,
+                                    confirmation_text=confirm_text,
+                                    create_backup=True,
+                                )
+                                if result.get("ok"):
+                                    st.success(
+                                        f"Payment updated. Backup: {result.get('backup_path') or 'n/a'}"
+                                    )
+                                    st.rerun()
+                                else:
+                                    st.error(result.get("reason", "Apply failed."))
+                            except sqlite3.OperationalError as exc:
+                                st.error(_readonly_db_unavailable_message(exc))
+                            finally:
+                                write_conn.close()
+
+    st.caption(
+        "Journal entries are not updated by this panel. After POS branch fixes, review linked journals manually if needed."
+    )
+
+
 def show_company_setup(company_key, company_name, role):
     st.header("⚙️ System Configuration")
     if not require_permission(role, "manage_company", action_label="manage company settings", company_key=company_key):
         return
+    if can_access_migration_cleanup(role):
+        _render_migration_cleanup_review(role, company_key)
+        st.markdown("---")
     st.subheader("Company Profile")
     conn = None
     try:
@@ -10551,7 +10891,7 @@ def show_company_setup(company_key, company_name, role):
                 deploy_conn = get_connection()
                 try:
                     ensure_branch_licensing_schema_integrity(deploy_conn)
-                    _render_branch_list_with_grants(deploy_conn, company_key)
+                    _render_branch_list_with_grants(deploy_conn, company_key, role)
                     license_snapshot = get_company_branch_license_snapshot(deploy_conn, company_key)
                     if license_snapshot.get("can_create_active_branch"):
                         _render_branch_creation_form(
