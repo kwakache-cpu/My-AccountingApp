@@ -1,10 +1,10 @@
 # lastrowid Portability Inventory
 
-**Generated at:** 2026-06-01 15:39:28 UTC
-**Total lastrowid references (app + tests, excl. .venv):** 30
-**Application code references:** 14
-**Test-only references:** 16
-**Remaining raw lastrowid (application):** 13
+**Generated at:** 2026-06-01 18:29:49 UTC
+**Total lastrowid references (app + tests, excl. .venv):** 32
+**Application code references:** 13
+**Test-only references:** 19
+**Remaining raw lastrowid (application):** 12
 
 ## Recommended Helper Usage
 
@@ -50,26 +50,29 @@ SQLite continues to use `cursor.lastrowid` via `get_inserted_id()`.
 
 ## Medium-risk — CRUD / financials helpers
 
-**Count:** 0
+**Count:** 1
 
-_None._
+| File | Function | Line | Table | Convert now? | Snippet |
+|------|----------|-----:|-------|--------------|---------|
+| `tests/test_pos_return_identity.py` | `test_pos_return_insert_sqlite_matches_lastrowid` | 151 | `unknown` | done | `self.assertEqual(self.database.get_inserted_id(cursor), cursor.lastrowid)` |
 
 ## High-risk — accounting / POS / payments / inventory
 
-**Count:** 10
+**Count:** 11
 
 | File | Function | Line | Table | Convert now? | Snippet |
 |------|----------|-----:|-------|--------------|---------|
 | `accounting_engine.py` | `post_journal_entry` | 1307 | `inventory` | no — dedicated transaction testing required | `entry_id = int(cursor.lastrowid)` |
 | `modules.py` | `_persist_pos_sale` | 5325 | `unknown` | no — dedicated transaction testing required | `pos_sale_id = int(cursor.lastrowid)` |
-| `modules.py` | `_process_pos_return` | 5600 | `inventory` | no — dedicated transaction testing required | `pos_return_id = int(cursor.lastrowid)` |
-| `modules.py` | `show_sales_purchase` | 12893 | `invoices` | no — dedicated transaction testing required | `save_invoice_lines(conn, int(invoice_cursor.lastrowid), invoice_items)` |
-| `modules.py` | `show_sales_purchase` | 12934 | `invoices` | no — dedicated transaction testing required | `source_id=int(invoice_cursor.lastrowid),` |
+| `modules.py` | `show_sales_purchase` | 12895 | `invoices` | no — dedicated transaction testing required | `save_invoice_lines(conn, int(invoice_cursor.lastrowid), invoice_items)` |
+| `modules.py` | `show_sales_purchase` | 12936 | `invoices` | no — dedicated transaction testing required | `source_id=int(invoice_cursor.lastrowid),` |
 | `scripts/run_postgres_schema_compatibility_audit.py` | `<module>` | 75 | `pos_sales` | no — dedicated transaction testing required | `(r"payment_cursor\.lastrowid", "modules.py"),` |
 | `scripts/run_postgres_schema_compatibility_audit.py` | `<module>` | 88 | `payments` | no — dedicated transaction testing required | `(r"payroll_cursor\.lastrowid", "modules.py"),` |
 | `tests/test_inventory_movements.py` | `test_insert_stock_movement_record_sqlite_matches_lastrowid` | 148 | `unknown` | done | `self.assertEqual(self.database.get_inserted_id(cursor), cursor.lastrowid)` |
 | `tests/test_migration_cleanup_ui.py` | `_create_pos_sale` | 53 | `unknown` | no — dedicated transaction testing required | `return int(cursor.lastrowid), receipt_number` |
 | `tests/test_payroll_fixed_assets_identity.py` | `test_payroll_insert_sqlite_matches_lastrowid` | 100 | `unknown` | done | `self.assertEqual(self.database.get_inserted_id(cursor), cursor.lastrowid)` |
+| `tests/test_pos_return_identity.py` | `_create_pos_sale_with_line` | 64 | `unknown` | no — dedicated transaction testing required | `pos_sale_id = int(sale_cursor.lastrowid)` |
+| `tests/test_pos_return_identity.py` | `_create_pos_sale_with_line` | 84 | `inventory` | no — dedicated transaction testing required | `pos_sale_line_id = int(line_cursor.lastrowid)` |
 
 ## Phase 5B.7 Conversions (completed)
 
@@ -127,3 +130,9 @@ Details: [payments_identity_conversion_5b10c.md](payments_identity_conversion_5b
 |----------|------|
 | `show_payroll` | `modules.py` |
 | `show_fixed_assets` (acquisition insert) | `modules.py` |
+
+## Phase 5B.10E Conversions (completed)
+
+| Function | File |
+|----------|------|
+| `_process_pos_return` (`pos_returns` insert only) | `modules.py` |
