@@ -14276,11 +14276,13 @@ def show_payroll(company_key, role):
                 try:
                     conn = get_connection()
                     payroll_cursor = conn.execute(
-                        """INSERT INTO payroll
-                           (company_key, emp_name, basic_salary, allowances, ssnit_t1, ssnit_t2,
-                            taxable_income, paye, net_salary, deductions, month, year, payment_status, payment_method,
-                            approval_status, created_by, status)
-                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Posted', ?, 'Active')""",
+                        ensure_insert_sql_returning(
+                            """INSERT INTO payroll
+                               (company_key, emp_name, basic_salary, allowances, ssnit_t1, ssnit_t2,
+                                taxable_income, paye, net_salary, deductions, month, year, payment_status, payment_method,
+                                approval_status, created_by, status)
+                               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Posted', ?, 'Active')"""
+                        ),
                         (
                             company_key,
                             emp_name,
@@ -14299,7 +14301,7 @@ def show_payroll(company_key, role):
                             role,
                         ),
                     )
-                    payroll_id = int(payroll_cursor.lastrowid)
+                    payroll_id = get_inserted_id(payroll_cursor)
                     conn.execute(
                         """
                         INSERT INTO payroll_records
@@ -14809,15 +14811,17 @@ def show_fixed_assets(company_key, role):
                             st.warning("Select a supplier for a credit asset purchase.")
                             return
                     asset_cursor = conn.execute(
-                        """
-                        INSERT INTO fixed_assets
-                           (company_key, asset_name, asset_category, purchase_date, cost,
-                            opening_book_value, useful_life_years, residual_value, depreciation_method,
-                            depreciation_rate, accumulated_depreciation, book_value, last_depreciation_date, location,
-                            custodian, description, notes, acquisition_type, payment_method, supplier_id,
-                            owner_contributor_name, status, approval_status, created_by)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'Straight-line', ?, 0, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, 'Active', 'Posted', ?)
-                        """,
+                        ensure_insert_sql_returning(
+                            """
+                            INSERT INTO fixed_assets
+                               (company_key, asset_name, asset_category, purchase_date, cost,
+                                opening_book_value, useful_life_years, residual_value, depreciation_method,
+                                depreciation_rate, accumulated_depreciation, book_value, last_depreciation_date, location,
+                                custodian, description, notes, acquisition_type, payment_method, supplier_id,
+                                owner_contributor_name, status, approval_status, created_by)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'Straight-line', ?, 0, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, 'Active', 'Posted', ?)
+                            """
+                        ),
                         (
                             company_key,
                             asset_name,
@@ -14840,6 +14844,7 @@ def show_fixed_assets(company_key, role):
                             role,
                         ),
                     )
+                    asset_id = get_inserted_id(asset_cursor)
                     acquisition_lines, acquisition_meta = _build_fixed_asset_acquisition_lines(
                         conn,
                         company_key,
@@ -14851,7 +14856,7 @@ def show_fixed_assets(company_key, role):
                         company_key=company_key,
                         date=purchase_date,
                         description="Fixed asset acquisition",
-                        reference=f"FA-{int(asset_cursor.lastrowid)}",
+                        reference=f"FA-{asset_id}",
                         lines=acquisition_lines,
                         created_by=role,
                         branch_id=st.session_state.get("active_branch_id"),
@@ -14859,7 +14864,7 @@ def show_fixed_assets(company_key, role):
                         source_module="Fixed Assets",
                         source_table="fixed_assets",
                         source_type=acquisition_meta["acquisition_type"],
-                        source_id=int(asset_cursor.lastrowid),
+                        source_id=asset_id,
                         approval_status="Posted",
                         user_role=role,
                         conn=conn,

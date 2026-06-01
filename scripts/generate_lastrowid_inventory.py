@@ -237,6 +237,13 @@ def render_report(entries: list[dict]) -> str:
             "",
             "Details: [payments_identity_conversion_5b10c.md](payments_identity_conversion_5b10c.md)",
             "",
+            "## Phase 5B.10D Conversions (completed)",
+            "",
+            "| Function | File |",
+            "|----------|------|",
+            "| `show_payroll` | `modules.py` |",
+            "| `show_fixed_assets` (acquisition insert) | `modules.py` |",
+            "",
         ]
     )
     return "\n".join(lines)
