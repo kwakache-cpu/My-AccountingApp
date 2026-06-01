@@ -262,6 +262,14 @@ def render_report(entries: list[dict]) -> str:
             "|----------|------|",
             "| `show_sales_purchase` (Sales / invoice branch only) | `modules.py` |",
             "",
+            "## Phase 5B.10G Conversions (completed)",
+            "",
+            "| Function | File |",
+            "|----------|------|",
+            "| `post_journal_entry` (`journal_entries` insert only) | `accounting_engine.py` |",
+            "",
+            "Details: [journal_identity_conversion_5b10g.md](journal_identity_conversion_5b10g.md)",
+            "",
         ]
     )
     return "\n".join(lines)
