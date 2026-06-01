@@ -8450,14 +8450,16 @@ def show_accounts_payable_page(conn, demo_on):
             bill_number = f"BILL-{datetime.now().strftime('%Y%m%d%H%M%S')}"
             input_vat = round(float(amount or 0.0) * float(input_vat_rate or 0.0) / 100.0, 2)
             cursor = conn.execute(
-                """
-                INSERT INTO bills (
-                    company_key, supplier_id, bill_number, bill_date, due_date, status, approval_status,
-                    amount, input_vat, purchase_classification, payment_method, expense_account_name, asset_name,
-                    asset_category, currency, description, created_by
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'GHS', ?, ?)
-                """,
+                ensure_insert_sql_returning(
+                    """
+                    INSERT INTO bills (
+                        company_key, supplier_id, bill_number, bill_date, due_date, status, approval_status,
+                        amount, input_vat, purchase_classification, payment_method, expense_account_name, asset_name,
+                        asset_category, currency, description, created_by
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'GHS', ?, ?)
+                    """
+                ),
                 (
                     company_key,
                     supplier_id,
@@ -8477,7 +8479,7 @@ def show_accounts_payable_page(conn, demo_on):
                     role,
                 ),
             )
-            bill_id = int(cursor.lastrowid)
+            bill_id = get_inserted_id(cursor)
             if posting_state == "Posted":
                 journal_lines, _ = build_purchase_journal_lines(
                     conn,
@@ -8646,14 +8648,16 @@ def show_create_bill_page(company_key):
                 input_vat = round(total_amount * float(input_vat_rate or 0.0) / 100.0, 2)
 
                 cursor = conn.execute(
-                    """
-                    INSERT INTO bills (
-                        company_key, supplier_id, bill_number, bill_date, due_date, status, approval_status,
-                        amount, input_vat, purchase_classification, payment_method, expense_account_name, asset_name,
-                        asset_category, currency, description, created_by
-                    )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'GHS', ?, ?)
-                    """,
+                    ensure_insert_sql_returning(
+                        """
+                        INSERT INTO bills (
+                            company_key, supplier_id, bill_number, bill_date, due_date, status, approval_status,
+                            amount, input_vat, purchase_classification, payment_method, expense_account_name, asset_name,
+                            asset_category, currency, description, created_by
+                        )
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'GHS', ?, ?)
+                        """
+                    ),
                     (
                         company_key,
                         supplier_id,
@@ -8673,7 +8677,7 @@ def show_create_bill_page(company_key):
                         role,
                     ),
                 )
-                bill_id = int(cursor.lastrowid)
+                bill_id = get_inserted_id(cursor)
 
                 # Insert bill lines
                 for item in valid_items:
@@ -12935,14 +12939,16 @@ def show_sales_purchase(company_key, role, doc_type="Sales"):
                     supplier_id = _get_or_create_party(conn, "suppliers", company_key, party_name)
                     input_vat = round(float(amount or 0.0) * float(input_vat_rate or 0.0) / 100.0, 2)
                     bill_cursor = conn.execute(
-                        """
-                        INSERT INTO bills (
-                            company_key, supplier_id, bill_number, bill_date, due_date, status, approval_status,
-                            amount, input_vat, purchase_classification, payment_method, expense_account_name, asset_name,
-                            asset_category, currency, description, created_by
-                        )
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'GHS', ?, ?)
-                        """,
+                        ensure_insert_sql_returning(
+                            """
+                            INSERT INTO bills (
+                                company_key, supplier_id, bill_number, bill_date, due_date, status, approval_status,
+                                amount, input_vat, purchase_classification, payment_method, expense_account_name, asset_name,
+                                asset_category, currency, description, created_by
+                            )
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'GHS', ?, ?)
+                            """
+                        ),
                         (
                             company_key,
                             supplier_id,
@@ -12962,6 +12968,7 @@ def show_sales_purchase(company_key, role, doc_type="Sales"):
                             role,
                         ),
                     )
+                    bill_id = get_inserted_id(bill_cursor)
                     if posting_state == "Posted":
                         journal_lines, _ = build_purchase_journal_lines(
                             conn,
@@ -12985,7 +12992,7 @@ def show_sales_purchase(company_key, role, doc_type="Sales"):
                             source_module="Purchase Invoicing",
                             source_table="bills",
                             source_type="Bill",
-                            source_id=int(bill_cursor.lastrowid),
+                            source_id=bill_id,
                             approval_status="Posted",
                             user_role=role,
                             conn=conn,

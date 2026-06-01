@@ -217,6 +217,14 @@ def render_report(entries: list[dict]) -> str:
             "|----------|------|",
             "| `_insert_stock_movement_record` | `modules.py` |",
             "",
+            "## Phase 5B.10B Conversions (completed)",
+            "",
+            "| Function | File |",
+            "|----------|------|",
+            "| `show_accounts_payable_page` | `modules.py` |",
+            "| `show_create_bill_page` | `modules.py` |",
+            "| `show_sales_purchase` (Purchase / bill branch only) | `modules.py` |",
+            "",
         ]
     )
     return "\n".join(lines)

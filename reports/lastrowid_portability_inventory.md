@@ -1,10 +1,10 @@
 # lastrowid Portability Inventory
 
-**Generated at:** 2026-06-01 14:09:26 UTC
-**Total lastrowid references (app + tests, excl. .venv):** 34
-**Application code references:** 22
-**Test-only references:** 12
-**Remaining raw lastrowid (application):** 21
+**Generated at:** 2026-06-01 14:35:29 UTC
+**Total lastrowid references (app + tests, excl. .venv):** 32
+**Application code references:** 19
+**Test-only references:** 13
+**Remaining raw lastrowid (application):** 18
 
 ## Recommended Helper Usage
 
@@ -23,7 +23,7 @@ SQLite continues to use `cursor.lastrowid` via `get_inserted_id()`.
 
 ## Low-risk — setup / admin / contacts
 
-**Count:** 17
+**Count:** 18
 
 | File | Function | Line | Table | Convert now? | Snippet |
 |------|----------|-----:|-------|--------------|---------|
@@ -34,6 +34,7 @@ SQLite continues to use `cursor.lastrowid` via `get_inserted_id()`.
 | `scripts/run_postgres_schema_compatibility_audit.py` | `_score_risks` | 297 | `unknown` | yes — use ensure_insert_sql_returning + get_inserted_id | `blockers.append(f"Widespread cursor.lastrowid usage ({lastrowid_hits} references` |
 | `scripts/run_postgres_schema_compatibility_audit.py` | `render_write_paths_report` | 487 | `unknown` | done | `"- Replace `lastrowid` with `fetch_inserted_row_id()` after `insert_returning_id` |
 | `scripts/run_postgres_schema_compatibility_audit.py` | `render_readiness_report` | 532 | `unknown` | yes — use ensure_insert_sql_returning + get_inserted_id | `"2. Finish placeholder + `lastrowid` migration on critical write paths using exi` |
+| `tests/test_ap_bills_identity.py` | `test_bill_insert_sqlite_matches_lastrowid` | 87 | `unknown` | done | `self.assertEqual(self.database.get_inserted_id(cursor), cursor.lastrowid)` |
 | `tests/test_branch_module_governance.py` | `test_staff_assignment_transfers_user_branch_id` | 84 | `unknown` | yes — use ensure_insert_sql_returning + get_inserted_id | `).lastrowid` |
 | `tests/test_insert_identity_portability.py` | `test_get_inserted_id_returns_sqlite_lastrowid` | 19 | `unknown` | done | `self.assertEqual(self.database.get_inserted_id(cursor), cursor.lastrowid)` |
 | `tests/test_insert_identity_portability.py` | `test_get_inserted_id_returns_sqlite_lastrowid` | 20 | `unknown` | done | `self.assertEqual(self.database.fetch_inserted_row_id(cursor, backend="sqlite"), ` |
@@ -53,7 +54,7 @@ _None._
 
 ## High-risk — accounting / POS / payments / inventory
 
-**Count:** 17
+**Count:** 14
 
 | File | Function | Line | Table | Convert now? | Snippet |
 |------|----------|-----:|-------|--------------|---------|
@@ -61,15 +62,12 @@ _None._
 | `accounting_engine.py` | `allocate_payment` | 1587 | `unknown` | no — dedicated transaction testing required | `return int(cursor.lastrowid)` |
 | `modules.py` | `_persist_pos_sale` | 5325 | `unknown` | no — dedicated transaction testing required | `pos_sale_id = int(cursor.lastrowid)` |
 | `modules.py` | `_process_pos_return` | 5600 | `inventory` | no — dedicated transaction testing required | `pos_return_id = int(cursor.lastrowid)` |
-| `modules.py` | `show_accounts_payable_page` | 8480 | `unknown` | no — dedicated transaction testing required | `bill_id = int(cursor.lastrowid)` |
-| `modules.py` | `show_create_bill_page` | 8676 | `unknown` | no — dedicated transaction testing required | `bill_id = int(cursor.lastrowid)` |
-| `modules.py` | `show_sales_purchase` | 12889 | `invoices` | no — dedicated transaction testing required | `save_invoice_lines(conn, int(invoice_cursor.lastrowid), invoice_items)` |
-| `modules.py` | `show_sales_purchase` | 12930 | `invoices` | no — dedicated transaction testing required | `source_id=int(invoice_cursor.lastrowid),` |
-| `modules.py` | `show_sales_purchase` | 12988 | `bills` | no — dedicated transaction testing required | `source_id=int(bill_cursor.lastrowid),` |
-| `modules.py` | `_journal_method_balance` | 13340 | `unknown` | no — dedicated transaction testing required | `payment_id = int(payment_cursor.lastrowid)` |
-| `modules.py` | `show_payroll` | 14293 | `unknown` | no — dedicated transaction testing required | `payroll_id = int(payroll_cursor.lastrowid)` |
-| `modules.py` | `show_fixed_assets` | 14845 | `unknown` | no — dedicated transaction testing required | `reference=f"FA-{int(asset_cursor.lastrowid)}",` |
-| `modules.py` | `show_fixed_assets` | 14853 | `unknown` | no — dedicated transaction testing required | `source_id=int(asset_cursor.lastrowid),` |
+| `modules.py` | `show_sales_purchase` | 12893 | `invoices` | no — dedicated transaction testing required | `save_invoice_lines(conn, int(invoice_cursor.lastrowid), invoice_items)` |
+| `modules.py` | `show_sales_purchase` | 12934 | `invoices` | no — dedicated transaction testing required | `source_id=int(invoice_cursor.lastrowid),` |
+| `modules.py` | `_journal_method_balance` | 13347 | `unknown` | no — dedicated transaction testing required | `payment_id = int(payment_cursor.lastrowid)` |
+| `modules.py` | `show_payroll` | 14300 | `unknown` | no — dedicated transaction testing required | `payroll_id = int(payroll_cursor.lastrowid)` |
+| `modules.py` | `show_fixed_assets` | 14852 | `unknown` | no — dedicated transaction testing required | `reference=f"FA-{int(asset_cursor.lastrowid)}",` |
+| `modules.py` | `show_fixed_assets` | 14860 | `unknown` | no — dedicated transaction testing required | `source_id=int(asset_cursor.lastrowid),` |
 | `scripts/run_postgres_schema_compatibility_audit.py` | `<module>` | 75 | `pos_sales` | no — dedicated transaction testing required | `(r"payment_cursor\.lastrowid", "modules.py"),` |
 | `scripts/run_postgres_schema_compatibility_audit.py` | `<module>` | 88 | `payments` | no — dedicated transaction testing required | `(r"payroll_cursor\.lastrowid", "modules.py"),` |
 | `tests/test_inventory_movements.py` | `test_insert_stock_movement_record_sqlite_matches_lastrowid` | 148 | `unknown` | done | `self.assertEqual(self.database.get_inserted_id(cursor), cursor.lastrowid)` |
@@ -104,3 +102,11 @@ See [high_risk_identity_conversion_plan.md](high_risk_identity_conversion_plan.m
 | Function | File |
 |----------|------|
 | `_insert_stock_movement_record` | `modules.py` |
+
+## Phase 5B.10B Conversions (completed)
+
+| Function | File |
+|----------|------|
+| `show_accounts_payable_page` | `modules.py` |
+| `show_create_bill_page` | `modules.py` |
+| `show_sales_purchase` (Purchase / bill branch only) | `modules.py` |
