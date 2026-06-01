@@ -9,7 +9,9 @@ import pandas as pd
 
 from database import (
     execute_write_transaction,
+    ensure_insert_sql_returning,
     get_connection,
+    get_inserted_id,
     log_audit_action as database_log_audit_action,
     with_retry_on_lock,
 )
@@ -1041,13 +1043,15 @@ def get_or_create_account(conn, account_name, account_type, parent_id=None, acco
         return int(row["id"])
 
     cursor = conn.execute(
-        """
-        INSERT INTO chart_of_accounts (
-            name, type, parent_id, code, category, account_code, account_name, account_type,
-            posting_allowed, control_account, allow_manual_posting, is_active
-        )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
+        ensure_insert_sql_returning(
+            """
+            INSERT INTO chart_of_accounts (
+                name, type, parent_id, code, category, account_code, account_name, account_type,
+                posting_allowed, control_account, allow_manual_posting, is_active
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """
+        ),
         (
             account_name,
             account_type,
@@ -1063,7 +1067,7 @@ def get_or_create_account(conn, account_name, account_type, parent_id=None, acco
             1,
         ),
     )
-    return int(cursor.lastrowid)
+    return get_inserted_id(cursor)
 
 
 def get_account_id(conn, account_name, account_type=None):
@@ -1616,12 +1620,14 @@ def create_bank_account(company_key, account_name, bank_name=None, account_numbe
     conn = conn or get_connection()
     try:
         cursor = conn.execute(
-            "INSERT INTO bank_accounts (company_key, branch_id, account_name, account_number, bank_name, account_type, currency, balance, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            ensure_insert_sql_returning(
+                "INSERT INTO bank_accounts (company_key, branch_id, account_name, account_number, bank_name, account_type, currency, balance, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+            ),
             (company_key, branch_id, account_name, account_number, bank_name, account_type, currency, opening_balance, created_by),
         )
         if owns_connection:
             conn.commit()
-        return int(cursor.lastrowid)
+        return get_inserted_id(cursor)
     except Exception:
         if owns_connection:
             conn.rollback()
