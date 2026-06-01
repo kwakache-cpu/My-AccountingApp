@@ -3850,7 +3850,8 @@ def ensure_company_trial_subscription(
         raise ValueError("company_key and company_name are required")
     today = datetime.now().date()
     end_date = today + timedelta(days=max(int(trial_days or DEFAULT_SUBSCRIPTION_TRIAL_DAYS), 1))
-    company_row = conn.execute(
+    company_row = execute_portable_query(
+        conn,
         "SELECT key FROM companies WHERE key = ? LIMIT 1",
         (normalized_key,),
     ).fetchone()
@@ -5437,7 +5438,8 @@ def create_company_branch(
         return {"ok": False, "reason": "Could not derive a branch identifier from the branch name."}
     branch_id = _allocate_unique_branch_id(conn, base_branch_id)
 
-    existing_name = conn.execute(
+    existing_name = execute_portable_query(
+        conn,
         """
         SELECT branch_id FROM branches
         WHERE company_key = ? AND LOWER(TRIM(branch_name)) = LOWER(TRIM(?))
@@ -5468,7 +5470,8 @@ def create_company_branch(
         }
 
     resolved_access_key = str(branch_access_key or "").strip() or _generate_branch_access_key(branch_id)
-    duplicate_key = conn.execute(
+    duplicate_key = execute_portable_query(
+        conn,
         "SELECT branch_id FROM branches WHERE branch_access_key = ? LIMIT 1",
         (resolved_access_key,),
     ).fetchone()
@@ -5481,7 +5484,8 @@ def create_company_branch(
         _derive_branch_code(normalized_branch_name),
     )
 
-    catalog_row = conn.execute(
+    catalog_row = execute_portable_query(
+        conn,
         "SELECT branch_type_name FROM branch_type_catalog WHERE branch_type_key = ?",
         (normalized_type_key,),
     ).fetchone()
@@ -5600,11 +5604,13 @@ def _generate_unique_branch_user_login_key(conn, company_key, branch_id, role_na
     role_slug = "".join(part[:2] for part in str(role_name or "USR").replace("/", " ").split() if part).upper()[:6] or "USR"
     for _attempt in range(25):
         candidate = f"{company_key}-{branch_slug}-{role_slug}-{random.randint(10000, 99999)}"
-        login_conflict = conn.execute(
+        login_conflict = execute_portable_query(
+            conn,
             "SELECT 1 FROM users WHERE login_key = ? LIMIT 1",
             (candidate,),
         ).fetchone()
-        branch_key_conflict = conn.execute(
+        branch_key_conflict = execute_portable_query(
+            conn,
             "SELECT 1 FROM branches WHERE branch_access_key = ? LIMIT 1",
             (candidate,),
         ).fetchone()
@@ -5656,7 +5662,8 @@ def assign_branch_manager(
     if not normalized_company_key or not normalized_branch_id or not normalized_manager_user_id:
         return {"ok": False, "reason": "Company, branch, and manager user are required."}
 
-    branch_row = conn.execute(
+    branch_row = execute_portable_query(
+        conn,
         "SELECT branch_id, branch_name, branch_access_key FROM branches WHERE company_key = ? AND branch_id = ?",
         (normalized_company_key, normalized_branch_id),
     ).fetchone()
@@ -5768,25 +5775,29 @@ def create_branch_scoped_user(
     if normalized_role in PRIVILEGED_COMPANY_USER_ROLES:
         return {"ok": False, "reason": "Privileged roles cannot be created from branch user administration."}
 
-    branch_row = conn.execute(
+    branch_row = execute_portable_query(
+        conn,
         "SELECT branch_id FROM branches WHERE company_key = ? AND branch_id = ?",
         (normalized_company_key, normalized_branch_id),
     ).fetchone()
     if not branch_row:
         return {"ok": False, "reason": "Branch not found for this company."}
 
-    branch_access_key_before = conn.execute(
+    branch_access_key_before = execute_portable_query(
+        conn,
         "SELECT branch_access_key FROM branches WHERE company_key = ? AND branch_id = ?",
         (normalized_company_key, normalized_branch_id),
     ).fetchone()
 
     resolved_login_key = str(login_key or "").strip()
     if resolved_login_key:
-        login_conflict = conn.execute(
+        login_conflict = execute_portable_query(
+            conn,
             "SELECT 1 FROM users WHERE login_key = ? LIMIT 1",
             (resolved_login_key,),
         ).fetchone()
-        branch_key_conflict = conn.execute(
+        branch_key_conflict = execute_portable_query(
+            conn,
             "SELECT 1 FROM branches WHERE branch_access_key = ? LIMIT 1",
             (resolved_login_key,),
         ).fetchone()
@@ -5821,7 +5832,8 @@ def create_branch_scoped_user(
         ),
     )
 
-    branch_access_key_after = conn.execute(
+    branch_access_key_after = execute_portable_query(
+        conn,
         "SELECT branch_access_key FROM branches WHERE company_key = ? AND branch_id = ?",
         (normalized_company_key, normalized_branch_id),
     ).fetchone()
@@ -6054,7 +6066,8 @@ def update_company_branch(
 ):
     normalized_company_key = str(company_key or "").strip()
     normalized_branch_id = str(branch_id or "").strip()
-    row = conn.execute(
+    row = execute_portable_query(
+        conn,
         """
         SELECT branch_id, branch_name, branch_code, location, branch_type, branch_access_key,
                manager_user_id, branch_manager, COALESCE(is_active, 1) AS is_active,
@@ -6105,7 +6118,8 @@ def update_company_branch(
         else str(current.get("branch_access_key") or "").strip()
     )
     if resolved_access_key != str(current.get("branch_access_key") or "").strip():
-        conflict = conn.execute(
+        conflict = execute_portable_query(
+            conn,
             """
             SELECT branch_id FROM branches
             WHERE branch_access_key = ? AND branch_id != ?

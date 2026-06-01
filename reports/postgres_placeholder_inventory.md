@@ -1,29 +1,7 @@
-# PostgreSQL Placeholder Inventory (Phase 5B.11–5B.12C)
+# PostgreSQL Placeholder Inventory (Phase 5B.11)
 
-**Audited at:** 2026-06-01 21:44:36 UTC
+**Audited at:** 2026-06-01 22:46:40 UTC
 **Scope:** `database.py`, `modules.py`, `financials.py`, `accounting_engine.py`, `app.py`, `enterprise_services.py`, `erp_migrations.py`
-
-**Counts:** 5B.11 ~1036 → 5B.12B **1035** → 5B.12C **1035** (source literals unchanged; runtime routing expanded).
-
-### Phase 5B.12C — auth/user read conversions (`database.py`)
-
-| Function | Change |
-|----------|--------|
-| `_fetch_company_user_by_user_id` | `execute_portable_query` |
-| `list_branch_users` | `execute_portable_query` |
-| `fetch_branch_manager_candidates` | `execute_portable_query` + `db_placeholders` for `NOT IN` |
-| `fetch_branch_manager_select_options` | (via candidates + `_fetch_company_user_by_user_id`) |
-| `list_company_staff_for_assignment` | `execute_portable_query` + `db_placeholders` for `NOT IN` |
-| `update_branch_user_status` | pre-update user SELECT only |
-| `update_company_staff_branch_assignment` | pre-update user SELECT + target branch existence SELECT |
-
-**Intentionally not converted (login/access-key write guards):**
-- `_generate_unique_branch_user_login_key` — `login_key` / `branch_access_key` uniqueness probes
-- `create_branch_scoped_user` — login-key and access-key conflict checks before INSERT
-- `assign_branch_manager` — branch row read inside write/locking flow
-- `create_company_branch` / branch access-key duplicate checks
-
-`execute_portable_query()` in `database.py`: **~27** call sites.
 
 ## Executive Summary
 
@@ -31,7 +9,6 @@
 |--------|------:|
 | Literal `?` placeholders (heuristic, excl. strings/logging) | **1035** |
 | `db_param_placeholder()` / `db_placeholders()` call sites | **7** |
-| `execute_portable_query()` in `database.py` | **~27** |
 | Portable helper definitions | `database.py` only |
 
 **Classification legend**
