@@ -6887,14 +6887,16 @@ def _insert_stock_movement_record(
     notes=None,
 ):
     movement_cursor = conn.execute(
-        """
-        INSERT INTO stock_movements (
-            company_key, branch_id, inventory_item_id, item_name, movement_type,
-            quantity, reason, previous_qty, new_qty, created_by, created_at,
-            reference, notes, status, approval_status
-        )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?, ?, 'Approved', 'Approved')
-        """,
+        ensure_insert_sql_returning(
+            """
+            INSERT INTO stock_movements (
+                company_key, branch_id, inventory_item_id, item_name, movement_type,
+                quantity, reason, previous_qty, new_qty, created_by, created_at,
+                reference, notes, status, approval_status
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?, ?, 'Approved', 'Approved')
+            """
+        ),
         (
             company_key,
             str(branch_id) if branch_id else None,
@@ -6910,7 +6912,7 @@ def _insert_stock_movement_record(
             str(notes or "").strip() or None,
         ),
     )
-    return int(movement_cursor.lastrowid)
+    return get_inserted_id(movement_cursor)
 
 
 def _fetch_recent_inventory_movement_rows(conn, company_key, branch_id=None, limit=50):
