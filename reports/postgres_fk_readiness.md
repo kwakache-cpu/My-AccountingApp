@@ -1,6 +1,7 @@
 # PostgreSQL FK Readiness
 
-**Audited at:** 2026-06-01 12:31:48 UTC
+**Audited at:** 2026-06-01 20:07:48 UTC  
+**Phase 5B.11:** **Data readiness GREEN** — zero FK orphans on current SQLite snapshot. Load-order and index heuristics unchanged for Postgres migration planning.
 
 Read-only orphan checks: child FK column populated but no matching parent row.
 
