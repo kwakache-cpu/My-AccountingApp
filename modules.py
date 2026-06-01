@@ -760,6 +760,8 @@ from database import (
     force_backup_after_company_creation,
     get_firebase_service_account_info,
     get_connection,
+    get_inserted_id,
+    ensure_insert_sql_returning,
     get_database_health_snapshot,
     get_postgres_readiness_diagnostics,
     get_persistence_diagnostics,
@@ -1384,10 +1386,12 @@ def _create_legacy_voucher_if_enabled(
     if not _legacy_write_enabled(conn):
         return None
     cursor = conn.execute(
-        """
-        INSERT INTO vouchers (company_key, branch_id, date, v_type, ledger, credit, reference_no, narration, payment_method, status, approval_status, created_by)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Posted', ?)
-        """,
+        ensure_insert_sql_returning(
+            """
+            INSERT INTO vouchers (company_key, branch_id, date, v_type, ledger, credit, reference_no, narration, payment_method, status, approval_status, created_by)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Posted', ?)
+            """
+        ),
         (
             company_key,
             branch_id,
@@ -1402,7 +1406,7 @@ def _create_legacy_voucher_if_enabled(
             created_by,
         ),
     )
-    return int(cursor.lastrowid)
+    return get_inserted_id(cursor)
 
 
 def get_company_branches(company_key):
@@ -4189,10 +4193,12 @@ def _get_or_create_party(conn, table_name, company_key, party_name):
     if existing:
         return int(existing["id"])
     cursor = conn.execute(
-        f"INSERT INTO {table_name} (company_key, name, currency) VALUES (?, ?, 'GHS')",
+        ensure_insert_sql_returning(
+            f"INSERT INTO {table_name} (company_key, name, currency) VALUES (?, ?, 'GHS')"
+        ),
         (company_key, party_name),
     )
-    return int(cursor.lastrowid)
+    return get_inserted_id(cursor)
 
 
 def _register_customer(conn, company_key, name, phone="", email="", branch_id=None):
@@ -4217,13 +4223,15 @@ def _register_customer(conn, company_key, name, phone="", email="", branch_id=No
         return int(existing["id"])
 
     cursor = conn.execute(
-        """
-        INSERT INTO customers (company_key, name, phone, email, customer_id, current_balance, currency)
-        VALUES (?, ?, ?, ?, NULL, 0, 'GHS')
-        """,
+        ensure_insert_sql_returning(
+            """
+            INSERT INTO customers (company_key, name, phone, email, customer_id, current_balance, currency)
+            VALUES (?, ?, ?, ?, NULL, 0, 'GHS')
+            """
+        ),
         (company_key, name.strip(), phone.strip(), email.strip()),
     )
-    customer_row_id = int(cursor.lastrowid)
+    customer_row_id = get_inserted_id(cursor)
     conn.execute(
         "UPDATE customers SET customer_id = COALESCE(NULLIF(customer_id, ''), ?) WHERE id = ? AND company_key = ?",
         (f"CUST-{customer_row_id:06d}", customer_row_id, company_key),
@@ -16504,7 +16512,9 @@ def show_ai_assistant(client_id):
 def _register_supplier(conn, company_key, name, phone, email, address, category):
     """Insert a new supplier into the suppliers table using the active connection."""
     cursor = conn.execute(
-        "INSERT INTO suppliers (company_key, name, phone, email, address, category) VALUES (?, ?, ?, ?, ?, ?)",
+        ensure_insert_sql_returning(
+            "INSERT INTO suppliers (company_key, name, phone, email, address, category) VALUES (?, ?, ?, ?, ?, ?)"
+        ),
         (
             company_key,
             name.strip(),
@@ -16514,7 +16524,7 @@ def _register_supplier(conn, company_key, name, phone, email, address, category)
             category.strip() if category else "",
         ),
     )
-    return cursor.lastrowid
+    return get_inserted_id(cursor)
 
 
 def _record_supplier_ledger_transaction(conn, company_key, supplier_id, transaction_type, amount, description, role, reference=None, transaction_date=None, post_to_gl=True):

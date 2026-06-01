@@ -1276,6 +1276,35 @@ def fetch_inserted_row_id(cursor, backend=None, returning_column="id"):
     return getattr(cursor, "lastrowid", None)
 
 
+def get_inserted_id(cursor, backend=None, returning_column="id"):
+    """
+    Portable inserted-row identity after INSERT.
+    SQLite: cursor.lastrowid. PostgreSQL: first column from RETURNING clause (call fetchone via fetch_inserted_row_id).
+    """
+    inserted = fetch_inserted_row_id(cursor, backend=backend, returning_column=returning_column)
+    if inserted is None:
+        return None
+    try:
+        return int(inserted)
+    except (TypeError, ValueError):
+        return inserted
+
+
+def ensure_insert_sql_returning(sql, returning_column="id", backend=None):
+    """
+    Append RETURNING for PostgreSQL when the INSERT statement does not already include it.
+    SQLite receives the original SQL unchanged.
+    """
+    backend = _normalize_db_backend(backend or get_active_db_backend())
+    normalized = str(sql or "").strip().rstrip(";")
+    if backend != "postgres":
+        return normalized
+    if re.search(r"\bRETURNING\b", normalized, re.IGNORECASE):
+        return normalized
+    returning_col = str(returning_column or "id").strip() or "id"
+    return f"{normalized} RETURNING {returning_col}"
+
+
 def db_current_timestamp_sql(backend=None):
     return "CURRENT_TIMESTAMP"
 
