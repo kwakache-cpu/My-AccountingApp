@@ -1,10 +1,10 @@
 # lastrowid Portability Inventory
 
-**Generated at:** 2026-06-01 12:56:38 UTC
-**Total lastrowid references (app + tests, excl. .venv):** 46
-**Application code references:** 35
+**Generated at:** 2026-06-01 13:16:44 UTC
+**Total lastrowid references (app + tests, excl. .venv):** 34
+**Application code references:** 23
 **Test-only references:** 11
-**Remaining raw lastrowid (application):** 34
+**Remaining raw lastrowid (application):** 22
 
 ## Recommended Helper Usage
 
@@ -52,30 +52,17 @@ SQLite continues to use `cursor.lastrowid` via `get_inserted_id()`.
 
 ## Medium-risk — CRUD / financials helpers
 
-**Count:** 10
+**Count:** 0
 
-| File | Function | Line | Table | Convert now? | Snippet |
-|------|----------|-----:|-------|--------------|---------|
-| `accounting_engine.py` | `schedule_recurring_transaction` | 1693 | `unknown` | later phase | `return int(cursor.lastrowid)` |
-| `financials.py` | `_party_id` | 186 | `unknown` | later phase | `return int(cursor.lastrowid)` |
-| `financials.py` | `show_invoice_manager` | 652 | `unknown` | later phase | `invoice_reference=f"INV-{cursor.lastrowid}",` |
-| `financials.py` | `show_invoice_manager` | 679 | `inventory` | later phase | `reference=f"INV-{cursor.lastrowid}",` |
-| `financials.py` | `show_invoice_manager` | 687 | `invoices` | later phase | `source_id=int(cursor.lastrowid),` |
-| `financials.py` | `show_invoice_manager` | 778 | `unknown` | later phase | `reference=f"BILL-{cursor.lastrowid}",` |
-| `financials.py` | `show_invoice_manager` | 786 | `bills` | later phase | `source_id=int(cursor.lastrowid),` |
-| `financials.py` | `show_create_invoice_page` | 1052 | `unknown` | later phase | `invoice_reference=f"INV-{cursor.lastrowid}",` |
-| `financials.py` | `show_create_invoice_page` | 1079 | `inventory` | later phase | `reference=f"INV-{cursor.lastrowid}",` |
-| `financials.py` | `show_create_invoice_page` | 1087 | `invoices` | later phase | `source_id=int(cursor.lastrowid),` |
+_None._
 
 ## High-risk — accounting / POS / payments / inventory
 
-**Count:** 14
+**Count:** 12
 
 | File | Function | Line | Table | Convert now? | Snippet |
 |------|----------|-----:|-------|--------------|---------|
 | `accounting_engine.py` | `post_journal_entry` | 1307 | `inventory` | no — dedicated transaction testing required | `entry_id = int(cursor.lastrowid)` |
-| `financials.py` | `show_invoice_manager` | 647 | `invoices` | no — dedicated transaction testing required | `save_invoice_lines(conn, int(cursor.lastrowid), invoice_items)` |
-| `financials.py` | `show_create_invoice_page` | 1037 | `unknown` | no — dedicated transaction testing required | `save_invoice_lines(conn, int(cursor.lastrowid), invoice_items)` |
 | `modules.py` | `_persist_pos_sale` | 5325 | `unknown` | no — dedicated transaction testing required | `pos_sale_id = int(cursor.lastrowid)` |
 | `modules.py` | `_process_pos_return` | 5600 | `inventory` | no — dedicated transaction testing required | `pos_return_id = int(cursor.lastrowid)` |
 | `modules.py` | `_insert_stock_movement_record` | 6913 | `inventory` | no — dedicated transaction testing required | `return int(movement_cursor.lastrowid)` |

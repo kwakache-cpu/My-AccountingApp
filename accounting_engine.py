@@ -1685,12 +1685,14 @@ def schedule_recurring_transaction(company_key, description, frequency, amount, 
     try:
         payload = json.dumps(lines)
         cursor = conn.execute(
-            "INSERT INTO recurring_transactions (company_key, branch_id, description, frequency, amount, next_run_date, is_active, source_module, source_table, source_id, created_by, recurrence_payload) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            ensure_insert_sql_returning(
+                "INSERT INTO recurring_transactions (company_key, branch_id, description, frequency, amount, next_run_date, is_active, source_module, source_table, source_id, created_by, recurrence_payload) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+            ),
             (company_key, branch_id, description, frequency, amount, _resolve_date(next_run_date), 1 if active else 0, source_module, source_table, source_id, created_by, payload),
         )
         if owns_connection:
             conn.commit()
-        return int(cursor.lastrowid)
+        return get_inserted_id(cursor)
     except Exception:
         if owns_connection:
             conn.rollback()
