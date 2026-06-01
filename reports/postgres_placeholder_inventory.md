@@ -1,35 +1,37 @@
-# PostgreSQL Placeholder Inventory (Phase 5B.11 + 5B.12A + 5B.12B)
+# PostgreSQL Placeholder Inventory (Phase 5B.11–5B.12C)
 
-**Audited at:** 2026-06-01 21:15:36 UTC
+**Audited at:** 2026-06-01 21:44:36 UTC
 **Scope:** `database.py`, `modules.py`, `financials.py`, `accounting_engine.py`, `app.py`, `enterprise_services.py`, `erp_migrations.py`
 
-**Placeholder count:** before 5B.12A ~1036 → after 5B.12B source scan **1035** (literals remain in SQL strings; runtime routing via `execute_portable_query`).
+**Counts:** 5B.11 ~1036 → 5B.12B **1035** → 5B.12C **1035** (source literals unchanged; runtime routing expanded).
 
-### Phase 5B.12B — `database.py` read conversions (11 helpers)
+### Phase 5B.12C — auth/user read conversions (`database.py`)
 
-| Function | Notes |
+| Function | Change |
 |----------|--------|
-| `_branch_licensing_table_exists` | Uses `db_table_exists()` |
-| `_fetch_company_name` | Company name lookup |
-| `_allocate_unique_branch_code` | Branch code conflict check |
-| `_allocate_unique_branch_id` | Branch id existence check |
-| `count_active_branches` | License active branch count |
-| `ensure_branch_module_grants_for_branch` | Fallback module defaults SELECT |
-| `repair_branch_module_grants` | Branch list SELECT (writes grants after) |
-| `_fetch_branch_type_default_module_keys` | Catalog defaults read |
-| `get_branch_enabled_modules` | Grant module keys read |
-| `get_audit_operations_summary` | Diagnostic audit aggregates |
-| `get_company_data` | Company profile read |
+| `_fetch_company_user_by_user_id` | `execute_portable_query` |
+| `list_branch_users` | `execute_portable_query` |
+| `fetch_branch_manager_candidates` | `execute_portable_query` + `db_placeholders` for `NOT IN` |
+| `fetch_branch_manager_select_options` | (via candidates + `_fetch_company_user_by_user_id`) |
+| `list_company_staff_for_assignment` | `execute_portable_query` + `db_placeholders` for `NOT IN` |
+| `update_branch_user_status` | pre-update user SELECT only |
+| `update_company_staff_branch_assignment` | pre-update user SELECT + target branch existence SELECT |
 
-`execute_portable_query()` call sites in `database.py`: **~20** (5B.12A: 6, 5B.12B: +11).
+**Intentionally not converted (login/access-key write guards):**
+- `_generate_unique_branch_user_login_key` — `login_key` / `branch_access_key` uniqueness probes
+- `create_branch_scoped_user` — login-key and access-key conflict checks before INSERT
+- `assign_branch_manager` — branch row read inside write/locking flow
+- `create_company_branch` / branch access-key duplicate checks
+
+`execute_portable_query()` in `database.py`: **~27** call sites.
 
 ## Executive Summary
 
 | Metric | Count |
 |--------|------:|
 | Literal `?` placeholders (heuristic, excl. strings/logging) | **1035** |
-| `db_param_placeholder()` / `db_placeholders()` call sites | **5** |
-| `execute_portable_query()` in `database.py` | **~20** |
+| `db_param_placeholder()` / `db_placeholders()` call sites | **7** |
+| `execute_portable_query()` in `database.py` | **~27** |
 | Portable helper definitions | `database.py` only |
 
 **Classification legend**
@@ -43,7 +45,7 @@
 
 | File | `?` count | Helper calls | Risk | Dominant pattern |
 |------|----------:|---------------:|------|------------------|
-| `database.py` | 165 | 5 | MEDIUM | literal `?` throughout |
+| `database.py` | 165 | 7 | MEDIUM | literal `?` throughout |
 | `modules.py` | 683 | 0 | HIGH | literal `?` throughout |
 | `financials.py` | 41 | 0 | MEDIUM | literal `?` throughout |
 | `accounting_engine.py` | 128 | 0 | HIGH | literal `?` throughout |
@@ -68,12 +70,6 @@
 - Company/subscription CRUD — literal `?` (lines ~3379–3942)
 - Backup/restore diagnostics — literal `?` + `sqlite_master`
 - Schema deployment `_deploy_full_schema` — SQLite DDL only
-
-**Remaining `database.py` read blockers (not converted)**
-- Users/auth paths: `_fetch_company_user_by_user_id`, `list_branch_users`, login_key uniqueness checks
-- Write-path preflight SELECTs: `create_company_branch`, `assign_branch_manager`, staff assignment
-- Startup/schema: `ensure_schema`, migration `sqlite_master` probes, PRAGMA introspection
-- Subscription trial/billing writes mixed with reads
 
 **Top functions by `?` count**
 
