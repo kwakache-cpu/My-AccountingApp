@@ -5296,14 +5296,16 @@ def _persist_pos_sale(conn, company_key, branch_id, sale_reference, receipt_data
         return int(existing["id"])
 
     cursor = conn.execute(
-        """
-        INSERT INTO pos_sales (
-            company_key, branch_id, sale_reference, receipt_number, sale_date, sale_datetime,
-            cashier, payment_method, customer_id, subtotal, discount_total, tax_total,
-            grand_total, amount_tendered, change_due
-        )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
+        ensure_insert_sql_returning(
+            """
+            INSERT INTO pos_sales (
+                company_key, branch_id, sale_reference, receipt_number, sale_date, sale_datetime,
+                cashier, payment_method, customer_id, subtotal, discount_total, tax_total,
+                grand_total, amount_tendered, change_due
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """
+        ),
         (
             company_key,
             str(branch_id or ""),
@@ -5322,7 +5324,7 @@ def _persist_pos_sale(conn, company_key, branch_id, sale_reference, receipt_data
             float(receipt_data.get("change_due") or 0.0),
         ),
     )
-    pos_sale_id = int(cursor.lastrowid)
+    pos_sale_id = get_inserted_id(cursor)
     for sale_line in sale_cart:
         _recalculate_pos_line(sale_line)
         conn.execute(
