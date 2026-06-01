@@ -9,7 +9,7 @@ import pandas as pd
 import streamlit as st
 from security_utils import build_user_safe_error, sanitize_error_message
 
-from database import get_connection
+from database import ensure_insert_sql_returning, get_connection, get_inserted_id
 from accounting_engine import (
     close_fiscal_year,
     generate_cash_flow_statement as engine_generate_cash_flow_statement,
@@ -180,10 +180,12 @@ def _party_id(conn, table_name, company_key, name):
     if row:
         return int(row["id"])
     cursor = conn.execute(
-        f"INSERT INTO {table_name} (company_key, name, currency) VALUES (?, ?, 'GHS')",
+        ensure_insert_sql_returning(
+            f"INSERT INTO {table_name} (company_key, name, currency) VALUES (?, ?, 'GHS')"
+        ),
         (company_key, name),
     )
-    return int(cursor.lastrowid)
+    return get_inserted_id(cursor)
 
 
 def _csv_button(label, dataframe, key):
@@ -632,10 +634,12 @@ def show_invoice_manager(company_key, role):
                 output_getfund = _tax_amount(amount, output_getfund_rate)
                 try:
                     cursor = conn.execute(
-                        """
-                        INSERT INTO invoices (company_key, customer_id, invoice_number, invoice_date, due_date, status, approval_status, amount, output_vat, currency, description, created_by)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'GHS', ?, ?)
-                        """,
+                        ensure_insert_sql_returning(
+                            """
+                            INSERT INTO invoices (company_key, customer_id, invoice_number, invoice_date, due_date, status, approval_status, amount, output_vat, currency, description, created_by)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'GHS', ?, ?)
+                            """
+                        ),
                         (company_key, customer_id, f"INV-{datetime.now().strftime('%Y%m%d%H%M%S')}", invoice_date.isoformat(), invoice_date.isoformat(), status, posting_state, amount, output_vat, description, role),
                     )
                 except sqlite3.IntegrityError as e:
@@ -643,13 +647,14 @@ def show_invoice_manager(company_key, role):
                     st.error(build_user_safe_error(e, role))
                     st.stop()
 
+                invoice_id = get_inserted_id(cursor)
                 if invoice_items:
-                    save_invoice_lines(conn, int(cursor.lastrowid), invoice_items)
+                    save_invoice_lines(conn, invoice_id, invoice_items)
                 if posting_state == "Posted":
                     stock_effects = apply_invoice_stock_effects(
                         conn,
                         company_key=company_key,
-                        invoice_reference=f"INV-{cursor.lastrowid}",
+                        invoice_reference=f"INV-{invoice_id}",
                         invoice_items=invoice_items,
                         role=role,
                         branch_id=st.session_state.get("active_branch_id"),
@@ -676,7 +681,7 @@ def show_invoice_manager(company_key, role):
                         company_key=company_key,
                         date=invoice_date,
                         description="Sales invoice",
-                        reference=f"INV-{cursor.lastrowid}",
+                        reference=f"INV-{invoice_id}",
                         lines=journal_lines,
                         created_by=role,
                         branch_id=st.session_state.get("active_branch_id"),
@@ -684,7 +689,7 @@ def show_invoice_manager(company_key, role):
                         source_module="Invoices",
                         source_table="invoices",
                         source_type="Invoice",
-                        source_id=int(cursor.lastrowid),
+                        source_id=invoice_id,
                         approval_status="Posted",
                         conn=conn,
                     )
@@ -728,14 +733,16 @@ def show_invoice_manager(company_key, role):
                 input_vat = round(amount * (input_vat_rate or 0.0) / 100.0, 2)
                 try:
                     cursor = conn.execute(
-                        """
-                        INSERT INTO bills (
-                            company_key, supplier_id, bill_number, bill_date, due_date, status, approval_status,
-                            amount, input_vat, purchase_classification, payment_method, expense_account_name, asset_name,
-                            asset_category, currency, description, created_by
-                        )
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'GHS', ?, ?)
-                        """,
+                        ensure_insert_sql_returning(
+                            """
+                            INSERT INTO bills (
+                                company_key, supplier_id, bill_number, bill_date, due_date, status, approval_status,
+                                amount, input_vat, purchase_classification, payment_method, expense_account_name, asset_name,
+                                asset_category, currency, description, created_by
+                            )
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'GHS', ?, ?)
+                            """
+                        ),
                         (
                             company_key,
                             supplier_id,
@@ -760,6 +767,7 @@ def show_invoice_manager(company_key, role):
                     st.error(build_user_safe_error(e, role))
                     st.stop()
 
+                bill_id = get_inserted_id(cursor)
                 if posting_state == "Posted":
                     journal_lines, _ = build_purchase_journal_lines(
                         conn,
@@ -775,7 +783,7 @@ def show_invoice_manager(company_key, role):
                         company_key=company_key,
                         date=bill_date,
                         description="Purchase bill",
-                        reference=f"BILL-{cursor.lastrowid}",
+                        reference=f"BILL-{bill_id}",
                         lines=journal_lines,
                         created_by=role,
                         branch_id=st.session_state.get("active_branch_id"),
@@ -783,7 +791,7 @@ def show_invoice_manager(company_key, role):
                         source_module="Bills",
                         source_table="bills",
                         source_type="Bill",
-                        source_id=int(cursor.lastrowid),
+                        source_id=bill_id,
                         approval_status="Posted",
                         user_role=role,
                         conn=conn,
@@ -1010,10 +1018,12 @@ def show_create_invoice_page(company_key, role):
             output_getfund = _tax_amount(amount, output_getfund_rate)
             try:
                 cursor = conn.execute(
-                    """
-                    INSERT INTO invoices (company_key, customer_id, invoice_number, invoice_date, due_date, status, approval_status, amount, output_vat, currency, description, created_by)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'GHS', ?, ?)
-                    """,
+                    ensure_insert_sql_returning(
+                        """
+                        INSERT INTO invoices (company_key, customer_id, invoice_number, invoice_date, due_date, status, approval_status, amount, output_vat, currency, description, created_by)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'GHS', ?, ?)
+                        """
+                    ),
                     (
                         company_key,
                         customer_id,
@@ -1033,8 +1043,9 @@ def show_create_invoice_page(company_key, role):
                 st.error(build_user_safe_error(e, role))
                 st.stop()
 
+            invoice_id = get_inserted_id(cursor)
             if invoice_items:
-                save_invoice_lines(conn, int(cursor.lastrowid), invoice_items)
+                save_invoice_lines(conn, invoice_id, invoice_items)
             if posting_state == "Posted":
                 if not require_permission(
                     role,
@@ -1049,7 +1060,7 @@ def show_create_invoice_page(company_key, role):
                 stock_effects = apply_invoice_stock_effects(
                     conn,
                     company_key=company_key,
-                    invoice_reference=f"INV-{cursor.lastrowid}",
+                    invoice_reference=f"INV-{invoice_id}",
                     invoice_items=invoice_items,
                     role=role,
                     branch_id=st.session_state.get("active_branch_id"),
@@ -1076,7 +1087,7 @@ def show_create_invoice_page(company_key, role):
                     company_key=company_key,
                     date=invoice_date,
                     description="Sales invoice",
-                    reference=f"INV-{cursor.lastrowid}",
+                    reference=f"INV-{invoice_id}",
                     lines=journal_lines,
                     created_by=role,
                     branch_id=st.session_state.get("active_branch_id"),
@@ -1084,7 +1095,7 @@ def show_create_invoice_page(company_key, role):
                     source_module="Invoices",
                     source_table="invoices",
                     source_type="Invoice",
-                    source_id=int(cursor.lastrowid),
+                    source_id=invoice_id,
                     approval_status="Posted",
                     conn=conn,
                 )
