@@ -1,33 +1,14 @@
-# PostgreSQL Placeholder Inventory (Phase 5B.11–5B.12D)
+# PostgreSQL Placeholder Inventory (Phase 5B.11)
 
-**Audited at:** 2026-06-01 22:31:34 UTC
+**Audited at:** 2026-06-01 22:46:40 UTC
 **Scope:** `database.py`, `modules.py`, `financials.py`, `accounting_engine.py`, `app.py`, `enterprise_services.py`, `erp_migrations.py`
-
-### Phase 5B.12D — write preflight SELECT conversions (`database.py`)
-
-| Function | Pre-write SELECT converted |
-|----------|---------------------------|
-| `ensure_company_trial_subscription` | company existence (`SELECT key FROM companies`) |
-| `create_company_branch` | duplicate branch name, duplicate access key, catalog type label |
-| `_generate_unique_branch_user_login_key` | login_key + branch_access_key uniqueness |
-| `_fetch_company_user_by_user_id` | manager/user lookup |
-| `assign_branch_manager` | branch existence before UPDATE |
-| `create_branch_scoped_user` | branch existence, access key snapshot, login/access conflicts, post-insert access key read |
-| `update_branch_user_status` | user row before status UPDATE |
-| `update_company_branch` | branch row load, access-key conflict check |
-| `update_company_staff_branch_assignment` | user row + target branch existence |
-
-**Not converted:** INSERT/UPDATE/DELETE statements; `app.py` login UI; schema ensure/migrations; PRAGMA/sqlite_master.
-
-`execute_portable_query()` in `database.py`: **~38** call sites.
 
 ## Executive Summary
 
 | Metric | Count |
 |--------|------:|
 | Literal `?` placeholders (heuristic, excl. strings/logging) | **1035** |
-| `db_param_placeholder()` / `db_placeholders()` call sites | **5** |
-| `execute_portable_query()` in `database.py` | **~38** |
+| `db_param_placeholder()` / `db_placeholders()` call sites | **7** |
 | Portable helper definitions | `database.py` only |
 
 **Classification legend**
@@ -41,7 +22,7 @@
 
 | File | `?` count | Helper calls | Risk | Dominant pattern |
 |------|----------:|---------------:|------|------------------|
-| `database.py` | 165 | 5 | MEDIUM | literal `?` throughout |
+| `database.py` | 165 | 7 | MEDIUM | literal `?` throughout |
 | `modules.py` | 683 | 0 | HIGH | literal `?` throughout |
 | `financials.py` | 41 | 0 | MEDIUM | literal `?` throughout |
 | `accounting_engine.py` | 128 | 0 | HIGH | literal `?` throughout |
