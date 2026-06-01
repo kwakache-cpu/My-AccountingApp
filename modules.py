@@ -12887,14 +12887,17 @@ def show_sales_purchase(company_key, role, doc_type="Sales"):
                     output_nhil = _tax_amount(amount, output_nhil_rate)
                     output_getfund = _tax_amount(amount, output_getfund_rate)
                     invoice_cursor = conn.execute(
-                        """
-                        INSERT INTO invoices (company_key, customer_id, invoice_number, invoice_date, due_date, status, approval_status, amount, output_vat, currency, description, created_by)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'GHS', ?, ?)
-                        """,
+                        ensure_insert_sql_returning(
+                            """
+                            INSERT INTO invoices (company_key, customer_id, invoice_number, invoice_date, due_date, status, approval_status, amount, output_vat, currency, description, created_by)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'GHS', ?, ?)
+                            """
+                        ),
                         (company_key, customer_id, tx_reference, doc_date.isoformat(), doc_date.isoformat(), status, posting_state, amount, output_vat, narration, role),
                     )
+                    invoice_id = get_inserted_id(invoice_cursor)
                     if invoice_items:
-                        save_invoice_lines(conn, int(invoice_cursor.lastrowid), invoice_items)
+                        save_invoice_lines(conn, invoice_id, invoice_items)
                     debit_account = "Cash" if status == "Paid" else "Accounts Receivable"
                     if posting_state == "Posted":
                         stock_effects = apply_invoice_stock_effects(
@@ -12935,7 +12938,7 @@ def show_sales_purchase(company_key, role, doc_type="Sales"):
                             source_module="Sales Invoicing",
                             source_table="invoices",
                             source_type="Invoice",
-                            source_id=int(invoice_cursor.lastrowid),
+                            source_id=invoice_id,
                             approval_status="Posted",
                             conn=conn,
                         )

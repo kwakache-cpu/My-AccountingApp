@@ -256,6 +256,12 @@ def render_report(entries: list[dict]) -> str:
             "|----------|------|",
             "| `_persist_pos_sale` (`pos_sales` insert only) | `modules.py` |",
             "",
+            "## Phase 5B.10F-2 Conversions (completed)",
+            "",
+            "| Function | File |",
+            "|----------|------|",
+            "| `show_sales_purchase` (Sales / invoice branch only) | `modules.py` |",
+            "",
         ]
     )
     return "\n".join(lines)
