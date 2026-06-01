@@ -1,13 +1,15 @@
 # PostgreSQL Schema Compatibility
 
-**Audited at:** 2026-06-01 12:31:48 UTC
-**Database:** `D:\Emma\My AccountingApp\data\eka_enterprise_v3.db`
+**Audited at:** 2026-06-01 20:07:48 UTC  
+**Phase 5B.11:** Application identity on INSERT is **GREEN**; schema DDL remains **SQLite-native** (42 tables with AUTOINCREMENT). Postgres requires generated DDL + ETL before runtime cutover.
+
+**Database:** `D:\Emma\My AccountingApp\data\eka_enterprise_v3.db`  
 **Tables:** 51
 
 ## Summary
 
 - Total tables: **51**
-- Total rows (sum): **525**
+- Total rows (sum): **526**
 - Tables with AUTOINCREMENT: **42**
 - Tables with triggers: **0**
 
@@ -17,7 +19,7 @@
 |-------|-----:|-------------|----:|--------:|---------:|-------------|
 | `accounting_periods` | 0 | id | 0 | 1 | 0 | AUTOINCREMENT on PK |
 | `accounts_payable` | 0 | id | 0 | 0 | 0 | — |
-| `audit_logs` | 95 | id | 1 | 2 | 0 | AUTOINCREMENT on PK |
+| `audit_logs` | 96 | id | 1 | 2 | 0 | AUTOINCREMENT on PK |
 | `bank_accounts` | 0 | id | 2 | 1 | 0 | AUTOINCREMENT on PK |
 | `bill_lines` | 0 | id | 1 | 1 | 0 | AUTOINCREMENT on PK |
 | `bills` | 0 | id | 1 | 2 | 0 | AUTOINCREMENT on PK |
@@ -101,7 +103,7 @@ CREATE TABLE accounts_payable (id INTEGER PRIMARY KEY, vendor TEXT, amount REAL,
 
 ### `audit_logs`
 
-- **Row count:** 95
+- **Row count:** 96
 - **Primary key:** id
 
 **Foreign keys:**
@@ -1277,11 +1279,11 @@ CREATE TABLE vouchers
 
 # SQLite-Specific Features (Code Scan)
 
-**Audited at:** 2026-06-01 12:31:48 UTC
+**Audited at:** 2026-06-01 20:07:48 UTC
 
 Repository-wide scan of `*.py` (excluding `__pycache__`, `.test-tmp`).
 
-## PRAGMA (1426 occurrences)
+## PRAGMA (1442 occurrences)
 
 - `.venv/Lib/site-packages/cachecontrol/controller.py:236: # Check the max-age pragma in the cache control header`
 - `.venv/Lib/site-packages/cachetools/_cachedmethod.py:44: raise NotImplementedError()  # pragma: no cover`
@@ -1323,9 +1325,9 @@ Repository-wide scan of `*.py` (excluding `__pycache__`, `.test-tmp`).
 - `.venv/Lib/site-packages/google/auth/_default.py:32: if TYPE_CHECKING:  # pragma: NO COVER`
 - `.venv/Lib/site-packages/google/auth/_default.py:117: def _warn_about_generic_load_method(method_name):  # pragma: NO COVER`
 - `.venv/Lib/site-packages/google/auth/_helpers.py:358: return sys.version_info > (3, 0)  # pragma: NO COVER`
-- _… and 1386 more_
+- _… and 1402 more_
 
-## AUTOINCREMENT (204 occurrences)
+## AUTOINCREMENT (209 occurrences)
 
 - `.venv/Lib/site-packages/sqlalchemy/dialects/mssql/base.py:32: table. SQLAlchemy considers ``IDENTITY`` within its default "autoincrement"`
 - `.venv/Lib/site-packages/sqlalchemy/dialects/mssql/base.py:34: :paramref:`_schema.Column.autoincrement`.  This means that by default,`
@@ -1367,9 +1369,9 @@ Repository-wide scan of `*.py` (excluding `__pycache__`, `.test-tmp`).
 - `.venv/Lib/site-packages/sqlalchemy/dialects/sqlite/base.py:91: TABLE`` statement in order for the autoincrement behavior to be available.`
 - `.venv/Lib/site-packages/sqlalchemy/dialects/sqlite/base.py:970: the ``AUTOINCREMENT`` column parameter is used.   In order to return`
 - `.venv/Lib/site-packages/sqlalchemy/dialects/sqlite/base.py:1728: column.autoincrement is True`
-- _… and 164 more_
+- _… and 169 more_
 
-## lastrowid (122 occurrences)
+## lastrowid (118 occurrences)
 
 - `.venv/Lib/site-packages/sqlalchemy/connectors/asyncio.py:83: lastrowid: int`
 - `.venv/Lib/site-packages/sqlalchemy/connectors/asyncio.py:185: def lastrowid(self) -> int:`
@@ -1411,9 +1413,9 @@ Repository-wide scan of `*.py` (excluding `__pycache__`, `.test-tmp`).
 - `.venv/Lib/site-packages/sqlalchemy/sql/compiler.py:2290: # use lastrowid`
 - `.venv/Lib/site-packages/sqlalchemy/sql/compiler.py:2291: return lastrowid`
 - `.venv/Lib/site-packages/sqlalchemy/sql/compiler.py:2301: def get(lastrowid, parameters):`
-- _… and 82 more_
+- _… and 78 more_
 
-## sqlite_master (45 occurrences)
+## sqlite_master (55 occurrences)
 
 - `.venv/Lib/site-packages/pandas/io/sql.py:2849: sqlite_master`
 - `.venv/Lib/site-packages/pandas/tests/io/test_sql.py:514: c = conn.execute("SELECT name FROM sqlite_master WHERE type='view'")`
@@ -1426,63 +1428,72 @@ Repository-wide scan of `*.py` (excluding `__pycache__`, `.test-tmp`).
 - `.venv/Lib/site-packages/sqlalchemy/dialects/sqlite/base.py:2366: " (SELECT * FROM sqlite_master UNION ALL "`
 - `.venv/Lib/site-packages/sqlalchemy/dialects/sqlite/base.py:2374: "SELECT sql FROM sqlite_master WHERE name = ? "`
 - `.venv/Lib/site-packages/sqlalchemy/dialects/sqlite/base.py:2997: "sqlite_master",`
-- `accounting_engine.py:492: "SELECT name FROM sqlite_master WHERE type='table' AND name = ?",`
-- `accounting_engine.py:662: "SELECT name FROM sqlite_master WHERE type='table' AND name = ?",`
-- `accounting_engine.py:725: "SELECT name FROM sqlite_master WHERE type='table' AND name = ?",`
-- `accounting_engine.py:804: "SELECT name FROM sqlite_master WHERE type='table' AND name = ?",`
-- `accounting_engine.py:1082: conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'transactions'").fetchone()`
-- `accounting_engine.py:2683: "SELECT name FROM sqlite_master WHERE type='table' AND name = ? LIMIT 1",`
+- `accounting_engine.py:494: "SELECT name FROM sqlite_master WHERE type='table' AND name = ?",`
+- `accounting_engine.py:664: "SELECT name FROM sqlite_master WHERE type='table' AND name = ?",`
+- `accounting_engine.py:727: "SELECT name FROM sqlite_master WHERE type='table' AND name = ?",`
+- `accounting_engine.py:806: "SELECT name FROM sqlite_master WHERE type='table' AND name = ?",`
+- `accounting_engine.py:1086: conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'transactions'").fetchone()`
+- `accounting_engine.py:2695: "SELECT name FROM sqlite_master WHERE type='table' AND name = ? LIMIT 1",`
 - `database.py:42: "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",`
 - `database.py:391: rows = conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()`
 - `database.py:648: "sqlite_master_usage": "sqlite_master",`
 - `database.py:704: for row in diagnostics_conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()`
 - `database.py:763: for row in diagnostics_conn.execute("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name").fetchall():`
-- `database.py:1320: conn.execute("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?", (table_name,)).fetchone()`
-- `database.py:4010: SELECT name FROM sqlite_master`
-- `database.py:4207: "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",`
-- `database.py:4225: for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()`
-- `database.py:4301: for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()`
-- `database.py:4712: "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",`
-- `database.py:6319: "SELECT name FROM sqlite_master WHERE type='table' AND name = ?",`
-- `database.py:6355: "SELECT name FROM sqlite_master WHERE type='table' AND name = 'journal_entries'"`
-- `database.py:6377: for row in cursor.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()`
+- `database.py:1349: conn.execute("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?", (table_name,)).fetchone()`
+- `database.py:4039: SELECT name FROM sqlite_master`
+- `database.py:4236: "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",`
+- `database.py:4254: for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()`
+- `database.py:4330: for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()`
+- `database.py:4741: "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",`
+- `database.py:6348: "SELECT name FROM sqlite_master WHERE type='table' AND name = ?",`
+- `database.py:6384: "SELECT name FROM sqlite_master WHERE type='table' AND name = 'journal_entries'"`
+- `database.py:6406: for row in cursor.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()`
 - `db_upgrade_safety.py:55: "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",`
 - `erp_migrations.py:6: "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",`
 - `inspect_candidate_dbs.py:21: cur.execute("SELECT name FROM sqlite_master WHERE type='table'")`
-- `modules.py:2734: "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",`
+- `modules.py:2738: "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",`
 - `rebuild_db.py:10: "SELECT name FROM sqlite_master WHERE type='table' AND name=?",`
 - `scripts/run_migration_integrity_audit.py:60: "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ? LIMIT 1",`
 - `scripts/run_migration_integrity_audit.py:144: "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name"`
-- `scripts/run_postgres_schema_compatibility_audit.py:35: "sqlite_master": re.compile(r"\bsqlite_master\b"),`
-- `scripts/run_postgres_schema_compatibility_audit.py:159: SELECT name FROM sqlite_master`
-- _… and 5 more_
+- `scripts/run_postgres_5b11_audit.py:26: "sqlite_master": re.compile(r"\bsqlite_master\b"),`
+- `scripts/run_postgres_5b11_audit.py:47: "sqlite_master": "information_schema.tables, pg_catalog",`
+- _… and 15 more_
 
-## INSERT OR IGNORE (24 occurrences)
+## INSERT OR IGNORE (33 occurrences)
 
 - `database.py:645: "insert_or_ignore": "INSERT OR IGNORE",`
-- `database.py:1307: return f"INSERT OR IGNORE INTO {table_name} ({column_sql}) VALUES ({placeholders})"`
-- `database.py:4580: "INSERT OR IGNORE INTO schema_version (version, description) VALUES (?, ?)",`
-- `database.py:4740: INSERT OR IGNORE INTO branch_type_catalog (`
-- `database.py:4763: INSERT OR IGNORE INTO branch_type_module_defaults (`
-- `database.py:4820: INSERT OR IGNORE INTO branch_module_grants (`
-- `database.py:5411: INSERT OR IGNORE INTO users (`
-- `database.py:6575: "INSERT OR IGNORE INTO system_settings (id, master_price_per_month, base_currency, display_currency, exchange_rate) VALU`
-- `database.py:7080: "INSERT OR IGNORE INTO system_settings (id, master_price_per_month, base_currency, display_currency, exchange_rate) VALU`
-- `database.py:8159: cursor.execute("INSERT OR IGNORE INTO maintenance_settings (id, is_active) VALUES (1, 0)")`
-- `database.py:8332: "INSERT OR IGNORE INTO system_settings (id, master_price_per_month) VALUES (1, 500)"`
+- `database.py:1336: return f"INSERT OR IGNORE INTO {table_name} ({column_sql}) VALUES ({placeholders})"`
+- `database.py:4609: "INSERT OR IGNORE INTO schema_version (version, description) VALUES (?, ?)",`
+- `database.py:4769: INSERT OR IGNORE INTO branch_type_catalog (`
+- `database.py:4792: INSERT OR IGNORE INTO branch_type_module_defaults (`
+- `database.py:4849: INSERT OR IGNORE INTO branch_module_grants (`
+- `database.py:5440: INSERT OR IGNORE INTO users (`
+- `database.py:6604: "INSERT OR IGNORE INTO system_settings (id, master_price_per_month, base_currency, display_currency, exchange_rate) VALU`
+- `database.py:7109: "INSERT OR IGNORE INTO system_settings (id, master_price_per_month, base_currency, display_currency, exchange_rate) VALU`
+- `database.py:8188: cursor.execute("INSERT OR IGNORE INTO maintenance_settings (id, is_active) VALUES (1, 0)")`
+- `database.py:8361: "INSERT OR IGNORE INTO system_settings (id, master_price_per_month) VALUES (1, 500)"`
 - `erp_migrations.py:26: conn.execute("INSERT OR IGNORE INTO system_settings (id) VALUES (1)")`
 - `erp_migrations.py:62: "INSERT OR IGNORE INTO migration_history (migration_id, description) VALUES (?, ?)",`
-- `financials.py:570: conn.execute("INSERT OR IGNORE INTO customers (company_key, name, email, phone, currency) VALUES (?, ?, ?, ?, 'GHS')", (`
-- `financials.py:587: conn.execute("INSERT OR IGNORE INTO suppliers (company_key, name, email, phone, currency) VALUES (?, ?, ?, ?, 'GHS')", (`
-- `financials.py:902: "INSERT OR IGNORE INTO customers (company_key, name, email, phone, currency) VALUES (?, ?, ?, ?, 'GHS')",`
-- `financials.py:941: "INSERT OR IGNORE INTO suppliers (company_key, name, email, phone, currency) VALUES (?, ?, ?, ?, 'GHS')",`
+- `financials.py:572: conn.execute("INSERT OR IGNORE INTO customers (company_key, name, email, phone, currency) VALUES (?, ?, ?, ?, 'GHS')", (`
+- `financials.py:589: conn.execute("INSERT OR IGNORE INTO suppliers (company_key, name, email, phone, currency) VALUES (?, ?, ?, ?, 'GHS')", (`
+- `financials.py:912: "INSERT OR IGNORE INTO customers (company_key, name, email, phone, currency) VALUES (?, ?, ?, ?, 'GHS')",`
+- `financials.py:951: "INSERT OR IGNORE INTO suppliers (company_key, name, email, phone, currency) VALUES (?, ?, ?, ?, 'GHS')",`
 - `fix_db.py:227: INSERT OR IGNORE INTO maintenance_settings (`
 - `FORCE_RESET_DB.py:124: INSERT OR IGNORE INTO maintenance_settings (`
 - `rebuild_db.py:174: INSERT OR IGNORE INTO maintenance_settings (`
+- `scripts/run_postgres_5b11_audit.py:28: "INSERT OR IGNORE": re.compile(r"\bINSERT\s+OR\s+IGNORE\b", re.I),`
+- `scripts/run_postgres_5b11_audit.py:49: "INSERT OR IGNORE": "INSERT ... ON CONFLICT DO NOTHING (db_insert_ignore_sql)",`
+- `scripts/run_postgres_5b11_audit.py:184: if feat in {"INSERT OR IGNORE", "INSERT OR REPLACE", "REPLACE INTO"}:`
+- `scripts/run_postgres_5b11_audit.py:266: needs.append("Migration SQL uses literal `?` and `INSERT OR IGNORE` — must route through helpers for Postgres")`
+- `scripts/run_postgres_5b11_audit.py:376: "| **Migrations** (`erp_migrations.py`) | **Yes** | **Hard blocker** | `sqlite_master`, `PRAGMA`, `INSERT OR IGNORE`, li`
+- `scripts/run_postgres_5b11_audit.py:401: "- `INSERT OR IGNORE` in `financials.py` / `erp_migrations.py` (not using `db_insert_ignore_sql()`).",`
 - `scripts/run_postgres_schema_compatibility_audit.py:33: "INSERT OR IGNORE": re.compile(r"\bINSERT\s+OR\s+IGNORE\b", re.I),`
 - `scripts/run_postgres_schema_compatibility_audit.py:307: if len(sqlite_features.get("INSERT OR IGNORE", [])) > 5:`
 - `scripts/run_postgres_schema_compatibility_audit.py:308: medium.append("INSERT OR IGNORE — partially covered by db_insert_ignore_sql(); audit all call sites")`
 - `tests/test_database_backend_foundation.py:86: self.assertIn("INSERT OR IGNORE", sqlite_sql)`
+- `tests/test_journal_entry_identity.py:133: INSERT OR IGNORE INTO branches (branch_id, company_key, branch_name)`
+- `tests/test_pos_return_identity.py:18: INSERT OR IGNORE INTO branches (branch_id, company_key, branch_name)`
+- `tests/test_pos_sale_identity.py:14: INSERT OR IGNORE INTO branches (branch_id, company_key, branch_name)`
 
 ## ROWID (19 occurrences)
 
@@ -1506,70 +1517,88 @@ Repository-wide scan of `*.py` (excluding `__pycache__`, `.test-tmp`).
 - `scripts/run_postgres_schema_compatibility_audit.py:179: if "WITHOUT ROWID" in info.create_sql.upper():`
 - `scripts/run_postgres_schema_compatibility_audit.py:180: info.sqlite_only.append("WITHOUT ROWID")`
 
-## WAL (10 occurrences)
+## WAL (13 occurrences)
 
 - `.venv/Lib/site-packages/PIL/WalImageFile.py:5: # WAL file handling`
 - `.venv/Lib/site-packages/PIL/WalImageFile.py:23: To open a WAL file, use the :py:func:`PIL.WalImageFile.open()` function instead.`
 - `.venv/Lib/site-packages/PIL/WalImageFile.py:35: format = "WAL"`
 - `.venv/Lib/site-packages/PIL/WalImageFile.py:67: Load texture from a Quake2 WAL texture file.`
 - `.venv/Lib/site-packages/PIL/WalImageFile.py:72: :param filename: WAL file name, or an opened file handle.`
-- `database.py:1580: "journal_mode": "WAL",`
-- `database.py:2287: source_conn.execute("PRAGMA journal_mode = WAL;")`
-- `database.py:4055: conn.execute("PRAGMA journal_mode = WAL;")`
-- `database.py:4077: conn.execute("PRAGMA journal_mode = WAL;")`
+- `database.py:1609: "journal_mode": "WAL",`
+- `database.py:2316: source_conn.execute("PRAGMA journal_mode = WAL;")`
+- `database.py:4084: conn.execute("PRAGMA journal_mode = WAL;")`
+- `database.py:4106: conn.execute("PRAGMA journal_mode = WAL;")`
+- `scripts/run_postgres_5b11_audit.py:40: "WAL": re.compile(r"\bWAL\b"),`
+- `scripts/run_postgres_5b11_audit.py:61: "WAL": "N/A (Postgres MVCC)",`
+- `scripts/run_postgres_5b11_audit.py:192: if feat in {"WAL", "busy_timeout"}:`
 - `scripts/run_postgres_schema_compatibility_audit.py:39: "WAL": re.compile(r"\bWAL\b"),`
 
-## busy_timeout (7 occurrences)
+## busy_timeout (10 occurrences)
 
 - `app.py:2499: "backup_overlaps={overlaps} busy_timeout={timeout}ms longest_write={longest}s ({operation})".format(`
-- `database.py:2285: source_conn.execute(f"PRAGMA busy_timeout = {SQLITE_BUSY_TIMEOUT_MS};")`
-- `database.py:2289: snapshot_conn.execute(f"PRAGMA busy_timeout = {SQLITE_BUSY_TIMEOUT_MS};")`
-- `database.py:4054: conn.execute(f"PRAGMA busy_timeout = {SQLITE_BUSY_TIMEOUT_MS};")`
-- `database.py:4076: conn.execute(f"PRAGMA busy_timeout = {SQLITE_BUSY_TIMEOUT_MS};")`
+- `database.py:2314: source_conn.execute(f"PRAGMA busy_timeout = {SQLITE_BUSY_TIMEOUT_MS};")`
+- `database.py:2318: snapshot_conn.execute(f"PRAGMA busy_timeout = {SQLITE_BUSY_TIMEOUT_MS};")`
+- `database.py:4083: conn.execute(f"PRAGMA busy_timeout = {SQLITE_BUSY_TIMEOUT_MS};")`
+- `database.py:4105: conn.execute(f"PRAGMA busy_timeout = {SQLITE_BUSY_TIMEOUT_MS};")`
 - `migration_cleanup.py:90: conn.execute(f"PRAGMA busy_timeout = {int(busy_timeout_ms)}")`
+- `scripts/run_postgres_5b11_audit.py:41: "busy_timeout": re.compile(r"\bbusy_timeout\b", re.I),`
+- `scripts/run_postgres_5b11_audit.py:62: "busy_timeout": "lock_timeout / statement_timeout",`
+- `scripts/run_postgres_5b11_audit.py:192: if feat in {"WAL", "busy_timeout"}:`
 - `scripts/run_postgres_schema_compatibility_audit.py:37: "busy_timeout": re.compile(r"\bbusy_timeout\b", re.I),`
 
-## GLOB (6 occurrences)
+## BEGIN IMMEDIATE (9 occurrences)
 
-- `scripts/plan_migration_data_cleanup.py:250: # Match Phase 5B.2 audit selection (includes GLOB false positives).`
-- `scripts/plan_migration_data_cleanup.py:256: AND expiry_date NOT GLOB ?`
-- `scripts/run_migration_integrity_audit.py:594: AND expiry_date NOT GLOB '????-??-??'`
-- `scripts/run_postgres_schema_compatibility_audit.py:40: "GLOB": re.compile(r"\bGLOB\b"),`
-- `scripts/run_postgres_schema_compatibility_audit.py:309: if len(sqlite_features.get("GLOB", [])) > 3:`
-- `scripts/run_postgres_schema_compatibility_audit.py:310: low.append("GLOB patterns — use Postgres ~ or SIMILAR TO / regex")`
-
-## BEGIN IMMEDIATE (5 occurrences)
-
-- `database.py:1479: self.conn.execute("BEGIN IMMEDIATE" if self.immediate else "BEGIN")`
+- `database.py:1508: self.conn.execute("BEGIN IMMEDIATE" if self.immediate else "BEGIN")`
+- `scripts/run_postgres_5b11_audit.py:39: "BEGIN IMMEDIATE": re.compile(r"\bBEGIN\s+IMMEDIATE\b", re.I),`
+- `scripts/run_postgres_5b11_audit.py:60: "BEGIN IMMEDIATE": "BEGIN (default READ COMMITTED)",`
+- `scripts/run_postgres_5b11_audit.py:180: if feat in {"PRAGMA", "sqlite_master", "AUTOINCREMENT", "BEGIN IMMEDIATE"} and rel in PROD_APP:`
+- `scripts/run_postgres_5b11_audit.py:427: ("Transaction portability", "YELLOW", `db_begin`/`commit` OK; `BEGIN IMMEDIATE` SQLite-only in lock wrapper"),`
 - `scripts/run_postgres_schema_compatibility_audit.py:36: "BEGIN IMMEDIATE": re.compile(r"\bBEGIN\s+IMMEDIATE\b", re.I),`
 - `tests/test_sqlite_concurrency.py:121: holder.execute("BEGIN IMMEDIATE")`
 - `tests/test_sqlite_concurrency.py:138: raw_conn.execute("BEGIN IMMEDIATE")`
 - `tests/test_sqlite_concurrency.py:183: writer.execute("BEGIN IMMEDIATE")`
 
+## GLOB (9 occurrences)
+
+- `scripts/plan_migration_data_cleanup.py:250: # Match Phase 5B.2 audit selection (includes GLOB false positives).`
+- `scripts/plan_migration_data_cleanup.py:256: AND expiry_date NOT GLOB ?`
+- `scripts/run_migration_integrity_audit.py:594: AND expiry_date NOT GLOB '????-??-??'`
+- `scripts/run_postgres_5b11_audit.py:35: "GLOB": re.compile(r"\bGLOB\b"),`
+- `scripts/run_postgres_5b11_audit.py:56: "GLOB": "~ regex or SIMILAR TO",`
+- `scripts/run_postgres_5b11_audit.py:190: if feat == "GLOB":`
+- `scripts/run_postgres_schema_compatibility_audit.py:40: "GLOB": re.compile(r"\bGLOB\b"),`
+- `scripts/run_postgres_schema_compatibility_audit.py:309: if len(sqlite_features.get("GLOB", [])) > 3:`
+- `scripts/run_postgres_schema_compatibility_audit.py:310: low.append("GLOB patterns — use Postgres ~ or SIMILAR TO / regex")`
+
 ## journal_mode (5 occurrences)
 
-- `database.py:1580: "journal_mode": "WAL",`
-- `database.py:2287: source_conn.execute("PRAGMA journal_mode = WAL;")`
-- `database.py:4055: conn.execute("PRAGMA journal_mode = WAL;")`
-- `database.py:4077: conn.execute("PRAGMA journal_mode = WAL;")`
+- `database.py:1609: "journal_mode": "WAL",`
+- `database.py:2316: source_conn.execute("PRAGMA journal_mode = WAL;")`
+- `database.py:4084: conn.execute("PRAGMA journal_mode = WAL;")`
+- `database.py:4106: conn.execute("PRAGMA journal_mode = WAL;")`
 - `scripts/run_postgres_schema_compatibility_audit.py:38: "journal_mode": re.compile(r"\bjournal_mode\b", re.I),`
 
-## sqlite_sequence (2 occurrences)
+## INSERT OR REPLACE (5 occurrences)
 
-- `.venv/Lib/site-packages/sqlalchemy/dialects/sqlite/base.py:969: such an object is the ``sqlite_sequence`` table that's generated when`
-- `scripts/run_postgres_schema_compatibility_audit.py:42: "sqlite_sequence": re.compile(r"\bsqlite_sequence\b"),`
-
-## INSERT OR REPLACE (2 occurrences)
-
+- `scripts/run_postgres_5b11_audit.py:29: "INSERT OR REPLACE": re.compile(r"\bINSERT\s+OR\s+REPLACE\b", re.I),`
+- `scripts/run_postgres_5b11_audit.py:50: "INSERT OR REPLACE": "INSERT ... ON CONFLICT DO UPDATE",`
+- `scripts/run_postgres_5b11_audit.py:184: if feat in {"INSERT OR IGNORE", "INSERT OR REPLACE", "REPLACE INTO"}:`
 - `scripts/run_postgres_schema_compatibility_audit.py:32: "INSERT OR REPLACE": re.compile(r"\bINSERT\s+OR\s+REPLACE\b", re.I),`
 - `seed_data.py:21: INSERT OR REPLACE INTO companies (`
+
+## sqlite_sequence (4 occurrences)
+
+- `.venv/Lib/site-packages/sqlalchemy/dialects/sqlite/base.py:969: such an object is the ``sqlite_sequence`` table that's generated when`
+- `scripts/run_postgres_5b11_audit.py:42: "sqlite_sequence": re.compile(r"\bsqlite_sequence\b"),`
+- `scripts/run_postgres_5b11_audit.py:63: "sqlite_sequence": "pg_get_serial_sequence()",`
+- `scripts/run_postgres_schema_compatibility_audit.py:42: "sqlite_sequence": re.compile(r"\bsqlite_sequence\b"),`
 
 
 ---
 
 # Query Compatibility Scan
 
-**Audited at:** 2026-06-01 12:31:48 UTC
+**Audited at:** 2026-06-01 20:07:48 UTC
 
 Scoped files: `database.py`, `modules.py`, `financials.py`, `app.py`, `accounting_engine.py`.
 
@@ -1582,134 +1611,137 @@ Scoped files: `database.py`, `modules.py`, `financials.py`, `app.py`, `accountin
 ## `database.py`
 
 ### datetime_now_utc (20)
-- `database.py:1450: "started_at": datetime.utcnow().isoformat(timespec="seconds"),`
-- `database.py:1862: timestamp = timestamp or datetime.utcnow()`
-- `database.py:1867: timestamp = timestamp or datetime.utcnow()`
-- `database.py:1875: timestamp = timestamp or datetime.utcnow()`
-- `database.py:2167: "timestamp": datetime.utcnow().isoformat(timespec="seconds"),`
-- `database.py:2180: "timestamp": datetime.utcnow().isoformat(timespec="seconds"),`
-- `database.py:2309: local_history_path = _build_local_history_backup_path(datetime.utcnow())`
-- `database.py:2365: backup_timestamp = datetime.utcnow()`
-- `database.py:2736: timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")`
-- `database.py:3005: "restored_at": datetime.utcnow().isoformat(timespec="seconds"),`
-- `database.py:3081: "created_at": datetime.utcnow().isoformat(timespec="seconds"),`
-- `database.py:3370: derived_start_date = subscription_start_date or datetime.now().date().isoformat()`
-- `database.py:3377: if parsed_end is not None and parsed_end.date() < datetime.now().date():`
-- `database.py:3686: start_value = str(start_date or datetime.now().date().isoformat())`
-- `database.py:3727: today = datetime.now().date()`
-- `database.py:3784: today = _parse_datetime_like(as_of) or datetime.now()`
-- `database.py:3880: today = datetime.now().date()`
-- `database.py:4175: (f"{os.path.basename(DB_PATH)}::{int(datetime.now().timestamp())}",),`
-- `database.py:5670: user_id_seed = f"{normalized_company_key}|{normalized_full_name}|{resolved_login_key}|{datetime.now().isoformat()}|{rand`
-- `database.py:8860: event_id = f"AUD-{datetime.utcnow().strftime('%Y%m%d%H%M%S%f')}"`
+- `database.py:1479: "started_at": datetime.utcnow().isoformat(timespec="seconds"),`
+- `database.py:1891: timestamp = timestamp or datetime.utcnow()`
+- `database.py:1896: timestamp = timestamp or datetime.utcnow()`
+- `database.py:1904: timestamp = timestamp or datetime.utcnow()`
+- `database.py:2196: "timestamp": datetime.utcnow().isoformat(timespec="seconds"),`
+- `database.py:2209: "timestamp": datetime.utcnow().isoformat(timespec="seconds"),`
+- `database.py:2338: local_history_path = _build_local_history_backup_path(datetime.utcnow())`
+- `database.py:2394: backup_timestamp = datetime.utcnow()`
+- `database.py:2765: timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")`
+- `database.py:3034: "restored_at": datetime.utcnow().isoformat(timespec="seconds"),`
+- `database.py:3110: "created_at": datetime.utcnow().isoformat(timespec="seconds"),`
+- `database.py:3399: derived_start_date = subscription_start_date or datetime.now().date().isoformat()`
+- `database.py:3406: if parsed_end is not None and parsed_end.date() < datetime.now().date():`
+- `database.py:3715: start_value = str(start_date or datetime.now().date().isoformat())`
+- `database.py:3756: today = datetime.now().date()`
+- `database.py:3813: today = _parse_datetime_like(as_of) or datetime.now()`
+- `database.py:3909: today = datetime.now().date()`
+- `database.py:4204: (f"{os.path.basename(DB_PATH)}::{int(datetime.now().timestamp())}",),`
+- `database.py:5699: user_id_seed = f"{normalized_company_key}|{normalized_full_name}|{resolved_login_key}|{datetime.now().isoformat()}|{rand`
+- `database.py:8889: event_id = f"AUD-{datetime.utcnow().strftime('%Y%m%d%H%M%S%f')}"`
 
 ### insert_or_ignore (11)
 - `database.py:645: "insert_or_ignore": "INSERT OR IGNORE",`
-- `database.py:1307: return f"INSERT OR IGNORE INTO {table_name} ({column_sql}) VALUES ({placeholders})"`
-- `database.py:4580: "INSERT OR IGNORE INTO schema_version (version, description) VALUES (?, ?)",`
-- `database.py:4740: INSERT OR IGNORE INTO branch_type_catalog (`
-- `database.py:4763: INSERT OR IGNORE INTO branch_type_module_defaults (`
-- `database.py:4820: INSERT OR IGNORE INTO branch_module_grants (`
-- `database.py:5411: INSERT OR IGNORE INTO users (`
-- `database.py:6575: "INSERT OR IGNORE INTO system_settings (id, master_price_per_month, base_currency, display_currency, exchange_rate) VALU`
-- `database.py:7080: "INSERT OR IGNORE INTO system_settings (id, master_price_per_month, base_currency, display_currency, exchange_rate) VALU`
-- `database.py:8159: cursor.execute("INSERT OR IGNORE INTO maintenance_settings (id, is_active) VALUES (1, 0)")`
-- `database.py:8332: "INSERT OR IGNORE INTO system_settings (id, master_price_per_month) VALUES (1, 500)"`
+- `database.py:1336: return f"INSERT OR IGNORE INTO {table_name} ({column_sql}) VALUES ({placeholders})"`
+- `database.py:4609: "INSERT OR IGNORE INTO schema_version (version, description) VALUES (?, ?)",`
+- `database.py:4769: INSERT OR IGNORE INTO branch_type_catalog (`
+- `database.py:4792: INSERT OR IGNORE INTO branch_type_module_defaults (`
+- `database.py:4849: INSERT OR IGNORE INTO branch_module_grants (`
+- `database.py:5440: INSERT OR IGNORE INTO users (`
+- `database.py:6604: "INSERT OR IGNORE INTO system_settings (id, master_price_per_month, base_currency, display_currency, exchange_rate) VALU`
+- `database.py:7109: "INSERT OR IGNORE INTO system_settings (id, master_price_per_month, base_currency, display_currency, exchange_rate) VALU`
+- `database.py:8188: cursor.execute("INSERT OR IGNORE INTO maintenance_settings (id, is_active) VALUES (1, 0)")`
+- `database.py:8361: "INSERT OR IGNORE INTO system_settings (id, master_price_per_month) VALUES (1, 500)"`
 
-### sqlite_placeholder_question (4)
-- `database.py:1320: conn.execute("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?", (table_name,)).fetchone()`
-- `database.py:5022: if not conn.execute("SELECT 1 FROM branches WHERE branch_id = ? LIMIT 1", (candidate,)).fetchone():`
-- `database.py:5026: if not conn.execute("SELECT 1 FROM branches WHERE branch_id = ? LIMIT 1", (candidate,)).fetchone():`
-- `database.py:8944: return conn.execute("SELECT * FROM companies WHERE key = ?", (company_key,)).fetchone()`
-
-### on_conflict (3)
-- `database.py:1306: return f"INSERT INTO {table_name} ({column_sql}) VALUES ({placeholders}) ON CONFLICT{conflict_sql} DO NOTHING"`
-- `database.py:3602: ON CONFLICT(plan_name) DO UPDATE SET`
-- `database.py:3694: ON CONFLICT(company_key) DO UPDATE SET`
-
-### returning_clause (2)
+### returning_clause (5)
 - `database.py:1244: PostgreSQL callers should append RETURNING and read the returned row.`
 - `database.py:1255: return f"{base_sql} RETURNING {returning_col}"`
+- `database.py:1282: SQLite: cursor.lastrowid. PostgreSQL: first column from RETURNING clause (call fetchone via fetch_inserted_row_id).`
+- `database.py:1295: Append RETURNING for PostgreSQL when the INSERT statement does not already include it.`
+- `database.py:1305: return f"{normalized} RETURNING {returning_col}"`
+
+### sqlite_placeholder_question (4)
+- `database.py:1349: conn.execute("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?", (table_name,)).fetchone()`
+- `database.py:5051: if not conn.execute("SELECT 1 FROM branches WHERE branch_id = ? LIMIT 1", (candidate,)).fetchone():`
+- `database.py:5055: if not conn.execute("SELECT 1 FROM branches WHERE branch_id = ? LIMIT 1", (candidate,)).fetchone():`
+- `database.py:8973: return conn.execute("SELECT * FROM companies WHERE key = ?", (company_key,)).fetchone()`
+
+### on_conflict (3)
+- `database.py:1335: return f"INSERT INTO {table_name} ({column_sql}) VALUES ({placeholders}) ON CONFLICT{conflict_sql} DO NOTHING"`
+- `database.py:3631: ON CONFLICT(plan_name) DO UPDATE SET`
+- `database.py:3723: ON CONFLICT(company_key) DO UPDATE SET`
 
 ### integer_boolean (1)
-- `database.py:5277: is_active=1,`
+- `database.py:5306: is_active=1,`
 
 ## `modules.py`
 
 ### datetime_now_utc (89)
-- `modules.py:1299: new_expiry = datetime.now() + relativedelta(months=+int(duration_months))`
-- `modules.py:1337: datetime.now().isoformat(timespec="seconds"),`
-- `modules.py:1612: datetime.now().isoformat(timespec="seconds"),`
-- `modules.py:1666: return f"{prefix}-{datetime.now().strftime('%Y%m%d%H%M%S')}-{uuid.uuid4().hex[:8].upper()}"`
-- `modules.py:1838: subscription_expiry=datetime.now().date().isoformat(),`
-- `modules.py:1844: subscription_start_date=datetime.now().date().isoformat(),`
-- `modules.py:1845: subscription_end_date=datetime.now().date().isoformat(),`
-- `modules.py:1868: activated_at = datetime.now().isoformat(timespec="seconds")`
-- `modules.py:1896: datetime.now().isoformat(timespec="seconds"),`
-- `modules.py:2114: paid_at = data.get("paid_at") or datetime.now().isoformat(timespec="seconds")`
-- `modules.py:2115: verified_at = datetime.now().isoformat(timespec="seconds")`
-- `modules.py:2566: now_ts = datetime.utcnow().timestamp()`
-- `modules.py:2742: since_date = (datetime.now() - timedelta(days=30)).date().isoformat()`
-- `modules.py:2814: seed = f"{company_key}|{staff_name.strip()}|{login_key.strip()}|{datetime.now().isoformat()}|{random.randint(1000,9999)}`
-- `modules.py:2933: value = entry_date or datetime.now().date()`
-- `modules.py:3897: value=datetime.now().date(),`
-- `modules.py:3960: reference = f"JRN-{datetime.now().strftime('%Y%m%d%H%M%S')}"`
-- `modules.py:4058: depreciation_date = pd.to_datetime(as_of_date or datetime.now().date()).date()`
-- `modules.py:4473: tx_date = transaction_date.isoformat() if hasattr(transaction_date, "isoformat") else (transaction_date or datetime.now(`
-- `modules.py:4617: (datetime.now().isoformat(timespec="seconds"), level, module_name, message),`
-- `modules.py:4786: "sale_date": datetime.now().date().isoformat(),`
-- `modules.py:4787: "sale_datetime": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),`
-- `modules.py:5005: return f"SUS-{datetime.now().strftime('%Y%m%d%H%M%S')}-{uuid.uuid4().hex[:6].upper()}"`
-- `modules.py:5017: "sale_date": str(st.session_state.get(f"pos_sale_date_{company_key}") or datetime.now().date()),`
-- `modules.py:5438: return f"RET-{datetime.now().strftime('%Y%m%d%H%M%S')}-{uuid.uuid4().hex[:6].upper()}"`
+- `modules.py:1301: new_expiry = datetime.now() + relativedelta(months=+int(duration_months))`
+- `modules.py:1339: datetime.now().isoformat(timespec="seconds"),`
+- `modules.py:1616: datetime.now().isoformat(timespec="seconds"),`
+- `modules.py:1670: return f"{prefix}-{datetime.now().strftime('%Y%m%d%H%M%S')}-{uuid.uuid4().hex[:8].upper()}"`
+- `modules.py:1842: subscription_expiry=datetime.now().date().isoformat(),`
+- `modules.py:1848: subscription_start_date=datetime.now().date().isoformat(),`
+- `modules.py:1849: subscription_end_date=datetime.now().date().isoformat(),`
+- `modules.py:1872: activated_at = datetime.now().isoformat(timespec="seconds")`
+- `modules.py:1900: datetime.now().isoformat(timespec="seconds"),`
+- `modules.py:2118: paid_at = data.get("paid_at") or datetime.now().isoformat(timespec="seconds")`
+- `modules.py:2119: verified_at = datetime.now().isoformat(timespec="seconds")`
+- `modules.py:2570: now_ts = datetime.utcnow().timestamp()`
+- `modules.py:2746: since_date = (datetime.now() - timedelta(days=30)).date().isoformat()`
+- `modules.py:2818: seed = f"{company_key}|{staff_name.strip()}|{login_key.strip()}|{datetime.now().isoformat()}|{random.randint(1000,9999)}`
+- `modules.py:2937: value = entry_date or datetime.now().date()`
+- `modules.py:3901: value=datetime.now().date(),`
+- `modules.py:3964: reference = f"JRN-{datetime.now().strftime('%Y%m%d%H%M%S')}"`
+- `modules.py:4062: depreciation_date = pd.to_datetime(as_of_date or datetime.now().date()).date()`
+- `modules.py:4481: tx_date = transaction_date.isoformat() if hasattr(transaction_date, "isoformat") else (transaction_date or datetime.now(`
+- `modules.py:4625: (datetime.now().isoformat(timespec="seconds"), level, module_name, message),`
+- `modules.py:4794: "sale_date": datetime.now().date().isoformat(),`
+- `modules.py:4795: "sale_datetime": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),`
+- `modules.py:5013: return f"SUS-{datetime.now().strftime('%Y%m%d%H%M%S')}-{uuid.uuid4().hex[:6].upper()}"`
+- `modules.py:5025: "sale_date": str(st.session_state.get(f"pos_sale_date_{company_key}") or datetime.now().date()),`
+- `modules.py:5448: return f"RET-{datetime.now().strftime('%Y%m%d%H%M%S')}-{uuid.uuid4().hex[:6].upper()}"`
 - _… 64 more_
 
 ### sqlite_placeholder_question (6)
-- `modules.py:4343: conn.execute("DELETE FROM invoice_lines WHERE invoice_id = ?", (int(invoice_id),))`
-- `modules.py:8555: suppliers = conn.execute("SELECT id, name FROM suppliers WHERE company_key = ? ORDER BY name", (company_key,)).fetchall(`
-- `modules.py:8947: row = conn.execute("SELECT contact_email, name FROM companies WHERE key = ? LIMIT 1", (company_key,)).fetchone()`
-- `modules.py:10821: company = conn.execute("SELECT * FROM companies WHERE key = ?", (company_key,)).fetchone()`
-- `modules.py:11096: company_row = conn.execute("SELECT name, barcode_input_source FROM companies WHERE key = ?", (company_key,)).fetchone()`
-- `modules.py:13081: suppliers = conn.execute("SELECT id, name FROM suppliers WHERE company_key = ? ORDER BY name", (company_key,)).fetchall(`
+- `modules.py:4351: conn.execute("DELETE FROM invoice_lines WHERE invoice_id = ?", (int(invoice_id),))`
+- `modules.py:8571: suppliers = conn.execute("SELECT id, name FROM suppliers WHERE company_key = ? ORDER BY name", (company_key,)).fetchall(`
+- `modules.py:8965: row = conn.execute("SELECT contact_email, name FROM companies WHERE key = ? LIMIT 1", (company_key,)).fetchone()`
+- `modules.py:10839: company = conn.execute("SELECT * FROM companies WHERE key = ?", (company_key,)).fetchone()`
+- `modules.py:11114: company_row = conn.execute("SELECT name, barcode_input_source FROM companies WHERE key = ?", (company_key,)).fetchone()`
+- `modules.py:13105: suppliers = conn.execute("SELECT id, name FROM suppliers WHERE company_key = ? ORDER BY name", (company_key,)).fetchall(`
 
 ### on_conflict (2)
-- `modules.py:1753: ON CONFLICT(reference) DO UPDATE SET`
-- `modules.py:3269: ON CONFLICT(company_key, period_label) DO UPDATE SET`
+- `modules.py:1757: ON CONFLICT(reference) DO UPDATE SET`
+- `modules.py:3273: ON CONFLICT(company_key, period_label) DO UPDATE SET`
 
 ### integer_boolean (1)
-- `modules.py:16865: is_active=1 if is_active else 0,`
+- `modules.py:16898: is_active=1 if is_active else 0,`
 
 ## `financials.py`
 
 ### datetime_now_utc (14)
-- `financials.py:244: start_date = st.date_input("Start Date", value=datetime.now().date().replace(day=1), key=f"{prefix}_start")`
-- `financials.py:246: end_date = st.date_input("End Date", value=datetime.now().date(), key=f"{prefix}_end")`
-- `financials.py:496: period_date = st.date_input("Accounting Period", value=datetime.now().date().replace(day=1), key=f"period_date_{company_`
-- `financials.py:512: tx_date = st.date_input("Transaction Date", value=datetime.now().date(), key=f"manual_tx_date_{company_key}")`
-- `financials.py:611: invoice_date = st.date_input("Invoice Date", value=datetime.now().date(), key=f"invoice_date_{company_key}")`
-- `financials.py:639: (company_key, customer_id, f"INV-{datetime.now().strftime('%Y%m%d%H%M%S')}", invoice_date.isoformat(), invoice_date.isof`
-- `financials.py:715: bill_date = st.date_input("Bill Date", value=datetime.now().date(), key=f"bill_date_{company_key}")`
-- `financials.py:742: f"BILL-{datetime.now().strftime('%Y%m%d%H%M%S')}",`
-- `financials.py:809: payment_date = st.date_input("Payment Date", value=datetime.now().date())`
-- `financials.py:980: invoice_date = st.date_input("Invoice Date", value=datetime.now().date(), key=f"invoice_date_{company_key}")`
-- `financials.py:1020: f"INV-{datetime.now().strftime('%Y%m%d%H%M%S')}",`
-- `financials.py:1126: payment_date = st.date_input("Payment Date", value=datetime.now().date(), key=f"receive_payment_date_{company_key}")`
-- `financials.py:1237: payment_date = st.date_input("Payment Date", value=datetime.now().date(), key=f"supplier_payment_date_{company_key}")`
-- `financials.py:1856: closing_date = st.date_input("Closing Date", value=datetime.now().date(), key=f"year_end_close_{company_key}")`
+- `financials.py:246: start_date = st.date_input("Start Date", value=datetime.now().date().replace(day=1), key=f"{prefix}_start")`
+- `financials.py:248: end_date = st.date_input("End Date", value=datetime.now().date(), key=f"{prefix}_end")`
+- `financials.py:498: period_date = st.date_input("Accounting Period", value=datetime.now().date().replace(day=1), key=f"period_date_{company_`
+- `financials.py:514: tx_date = st.date_input("Transaction Date", value=datetime.now().date(), key=f"manual_tx_date_{company_key}")`
+- `financials.py:613: invoice_date = st.date_input("Invoice Date", value=datetime.now().date(), key=f"invoice_date_{company_key}")`
+- `financials.py:643: (company_key, customer_id, f"INV-{datetime.now().strftime('%Y%m%d%H%M%S')}", invoice_date.isoformat(), invoice_date.isof`
+- `financials.py:720: bill_date = st.date_input("Bill Date", value=datetime.now().date(), key=f"bill_date_{company_key}")`
+- `financials.py:749: f"BILL-{datetime.now().strftime('%Y%m%d%H%M%S')}",`
+- `financials.py:817: payment_date = st.date_input("Payment Date", value=datetime.now().date())`
+- `financials.py:990: invoice_date = st.date_input("Invoice Date", value=datetime.now().date(), key=f"invoice_date_{company_key}")`
+- `financials.py:1032: f"INV-{datetime.now().strftime('%Y%m%d%H%M%S')}",`
+- `financials.py:1139: payment_date = st.date_input("Payment Date", value=datetime.now().date(), key=f"receive_payment_date_{company_key}")`
+- `financials.py:1252: payment_date = st.date_input("Payment Date", value=datetime.now().date(), key=f"supplier_payment_date_{company_key}")`
+- `financials.py:1873: closing_date = st.date_input("Closing Date", value=datetime.now().date(), key=f"year_end_close_{company_key}")`
 
 ### sqlite_placeholder_question (6)
 - `financials.py:179: row = conn.execute(f"SELECT id FROM {table_name} WHERE company_key = ? AND name = ?", (company_key, name)).fetchone()`
-- `financials.py:599: customers = [row[0] for row in conn.execute("SELECT name FROM customers WHERE company_key = ? ORDER BY name", (company_k`
-- `financials.py:704: suppliers = [row[0] for row in conn.execute("SELECT name FROM suppliers WHERE company_key = ? ORDER BY name", (company_k`
-- `financials.py:967: customers = [row[0] for row in conn.execute("SELECT name FROM customers WHERE company_key = ? ORDER BY name", (company_k`
-- `financials.py:1118: customers = [row[0] for row in conn.execute("SELECT name FROM customers WHERE company_key = ? ORDER BY name", (company_k`
-- `financials.py:1229: suppliers = [row[0] for row in conn.execute("SELECT name FROM suppliers WHERE company_key = ? ORDER BY name", (company_k`
+- `financials.py:601: customers = [row[0] for row in conn.execute("SELECT name FROM customers WHERE company_key = ? ORDER BY name", (company_k`
+- `financials.py:709: suppliers = [row[0] for row in conn.execute("SELECT name FROM suppliers WHERE company_key = ? ORDER BY name", (company_k`
+- `financials.py:977: customers = [row[0] for row in conn.execute("SELECT name FROM customers WHERE company_key = ? ORDER BY name", (company_k`
+- `financials.py:1131: customers = [row[0] for row in conn.execute("SELECT name FROM customers WHERE company_key = ? ORDER BY name", (company_k`
+- `financials.py:1244: suppliers = [row[0] for row in conn.execute("SELECT name FROM suppliers WHERE company_key = ? ORDER BY name", (company_k`
 
 ### insert_or_ignore (4)
-- `financials.py:570: conn.execute("INSERT OR IGNORE INTO customers (company_key, name, email, phone, currency) VALUES (?, ?, ?, ?, 'GHS')", (`
-- `financials.py:587: conn.execute("INSERT OR IGNORE INTO suppliers (company_key, name, email, phone, currency) VALUES (?, ?, ?, ?, 'GHS')", (`
-- `financials.py:902: "INSERT OR IGNORE INTO customers (company_key, name, email, phone, currency) VALUES (?, ?, ?, ?, 'GHS')",`
-- `financials.py:941: "INSERT OR IGNORE INTO suppliers (company_key, name, email, phone, currency) VALUES (?, ?, ?, ?, 'GHS')",`
+- `financials.py:572: conn.execute("INSERT OR IGNORE INTO customers (company_key, name, email, phone, currency) VALUES (?, ?, ?, ?, 'GHS')", (`
+- `financials.py:589: conn.execute("INSERT OR IGNORE INTO suppliers (company_key, name, email, phone, currency) VALUES (?, ?, ?, ?, 'GHS')", (`
+- `financials.py:912: "INSERT OR IGNORE INTO customers (company_key, name, email, phone, currency) VALUES (?, ?, ?, ?, 'GHS')",`
+- `financials.py:951: "INSERT OR IGNORE INTO suppliers (company_key, name, email, phone, currency) VALUES (?, ?, ?, ?, 'GHS')",`
 
 ## `app.py`
 
@@ -1741,31 +1773,31 @@ Scoped files: `database.py`, `modules.py`, `financials.py`, `app.py`, `accountin
 ## `accounting_engine.py`
 
 ### datetime_now_utc (14)
-- `accounting_engine.py:239: current_period = _period_label_for_date(as_of_date or datetime.now().date())`
-- `accounting_engine.py:1453: reversal_date = _resolve_date(reversal_date or datetime.now().date())`
-- `accounting_engine.py:1460: reference = f"REV-{entry_id}-{datetime.now().strftime('%Y%m%d%H%M%S')}"`
-- `accounting_engine.py:1514: reversal_date=voided_at or datetime.now().date(),`
-- `accounting_engine.py:1519: voided_timestamp = _resolve_date(voided_at or datetime.now().date())`
-- `accounting_engine.py:1701: today = _resolve_date(run_date or datetime.now().date())`
-- `accounting_engine.py:1724: entry_date = _resolve_date(run_date or row["next_run_date"] or datetime.now().date())`
-- `accounting_engine.py:1730: reference=f"REC-{row['id']}-{datetime.now().strftime('%Y%m%d%H%M%S')}",`
-- `accounting_engine.py:1743: (datetime.now().isoformat(), next_run.isoformat(), row["id"]),`
-- `accounting_engine.py:1885: period_value = str(year_month or datetime.now().strftime("%Y-%m")).strip()`
-- `accounting_engine.py:1952: current_month = datetime.now().strftime("%Y-%m")`
-- `accounting_engine.py:2231: report_date = pd.Timestamp(as_of_date or datetime.now().date())`
-- `accounting_engine.py:2421: report_date = pd.Timestamp(as_of_date or datetime.now().date())`
-- `accounting_engine.py:2718: report_end_date = end_date or datetime.now().date()`
+- `accounting_engine.py:241: current_period = _period_label_for_date(as_of_date or datetime.now().date())`
+- `accounting_engine.py:1459: reversal_date = _resolve_date(reversal_date or datetime.now().date())`
+- `accounting_engine.py:1466: reference = f"REV-{entry_id}-{datetime.now().strftime('%Y%m%d%H%M%S')}"`
+- `accounting_engine.py:1520: reversal_date=voided_at or datetime.now().date(),`
+- `accounting_engine.py:1525: voided_timestamp = _resolve_date(voided_at or datetime.now().date())`
+- `accounting_engine.py:1713: today = _resolve_date(run_date or datetime.now().date())`
+- `accounting_engine.py:1736: entry_date = _resolve_date(run_date or row["next_run_date"] or datetime.now().date())`
+- `accounting_engine.py:1742: reference=f"REC-{row['id']}-{datetime.now().strftime('%Y%m%d%H%M%S')}",`
+- `accounting_engine.py:1755: (datetime.now().isoformat(), next_run.isoformat(), row["id"]),`
+- `accounting_engine.py:1897: period_value = str(year_month or datetime.now().strftime("%Y-%m")).strip()`
+- `accounting_engine.py:1964: current_month = datetime.now().strftime("%Y-%m")`
+- `accounting_engine.py:2243: report_date = pd.Timestamp(as_of_date or datetime.now().date())`
+- `accounting_engine.py:2433: report_date = pd.Timestamp(as_of_date or datetime.now().date())`
+- `accounting_engine.py:2730: report_end_date = end_date or datetime.now().date()`
 
 ### sqlite_placeholder_question (7)
-- `accounting_engine.py:1443: original = conn.execute("SELECT * FROM journal_entries WHERE id = ?", (entry_id,)).fetchone()`
-- `accounting_engine.py:1455: for row in conn.execute("SELECT account_id, debit, credit FROM journal_lines WHERE entry_id = ?", (entry_id,)):`
-- `accounting_engine.py:1505: original = conn.execute("SELECT * FROM journal_entries WHERE id = ?", (entry_id,)).fetchone()`
-- `accounting_engine.py:1549: payment = conn.execute("SELECT * FROM payments WHERE id = ?", (payment_id,)).fetchone()`
-- `accounting_engine.py:1554: invoice = conn.execute("SELECT amount FROM invoices WHERE id = ?", (invoice_id,)).fetchone()`
-- `accounting_engine.py:1561: bill = conn.execute("SELECT amount FROM bills WHERE id = ?", (bill_id,)).fetchone()`
-- `accounting_engine.py:1638: row = conn.execute("SELECT * FROM bank_accounts WHERE id = ?", (account_id,)).fetchone()`
+- `accounting_engine.py:1449: original = conn.execute("SELECT * FROM journal_entries WHERE id = ?", (entry_id,)).fetchone()`
+- `accounting_engine.py:1461: for row in conn.execute("SELECT account_id, debit, credit FROM journal_lines WHERE entry_id = ?", (entry_id,)):`
+- `accounting_engine.py:1511: original = conn.execute("SELECT * FROM journal_entries WHERE id = ?", (entry_id,)).fetchone()`
+- `accounting_engine.py:1555: payment = conn.execute("SELECT * FROM payments WHERE id = ?", (payment_id,)).fetchone()`
+- `accounting_engine.py:1560: invoice = conn.execute("SELECT amount FROM invoices WHERE id = ?", (invoice_id,)).fetchone()`
+- `accounting_engine.py:1567: bill = conn.execute("SELECT amount FROM bills WHERE id = ?", (bill_id,)).fetchone()`
+- `accounting_engine.py:1648: row = conn.execute("SELECT * FROM bank_accounts WHERE id = ?", (account_id,)).fetchone()`
 
 ### integer_boolean (3)
-- `accounting_engine.py:1521: "UPDATE journal_entries SET is_voided = 1, voided_at = ?, voided_by = ?, approval_status = 'Voided' WHERE id = ?",`
-- `accounting_engine.py:1702: query = "SELECT * FROM recurring_transactions WHERE is_active = 1 AND date(next_run_date) <= date(?)"`
-- `accounting_engine.py:1705: query = "SELECT * FROM recurring_transactions WHERE is_active = 1 AND company_key = ? AND date(next_run_date) <= date(?)`
+- `accounting_engine.py:1527: "UPDATE journal_entries SET is_voided = 1, voided_at = ?, voided_by = ?, approval_status = 'Voided' WHERE id = ?",`
+- `accounting_engine.py:1714: query = "SELECT * FROM recurring_transactions WHERE is_active = 1 AND date(next_run_date) <= date(?)"`
+- `accounting_engine.py:1717: query = "SELECT * FROM recurring_transactions WHERE is_active = 1 AND company_key = ? AND date(next_run_date) <= date(?)`
