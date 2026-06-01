@@ -1,6 +1,6 @@
 # Migration Integrity Summary
 
-**Audited at:** 2026-05-31 21:50:57 UTC
+**Audited at:** 2026-06-01 11:04:25 UTC
 **Database:** `D:\Emma\My AccountingApp\data\eka_enterprise_v3.db`
 **Database size:** 671,744 bytes
 
@@ -20,7 +20,7 @@ This read-only audit scanned the active SQLite database for migration blockers a
 | Users | GREEN |
 | Journals | GREEN |
 | POS | YELLOW |
-| Inventory | YELLOW |
+| Inventory | GREEN |
 | AR/AP | YELLOW |
 | Branch Governance | GREEN |
 
@@ -31,7 +31,6 @@ This read-only audit scanned the active SQLite database for migration blockers a
 ## Top Warnings
 
 - **sales_without_branch_id:** 8 (MEDIUM)
-- **invalid_expiry_dates:** 2 (MEDIUM)
 - **missing_manager_user_id:** 2 (LOW)
 - **payments_without_source_reference:** 1 (LOW)
 
@@ -39,7 +38,7 @@ This read-only audit scanned the active SQLite database for migration blockers a
 
 - `accounting_periods`: 0
 - `accounts_payable`: 0
-- `audit_logs`: 92
+- `audit_logs`: 93
 - `bank_accounts`: 0
 - `bill_lines`: 0
 - `bills`: 0
@@ -91,12 +90,12 @@ This read-only audit scanned the active SQLite database for migration blockers a
 
 ## Cleanup Readiness (Phase 5B.3)
 
-**Plan generated:** 2026-05-31 22:56:15 UTC
+**Plan generated:** 2026-06-01 11:04:26 UTC
 
-- Warning rows analyzed: **13**
+- Warning rows analyzed: **11**
 - Safe to auto-fix later: **1**
 - Manual decision required: **10**
-- No action needed (false positive / already valid): **2**
+- No action needed (false positive / already valid): **0**
 
 Detailed row-level plan: `reports/migration_cleanup_plan.md`
 

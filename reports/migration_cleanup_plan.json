@@ -1,0 +1,224 @@
+{
+  "generated_at": "2026-06-01 11:04:26 UTC",
+  "database_path": "D:\\Emma\\My AccountingApp\\data\\eka_enterprise_v3.db",
+  "pos_missing_branch_id": [
+    {
+      "id": 1,
+      "table": "pos_sales",
+      "company_key": "ADMIN-PERFECTO-123",
+      "branch_id": null,
+      "label": "PERFECTO PREMIUM / receipt POS-20260507103918",
+      "current_values": {
+        "branch_id": "",
+        "receipt_number": "POS-20260507103918",
+        "cashier": "Master Admin",
+        "sale_date": "2026-05-07"
+      },
+      "proposed_values": {},
+      "risk": "MEDIUM",
+      "auto_fix_safe": false,
+      "manual_required": true,
+      "reason": "Multiple active branches (2): KOFORIDUA (ADMIN-PERFECTO-123-koforidua), KUMASI (ADMIN-PERFECTO-123-kumasi). Cashier 'Master Admin' is not branch-scoped.",
+      "proposed_sql": "-- manual review required; no auto SQL proposed"
+    },
+    {
+      "id": 2,
+      "table": "pos_sales",
+      "company_key": "ADMIN-PERFECTO-123",
+      "branch_id": null,
+      "label": "PERFECTO PREMIUM / receipt POS-20260520135510",
+      "current_values": {
+        "branch_id": "",
+        "receipt_number": "POS-20260520135510",
+        "cashier": "Master Admin",
+        "sale_date": "2026-05-20"
+      },
+      "proposed_values": {},
+      "risk": "MEDIUM",
+      "auto_fix_safe": false,
+      "manual_required": true,
+      "reason": "Multiple active branches (2): KOFORIDUA (ADMIN-PERFECTO-123-koforidua), KUMASI (ADMIN-PERFECTO-123-kumasi). Cashier 'Master Admin' is not branch-scoped.",
+      "proposed_sql": "-- manual review required; no auto SQL proposed"
+    },
+    {
+      "id": 3,
+      "table": "pos_sales",
+      "company_key": "ADMIN-PERFECTO-123",
+      "branch_id": null,
+      "label": "PERFECTO PREMIUM / receipt POS-20260520155403",
+      "current_values": {
+        "branch_id": "",
+        "receipt_number": "POS-20260520155403",
+        "cashier": "Master Admin",
+        "sale_date": "2026-05-20"
+      },
+      "proposed_values": {},
+      "risk": "MEDIUM",
+      "auto_fix_safe": false,
+      "manual_required": true,
+      "reason": "Multiple active branches (2): KOFORIDUA (ADMIN-PERFECTO-123-koforidua), KUMASI (ADMIN-PERFECTO-123-kumasi). Cashier 'Master Admin' is not branch-scoped.",
+      "proposed_sql": "-- manual review required; no auto SQL proposed"
+    },
+    {
+      "id": 4,
+      "table": "pos_sales",
+      "company_key": "ADMIN-PERFECTO-123",
+      "branch_id": null,
+      "label": "PERFECTO PREMIUM / receipt POS-20260523232118",
+      "current_values": {
+        "branch_id": "",
+        "receipt_number": "POS-20260523232118",
+        "cashier": "Master Admin",
+        "sale_date": "2026-05-23"
+      },
+      "proposed_values": {},
+      "risk": "MEDIUM",
+      "auto_fix_safe": false,
+      "manual_required": true,
+      "reason": "Multiple active branches (2): KOFORIDUA (ADMIN-PERFECTO-123-koforidua), KUMASI (ADMIN-PERFECTO-123-kumasi). Cashier 'Master Admin' is not branch-scoped.",
+      "proposed_sql": "-- manual review required; no auto SQL proposed"
+    },
+    {
+      "id": 5,
+      "table": "pos_sales",
+      "company_key": "ADMIN-PERFECTO-123",
+      "branch_id": null,
+      "label": "PERFECTO PREMIUM / receipt POS-20260526234318",
+      "current_values": {
+        "branch_id": "",
+        "receipt_number": "POS-20260526234318",
+        "cashier": "Master Admin",
+        "sale_date": "2026-05-26"
+      },
+      "proposed_values": {},
+      "risk": "MEDIUM",
+      "auto_fix_safe": false,
+      "manual_required": true,
+      "reason": "Multiple active branches (2): KOFORIDUA (ADMIN-PERFECTO-123-koforidua), KUMASI (ADMIN-PERFECTO-123-kumasi). Cashier 'Master Admin' is not branch-scoped.",
+      "proposed_sql": "-- manual review required; no auto SQL proposed"
+    },
+    {
+      "id": 6,
+      "table": "pos_sales",
+      "company_key": "ADMIN-PERFECTO-123",
+      "branch_id": null,
+      "label": "PERFECTO PREMIUM / receipt POS-20260527122525",
+      "current_values": {
+        "branch_id": "",
+        "receipt_number": "POS-20260527122525",
+        "cashier": "Master Admin",
+        "sale_date": "2026-05-27"
+      },
+      "proposed_values": {},
+      "risk": "MEDIUM",
+      "auto_fix_safe": false,
+      "manual_required": true,
+      "reason": "Multiple active branches (2): KOFORIDUA (ADMIN-PERFECTO-123-koforidua), KUMASI (ADMIN-PERFECTO-123-kumasi). Cashier 'Master Admin' is not branch-scoped.",
+      "proposed_sql": "-- manual review required; no auto SQL proposed"
+    },
+    {
+      "id": 7,
+      "table": "pos_sales",
+      "company_key": "ADMIN-PERFECTO-123",
+      "branch_id": null,
+      "label": "PERFECTO PREMIUM / receipt POS-20260527144853",
+      "current_values": {
+        "branch_id": "",
+        "receipt_number": "POS-20260527144853",
+        "cashier": "Master Admin",
+        "sale_date": "2026-05-27"
+      },
+      "proposed_values": {},
+      "risk": "MEDIUM",
+      "auto_fix_safe": false,
+      "manual_required": true,
+      "reason": "Multiple active branches (2): KOFORIDUA (ADMIN-PERFECTO-123-koforidua), KUMASI (ADMIN-PERFECTO-123-kumasi). Cashier 'Master Admin' is not branch-scoped.",
+      "proposed_sql": "-- manual review required; no auto SQL proposed"
+    },
+    {
+      "id": 8,
+      "table": "pos_sales",
+      "company_key": "ADMIN-PERFECTO-123",
+      "branch_id": null,
+      "label": "PERFECTO PREMIUM / receipt POS-20260527145115",
+      "current_values": {
+        "branch_id": "",
+        "receipt_number": "POS-20260527145115",
+        "cashier": "Master Admin",
+        "sale_date": "2026-05-27"
+      },
+      "proposed_values": {},
+      "risk": "MEDIUM",
+      "auto_fix_safe": false,
+      "manual_required": true,
+      "reason": "Multiple active branches (2): KOFORIDUA (ADMIN-PERFECTO-123-koforidua), KUMASI (ADMIN-PERFECTO-123-kumasi). Cashier 'Master Admin' is not branch-scoped.",
+      "proposed_sql": "-- manual review required; no auto SQL proposed"
+    }
+  ],
+  "missing_manager_user_id": [
+    {
+      "id": "ADMIN-PERFECTO-123-koforidua",
+      "table": "branches",
+      "company_key": "ADMIN-PERFECTO-123",
+      "branch_id": "ADMIN-PERFECTO-123-koforidua",
+      "label": "KOFORIDUA (ADMIN-PERFECTO-123-koforidua)",
+      "current_values": {
+        "branch_manager": "KIN",
+        "manager_user_id": null
+      },
+      "proposed_values": {},
+      "risk": "LOW",
+      "auto_fix_safe": false,
+      "manual_required": true,
+      "reason": "No user match for branch_manager 'KIN'. Branch staff: JADON (Staff).",
+      "proposed_sql": "-- manual review required"
+    },
+    {
+      "id": "ADMIN-PERFECTO-123-kumasi",
+      "table": "branches",
+      "company_key": "ADMIN-PERFECTO-123",
+      "branch_id": "ADMIN-PERFECTO-123-kumasi",
+      "label": "KUMASI (ADMIN-PERFECTO-123-kumasi)",
+      "current_values": {
+        "branch_manager": "BEATRICE",
+        "manager_user_id": null
+      },
+      "proposed_values": {
+        "manager_user_id": null
+      },
+      "risk": "LOW",
+      "auto_fix_safe": false,
+      "manual_required": true,
+      "reason": "Matched by name only; manager_user_id column requires users.user_id.",
+      "proposed_sql": "-- manual: assign users.user_id for matched user before branch manager link"
+    }
+  ],
+  "payments_without_reference": [
+    {
+      "id": 4,
+      "table": "payments",
+      "company_key": "ADMIN-BELINDA-123",
+      "branch_id": null,
+      "label": "BELINDA AND DAUGHTERS / Customer Receipt GHS 50000.00 on 2026-04-27",
+      "current_values": {
+        "invoice_id": null,
+        "bill_id": null,
+        "customer_id": null,
+        "supplier_id": null,
+        "reference": "",
+        "payment_type": "Customer Receipt",
+        "amount": 50000.0
+      },
+      "proposed_values": {
+        "customer_id": 2,
+        "reference": "Customer receipt - BOA"
+      },
+      "risk": "MEDIUM",
+      "auto_fix_safe": true,
+      "manual_required": false,
+      "reason": "Journal #7: Customer receipt - BOA Matched customer 'BOA' (id=2) from journal text.",
+      "proposed_sql": "UPDATE payments SET customer_id = 2, reference = 'Customer receipt - BOA' WHERE id = 4 AND company_key = 'ADMIN-BELINDA-123';"
+    }
+  ],
+  "invalid_expiry_dates": []
+}

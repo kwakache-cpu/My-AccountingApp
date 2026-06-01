@@ -591,7 +591,7 @@ def run_audit(db_path: Path):
                 """
                 SELECT COUNT(*) FROM inventory
                 WHERE expiry_date IS NOT NULL AND TRIM(expiry_date) != ''
-                  AND expiry_date NOT GLOB '____-__-__'
+                  AND expiry_date NOT GLOB '????-??-??'
                 """,
                 missing_table="inventory",
             )

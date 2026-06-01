@@ -1,6 +1,6 @@
 # Migration Integrity Audit (Detailed)
 
-**Audited at:** 2026-05-31 21:50:57 UTC
+**Audited at:** 2026-06-01 11:04:25 UTC
 **Database:** `D:\Emma\My AccountingApp\data\eka_enterprise_v3.db`
 **Overall score:** YELLOW
 **Go/No-Go:** GO WITH WARNINGS
@@ -107,7 +107,7 @@ Note: Expected when sales exist but revenue journal not posted.
 
 ## Inventory
 
-**Area score:** YELLOW
+**Area score:** GREEN
 
 | Check | Count | Risk | Remediation |
 |-------|------:|------|-------------|
@@ -116,7 +116,7 @@ Note: Expected when sales exist but revenue journal not posted.
 | duplicate_barcode | 0 | MEDIUM | No action required. |
 | duplicate_item_code | 0 | MEDIUM | No action required. |
 | expired_stock_count | 2 | LOW | Informational; monitor during migration dry-run. |
-| invalid_expiry_dates | 2 | MEDIUM | Review and clean up before migration; may not block cutover. |
+| invalid_expiry_dates | 0 | MEDIUM | No action required. |
 | orphaned_stock_movements | 0 | HIGH | No action required. |
 | stock_movements_without_branch_id | 0 | MEDIUM | No action required. |
 
@@ -148,7 +148,7 @@ Note: Expected when sales exist but revenue journal not posted.
 
 - `accounting_periods` (0 rows)
 - `accounts_payable` (0 rows)
-- `audit_logs` (92 rows)
+- `audit_logs` (93 rows)
 - `bank_accounts` (0 rows)
 - `bill_lines` (0 rows)
 - `bills` (0 rows)
