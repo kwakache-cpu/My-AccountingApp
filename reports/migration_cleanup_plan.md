@@ -1,15 +1,15 @@
 # Migration Data Cleanup Plan
 
-**Generated at:** 2026-05-31 22:56:15 UTC
+**Generated at:** 2026-06-01 11:04:26 UTC
 **Database:** `D:\Emma\My AccountingApp\data\eka_enterprise_v3.db`
 **Mode:** read-only analysis (no data modified)
 
 ## Summary
 
-- **Total warning rows analyzed:** 13
+- **Total warning rows analyzed:** 11
 - **Safe to auto-fix later:** 1
 - **Manual decision required:** 10
-- **No action needed:** 2
+- **No action needed:** 0
 
 ## Cleanup Readiness
 
@@ -178,41 +178,6 @@ Migration remains **GO WITH WARNINGS** until manual items are resolved or accept
 ```
 
 
-## B. Invalid Expiry Dates
-
-### Row `inventory`.2 — OIL (002)
-
-| Field | Value |
-|-------|-------|
-| company_key | `ADMIN-PERFECTO-123` |
-| branch_id | `—` |
-| current bad value | expiry_date='2026-05-21' |
-| recommended fix | No change — date is already valid ISO YYYY-MM-DD (audit false positive from GLOB `_` pattern). |
-| risk level | **LOW** |
-| auto-fix safe | **No** |
-| manual decision needed | **No** |
-
-**Notes:** Phase 5B.2 audit used SQLite GLOB `____-__-__` where `_` is literal, not a wildcard.
-
-**Proposed SQL:** none (no change recommended)
-
-### Row `inventory`.3 — BEANS (009)
-
-| Field | Value |
-|-------|-------|
-| company_key | `ADMIN-PERFECTO-123` |
-| branch_id | `—` |
-| current bad value | expiry_date='2026-05-23' |
-| recommended fix | No change — date is already valid ISO YYYY-MM-DD (audit false positive from GLOB `_` pattern). |
-| risk level | **LOW** |
-| auto-fix safe | **No** |
-| manual decision needed | **No** |
-
-**Notes:** Phase 5B.2 audit used SQLite GLOB `____-__-__` where `_` is literal, not a wildcard.
-
-**Proposed SQL:** none (no change recommended)
-
-
 ## C. Missing manager_user_id
 
 ### Row `branches`.ADMIN-PERFECTO-123-koforidua — KOFORIDUA (ADMIN-PERFECTO-123-koforidua)
@@ -280,6 +245,6 @@ UPDATE payments SET customer_id = 2, reference = 'Customer receipt - BOA' WHERE 
 
 ## Execution Policy
 
-- Run `python scripts/plan_migration_data_cleanup.py` to preview proposed SQL.
-- `--apply` is reserved and **not implemented** in Phase 5B.3.
-- Do not execute UPDATE statements against production until a guarded apply phase is approved.
+- Run `python scripts/plan_migration_data_cleanup.py` to refresh the plan and JSON export.
+- Run `python scripts/apply_migration_data_cleanup.py --dry-run --plan reports/migration_cleanup_plan.json` to preview guarded apply.
+- Apply changes only with `scripts/apply_migration_data_cleanup.py --apply --confirm ...` (payment reference fix only).
