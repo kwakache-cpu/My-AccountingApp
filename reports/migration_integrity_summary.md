@@ -1,6 +1,6 @@
 # Migration Integrity Summary
 
-**Audited at:** 2026-06-01 11:29:02 UTC
+**Audited at:** 2026-06-01 19:46:22 UTC
 **Database:** `D:\Emma\My AccountingApp\data\eka_enterprise_v3.db`
 **Database size:** 671,744 bytes
 
@@ -38,7 +38,7 @@ This read-only audit scanned the active SQLite database for migration blockers a
 
 - `accounting_periods`: 0
 - `accounts_payable`: 0
-- `audit_logs`: 93
+- `audit_logs`: 96
 - `bank_accounts`: 0
 - `bill_lines`: 0
 - `bills`: 0
@@ -87,19 +87,6 @@ This read-only audit scanned the active SQLite database for migration blockers a
 - `transactions`: 0
 - `users`: 3
 - `vouchers`: 0
-
-## Cleanup Readiness (Phase 5B.3)
-
-**Plan generated:** 2026-06-01 11:29:02 UTC
-
-- Warning rows analyzed: **11**
-- Safe to auto-fix later: **1**
-- Manual decision required: **10**
-- No action needed (false positive / already valid): **0**
-
-Detailed row-level plan: `reports/migration_cleanup_plan.md`
-
-**Migration status after cleanup planning:** remains **GO WITH WARNINGS** until manual items are resolved.
 
 ## Go / No-Go
 

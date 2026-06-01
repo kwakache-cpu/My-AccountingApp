@@ -1275,15 +1275,17 @@ def post_journal_entry(
 
     try:
         cursor = conn.execute(
-            """
-            INSERT INTO journal_entries (
-                company_key, date, description, reference, created_by, branch_id,
-                customer_id, supplier_id, inventory_item_id, payment_id,
-                source_module, source_table, source_type, source_id,
-                source_document_type, source_document_id, approval_status
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
+            ensure_insert_sql_returning(
+                """
+                INSERT INTO journal_entries (
+                    company_key, date, description, reference, created_by, branch_id,
+                    customer_id, supplier_id, inventory_item_id, payment_id,
+                    source_module, source_table, source_type, source_id,
+                    source_document_type, source_document_id, approval_status
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """
+            ),
             (
                 company_key,
                 entry_date,
@@ -1304,7 +1306,7 @@ def post_journal_entry(
                 normalized_approval_status,
             ),
         )
-        entry_id = int(cursor.lastrowid)
+        entry_id = get_inserted_id(cursor)
         document_type = source_type or source_table or source_module or "Journal"
         conn.execute(
             """
