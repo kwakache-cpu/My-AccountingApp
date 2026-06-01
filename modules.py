@@ -5573,14 +5573,16 @@ def _process_pos_return(
             )
 
         cursor = conn.execute(
-            """
-            INSERT INTO pos_returns (
-                company_key, branch_id, original_sale_reference, return_reference,
-                pos_sale_line_id, item_id, item_name, qty_returned, unit_price,
-                refund_amount, reason, refund_method, returned_by, returned_at, status
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, 'Posted')
-            """,
+            ensure_insert_sql_returning(
+                """
+                INSERT INTO pos_returns (
+                    company_key, branch_id, original_sale_reference, return_reference,
+                    pos_sale_line_id, item_id, item_name, qty_returned, unit_price,
+                    refund_amount, reason, refund_method, returned_by, returned_at, status
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, 'Posted')
+                """
+            ),
             (
                 company_key,
                 str(branch_id or ""),
@@ -5597,7 +5599,7 @@ def _process_pos_return(
                 role,
             ),
         )
-        pos_return_id = int(cursor.lastrowid)
+        pos_return_id = get_inserted_id(cursor)
         line_description = f"POS return for {line_row['item_name']} from {sale_reference}"
         accounting_lines = [
             {"account_id": sales_returns_account_id, "debit": refund_amount, "credit": 0},

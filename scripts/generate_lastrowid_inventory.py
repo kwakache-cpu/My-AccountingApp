@@ -244,6 +244,12 @@ def render_report(entries: list[dict]) -> str:
             "| `show_payroll` | `modules.py` |",
             "| `show_fixed_assets` (acquisition insert) | `modules.py` |",
             "",
+            "## Phase 5B.10E Conversions (completed)",
+            "",
+            "| Function | File |",
+            "|----------|------|",
+            "| `_process_pos_return` (`pos_returns` insert only) | `modules.py` |",
+            "",
         ]
     )
     return "\n".join(lines)
