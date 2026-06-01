@@ -1,10 +1,12 @@
 # Migration Manual Fix Instructions
 
 **Database:** `D:\Emma\My AccountingApp\data\eka_enterprise_v3.db`  
-**Phase:** 5B.4 guarded cleanup  
+**Phase:** 5B.5 admin UI + guarded cleanup  
 **Last plan:** see `reports/migration_cleanup_plan.json`
 
-This document covers fixes that must be done manually in the application or via approved SQL after business review. Only the payment reference fix may be applied through the guarded script.
+Use **System Configuration → Migration Cleanup Review** (Dev / Master Admin only) for in-app fixes, or follow the steps below.
+
+This document covers fixes that must be done manually in the application or via approved SQL after business review. The payment reference fix may be applied in-app or through the guarded CLI script.
 
 ---
 
@@ -70,7 +72,14 @@ WHERE id = 1 AND company_key = 'ADMIN-PERFECTO-123';
 **Journal #7:** “Customer receipt - BOA”  
 **Proposed fix:** `customer_id = 2` (customer BOA), `reference = 'Customer receipt - BOA'`
 
-### Dry-run (read-only)
+### In-app (recommended)
+
+1. Open **System Configuration**.
+2. Use **Migration Cleanup Review → Payment reference** tab.
+3. Confirm checkbox and type: `I confirm this payment reference fix`.
+4. Click **Apply payment fix** (creates backup automatically).
+
+### CLI dry-run (read-only)
 
 ```powershell
 python scripts/apply_migration_data_cleanup.py --dry-run --plan reports/migration_cleanup_plan.json
