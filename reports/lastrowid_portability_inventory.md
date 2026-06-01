@@ -1,10 +1,10 @@
 # lastrowid Portability Inventory
 
-**Generated at:** 2026-06-01 18:54:42 UTC
-**Total lastrowid references (app + tests, excl. .venv):** 32
-**Application code references:** 12
-**Test-only references:** 20
-**Remaining raw lastrowid (application):** 11
+**Generated at:** 2026-06-01 19:20:44 UTC
+**Total lastrowid references (app + tests, excl. .venv):** 31
+**Application code references:** 10
+**Test-only references:** 21
+**Remaining raw lastrowid (application):** 9
 
 ## Recommended Helper Usage
 
@@ -23,7 +23,7 @@ SQLite continues to use `cursor.lastrowid` via `get_inserted_id()`.
 
 ## Low-risk — setup / admin / contacts
 
-**Count:** 20
+**Count:** 21
 
 | File | Function | Line | Table | Convert now? | Snippet |
 |------|----------|-----:|-------|--------------|---------|
@@ -42,6 +42,7 @@ SQLite continues to use `cursor.lastrowid` via `get_inserted_id()`.
 | `tests/test_migration_cleanup_ui.py` | `test_payment_fix_updates_only_customer_id_and_reference` | 215 | `payments` | yes — use ensure_insert_sql_returning + get_inserted_id | `).lastrowid` |
 | `tests/test_payments_identity.py` | `test_payment_insert_sqlite_matches_lastrowid` | 69 | `unknown` | done | `self.assertEqual(self.database.get_inserted_id(cursor), cursor.lastrowid)` |
 | `tests/test_payments_identity.py` | `test_payment_insert_sqlite_matches_lastrowid` | 72 | `unknown` | yes — use ensure_insert_sql_returning + get_inserted_id | `cursor.lastrowid,` |
+| `tests/test_sales_invoice_identity.py` | `test_invoice_insert_sqlite_matches_lastrowid` | 121 | `unknown` | done | `self.assertEqual(self.database.get_inserted_id(cursor), cursor.lastrowid)` |
 | `tests/test_support.py` | `create_customer` | 109 | `unknown` | yes — use ensure_insert_sql_returning + get_inserted_id | `return int(cursor.lastrowid)` |
 | `tests/test_support.py` | `create_supplier` | 120 | `unknown` | yes — use ensure_insert_sql_returning + get_inserted_id | `return int(cursor.lastrowid)` |
 | `tests/test_support.py` | `create_invoice` | 145 | `unknown` | yes — use ensure_insert_sql_returning + get_inserted_id | `return int(cursor.lastrowid)` |
@@ -58,13 +59,11 @@ SQLite continues to use `cursor.lastrowid` via `get_inserted_id()`.
 
 ## High-risk — accounting / POS / payments / inventory
 
-**Count:** 11
+**Count:** 9
 
 | File | Function | Line | Table | Convert now? | Snippet |
 |------|----------|-----:|-------|--------------|---------|
 | `accounting_engine.py` | `post_journal_entry` | 1307 | `inventory` | no — dedicated transaction testing required | `entry_id = int(cursor.lastrowid)` |
-| `modules.py` | `show_sales_purchase` | 12897 | `invoices` | no — dedicated transaction testing required | `save_invoice_lines(conn, int(invoice_cursor.lastrowid), invoice_items)` |
-| `modules.py` | `show_sales_purchase` | 12938 | `invoices` | no — dedicated transaction testing required | `source_id=int(invoice_cursor.lastrowid),` |
 | `scripts/run_postgres_schema_compatibility_audit.py` | `<module>` | 75 | `pos_sales` | no — dedicated transaction testing required | `(r"payment_cursor\.lastrowid", "modules.py"),` |
 | `scripts/run_postgres_schema_compatibility_audit.py` | `<module>` | 88 | `payments` | no — dedicated transaction testing required | `(r"payroll_cursor\.lastrowid", "modules.py"),` |
 | `tests/test_inventory_movements.py` | `test_insert_stock_movement_record_sqlite_matches_lastrowid` | 148 | `unknown` | done | `self.assertEqual(self.database.get_inserted_id(cursor), cursor.lastrowid)` |
@@ -142,3 +141,9 @@ Details: [payments_identity_conversion_5b10c.md](payments_identity_conversion_5b
 | Function | File |
 |----------|------|
 | `_persist_pos_sale` (`pos_sales` insert only) | `modules.py` |
+
+## Phase 5B.10F-2 Conversions (completed)
+
+| Function | File |
+|----------|------|
+| `show_sales_purchase` (Sales / invoice branch only) | `modules.py` |
