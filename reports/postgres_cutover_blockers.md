@@ -1,6 +1,6 @@
 # PostgreSQL Runtime Cutover Blockers (Phase 5B.11)
 
-**Audited at:** 2026-06-01 21:15:36 UTC
+**Audited at:** 2026-06-01 22:31:34 UTC
 
 **Assumed env (not enabled in this audit):**
 ```
@@ -24,7 +24,7 @@ Analysis based on `get_connection()`, `ensure_schema()`, `get_postgres_readiness
 | **Branch governance** | **Likely** | **High risk** | Grant repair uses SQLite introspection patterns in database.py |
 | **Inventory** | **Likely** | **High risk** | `PRAGMA table_info(inventory)` in accounting_engine; movement SQL uses `?` |
 | **Reporting** | **Likely** | **High risk** | `accounting_engine` trial balance / GL use `?` and `strftime('%Y-%m', je.date)` |
-| **Auth/login** | **Partial** | **Medium risk** | User lookup SQL uses `?`; schema for `users` not ensured on Postgres |
+| **Auth/login** | **Partial** | **Medium risk** | `database.py` pre-write user/branch checks portable; `app.py` session login + user DML still `?` |
 
 ## Hard Blockers (must fix before any staging cutover)
 
@@ -41,6 +41,7 @@ Analysis based on `get_connection()`, `ensure_schema()`, `get_postgres_readiness
 
 ## Medium Risk
 
+- `database.py` user/branch **INSERT/UPDATE/DELETE** still use literal `?` (preflight SELECTs only converted in 5B.12D).
 - `INSERT OR IGNORE` in `financials.py` / `erp_migrations.py` (not using `db_insert_ignore_sql()`).
 - Accounting period reports using SQLite `strftime` in SQL.
 - INTEGER 0/1 booleans — work on Postgres but differ from native BOOLEAN.
