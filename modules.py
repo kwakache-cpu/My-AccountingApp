@@ -13328,10 +13328,12 @@ def show_banking(company_key, role):
                             conn.rollback()
                             return
                     payment_cursor = conn.execute(
-                        """
-                        INSERT INTO payments (company_key, payment_date, payment_type, customer_id, supplier_id, amount, currency, method, reference, status, approval_status, created_by)
-                        VALUES (?, ?, ?, ?, ?, ?, 'GHS', ?, ?, 'Posted', 'Posted', ?)
-                        """,
+                        ensure_insert_sql_returning(
+                            """
+                            INSERT INTO payments (company_key, payment_date, payment_type, customer_id, supplier_id, amount, currency, method, reference, status, approval_status, created_by)
+                            VALUES (?, ?, ?, ?, ?, ?, 'GHS', ?, ?, 'Posted', 'Posted', ?)
+                            """
+                        ),
                         (
                             company_key,
                             payment_date.isoformat(),
@@ -13344,7 +13346,7 @@ def show_banking(company_key, role):
                             role,
                         ),
                     )
-                    payment_id = int(payment_cursor.lastrowid)
+                    payment_id = get_inserted_id(payment_cursor)
                     document_reference = normalized_reference or f"BANK-{payment_id}"
                     audit_transaction_type = payment_type
                     audit_owner_name = normalized_owner_name
