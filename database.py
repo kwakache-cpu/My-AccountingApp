@@ -4832,11 +4832,7 @@ def _normalize_branch_type_key(branch_type_value):
 
 
 def _branch_licensing_table_exists(conn, table_name):
-    row = conn.execute(
-        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
-        (table_name,),
-    ).fetchone()
-    return bool(row)
+    return db_table_exists(conn, table_name)
 
 
 def _branch_licensing_column_exists(conn, table_name, column_name):
@@ -4929,7 +4925,8 @@ def ensure_branch_module_grants_for_branch(conn, company_key, branch_id, branch_
     ).fetchall()
     if not default_rows and resolved_type_key != "other":
         resolved_type_key = "other"
-        default_rows = conn.execute(
+        default_rows = execute_portable_query(
+            conn,
             """
             SELECT module_key, COALESCE(is_enabled, 1)
             FROM branch_type_module_defaults
@@ -5049,7 +5046,8 @@ def _fetch_company_name(conn, company_key):
     normalized_company_key = str(company_key or "").strip()
     if not normalized_company_key:
         return ""
-    row = conn.execute(
+    row = execute_portable_query(
+        conn,
         "SELECT name FROM companies WHERE key = ? LIMIT 1",
         (normalized_company_key,),
     ).fetchone()
@@ -5112,7 +5110,7 @@ def _allocate_unique_branch_code(conn, company_key, base_branch_code, exclude_br
             query += " AND branch_id != ?"
             params.append(str(exclude_branch_id).strip())
         query += " LIMIT 1"
-        conflict = conn.execute(query, tuple(params)).fetchone()
+        conflict = execute_portable_query(conn, query, tuple(params)).fetchone()
         if not conflict:
             return candidate
         candidate = f"{normalized_base}-{suffix}"
@@ -5145,11 +5143,15 @@ def _allocate_unique_branch_id(conn, base_branch_id):
     if not normalized_base:
         return ""
     candidate = normalized_base
-    if not conn.execute("SELECT 1 FROM branches WHERE branch_id = ? LIMIT 1", (candidate,)).fetchone():
+    if not execute_portable_query(
+        conn, "SELECT 1 FROM branches WHERE branch_id = ? LIMIT 1", (candidate,)
+    ).fetchone():
         return candidate
     for suffix in range(2, 1000):
         candidate = f"{normalized_base}-{suffix}"
-        if not conn.execute("SELECT 1 FROM branches WHERE branch_id = ? LIMIT 1", (candidate,)).fetchone():
+        if not execute_portable_query(
+            conn, "SELECT 1 FROM branches WHERE branch_id = ? LIMIT 1", (candidate,)
+        ).fetchone():
             return candidate
     return f"{normalized_base}-{''.join(random.choices(string.ascii_lowercase + string.digits, k=6))}"
 
@@ -5174,7 +5176,7 @@ def count_active_branches(conn, company_key, exclude_branch_id=None):
     if exclude_branch_id:
         query += " AND branch_id != ?"
         params.append(str(exclude_branch_id).strip())
-    row = conn.execute(query, tuple(params)).fetchone()
+    row = execute_portable_query(conn, query, tuple(params)).fetchone()
     if row is None:
         return 0
     if isinstance(row, sqlite3.Row):
@@ -5364,7 +5366,8 @@ def repair_branch_module_grants(conn, company_key, *, ensure_schema=True):
     normalized_company_key = str(company_key or "").strip()
     if ensure_schema:
         ensure_branch_licensing_schema_integrity(conn)
-    rows = conn.execute(
+    rows = execute_portable_query(
+        conn,
         "SELECT branch_id, branch_type FROM branches WHERE company_key = ? ORDER BY branch_name",
         (normalized_company_key,),
     ).fetchall()
@@ -5937,7 +5940,8 @@ def fetch_branch_manager_select_options(conn, company_key, branch_id, current_ma
 
 def _fetch_branch_type_default_module_keys(conn, branch_type_key):
     normalized_key = _normalize_branch_type_key(branch_type_key)
-    rows = conn.execute(
+    rows = execute_portable_query(
+        conn,
         """
         SELECT module_key
         FROM branch_type_module_defaults
@@ -5953,7 +5957,8 @@ def get_branch_enabled_modules(conn, company_key, branch_id):
     normalized_company_key = str(company_key or "").strip()
     normalized_branch_id = str(branch_id or "").strip()
     ensure_branch_licensing_schema_integrity(conn)
-    rows = conn.execute(
+    rows = execute_portable_query(
+        conn,
         """
         SELECT module_key
         FROM branch_module_grants
@@ -9030,7 +9035,8 @@ def get_audit_operations_summary(conn=None, company_key=None, limit=50):
         action_type_expr = "COALESCE(NULLIF(action_type, ''), 'other')" if "action_type" in columns else "'legacy'"
         where_clause = "WHERE company_key = ?" if company_key else ""
         params = (company_key,) if company_key else ()
-        action_rows = conn.execute(
+        action_rows = execute_portable_query(
+            conn,
             f"""
             SELECT {action_type_expr} AS action_type, COUNT(*) AS event_count
             FROM audit_logs
@@ -9040,7 +9046,8 @@ def get_audit_operations_summary(conn=None, company_key=None, limit=50):
             """,
             params,
         ).fetchall()
-        recent_rows = conn.execute(
+        recent_rows = execute_portable_query(
+            conn,
             f"""
             SELECT timestamp, company_key, user_role, action, module_name,
                    {action_type_expr} AS action_type,
@@ -9069,7 +9076,11 @@ def get_company_data(company_key):
     """Retrieves full profile for a specific license."""
     conn = get_connection()
     try:
-        return conn.execute("SELECT * FROM companies WHERE key = ?", (company_key,)).fetchone()
+        return execute_portable_query(
+            conn,
+            "SELECT * FROM companies WHERE key = ?",
+            (company_key,),
+        ).fetchone()
     finally:
         conn.close()
 
