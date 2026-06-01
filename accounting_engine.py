@@ -1570,7 +1570,9 @@ def allocate_payment(payment_id, invoice_id=None, bill_id=None, amount=None, cre
                 raise ValueError(f"Allocation amount exceeds outstanding bill balance ({outstanding:.2f}).")
 
         cursor = conn.execute(
-            "INSERT INTO payment_allocations (company_key, payment_id, invoice_id, bill_id, amount, currency, branch_id, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            ensure_insert_sql_returning(
+                "INSERT INTO payment_allocations (company_key, payment_id, invoice_id, bill_id, amount, currency, branch_id, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+            ),
             (
                 payment["company_key"],
                 payment_id,
@@ -1578,13 +1580,13 @@ def allocate_payment(payment_id, invoice_id=None, bill_id=None, amount=None, cre
                 bill_id,
                 amount,
                 payment["currency"],
-                branch_id or payment["branch_id"],
+                branch_id or (payment["branch_id"] if "branch_id" in payment.keys() else None),
                 created_by or payment["created_by"],
             ),
         )
         if owns_connection:
             conn.commit()
-        return int(cursor.lastrowid)
+        return get_inserted_id(cursor)
     except Exception:
         if owns_connection:
             conn.rollback()

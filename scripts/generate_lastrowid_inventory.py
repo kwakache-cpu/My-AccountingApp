@@ -225,6 +225,18 @@ def render_report(entries: list[dict]) -> str:
             "| `show_create_bill_page` | `modules.py` |",
             "| `show_sales_purchase` (Purchase / bill branch only) | `modules.py` |",
             "",
+            "## Phase 5B.10C Conversions (completed)",
+            "",
+            "| Function | File |",
+            "|----------|------|",
+            "| `allocate_payment` | `accounting_engine.py` |",
+            "| `show_banking` | `modules.py` |",
+            "| `show_invoice_manager` (Payments tab) | `financials.py` |",
+            "| `show_receive_payment_page` | `financials.py` |",
+            "| `show_supplier_payment_page` | `financials.py` |",
+            "",
+            "Details: [payments_identity_conversion_5b10c.md](payments_identity_conversion_5b10c.md)",
+            "",
         ]
     )
     return "\n".join(lines)

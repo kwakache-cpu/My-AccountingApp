@@ -817,11 +817,13 @@ def show_invoice_manager(company_key, role):
             payment_date = st.date_input("Payment Date", value=datetime.now().date())
             if st.form_submit_button("Save Payment") and amount > 0:
                 conn = get_connection()
-                conn.execute(
-                    "INSERT INTO payments (company_key, payment_date, payment_type, status, amount, currency, method, reference, approval_status, created_by) VALUES (?, ?, ?, ?, ?, 'GHS', ?, ?, ?, ?)",
+                payment_cursor = conn.execute(
+                    ensure_insert_sql_returning(
+                        "INSERT INTO payments (company_key, payment_date, payment_type, status, amount, currency, method, reference, approval_status, created_by) VALUES (?, ?, ?, ?, ?, 'GHS', ?, ?, ?, ?)"
+                    ),
                     (company_key, payment_date.isoformat(), payment_type, posting_state, amount, payment_method, payment_ref, posting_state, role),
                 )
-                payment_id = int(conn.execute("SELECT last_insert_rowid()").fetchone()[0])
+                payment_id = get_inserted_id(payment_cursor)
                 if posting_state == "Posted":
                     if not require_permission(
                         role,
@@ -1151,11 +1153,13 @@ def show_receive_payment_page(company_key, role):
                 (company_key, customer_name),
             ).fetchone()
             customer_id = int(row["id"]) if row else None
-            conn.execute(
-                "INSERT INTO payments (company_key, payment_date, payment_type, status, amount, currency, method, reference, approval_status, created_by) VALUES (?, ?, ?, ?, ?, 'GHS', ?, ?, ?, ?)",
+            payment_cursor = conn.execute(
+                ensure_insert_sql_returning(
+                    "INSERT INTO payments (company_key, payment_date, payment_type, status, amount, currency, method, reference, approval_status, created_by) VALUES (?, ?, ?, ?, ?, 'GHS', ?, ?, ?, ?)"
+                ),
                 (company_key, payment_date.isoformat(), "Customer Receipt", posting_state, amount, payment_method, payment_ref, posting_state, role),
             )
-            payment_id = int(conn.execute("SELECT last_insert_rowid()").fetchone()[0])
+            payment_id = get_inserted_id(payment_cursor)
             if posting_state == "Posted":
                 if not require_permission(
                     role,
@@ -1262,11 +1266,13 @@ def show_supplier_payment_page(company_key, role):
                 (company_key, supplier_name),
             ).fetchone()
             supplier_id = int(row["id"]) if row else None
-            conn.execute(
-                "INSERT INTO payments (company_key, payment_date, payment_type, status, amount, currency, method, reference, approval_status, created_by) VALUES (?, ?, ?, ?, ?, 'GHS', ?, ?, ?, ?)",
+            payment_cursor = conn.execute(
+                ensure_insert_sql_returning(
+                    "INSERT INTO payments (company_key, payment_date, payment_type, status, amount, currency, method, reference, approval_status, created_by) VALUES (?, ?, ?, ?, ?, 'GHS', ?, ?, ?, ?)"
+                ),
                 (company_key, payment_date.isoformat(), "Supplier Payment", posting_state, amount, payment_method, payment_ref, posting_state, role),
             )
-            payment_id = int(conn.execute("SELECT last_insert_rowid()").fetchone()[0])
+            payment_id = get_inserted_id(payment_cursor)
             if posting_state == "Posted":
                 if not require_permission(
                     role,
