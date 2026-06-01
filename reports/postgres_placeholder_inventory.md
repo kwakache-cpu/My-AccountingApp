@@ -1,14 +1,27 @@
-# PostgreSQL Placeholder Inventory (Phase 5B.11)
+# PostgreSQL Placeholder Inventory (Phase 5B.11 + 5B.12A)
 
-**Audited at:** 2026-06-01 20:09:00 UTC
+**Audited at:** 2026-06-01 20:46:58 UTC
 **Scope:** `database.py`, `modules.py`, `financials.py`, `accounting_engine.py`, `app.py`, `enterprise_services.py`, `erp_migrations.py`
+
+**Counts:** before 5B.12A ~**1036** → after source scan **1035** (literals remain in strings; runtime conversion via `execute_portable_query` on Postgres).
+
+### 5B.12A converted queries (read-only, `database.py`)
+
+| Location | Purpose |
+|----------|---------|
+| `collect_row_counts` | Diagnostic table existence (`sqlite_master`) |
+| `db_table_exists` | Table existence check (SQLite path) |
+| `ensure_branch_module_grants_for_branch` | Branch type + module defaults SELECT |
+| `get_company_branch_license_snapshot` | Company license limits SELECT |
+| `list_company_branches_with_grants` | Branch catalog list SELECT |
 
 ## Executive Summary
 
 | Metric | Count |
 |--------|------:|
-| Literal `?` placeholders (heuristic, excl. strings/logging) | **1032** |
+| Literal `?` placeholders (heuristic, excl. strings/logging) | **1035** |
 | `db_param_placeholder()` / `db_placeholders()` call sites | **5** |
+| `execute_portable_query()` call sites (`database.py`) | **6** |
 | Portable helper definitions | `database.py` only |
 
 **Classification legend**
@@ -22,13 +35,13 @@
 
 | File | `?` count | Helper calls | Risk | Dominant pattern |
 |------|----------:|---------------:|------|------------------|
-| `database.py` | 162 | 5 | MEDIUM | literal `?` throughout |
+| `database.py` | 165 | 5 | MEDIUM | literal `?` throughout |
 | `modules.py` | 683 | 0 | HIGH | literal `?` throughout |
 | `financials.py` | 41 | 0 | MEDIUM | literal `?` throughout |
 | `accounting_engine.py` | 128 | 0 | HIGH | literal `?` throughout |
 | `app.py` | 18 | 0 | MEDIUM | literal `?` throughout |
 | `enterprise_services.py` | 0 | 0 | LOW | mixed helpers + literals |
-| `erp_migrations.py` | 4 | 0 | MEDIUM | literal `?` + `INSERT OR IGNORE` |
+| `erp_migrations.py` | 0 | 0 | LOW | mixed helpers + literals |
 
 ## Detailed Findings by File
 

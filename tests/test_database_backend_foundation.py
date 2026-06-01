@@ -50,8 +50,10 @@ class DatabaseBackendFoundationTests(ERPIsolatedTestCase):
             self.assertIn("DATABASE_URL is not configured.", validation["reasons"])
 
     def test_sql_placeholder_helpers_are_backend_aware(self):
+        self.assertEqual(self.database.db_placeholder(backend="sqlite"), "?")
         self.assertEqual(self.database.db_param_placeholder(1, backend="sqlite"), "?")
         self.assertEqual(self.database.db_placeholders(3, backend="sqlite"), "?, ?, ?")
+        self.assertEqual(self.database.db_placeholder(backend="postgres"), "%s")
         self.assertEqual(self.database.db_param_placeholder(2, backend="postgres"), "%s")
         self.assertEqual(self.database.db_placeholders(3, backend="postgres"), "%s, %s, %s")
 

@@ -38,7 +38,8 @@ except Exception as exc:
         counts = {}
         for table_name in table_names:
             try:
-                row = conn.execute(
+                row = execute_portable_query(
+                    conn,
                     "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
                     (table_name,),
                 ).fetchone()
@@ -1231,10 +1232,100 @@ def db_param_placeholder(index=1, backend=None):
     return "?"
 
 
+def db_placeholder(backend=None):
+    """Return the positional placeholder token for the active or given backend (`?` or `%s`)."""
+    return db_param_placeholder(1, backend=backend)
+
+
 def db_placeholders(count, backend=None):
     normalized_count = max(int(count or 0), 0)
-    placeholder = db_param_placeholder(1, backend=backend)
+    placeholder = db_placeholder(backend=backend)
     return ", ".join([placeholder] * normalized_count)
+
+
+class PlaceholderConversionError(ValueError):
+    """Raised when automatic `?` → `%s` conversion is unsafe for the given SQL."""
+
+
+def sql_for_backend(sqlite_sql, postgres_sql=None, backend=None):
+    """
+    Return backend-appropriate SQL.
+    When backend is postgres and postgres_sql is provided, return postgres_sql; otherwise sqlite_sql.
+    """
+    backend = _normalize_db_backend(backend or get_active_db_backend())
+    if backend == "postgres" and postgres_sql is not None:
+        return str(postgres_sql)
+    return str(sqlite_sql or "")
+
+
+def convert_placeholders_for_backend(sql, backend=None, *, strict_quoted_literals=True):
+    """
+    Convert SQLite `?` placeholders to PostgreSQL `%s` outside quoted string literals.
+
+    Limitation: does not parse SQL comments (`--`, `/* */`) or dialect-specific escapes.
+    For complex SQL, pass explicit `postgres_sql` via `sql_for_backend()` instead.
+    When `strict_quoted_literals` is True and a `?` appears inside a quoted literal, raises
+    PlaceholderConversionError so callers do not silently corrupt string constants.
+    """
+    backend = _normalize_db_backend(backend or get_active_db_backend())
+    normalized = str(sql or "")
+    if backend != "postgres" or "?" not in normalized:
+        return normalized
+
+    in_string = None
+    converted = []
+    question_mark_outside_literals = 0
+    question_mark_inside_literals = 0
+    index = 0
+    while index < len(normalized):
+        char = normalized[index]
+        if in_string:
+            if char == in_string and (index == 0 or normalized[index - 1] != "\\"):
+                in_string = None
+            elif char == "?":
+                question_mark_inside_literals += 1
+            converted.append(char)
+            index += 1
+            continue
+        if char in ("'", '"'):
+            in_string = char
+            converted.append(char)
+            index += 1
+            continue
+        if char == "?":
+            question_mark_outside_literals += 1
+            converted.append("%s")
+            index += 1
+            continue
+        converted.append(char)
+        index += 1
+
+    if (
+        strict_quoted_literals
+        and question_mark_inside_literals
+        and question_mark_outside_literals == 0
+    ):
+        raise PlaceholderConversionError(
+            "SQL contains only quoted '?' characters and no bind placeholders; use sql_for_backend() with an "
+            "explicit postgres_sql or rewrite the query instead of convert_placeholders_for_backend()."
+        )
+    return "".join(converted)
+
+
+def execute_portable_query(conn, sql, params=(), backend=None):
+    """
+    Execute SQL using backend-appropriate placeholder syntax.
+    On PostgreSQL, converts `?` to `%s` when safe; SQLite receives the original SQL unchanged.
+    """
+    if conn is None:
+        raise ValueError("A database connection is required for execute_portable_query().")
+    backend = _normalize_db_backend(backend or get_active_db_backend())
+    executable_sql = (
+        convert_placeholders_for_backend(sql, backend=backend)
+        if backend == "postgres"
+        else str(sql or "")
+    )
+    return conn.execute(executable_sql, params)
 
 
 def insert_returning_id_sql(table_name, columns, backend=None, returning_column="id"):
@@ -1346,7 +1437,11 @@ def db_table_exists(conn, table_name):
         ).fetchone()
         return bool(row[0] if row else False)
     return bool(
-        conn.execute("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?", (table_name,)).fetchone()
+        execute_portable_query(
+            conn,
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
+            (table_name,),
+        ).fetchone()
     )
 
 
@@ -4814,14 +4909,16 @@ def ensure_branch_module_grants_for_branch(conn, company_key, branch_id, branch_
         ensure_branch_licensing_schema_integrity(conn)
     resolved_type_key = _normalize_branch_type_key(branch_type_key)
     if not branch_type_key:
-        branch_row = conn.execute(
+        branch_row = execute_portable_query(
+            conn,
             "SELECT branch_type FROM branches WHERE company_key = ? AND branch_id = ?",
             (normalized_company_key, normalized_branch_id),
         ).fetchone()
         if branch_row is not None:
             resolved_type_key = _normalize_branch_type_key(branch_row[0])
 
-    default_rows = conn.execute(
+    default_rows = execute_portable_query(
+        conn,
         """
         SELECT module_key, COALESCE(is_enabled, 1)
         FROM branch_type_module_defaults
@@ -5089,7 +5186,8 @@ def get_company_branch_license_snapshot(conn, company_key, *, ensure_schema=True
     normalized_company_key = str(company_key or "").strip()
     if ensure_schema:
         ensure_branch_licensing_schema_integrity(conn)
-    row = conn.execute(
+    row = execute_portable_query(
+        conn,
         """
         SELECT COALESCE(max_branches, 1), COALESCE(number_of_branches, 1)
         FROM companies
@@ -5175,7 +5273,8 @@ def get_branch_type_catalog(conn):
 def list_company_branches_with_grants(conn, company_key):
     normalized_company_key = str(company_key or "").strip()
     ensure_branch_licensing_schema_integrity(conn)
-    rows = conn.execute(
+    rows = execute_portable_query(
+        conn,
         """
         SELECT
             b.branch_id,
