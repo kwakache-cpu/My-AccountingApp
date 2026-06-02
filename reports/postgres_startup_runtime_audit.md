@@ -5,7 +5,7 @@ Scope: startup/runtime backend selection paths only:
 - `database.py`: `startup_database()`, `get_connection()`, backend selectors, runtime enablement checks, SQLite/PostgreSQL openers, lightweight integrity/startup call points.
 - `app.py`: database startup and initialization calls in `main()`.
 
-Runtime code was not changed.
+Updated after Phase 5B.13B: a backend-aware startup gate now blocks enabled PostgreSQL runtime before SQLite-only schema/recovery paths run. PostgreSQL schema deployment is still not implemented.
 
 ## Key Findings
 
@@ -13,10 +13,10 @@ Runtime code was not changed.
 |---|---|---|
 | Backend selection | `get_active_db_backend()` returns `postgres` only when configured backend is PostgreSQL, runtime flag is enabled, and `DATABASE_URL` exists. Otherwise it silently returns `sqlite`. | MEDIUM |
 | Connection factory | `get_connection()` is backend-aware and can call `_open_postgres_connection()` when PostgreSQL is fully enabled. | LOW |
-| App startup order | `app.py` calls `ensure_schema()` before `startup_database()`. `ensure_schema()` opens SQLite directly and runs SQLite PRAGMA/ALTER/schema integrity logic. | CRITICAL |
-| Canonical startup | `startup_database()` is SQLite-file first: it calls `_ensure_local_db_file()`, validates `DB_PATH`, opens `_open_sqlite_connection()`, runs SQLite readiness checks, and later opens SQLite again for migrations. | CRITICAL |
+| App startup order | `app.py` now checks backend diagnostics before `ensure_schema()` and only runs `ensure_schema()` on the SQLite path. | MEDIUM |
+| Canonical startup | `startup_database()` now blocks active PostgreSQL runtime before SQLite-file bootstrap/recovery logic. SQLite remains the normal path. | HIGH |
 | Readiness reporting | `get_database_health_snapshot()` and `is_database_ready_for_production()` are SQLite database-file readiness checks, not backend-neutral health checks. | CRITICAL |
-| PostgreSQL connection | `_open_postgres_connection()` can create a wrapped psycopg/psycopg2 connection and enforce `sslmode=require`. It is not used by `startup_database()`. | HIGH |
+| PostgreSQL connection | `_open_postgres_connection()` can create a wrapped psycopg/psycopg2 connection and enforce `sslmode=require`; startup intentionally does not reach it until PostgreSQL schema deployment exists. | HIGH |
 | Lightweight checks | `_run_lightweight_integrity_checks()` calls SQLite DDL/bootstrap helpers, including `ensure_schema_integrity()`, `_ensure_database_identity_table()`, `_ensure_app_compatibility_tables()`, and schema manifest diagnostics. | CRITICAL |
 
 ## 1. What Happens Today When DB_BACKEND=sqlite?
@@ -53,22 +53,21 @@ Backend selection becomes PostgreSQL-aware:
 - `validate_postgres_runtime_enabled()` can return `ok=True` if a PostgreSQL driver is installed.
 - Direct calls to `get_connection()` can use `_open_postgres_connection()`.
 
-However, application startup does not become PostgreSQL-safe:
+Application startup now fails safe:
 
-1. `app.py` calls `ensure_schema()` before `startup_database()`.
-2. `ensure_schema()` ignores `get_connection()` and calls `_open_sqlite_connection()` directly.
-3. `startup_database()` also ignores active backend selection and starts by calling `_ensure_local_db_file()`, `is_database_valid(DB_PATH)`, `get_database_health_snapshot(DB_PATH)`, and later `_open_sqlite_connection()`.
-4. Health/readiness remains based on the local SQLite file at `DB_PATH`, not `DATABASE_URL`.
-5. If startup proceeds into lightweight checks, `_run_lightweight_integrity_checks()` executes SQLite DDL/PRAGMA/bootstrap helpers.
+1. `app.py` reads backend diagnostics before calling `ensure_schema()`.
+2. When PostgreSQL runtime is active, `app.py` skips `ensure_schema()`.
+3. `startup_database()` returns `stage=postgres_schema_not_implemented` before `_ensure_local_db_file()`, `_open_sqlite_connection()`, recovery, migrations, or schema bootstrap.
+4. The user-facing message is: `PostgreSQL runtime is enabled, but PostgreSQL schema deployment is not implemented yet.`
 
-Risk: CRITICAL. PostgreSQL may be active for later `get_connection()` calls, but the startup path still requires and mutates a SQLite runtime database file.
+Risk: HIGH. The immediate SQLite-startup hazard is guarded, but PostgreSQL runtime remains blocked because schema deployment and startup health checks are not implemented.
 
 ## 4. SQLite-Only Hard Blockers
 
 | Startup Call | Why It Blocks PostgreSQL | Risk |
 |---|---|---|
-| `app.py` `ensure_schema()` before `startup_database()` | Directly opens `_open_sqlite_connection()` and runs SQLite schema repair. | CRITICAL |
-| `startup_database()` `_ensure_local_db_file()` | Ensures/manages a local SQLite DB path before any PostgreSQL startup branch. | CRITICAL |
+| `app.py` `ensure_schema()` before `startup_database()` | Guarded in Phase 5B.13B; still a blocker if bypassed outside the gate. | HIGH |
+| `startup_database()` `_ensure_local_db_file()` | Guarded in Phase 5B.13B for active PostgreSQL runtime; still SQLite-only. | HIGH |
 | `startup_database()` `is_database_valid(DB_PATH)` | Requires `DB_PATH` to exist and be a valid SQLite file; uses `sqlite_master` and PRAGMA metadata. | CRITICAL |
 | `startup_database()` `get_database_health_snapshot(DB_PATH)` | Delegates to SQLite production readiness reporting and returns SQLite-specific health fields. | CRITICAL |
 | `startup_database()` `_open_sqlite_connection()` | Used for preflight, migration, and final validation regardless of active backend. | CRITICAL |
@@ -78,6 +77,7 @@ Risk: CRITICAL. PostgreSQL may be active for later `get_connection()` calls, but
 | `_record_schema_version()` | Uses `INSERT OR IGNORE` and `?` placeholders. | HIGH |
 | `_log_migration_event()` | Uses `?` placeholders; relies on portable write conversion, but its target table is created by SQLite DDL. | MEDIUM |
 | `_open_sqlite_connection()` | Sets `sqlite3.Row`, `PRAGMA foreign_keys`, `busy_timeout`, `journal_mode=WAL`, and `synchronous=NORMAL`. | CRITICAL |
+| PostgreSQL schema deployment | Not implemented; the startup gate blocks here by design. | CRITICAL |
 
 ## 5. Safe Or Already Backend-Aware Calls
 
@@ -95,22 +95,17 @@ Risk: CRITICAL. PostgreSQL may be active for later `get_connection()` calls, but
 
 ## 6. What Would Fail First In A Real PostgreSQL Staging Run?
 
-The first failure depends on whether a local SQLite `DB_PATH` already exists.
+After Phase 5B.13B, the first failure is intentional: `startup_database()` returns `postgres_schema_not_implemented` before touching SQLite schema/recovery paths or opening a PostgreSQL connection.
 
-If `DB_PATH` is missing in production mode, the earliest hard blocker is `app.py` `main()` calling `ensure_schema()`. `ensure_schema()` checks `DB_PATH`, logs that schema safety is skipped if missing, then `startup_database()` calls `_ensure_local_db_file()` and `get_database_health_snapshot(DB_PATH)`. The PostgreSQL database is not used for readiness. In production this can lead startup to recovery/failure logic based on the missing SQLite file, not the PostgreSQL URL.
-
-If a local SQLite `DB_PATH` exists, `ensure_schema()` will open and mutate SQLite before PostgreSQL startup. Then `startup_database()` will continue with SQLite preflight and readiness. PostgreSQL may not fail immediately because it is not the startup database. The first PostgreSQL-specific failure would likely happen after startup, when app code calls `get_connection()` and receives a PostgreSQL connection but then executes SQLite-style SQL, such as the `app.py` currency sync query with `?` placeholders.
-
-Most likely first real staging blocker: CRITICAL, the startup gate is still SQLite-file based and does not bootstrap/validate PostgreSQL at all.
+If this guard were bypassed, the next blockers remain PostgreSQL schema absence, SQLite-specific schema engine calls, `?` placeholders, and post-startup app queries that are not yet dialect-routed.
 
 ## 7. Recommended Next Phase
 
-1. Add an explicit PostgreSQL branch at the start of `startup_database()` when `get_active_db_backend() == "postgres"`.
-2. Move `app.py` away from unconditional `ensure_schema()` before `startup_database()`; make schema startup backend-aware.
-3. Create PostgreSQL startup health checks that validate `DATABASE_URL`, driver availability, connectivity, required tables, migration version, and company count without touching `DB_PATH`.
-4. Replace SQLite startup metadata helpers with backend-aware versions, especially migration metadata, database identity, schema version, and production readiness.
-5. Route lightweight integrity checks through backend-aware table/column helpers, or keep SQLite self-heal checks strictly on SQLite paths.
-6. After startup is PostgreSQL-safe, audit the first post-startup `get_connection()` call sites in `app.py` for SQLite placeholders and SQLite-specific SQL.
+1. Implement PostgreSQL schema deployment/migration ownership before allowing runtime startup to proceed.
+2. Create PostgreSQL startup health checks that validate `DATABASE_URL`, driver availability, connectivity, required tables, migration version, and company count without touching `DB_PATH`.
+3. Replace SQLite startup metadata helpers with backend-aware versions, especially migration metadata, database identity, schema version, and production readiness.
+4. Route lightweight integrity checks through backend-aware table/column helpers, or keep SQLite self-heal checks strictly on SQLite paths.
+5. Audit the first post-startup `get_connection()` call sites in `app.py` for SQLite placeholders and SQLite-specific SQL.
 
 ## Validation
 

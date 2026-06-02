@@ -863,6 +863,51 @@ def get_active_db_backend():
     return "sqlite"
 
 
+POSTGRES_SCHEMA_NOT_IMPLEMENTED_MESSAGE = (
+    "PostgreSQL runtime is enabled, but PostgreSQL schema deployment is not implemented yet."
+)
+
+
+def should_block_postgres_startup_until_schema_ready():
+    """Block enabled PostgreSQL runtime before SQLite-only startup paths can run."""
+    return get_active_db_backend() == "postgres"
+
+
+def should_run_sqlite_startup():
+    """Return True when startup should use the existing SQLite bootstrap/recovery path."""
+    return not should_block_postgres_startup_until_schema_ready()
+
+
+def get_startup_backend_diagnostics():
+    """Return startup backend routing details without exposing DATABASE_URL."""
+    configured_backend = get_configured_db_backend()
+    runtime_enabled = is_postgres_runtime_enabled()
+    database_url = get_database_url()
+    active_backend = get_active_db_backend()
+    postgres_requested = configured_backend == "postgres"
+    postgres_schema_blocked = should_block_postgres_startup_until_schema_ready()
+    reasons = []
+    if postgres_requested and not runtime_enabled:
+        reasons.append("PostgreSQL requested but ERP_ENABLE_POSTGRES_RUNTIME is not enabled; using SQLite fallback.")
+    if postgres_requested and runtime_enabled and not database_url:
+        reasons.append("PostgreSQL requested and runtime enabled, but DATABASE_URL is not configured; using SQLite fallback.")
+    if postgres_schema_blocked:
+        reasons.append(POSTGRES_SCHEMA_NOT_IMPLEMENTED_MESSAGE)
+    return {
+        "configured_backend": configured_backend,
+        "active_backend": active_backend,
+        "postgres_requested": postgres_requested,
+        "postgres_runtime_enabled": runtime_enabled,
+        "database_url_configured": bool(database_url),
+        "database_url_label": _redact_database_url(database_url),
+        "should_run_sqlite_startup": not postgres_schema_blocked,
+        "postgres_schema_blocked": postgres_schema_blocked,
+        "postgres_schema_ready": False,
+        "message": POSTGRES_SCHEMA_NOT_IMPLEMENTED_MESSAGE if postgres_schema_blocked else "",
+        "reasons": reasons,
+    }
+
+
 def is_sqlite():
     return get_active_db_backend() == "sqlite"
 
@@ -8569,6 +8614,29 @@ def startup_database():
     The flow is additive, idempotent, and restores from backup if validation detects data loss.
     """
     global LAST_RESTORE_SOURCE
+    backend_diagnostics = get_startup_backend_diagnostics()
+    if backend_diagnostics["postgres_schema_blocked"]:
+        logger.error(
+            "PostgreSQL startup blocked before schema/recovery paths: configured_backend=%s active_backend=%s database_url_configured=%s reason=%s",
+            backend_diagnostics["configured_backend"],
+            backend_diagnostics["active_backend"],
+            backend_diagnostics["database_url_configured"],
+            backend_diagnostics["message"],
+        )
+        return {
+            "ok": False,
+            "stage": "postgres_schema_not_implemented",
+            "reason": POSTGRES_SCHEMA_NOT_IMPLEMENTED_MESSAGE,
+            "configured_backend": backend_diagnostics["configured_backend"],
+            "active_backend": backend_diagnostics["active_backend"],
+            "postgres_requested": backend_diagnostics["postgres_requested"],
+            "postgres_runtime_enabled": backend_diagnostics["postgres_runtime_enabled"],
+            "database_url_configured": backend_diagnostics["database_url_configured"],
+            "startup_mode": "postgres_schema_blocked",
+            "bootstrap_needed": False,
+            "recovery_attempted": False,
+            "recovery_succeeded": False,
+        }
     LAST_RESTORE_SOURCE = "local_runtime_database"
     logger.info("Database startup entered: db_path=%s", DB_PATH)
     restore_guard = _load_restore_guard_state()
