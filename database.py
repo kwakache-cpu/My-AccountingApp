@@ -1328,6 +1328,42 @@ def execute_portable_query(conn, sql, params=(), backend=None):
     return conn.execute(executable_sql, params)
 
 
+def execute_portable_write(conn, sql, params=(), backend=None):
+    """
+    Execute DML (INSERT/UPDATE/DELETE) using backend-appropriate placeholder syntax.
+
+    Infrastructure only: does not commit, rollback, or manage transactions.
+    """
+    if conn is None:
+        raise ValueError("A database connection is required for execute_portable_write().")
+    backend = _normalize_db_backend(backend or get_active_db_backend())
+    executable_sql = (
+        convert_placeholders_for_backend(sql, backend=backend)
+        if backend == "postgres"
+        else str(sql or "")
+    )
+    return conn.execute(executable_sql, params)
+
+
+def executemany_portable_write(conn, sql, seq_of_params, backend=None):
+    """
+    Execute executemany DML using backend-appropriate placeholder syntax.
+
+    Infrastructure only: does not commit, rollback, or manage transactions.
+    """
+    if conn is None:
+        raise ValueError("A database connection is required for executemany_portable_write().")
+    backend = _normalize_db_backend(backend or get_active_db_backend())
+    executable_sql = (
+        convert_placeholders_for_backend(sql, backend=backend)
+        if backend == "postgres"
+        else str(sql or "")
+    )
+    if not hasattr(conn, "executemany"):
+        raise AttributeError("Connection does not support executemany().")
+    return conn.executemany(executable_sql, seq_of_params)
+
+
 def insert_returning_id_sql(table_name, columns, backend=None, returning_column="id"):
     """
     Build an INSERT statement for later identity retrieval.

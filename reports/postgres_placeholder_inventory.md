@@ -1,6 +1,6 @@
-# PostgreSQL Placeholder Inventory (Phase 5B.11)
+# PostgreSQL Placeholder Inventory (Phase 5B.11 + 5B.12E)
 
-**Audited at:** 2026-06-01 22:46:40 UTC
+**Audited at:** 2026-06-02 09:39:50 UTC
 **Scope:** `database.py`, `modules.py`, `financials.py`, `accounting_engine.py`, `app.py`, `enterprise_services.py`, `erp_migrations.py`
 
 ## Executive Summary
@@ -10,6 +10,11 @@
 | Literal `?` placeholders (heuristic, excl. strings/logging) | **1035** |
 | `db_param_placeholder()` / `db_placeholders()` call sites | **7** |
 | Portable helper definitions | `database.py` only |
+
+### Phase 5B.12E note (infrastructure only)
+
+- Added `execute_portable_write()` and `executemany_portable_write()` in `database.py`.
+- **No production DML call sites converted yet** (INSERT/UPDATE/DELETE still use literal `?` at call sites).
 
 **Classification legend**
 
