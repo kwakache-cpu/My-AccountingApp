@@ -1,11 +1,11 @@
 # PostgreSQL Migration Scorecard (Phase 5B.11)
 
-**Audited at:** 2026-06-02 11:09:29 UTC
+**Audited at:** 2026-06-02 12:04:36 UTC
 
 | Dimension | Grade | Notes |
 |-----------|-------|-------|
 | Identity portability | **GREEN** | Production paths use get_inserted_id / ensure_insert_sql_returning; zero raw lastrowid in app modules |
-| Placeholder portability | **RED** | ~600+ literal ? placeholders; helpers exist but unused in modules/accounting_engine |
+| Placeholder portability | **RED** | ~600+ literal ? placeholders; 5B.12H routes company/subscription trial/metadata DML through `execute_portable_write()`, but modules/accounting_engine still dominate |
 | Schema introspection portability | **RED** | PRAGMA / sqlite_master dominate outside small db_* helpers |
 | Transaction portability | **YELLOW** | db_begin/commit OK; BEGIN IMMEDIATE SQLite-only in lock wrapper |
 | Accounting portability | **YELLOW** | Journal identity GREEN; SQL dialect and strftime filters RED/YELLOW |

@@ -3494,7 +3494,8 @@ def create_company_record(
     normalized_name = str(company_name or "").strip()
     if not normalized_key or not normalized_name:
         raise ValueError("company_key and company_name are required")
-    conn.execute(
+    execute_portable_write(
+        conn,
         """
         INSERT INTO companies (
             key,
@@ -3746,7 +3747,8 @@ def upsert_subscription_plan_setting(
     days_value = max(int(duration_days or 0), 0)
     cursor = conn.cursor()
     _ensure_subscription_billing_schema(cursor)
-    conn.execute(
+    execute_portable_write(
+        conn,
         """
         INSERT INTO subscription_plan_settings (
             plan_name,
@@ -3845,7 +3847,8 @@ def upsert_company_subscription(
     normalized_plan_name = str(plan_name or "Trial").strip() or "Trial"
     start_value = str(start_date or datetime.now().date().isoformat())
     end_value = str(end_date).strip() if end_date not in (None, "") else None
-    conn.execute(
+    execute_portable_write(
+        conn,
         """
         INSERT INTO company_subscriptions (
             company_key, plan_name, status, start_date, end_date, last_payment_reference, updated_at
@@ -3906,7 +3909,8 @@ def ensure_company_trial_subscription(
             subscription_end_date=end_date.isoformat(),
         )
     else:
-        conn.execute(
+        execute_portable_write(
+            conn,
             "UPDATE companies SET subscription_expiry = ?, contact_email = COALESCE(?, contact_email), deployment_status = COALESCE(NULLIF(deployment_status, ''), 'Trial') WHERE key = ?",
             (end_date.isoformat(), str(contact_email or "").strip() or None, normalized_key),
         )
@@ -3984,7 +3988,8 @@ def get_company_subscription_snapshot(company_key, conn=None, as_of=None):
                 access_allowed = False
                 renewal_required = True
                 if row["status"] and row["status"] != "expired":
-                    conn.execute(
+                    execute_portable_write(
+                        conn,
                         """
                         UPDATE company_subscriptions
                         SET status = 'expired', updated_at = CURRENT_TIMESTAMP
@@ -3992,7 +3997,8 @@ def get_company_subscription_snapshot(company_key, conn=None, as_of=None):
                         """,
                         (normalized_key,),
                     )
-                    conn.execute(
+                    execute_portable_write(
+                        conn,
                         "UPDATE companies SET subscription_expiry = ? WHERE key = ?",
                         (parsed_end.date().isoformat(), normalized_key),
                     )
@@ -4067,7 +4073,8 @@ def activate_company_subscription(
         end_date=new_end.date().isoformat(),
         last_payment_reference=payment_reference,
     )
-    conn.execute(
+    execute_portable_write(
+        conn,
         """
         UPDATE companies
         SET subscription_expiry = ?, status = 'Active', deployment_status = 'Live'

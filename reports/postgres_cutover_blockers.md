@@ -1,6 +1,6 @@
 # PostgreSQL Runtime Cutover Blockers (Phase 5B.11)
 
-**Audited at:** 2026-06-02 11:09:29 UTC
+**Audited at:** 2026-06-02 12:04:36 UTC
 
 **Assumed env (not enabled in this audit):**
 ```
@@ -48,6 +48,7 @@ Analysis based on `get_connection()`, `ensure_schema()`, `get_postgres_readiness
 ## Low Risk
 
 - Identity retrieval on converted paths (POS, payments, journal, payroll, bills, invoices).
+- Subscription/trial metadata DML routed via `execute_portable_write()` (5B.12H); placeholders are rewritten on Postgres at execution time.
 - FK orphan count is zero on current SQLite snapshot (data readiness good on SQLite).
 - `test_postgres_connection()` — connectivity probe only, not app readiness.
 
