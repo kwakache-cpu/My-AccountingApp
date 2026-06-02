@@ -13,7 +13,9 @@ from database import (
     get_connection,
     get_recovery_source_diagnostics,
     get_sqlite_concurrency_diagnostics,
+    get_startup_backend_diagnostics,
     restore_latest_cloud_backup_to_local,
+    should_run_sqlite_startup,
     startup_database,
 )
 import json
@@ -1740,7 +1742,16 @@ def main():
     st.cache_data.clear()
     st.cache_resource.clear()
     # SQLite continuity on ephemeral hosting is temporary; managed persistent DB remains the target architecture.
-    ensure_schema()
+    startup_backend = get_startup_backend_diagnostics()
+    if should_run_sqlite_startup():
+        ensure_schema()
+    else:
+        logger.error(
+            "Application startup blocked before SQLite schema path: configured_backend=%s active_backend=%s reason=%s",
+            startup_backend.get("configured_backend"),
+            startup_backend.get("active_backend"),
+            startup_backend.get("message"),
+        )
     startup_status = startup_database()
     startup_mode = str(startup_status.get("startup_mode", startup_status.get("stage", ""))) if isinstance(startup_status, dict) else ""
     bootstrap_needed = (
@@ -1753,6 +1764,20 @@ def main():
     st.session_state["database_startup_mode"] = startup_mode
     startup_ok = bool(startup_status.get("ok")) if isinstance(startup_status, dict) else bool(startup_status)
     if not startup_ok:
+        if isinstance(startup_status, dict) and startup_status.get("stage") == "postgres_schema_not_implemented":
+            logger.error(
+                "Application startup halted by backend-aware gate: configured_backend=%s active_backend=%s reason=%s",
+                startup_status.get("configured_backend"),
+                startup_status.get("active_backend"),
+                startup_status.get("reason"),
+            )
+            st.error(
+                f"{startup_status.get('reason')}\n\n"
+                f"Configured Backend: {startup_status.get('configured_backend', 'unknown')}\n"
+                f"Active Backend: {startup_status.get('active_backend', 'unknown')}\n"
+                "The app stopped safely before running SQLite schema or recovery paths."
+            )
+            st.stop()
         logger.error(
             "Application startup halted because the runtime database is not safe for use: stage=%s reason=%s",
             startup_status.get("stage") if isinstance(startup_status, dict) else "unknown",

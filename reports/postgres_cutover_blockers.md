@@ -9,12 +9,15 @@ ERP_ENABLE_POSTGRES_RUNTIME="1"
 DATABASE_URL="postgresql://..."
 ```
 
-Analysis based on `get_connection()`, `ensure_schema()`, `get_postgres_readiness_diagnostics()`, and scoped code review.
+Analysis based on `get_connection()`, `ensure_schema()`, `startup_database()`, `get_postgres_readiness_diagnostics()`, and scoped code review.
+
+**Phase 5B.13B update:** a backend-aware startup gate now exists. When PostgreSQL runtime is fully enabled, startup blocks with `PostgreSQL runtime is enabled, but PostgreSQL schema deployment is not implemented yet.` before running SQLite schema/recovery paths. Cutover remains **NO-GO** because PostgreSQL schema deployment and broad SQL portability are still incomplete.
 
 ## Subsystem Failure Matrix
 
 | Subsystem | Would fail today? | Classification | Primary cause |
 |-----------|-------------------|----------------|---------------|
+| **Startup gate** (`app.py`, `startup_database`) | **Blocks intentionally** | **Guardrail** | Prevents enabled PostgreSQL runtime from entering SQLite-only schema/recovery paths |
 | **Schema ensure** (`ensure_schema`, `_deploy_full_schema`) | **Yes** | **Hard blocker** | SQLite DDL (`AUTOINCREMENT`, `PRAGMA table_info`), no Postgres schema bootstrap |
 | **Migrations** (`erp_migrations.py`) | **Yes** | **Hard blocker** | `sqlite_master`, `PRAGMA`, `INSERT OR IGNORE`, literal `?` |
 | **Startup checks** (`get_postgres_readiness_diagnostics`) | **Partial** | **High risk** | Diagnostics use `sqlite_master`/`PRAGMA` even when probing readiness |
@@ -28,10 +31,11 @@ Analysis based on `get_connection()`, `ensure_schema()`, `get_postgres_readiness
 
 ## Hard Blockers (must fix before any staging cutover)
 
-1. **No Postgres DDL path** — `_deploy_full_schema` / `ensure_schema_integrity` only emit SQLite syntax.
-2. **~600+ literal `?` placeholders** across core modules — psycopg requires `%s`.
-3. **Schema introspection** — widespread `PRAGMA` / `sqlite_master` outside `db_table_exists` / `db_column_exists` helpers.
-4. **No migrated Postgres database** — data still in `eka_enterprise_v3.db`; cutover requires ETL (out of scope).
+1. **PostgreSQL startup intentionally blocked** — Phase 5B.13B prevents unsafe startup until schema deployment exists.
+2. **No Postgres DDL path** — `_deploy_full_schema` / `ensure_schema_integrity` only emit SQLite syntax.
+3. **~600+ literal `?` placeholders** across core modules — psycopg requires `%s`.
+4. **Schema introspection** — widespread `PRAGMA` / `sqlite_master` outside `db_table_exists` / `db_column_exists` helpers.
+5. **No migrated Postgres database** — data still in `eka_enterprise_v3.db`; cutover requires ETL (out of scope).
 
 ## High Risk (may connect but core flows break)
 
@@ -54,7 +58,8 @@ Analysis based on `get_connection()`, `ensure_schema()`, `get_postgres_readiness
 
 ## Expected first failures (ordered)
 
-1. App startup → `ensure_schema()` → syntax error on `AUTOINCREMENT` / `PRAGMA`.
-2. If schema skipped → first `execute('... ? ...')` → psycopg programming error.
-3. If some queries work → `PRAGMA table_info` in accounting_engine inventory guard.
-4. Reporting month filter → `strftime` function does not exist.
+1. App startup → backend-aware gate → safe block: PostgreSQL schema deployment is not implemented.
+2. If gate bypassed → `ensure_schema()` / `_deploy_full_schema()` → syntax error on `AUTOINCREMENT` / `PRAGMA`.
+3. If schema skipped → first `execute('... ? ...')` → psycopg programming error.
+4. If some queries work → `PRAGMA table_info` in accounting_engine inventory guard.
+5. Reporting month filter → `strftime` function does not exist.
