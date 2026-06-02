@@ -13,11 +13,14 @@ Analysis based on `get_connection()`, `ensure_schema()`, `startup_database()`, `
 
 **Phase 5B.13B update:** a backend-aware startup gate now exists. When PostgreSQL runtime is fully enabled, startup blocks with `PostgreSQL runtime is enabled, but PostgreSQL schema deployment is not implemented yet.` before running SQLite schema/recovery paths. Cutover remains **NO-GO** because PostgreSQL schema deployment and broad SQL portability are still incomplete.
 
+**Phase 5B.13C update:** `reports/postgres_schema_deployment_plan.md` now defines the PostgreSQL schema deployment strategy, type mappings, phased implementation path, table deployment order, and validation plan. This is design-only; PostgreSQL schema deployment is still not implemented and cutover remains **NO-GO**.
+
 ## Subsystem Failure Matrix
 
 | Subsystem | Would fail today? | Classification | Primary cause |
 |-----------|-------------------|----------------|---------------|
 | **Startup gate** (`app.py`, `startup_database`) | **Blocks intentionally** | **Guardrail** | Prevents enabled PostgreSQL runtime from entering SQLite-only schema/recovery paths |
+| **Schema deployment plan** (`reports/postgres_schema_deployment_plan.md`) | **Plan exists** | **Design only** | Defines target DDL strategy but does not deploy PostgreSQL schema |
 | **Schema ensure** (`ensure_schema`, `_deploy_full_schema`) | **Yes** | **Hard blocker** | SQLite DDL (`AUTOINCREMENT`, `PRAGMA table_info`), no Postgres schema bootstrap |
 | **Migrations** (`erp_migrations.py`) | **Yes** | **Hard blocker** | `sqlite_master`, `PRAGMA`, `INSERT OR IGNORE`, literal `?` |
 | **Startup checks** (`get_postgres_readiness_diagnostics`) | **Partial** | **High risk** | Diagnostics use `sqlite_master`/`PRAGMA` even when probing readiness |
@@ -32,10 +35,11 @@ Analysis based on `get_connection()`, `ensure_schema()`, `startup_database()`, `
 ## Hard Blockers (must fix before any staging cutover)
 
 1. **PostgreSQL startup intentionally blocked** — Phase 5B.13B prevents unsafe startup until schema deployment exists.
-2. **No Postgres DDL path** — `_deploy_full_schema` / `ensure_schema_integrity` only emit SQLite syntax.
-3. **~600+ literal `?` placeholders** across core modules — psycopg requires `%s`.
-4. **Schema introspection** — widespread `PRAGMA` / `sqlite_master` outside `db_table_exists` / `db_column_exists` helpers.
-5. **No migrated Postgres database** — data still in `eka_enterprise_v3.db`; cutover requires ETL (out of scope).
+2. **PostgreSQL schema deployment plan exists but is not implemented** — no PostgreSQL DDL generator/deployer has been added yet.
+3. **No Postgres DDL path** — `_deploy_full_schema` / `ensure_schema_integrity` only emit SQLite syntax.
+4. **~600+ literal `?` placeholders** across core modules — psycopg requires `%s`.
+5. **Schema introspection** — widespread `PRAGMA` / `sqlite_master` outside `db_table_exists` / `db_column_exists` helpers.
+6. **No migrated Postgres database** — data still in `eka_enterprise_v3.db`; cutover requires ETL (out of scope).
 
 ## High Risk (may connect but core flows break)
 
@@ -59,7 +63,8 @@ Analysis based on `get_connection()`, `ensure_schema()`, `startup_database()`, `
 ## Expected first failures (ordered)
 
 1. App startup → backend-aware gate → safe block: PostgreSQL schema deployment is not implemented.
-2. If gate bypassed → `ensure_schema()` / `_deploy_full_schema()` → syntax error on `AUTOINCREMENT` / `PRAGMA`.
-3. If schema skipped → first `execute('... ? ...')` → psycopg programming error.
-4. If some queries work → `PRAGMA table_info` in accounting_engine inventory guard.
-5. Reporting month filter → `strftime` function does not exist.
+2. If gate is relaxed before Phase 5B.13C is implemented → missing PostgreSQL schema/metadata tables.
+3. If gate bypassed → `ensure_schema()` / `_deploy_full_schema()` → syntax error on `AUTOINCREMENT` / `PRAGMA`.
+4. If schema skipped → first `execute('... ? ...')` → psycopg programming error.
+5. If some queries work → `PRAGMA table_info` in accounting_engine inventory guard.
+6. Reporting month filter → `strftime` function does not exist.
