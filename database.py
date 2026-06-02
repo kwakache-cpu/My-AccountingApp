@@ -5536,7 +5536,8 @@ def create_company_branch(
         else normalized_type_key.replace("_", " ").title()
     )
 
-    conn.execute(
+    execute_portable_write(
+        conn,
         """
         INSERT INTO branches (
             branch_id,
@@ -5582,7 +5583,8 @@ def create_company_branch(
 
     bookkeeper_created = False
     if create_default_bookkeeper_user and bookkeeper_password_hash:
-        cursor = conn.execute(
+        cursor = execute_portable_write(
+            conn,
             """
             INSERT OR IGNORE INTO users (
                 company_key, branch_id, full_name, login_key, password_hash, role, status
@@ -5727,7 +5729,8 @@ def assign_branch_manager(
         }
 
     target_role = "Branch Manager" if promote_to_branch_manager else manager_role
-    conn.execute(
+    execute_portable_write(
+        conn,
         """
         UPDATE users
         SET branch_id = ?, role = ?, status = COALESCE(status, 'Active')
@@ -5735,7 +5738,8 @@ def assign_branch_manager(
         """,
         (normalized_branch_id, target_role, normalized_company_key, normalized_manager_user_id),
     )
-    conn.execute(
+    execute_portable_write(
+        conn,
         """
         UPDATE branches
         SET manager_user_id = ?, branch_manager = ?
@@ -5855,7 +5859,8 @@ def create_branch_scoped_user(
     user_id_seed = f"{normalized_company_key}|{normalized_full_name}|{resolved_login_key}|{datetime.now().isoformat()}|{random.randint(1000, 9999)}"
     user_id = hashlib.sha256(user_id_seed.encode("utf-8")).hexdigest()
 
-    conn.execute(
+    execute_portable_write(
+        conn,
         """
         INSERT INTO users (
             company_key, branch_id, full_name, user_id, login_key, role, status
@@ -5935,7 +5940,8 @@ def update_branch_user_status(
     ):
         return {"ok": False, "reason": "This user role cannot be managed from branch administration."}
 
-    conn.execute(
+    execute_portable_write(
+        conn,
         "UPDATE users SET status = ? WHERE id = ? AND company_key = ?",
         (normalized_status, int(user_pk_id), normalized_company_key),
     )
@@ -6193,7 +6199,8 @@ def update_company_branch(
         exclude_branch_id=normalized_branch_id,
     )
 
-    conn.execute(
+    execute_portable_write(
+        conn,
         """
         UPDATE branches
         SET branch_name = ?,
@@ -6359,7 +6366,8 @@ def update_company_staff_branch_assignment(
         normalized_role = str(role or "").strip()
         if normalized_role in PRIVILEGED_COMPANY_USER_ROLES:
             return {"ok": False, "reason": "Cannot assign a privileged role from staff administration."}
-        conn.execute(
+        execute_portable_write(
+            conn,
             """
             UPDATE users
             SET branch_id = ?, role = ?
@@ -6368,7 +6376,8 @@ def update_company_staff_branch_assignment(
             (normalized_branch_id, normalized_role, int(user_pk_id), normalized_company_key),
         )
     else:
-        conn.execute(
+        execute_portable_write(
+            conn,
             """
             UPDATE users
             SET branch_id = ?

@@ -1,6 +1,6 @@
 # PostgreSQL / SQLite Feature Inventory (Phase 5B.11)
 
-**Audited at:** 2026-06-02 10:35:12 UTC
+**Audited at:** 2026-06-02 11:09:29 UTC
 **Scope:** same seven core modules as placeholder inventory.
 
 ## Summary by Feature
@@ -57,18 +57,18 @@
 | `database.py` | `_ensure_database_identity_table` | 4321 | HIGH | `existing_columns = {row[1] for row in conn.execute("PRAGMA table_info(database_identity)").fetchall()}` |
 | `database.py` | `is_database_valid` | 4393 | HIGH | `company_columns = {row[1] for row in conn.execute("PRAGMA table_info(companies)").fetchall()}` |
 | `database.py` | `_branch_licensing_column_exists` | 4883 | HIGH | `columns = {row[1] for row in conn.execute(f"PRAGMA table_info({table_name})").fetchall()}` |
-| `database.py` | `ensure_schema_integrity` | 6519 | HIGH | `cursor.execute(f"PRAGMA table_info({table_name})")` |
-| `database.py` | `ensure_schema_integrity` | 6525 | HIGH | `cursor.execute("PRAGMA table_info(license_payment_transactions)")` |
-| `database.py` | `ensure_schema_integrity` | 6553 | HIGH | `cursor.execute("PRAGMA table_info(journal_entries)")` |
-| `database.py` | `(module)` | 6592 | HIGH | `cursor.execute("PRAGMA table_info(stock)")` |
-| `database.py` | `(module)` | 6612 | HIGH | `cursor.execute("PRAGMA table_info(chart_of_accounts)")` |
-| `database.py` | `(module)` | 6760 | HIGH | `cursor.execute("PRAGMA table_info(system_settings)")` |
-| `database.py` | `(module)` | 6807 | HIGH | `cursor.execute("PRAGMA table_info(journal_entries)")` |
-| `database.py` | `(module)` | 6897 | HIGH | `cursor.execute("PRAGMA table_info(customers)")` |
-| `database.py` | `(module)` | 6961 | HIGH | `cursor.execute("PRAGMA table_info(suppliers)")` |
-| `database.py` | `(module)` | 7249 | HIGH | `cursor.execute("PRAGMA table_info(transactions)")` |
-| `database.py` | `(module)` | 7265 | HIGH | `cursor.execute("PRAGMA table_info(system_settings)")` |
-| `database.py` | `ensure_inventory_schema_integrity` | 7319 | HIGH | `cursor.execute("PRAGMA table_info(inventory)")` |
+| `database.py` | `ensure_schema_integrity` | 6528 | HIGH | `cursor.execute(f"PRAGMA table_info({table_name})")` |
+| `database.py` | `ensure_schema_integrity` | 6534 | HIGH | `cursor.execute("PRAGMA table_info(license_payment_transactions)")` |
+| `database.py` | `ensure_schema_integrity` | 6562 | HIGH | `cursor.execute("PRAGMA table_info(journal_entries)")` |
+| `database.py` | `(module)` | 6601 | HIGH | `cursor.execute("PRAGMA table_info(stock)")` |
+| `database.py` | `(module)` | 6621 | HIGH | `cursor.execute("PRAGMA table_info(chart_of_accounts)")` |
+| `database.py` | `(module)` | 6769 | HIGH | `cursor.execute("PRAGMA table_info(system_settings)")` |
+| `database.py` | `(module)` | 6816 | HIGH | `cursor.execute("PRAGMA table_info(journal_entries)")` |
+| `database.py` | `(module)` | 6906 | HIGH | `cursor.execute("PRAGMA table_info(customers)")` |
+| `database.py` | `(module)` | 6970 | HIGH | `cursor.execute("PRAGMA table_info(suppliers)")` |
+| `database.py` | `(module)` | 7258 | HIGH | `cursor.execute("PRAGMA table_info(transactions)")` |
+| `database.py` | `(module)` | 7274 | HIGH | `cursor.execute("PRAGMA table_info(system_settings)")` |
+| `database.py` | `ensure_inventory_schema_integrity` | 7328 | HIGH | `cursor.execute("PRAGMA table_info(inventory)")` |
 | _…_ | | | | _40 more in PRAGMA_ |
 
 ### AUTOINCREMENT (51)
@@ -84,34 +84,34 @@
 | `database.py` | `_ensure_migration_metadata_tables` | 4291 | MEDIUM | `id INTEGER PRIMARY KEY AUTOINCREMENT,` |
 | `database.py` | `ensure_branch_licensing_schema_integrity` | 5028 | MEDIUM | `id INTEGER PRIMARY KEY AUTOINCREMENT,` |
 | `database.py` | `ensure_branch_licensing_schema_integrity` | 5041 | MEDIUM | `id INTEGER PRIMARY KEY AUTOINCREMENT,` |
-| `database.py` | `ensure_schema_integrity` | 6478 | MEDIUM | `id INTEGER PRIMARY KEY AUTOINCREMENT,` |
-| `database.py` | `ensure_schema_integrity` | 6489 | MEDIUM | `id INTEGER PRIMARY KEY AUTOINCREMENT,` |
-| `database.py` | `(module)` | 6600 | MEDIUM | `id INTEGER PRIMARY KEY AUTOINCREMENT,` |
-| `database.py` | `(module)` | 6777 | MEDIUM | `id INTEGER PRIMARY KEY AUTOINCREMENT,` |
-| `database.py` | `(module)` | 6842 | MEDIUM | `id INTEGER PRIMARY KEY AUTOINCREMENT,` |
-| `database.py` | `(module)` | 6859 | MEDIUM | `id INTEGER PRIMARY KEY AUTOINCREMENT,` |
-| `database.py` | `(module)` | 6883 | MEDIUM | `id INTEGER PRIMARY KEY AUTOINCREMENT,` |
-| `database.py` | `(module)` | 6926 | MEDIUM | `id INTEGER PRIMARY KEY AUTOINCREMENT,` |
-| `database.py` | `(module)` | 6948 | MEDIUM | `id INTEGER PRIMARY KEY AUTOINCREMENT,` |
-| `database.py` | `(module)` | 6979 | MEDIUM | `id INTEGER PRIMARY KEY AUTOINCREMENT,` |
-| `database.py` | `(module)` | 6999 | MEDIUM | `id INTEGER PRIMARY KEY AUTOINCREMENT,` |
-| `database.py` | `(module)` | 7029 | MEDIUM | `id INTEGER PRIMARY KEY AUTOINCREMENT,` |
-| `database.py` | `(module)` | 7064 | MEDIUM | `id INTEGER PRIMARY KEY AUTOINCREMENT,` |
-| `database.py` | `(module)` | 7083 | MEDIUM | `id INTEGER PRIMARY KEY AUTOINCREMENT,` |
-| `database.py` | `(module)` | 7098 | MEDIUM | `id INTEGER PRIMARY KEY AUTOINCREMENT,` |
-| `database.py` | `(module)` | 7118 | MEDIUM | `id INTEGER PRIMARY KEY AUTOINCREMENT,` |
-| `database.py` | `(module)` | 7149 | MEDIUM | `id INTEGER PRIMARY KEY AUTOINCREMENT,` |
-| `database.py` | `(module)` | 7173 | MEDIUM | `id INTEGER PRIMARY KEY AUTOINCREMENT,` |
-| `database.py` | `(module)` | 7198 | MEDIUM | `id INTEGER PRIMARY KEY AUTOINCREMENT,` |
-| `database.py` | `(module)` | 7215 | MEDIUM | `id INTEGER PRIMARY KEY AUTOINCREMENT,` |
-| `database.py` | `(module)` | 7235 | MEDIUM | `id INTEGER PRIMARY KEY AUTOINCREMENT,` |
-| `database.py` | `ensure_inventory_schema_integrity` | 7294 | MEDIUM | `id INTEGER PRIMARY KEY AUTOINCREMENT,` |
-| `database.py` | `ensure_inventory_schema_integrity` | 7354 | MEDIUM | `id INTEGER PRIMARY KEY AUTOINCREMENT,` |
-| `database.py` | `ensure_stock_movements_schema_integrity` | 7412 | MEDIUM | `id INTEGER PRIMARY KEY AUTOINCREMENT,` |
-| `database.py` | `ensure_cashier_closings_schema` | 7466 | MEDIUM | `id INTEGER PRIMARY KEY AUTOINCREMENT,` |
-| `database.py` | `ensure_pos_sales_schema` | 7523 | MEDIUM | `id INTEGER PRIMARY KEY AUTOINCREMENT,` |
-| `database.py` | `ensure_pos_sales_schema` | 7583 | MEDIUM | `id INTEGER PRIMARY KEY AUTOINCREMENT,` |
-| `database.py` | `ensure_pos_sales_schema` | 7632 | MEDIUM | `id INTEGER PRIMARY KEY AUTOINCREMENT,` |
+| `database.py` | `ensure_schema_integrity` | 6487 | MEDIUM | `id INTEGER PRIMARY KEY AUTOINCREMENT,` |
+| `database.py` | `ensure_schema_integrity` | 6498 | MEDIUM | `id INTEGER PRIMARY KEY AUTOINCREMENT,` |
+| `database.py` | `(module)` | 6609 | MEDIUM | `id INTEGER PRIMARY KEY AUTOINCREMENT,` |
+| `database.py` | `(module)` | 6786 | MEDIUM | `id INTEGER PRIMARY KEY AUTOINCREMENT,` |
+| `database.py` | `(module)` | 6851 | MEDIUM | `id INTEGER PRIMARY KEY AUTOINCREMENT,` |
+| `database.py` | `(module)` | 6868 | MEDIUM | `id INTEGER PRIMARY KEY AUTOINCREMENT,` |
+| `database.py` | `(module)` | 6892 | MEDIUM | `id INTEGER PRIMARY KEY AUTOINCREMENT,` |
+| `database.py` | `(module)` | 6935 | MEDIUM | `id INTEGER PRIMARY KEY AUTOINCREMENT,` |
+| `database.py` | `(module)` | 6957 | MEDIUM | `id INTEGER PRIMARY KEY AUTOINCREMENT,` |
+| `database.py` | `(module)` | 6988 | MEDIUM | `id INTEGER PRIMARY KEY AUTOINCREMENT,` |
+| `database.py` | `(module)` | 7008 | MEDIUM | `id INTEGER PRIMARY KEY AUTOINCREMENT,` |
+| `database.py` | `(module)` | 7038 | MEDIUM | `id INTEGER PRIMARY KEY AUTOINCREMENT,` |
+| `database.py` | `(module)` | 7073 | MEDIUM | `id INTEGER PRIMARY KEY AUTOINCREMENT,` |
+| `database.py` | `(module)` | 7092 | MEDIUM | `id INTEGER PRIMARY KEY AUTOINCREMENT,` |
+| `database.py` | `(module)` | 7107 | MEDIUM | `id INTEGER PRIMARY KEY AUTOINCREMENT,` |
+| `database.py` | `(module)` | 7127 | MEDIUM | `id INTEGER PRIMARY KEY AUTOINCREMENT,` |
+| `database.py` | `(module)` | 7158 | MEDIUM | `id INTEGER PRIMARY KEY AUTOINCREMENT,` |
+| `database.py` | `(module)` | 7182 | MEDIUM | `id INTEGER PRIMARY KEY AUTOINCREMENT,` |
+| `database.py` | `(module)` | 7207 | MEDIUM | `id INTEGER PRIMARY KEY AUTOINCREMENT,` |
+| `database.py` | `(module)` | 7224 | MEDIUM | `id INTEGER PRIMARY KEY AUTOINCREMENT,` |
+| `database.py` | `(module)` | 7244 | MEDIUM | `id INTEGER PRIMARY KEY AUTOINCREMENT,` |
+| `database.py` | `ensure_inventory_schema_integrity` | 7303 | MEDIUM | `id INTEGER PRIMARY KEY AUTOINCREMENT,` |
+| `database.py` | `ensure_inventory_schema_integrity` | 7363 | MEDIUM | `id INTEGER PRIMARY KEY AUTOINCREMENT,` |
+| `database.py` | `ensure_stock_movements_schema_integrity` | 7421 | MEDIUM | `id INTEGER PRIMARY KEY AUTOINCREMENT,` |
+| `database.py` | `ensure_cashier_closings_schema` | 7475 | MEDIUM | `id INTEGER PRIMARY KEY AUTOINCREMENT,` |
+| `database.py` | `ensure_pos_sales_schema` | 7532 | MEDIUM | `id INTEGER PRIMARY KEY AUTOINCREMENT,` |
+| `database.py` | `ensure_pos_sales_schema` | 7592 | MEDIUM | `id INTEGER PRIMARY KEY AUTOINCREMENT,` |
+| `database.py` | `ensure_pos_sales_schema` | 7641 | MEDIUM | `id INTEGER PRIMARY KEY AUTOINCREMENT,` |
 | _…_ | | | | _16 more in AUTOINCREMENT_ |
 
 ### date(...) (49)
@@ -167,7 +167,7 @@
 | `database.py` | `_build_local_history_backup_path` | 2030 | HIGH | `f"eka_enterprise_v3_{timestamp.strftime('%Y%m%d_%H%M%S')}.db",` |
 | `database.py` | `_build_pre_cloud_restore_backup_path` | 2038 | HIGH | `f"eka_enterprise_v3_before_cloud_restore_{timestamp.strftime('%Y%m%d_%H%M%S')}.db",` |
 | `database.py` | `get_downloadable_backup_export` | 2896 | HIGH | `timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")` |
-| `database.py` | `log_audit_action` | 9055 | HIGH | `event_id = f"AUD-{datetime.utcnow().strftime('%Y%m%d%H%M%S%f')}"` |
+| `database.py` | `log_audit_action` | 9064 | HIGH | `event_id = f"AUD-{datetime.utcnow().strftime('%Y%m%d%H%M%S%f')}"` |
 | `modules.py` | `_generate_paystack_reference` | 1670 | HIGH | `return f"{prefix}-{datetime.now().strftime('%Y%m%d%H%M%S')}-{uuid.uuid4().hex[:8].upper()}"` |
 | `modules.py` | `set_period_status` | 3252 | HIGH | `period_label = start_date.strftime("%Y-%m")` |
 | `modules.py` | `show_journal_entries` | 3964 | HIGH | `reference = f"JRN-{datetime.now().strftime('%Y%m%d%H%M%S')}"` |
@@ -216,9 +216,9 @@
 | `database.py` | `_table_exists` | 4371 | HIGH | `"SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",` |
 | `database.py` | `is_database_valid` | 4389 | HIGH | `for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()` |
 | `database.py` | `get_database_production_readiness_report` | 4465 | HIGH | `for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()` |
-| `database.py` | `ensure_schema_integrity` | 6514 | HIGH | `"SELECT name FROM sqlite_master WHERE type='table' AND name = ?",` |
-| `database.py` | `ensure_schema_integrity` | 6550 | HIGH | `"SELECT name FROM sqlite_master WHERE type='table' AND name = 'journal_entries'"` |
-| `database.py` | `ensure_schema_integrity` | 6572 | HIGH | `for row in cursor.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()` |
+| `database.py` | `ensure_schema_integrity` | 6523 | HIGH | `"SELECT name FROM sqlite_master WHERE type='table' AND name = ?",` |
+| `database.py` | `ensure_schema_integrity` | 6559 | HIGH | `"SELECT name FROM sqlite_master WHERE type='table' AND name = 'journal_entries'"` |
+| `database.py` | `ensure_schema_integrity` | 6581 | HIGH | `for row in cursor.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()` |
 | `modules.py` | `_table_exists` | 2738 | HIGH | `"SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",` |
 | `accounting_engine.py` | `_resolve_source_document_mismatches` | 494 | HIGH | `"SELECT name FROM sqlite_master WHERE type='table' AND name = ?",` |
 | `accounting_engine.py` | `get_finance_integrity_diagnostics` | 664 | HIGH | `"SELECT name FROM sqlite_master WHERE type='table' AND name = ?",` |
@@ -242,17 +242,17 @@
 | `database.py` | `list_company_branches_with_grants` | 5356 | LOW | `if isinstance(row, sqlite3.Row):` |
 | `database.py` | `repair_branch_module_grants` | 5419 | LOW | `if isinstance(row, sqlite3.Row):` |
 | `database.py` | `create_company_branch` | 5492 | LOW | `existing_branch_id = existing_name[0] if not isinstance(existing_name, sqlite3.Row) else existing_name["branch_id"]` |
-| `database.py` | `_fetch_company_user_by_user_id` | 5678 | LOW | `if isinstance(row, sqlite3.Row):` |
-| `database.py` | `assign_branch_manager` | 5757 | LOW | `"branch_access_key": branch_row[2] if not isinstance(branch_row, sqlite3.Row) else branch_row["branch_access_key"],` |
-| `database.py` | `list_branch_users` | 5777 | LOW | `if isinstance(row, sqlite3.Row):` |
-| `database.py` | `update_branch_user_status` | 5923 | LOW | `user_role = row[1] if not isinstance(row, sqlite3.Row) else row["role"]` |
-| `database.py` | `update_branch_user_status` | 5924 | LOW | `user_branch_id = row[2] if not isinstance(row, sqlite3.Row) else row["branch_id"]` |
-| `database.py` | `fetch_branch_manager_candidates` | 5969 | LOW | `if isinstance(row, sqlite3.Row):` |
-| `database.py` | `_fetch_branch_type_default_module_keys` | 6010 | LOW | `return {str(row[0] if not isinstance(row, sqlite3.Row) else row["module_key"]) for row in rows}` |
-| `database.py` | `get_branch_enabled_modules` | 6028 | LOW | `return {str(row[0] if not isinstance(row, sqlite3.Row) else row["module_key"]) for row in rows}` |
-| `database.py` | `update_company_branch` | 6124 | LOW | `if isinstance(row, sqlite3.Row):` |
-| `database.py` | `list_company_staff_for_assignment` | 6287 | LOW | `if isinstance(row, sqlite3.Row):` |
-| `database.py` | `update_company_staff_branch_assignment` | 6345 | LOW | `user_role = row[1] if not isinstance(row, sqlite3.Row) else row["role"]` |
+| `database.py` | `_fetch_company_user_by_user_id` | 5680 | LOW | `if isinstance(row, sqlite3.Row):` |
+| `database.py` | `assign_branch_manager` | 5761 | LOW | `"branch_access_key": branch_row[2] if not isinstance(branch_row, sqlite3.Row) else branch_row["branch_access_key"],` |
+| `database.py` | `list_branch_users` | 5781 | LOW | `if isinstance(row, sqlite3.Row):` |
+| `database.py` | `update_branch_user_status` | 5928 | LOW | `user_role = row[1] if not isinstance(row, sqlite3.Row) else row["role"]` |
+| `database.py` | `update_branch_user_status` | 5929 | LOW | `user_branch_id = row[2] if not isinstance(row, sqlite3.Row) else row["branch_id"]` |
+| `database.py` | `fetch_branch_manager_candidates` | 5975 | LOW | `if isinstance(row, sqlite3.Row):` |
+| `database.py` | `_fetch_branch_type_default_module_keys` | 6016 | LOW | `return {str(row[0] if not isinstance(row, sqlite3.Row) else row["module_key"]) for row in rows}` |
+| `database.py` | `get_branch_enabled_modules` | 6034 | LOW | `return {str(row[0] if not isinstance(row, sqlite3.Row) else row["module_key"]) for row in rows}` |
+| `database.py` | `update_company_branch` | 6130 | LOW | `if isinstance(row, sqlite3.Row):` |
+| `database.py` | `list_company_staff_for_assignment` | 6294 | LOW | `if isinstance(row, sqlite3.Row):` |
+| `database.py` | `update_company_staff_branch_assignment` | 6352 | LOW | `user_role = row[1] if not isinstance(row, sqlite3.Row) else row["role"]` |
 | `modules.py` | `_readonly_db_unavailable_message` | 10592 | LOW | `f"{b[1]} ({b[2] or b[0]})" if not isinstance(b, sqlite3.Row) else` |
 | `modules.py` | `_readonly_db_unavailable_message` | 10597 | LOW | `b[0] if not isinstance(b, sqlite3.Row) else b["branch_id"] for b in branches` |
 
@@ -268,11 +268,11 @@
 | `database.py` | `seed_branch_type_catalog` | 4902 | MEDIUM | `INSERT OR IGNORE INTO branch_type_catalog (` |
 | `database.py` | `seed_branch_type_module_defaults` | 4925 | MEDIUM | `INSERT OR IGNORE INTO branch_type_module_defaults (` |
 | `database.py` | `ensure_branch_module_grants_for_branch` | 4985 | MEDIUM | `INSERT OR IGNORE INTO branch_module_grants (` |
-| `database.py` | `create_company_branch` | 5587 | MEDIUM | `INSERT OR IGNORE INTO users (` |
-| `database.py` | `(module)` | 6770 | MEDIUM | `"INSERT OR IGNORE INTO system_settings (id, master_price_per_month, base_currency, display_currency, exchange_rate) VALU` |
-| `database.py` | `(module)` | 7275 | MEDIUM | `"INSERT OR IGNORE INTO system_settings (id, master_price_per_month, base_currency, display_currency, exchange_rate) VALU` |
-| `database.py` | `(module)` | 8354 | MEDIUM | `cursor.execute("INSERT OR IGNORE INTO maintenance_settings (id, is_active) VALUES (1, 0)")` |
-| `database.py` | `(module)` | 8527 | MEDIUM | `"INSERT OR IGNORE INTO system_settings (id, master_price_per_month) VALUES (1, 500)"` |
+| `database.py` | `create_company_branch` | 5589 | MEDIUM | `INSERT OR IGNORE INTO users (` |
+| `database.py` | `(module)` | 6779 | MEDIUM | `"INSERT OR IGNORE INTO system_settings (id, master_price_per_month, base_currency, display_currency, exchange_rate) VALU` |
+| `database.py` | `(module)` | 7284 | MEDIUM | `"INSERT OR IGNORE INTO system_settings (id, master_price_per_month, base_currency, display_currency, exchange_rate) VALU` |
+| `database.py` | `(module)` | 8363 | MEDIUM | `cursor.execute("INSERT OR IGNORE INTO maintenance_settings (id, is_active) VALUES (1, 0)")` |
+| `database.py` | `(module)` | 8536 | MEDIUM | `"INSERT OR IGNORE INTO system_settings (id, master_price_per_month) VALUES (1, 500)"` |
 | `financials.py` | `show_invoice_manager` | 572 | MEDIUM | `conn.execute("INSERT OR IGNORE INTO customers (company_key, name, email, phone, currency) VALUES (?, ?, ?, ?, 'GHS')", (` |
 | `financials.py` | `show_invoice_manager` | 589 | MEDIUM | `conn.execute("INSERT OR IGNORE INTO suppliers (company_key, name, email, phone, currency) VALUES (?, ?, ?, ?, 'GHS')", (` |
 | `financials.py` | `show_customers_page` | 912 | MEDIUM | `"INSERT OR IGNORE INTO customers (company_key, name, email, phone, currency) VALUES (?, ?, ?, ?, 'GHS')",` |

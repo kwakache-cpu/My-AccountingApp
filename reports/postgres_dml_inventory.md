@@ -40,6 +40,17 @@ Low-risk DML statements now execute through `execute_portable_write()`:
 - `_record_schema_version`: `INSERT OR IGNORE INTO schema_version ...`
 - `log_audit_action`: both `INSERT INTO audit_logs ...` variants
 
+## Phase 5B.12G conversions applied (branch/user admin DML)
+
+Branch/user administration DML now executes through `execute_portable_write()` (no SQL logic changes):
+
+- `create_company_branch`: `INSERT INTO branches ...`; optional `INSERT OR IGNORE INTO users ...` (default bookkeeper)
+- `update_company_branch`: `UPDATE branches ...`
+- `assign_branch_manager`: `UPDATE users ...`; `UPDATE branches ...`
+- `create_branch_scoped_user`: `INSERT INTO users ...`
+- `update_branch_user_status`: `UPDATE users SET status ...`
+- `update_company_staff_branch_assignment`: `UPDATE users ...` (both variants)
+
 ### Medium risk
 
 - **Company / subscription admin**
