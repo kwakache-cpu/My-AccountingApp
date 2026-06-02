@@ -1,4 +1,4 @@
-# PostgreSQL DML Inventory (Phase 5B.12E + 5B.12F)
+# PostgreSQL DML Inventory (Phase 5B.12E + 5B.12F + 5B.12G + 5B.12H)
 
 **Audited at:** 2026-06-02  
 **Scope:** `database.py` only  
@@ -51,14 +51,25 @@ Branch/user administration DML now executes through `execute_portable_write()` (
 - `update_branch_user_status`: `UPDATE users SET status ...`
 - `update_company_staff_branch_assignment`: `UPDATE users ...` (both variants)
 
+## Phase 5B.12H conversions applied (company / subscription DML)
+
+Company/subscription/billing metadata DML now executes through `execute_portable_write()`:
+
+- `create_company_record`: `INSERT INTO companies ...`
+- `upsert_subscription_plan_setting`: `INSERT INTO subscription_plan_settings ... ON CONFLICT(plan_name) DO UPDATE`
+- `upsert_company_subscription`: `INSERT INTO company_subscriptions ... ON CONFLICT(company_key) DO UPDATE`
+- `ensure_company_trial_subscription` (existing-company path): `UPDATE companies ... subscription_expiry/contact_email/deployment_status`
+- `activate_company_subscription`: `UPDATE companies ... subscription_expiry/status/deployment_status`
+- `get_company_subscription_snapshot` (auto-expire path): `UPDATE company_subscriptions ... status='expired'` + `UPDATE companies ... subscription_expiry ...`
+
 ### Medium risk
 
 - **Company / subscription admin**
-  - `INSERT INTO companies (...)`
-  - `INSERT INTO subscription_plan_settings (...) ON CONFLICT ... DO UPDATE`
-  - `INSERT INTO company_subscriptions (...) ON CONFLICT ... DO UPDATE`
-  - `UPDATE companies ...` subscription/expiry changes
-  - `UPDATE company_subscriptions ...`
+  - `INSERT INTO companies (...)` (now routed via `execute_portable_write()` after 5B.12H)
+  - `INSERT INTO subscription_plan_settings (...) ON CONFLICT ... DO UPDATE` (now routed via `execute_portable_write()`)
+  - `INSERT INTO company_subscriptions (...) ON CONFLICT ... DO UPDATE` (now routed via `execute_portable_write()`)
+  - `UPDATE companies ...` subscription/expiry changes (now routed via `execute_portable_write()` for trial/activation + auto-expire)
+  - `UPDATE company_subscriptions ...` (now routed via `execute_portable_write()` for auto-expire)
 - **Branch governance**
   - `INSERT INTO branches (...)`
   - `UPDATE branches ...` (manager assignment / update flows)

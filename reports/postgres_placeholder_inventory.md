@@ -1,6 +1,6 @@
 # PostgreSQL Placeholder Inventory (Phase 5B.11)
 
-**Audited at:** 2026-06-02 11:09:29 UTC
+**Audited at:** 2026-06-02 12:04:36 UTC
 **Scope:** `database.py`, `modules.py`, `financials.py`, `accounting_engine.py`, `app.py`, `enterprise_services.py`, `erp_migrations.py`
 
 ## Executive Summary
@@ -44,7 +44,7 @@
 - _Review remaining literals in hot paths._
 
 **SQLite-only**
-- Company/subscription CRUD — literal `?` (lines ~3379–3942)
+- Company/subscription CRUD — literal `?` (lines ~3379–3942), but 5B.12H routes the trial/subscription DML call sites through `execute_portable_write()` so placeholders are rewritten on Postgres at execution time
 - Backup/restore diagnostics — literal `?` + `sqlite_master`
 - Schema deployment `_deploy_full_schema` — SQLite DDL only
 
