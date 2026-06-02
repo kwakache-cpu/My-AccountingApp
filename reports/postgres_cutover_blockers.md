@@ -1,6 +1,6 @@
 # PostgreSQL Runtime Cutover Blockers (Phase 5B.11)
 
-**Audited at:** 2026-06-02 09:39:50 UTC
+**Audited at:** 2026-06-02 10:35:12 UTC
 
 **Assumed env (not enabled in this audit):**
 ```
@@ -24,7 +24,7 @@ Analysis based on `get_connection()`, `ensure_schema()`, `get_postgres_readiness
 | **Branch governance** | **Likely** | **High risk** | Grant repair uses SQLite introspection patterns in database.py |
 | **Inventory** | **Likely** | **High risk** | `PRAGMA table_info(inventory)` in accounting_engine; movement SQL uses `?` |
 | **Reporting** | **Likely** | **High risk** | `accounting_engine` trial balance / GL use `?` and `strftime('%Y-%m', je.date)` |
-| **Auth/login** | **Partial** | **Medium risk** | User lookup SQL uses `?` in many call sites; DML helpers exist but write call-site conversion is not started |
+| **Auth/login** | **Partial** | **Medium risk** | User lookup SQL uses `?`; schema for `users` not ensured on Postgres |
 
 ## Hard Blockers (must fix before any staging cutover)
 

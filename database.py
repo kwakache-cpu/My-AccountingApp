@@ -4327,7 +4327,8 @@ def _ensure_database_identity_table(conn):
     }.items():
         if column_name not in existing_columns:
             conn.execute(f"ALTER TABLE database_identity ADD COLUMN {column_name} {column_def}")
-    conn.execute(
+    execute_portable_write(
+        conn,
         """
         INSERT INTO database_identity (instance_id)
         SELECT ?
@@ -4335,7 +4336,8 @@ def _ensure_database_identity_table(conn):
         """,
         (f"{os.path.basename(DB_PATH)}::{int(datetime.now().timestamp())}",),
     )
-    conn.execute(
+    execute_portable_write(
+        conn,
         """
         UPDATE database_identity
         SET last_verified_at = CURRENT_TIMESTAMP,
@@ -4350,7 +4352,8 @@ def _ensure_database_identity_table(conn):
 
 def _mark_database_startup_identity(conn):
     _ensure_database_identity_table(conn)
-    conn.execute(
+    execute_portable_write(
+        conn,
         """
         UPDATE database_identity
         SET last_startup_at = CURRENT_TIMESTAMP,
@@ -4707,7 +4710,8 @@ def _log_migration_event(
 ):
     before_counts = before_counts or {}
     after_counts = after_counts or {}
-    conn.execute(
+    execute_portable_write(
+        conn,
         """
         INSERT INTO migration_logs (
             version,
@@ -4737,7 +4741,8 @@ def _log_migration_event(
 
 
 def _record_schema_version(conn, version, description):
-    conn.execute(
+    execute_portable_write(
+        conn,
         "INSERT OR IGNORE INTO schema_version (version, description) VALUES (?, ?)",
         (version, description),
     )
@@ -9049,7 +9054,8 @@ def log_audit_action(
         columns = {row[1] for row in conn.execute("PRAGMA table_info(audit_logs)").fetchall()}
         event_id = f"AUD-{datetime.utcnow().strftime('%Y%m%d%H%M%S%f')}"
         if {"action_type", "document_ref", "before_after_summary", "event_id"}.issubset(columns):
-            conn.execute(
+            execute_portable_write(
+                conn,
                 """
                 INSERT INTO audit_logs (
                     company_key, user_role, action, module_name, details, branch_id,
@@ -9071,7 +9077,8 @@ def log_audit_action(
                 ),
             )
         else:
-            conn.execute(
+            execute_portable_write(
+                conn,
                 """
                 INSERT INTO audit_logs (company_key, user_role, action, module_name, details, branch_id)
                 VALUES (?, ?, ?, ?, ?, ?)

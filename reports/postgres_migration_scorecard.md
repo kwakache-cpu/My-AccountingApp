@@ -1,13 +1,11 @@
-# PostgreSQL Migration Scorecard (Phase 5B.11 + 5B.12E)
+# PostgreSQL Migration Scorecard (Phase 5B.11)
 
-**Audited at:** 2026-06-02 09:39:50 UTC
-
-**5B.12E:** Portable DML execution helpers added (`execute_portable_write`, `executemany_portable_write`). No DML call-site conversions yet.
+**Audited at:** 2026-06-02 10:35:12 UTC
 
 | Dimension | Grade | Notes |
 |-----------|-------|-------|
 | Identity portability | **GREEN** | Production paths use get_inserted_id / ensure_insert_sql_returning; zero raw lastrowid in app modules |
-| Placeholder portability | **RED** | ~1035 scoped literal `?`; write-portable execution helpers exist but call-site conversion is not started |
+| Placeholder portability | **RED** | ~600+ literal ? placeholders; helpers exist but unused in modules/accounting_engine |
 | Schema introspection portability | **RED** | PRAGMA / sqlite_master dominate outside small db_* helpers |
 | Transaction portability | **YELLOW** | db_begin/commit OK; BEGIN IMMEDIATE SQLite-only in lock wrapper |
 | Accounting portability | **YELLOW** | Journal identity GREEN; SQL dialect and strftime filters RED/YELLOW |
