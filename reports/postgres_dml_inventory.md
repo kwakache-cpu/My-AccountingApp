@@ -1,4 +1,4 @@
-# PostgreSQL DML Inventory (Phase 5B.12E)
+# PostgreSQL DML Inventory (Phase 5B.12E + 5B.12F)
 
 **Audited at:** 2026-06-02  
 **Scope:** `database.py` only  
@@ -29,6 +29,16 @@ These counts are indicative (string-based scan), not an AST SQL parser.
   - `INSERT INTO database_identity (...)`, `UPDATE database_identity ...` (runtime metadata)
 - **Audit logging**
   - `INSERT INTO audit_logs (...)` (append-only diagnostic record)
+
+## Phase 5B.12F conversions applied
+
+Low-risk DML statements now execute through `execute_portable_write()`:
+
+- `_ensure_database_identity_table`: `INSERT INTO database_identity ...` and `UPDATE database_identity ...`
+- `_mark_database_startup_identity`: `UPDATE database_identity ...`
+- `_log_migration_event`: `INSERT INTO migration_logs ...`
+- `_record_schema_version`: `INSERT OR IGNORE INTO schema_version ...`
+- `log_audit_action`: both `INSERT INTO audit_logs ...` variants
 
 ### Medium risk
 
