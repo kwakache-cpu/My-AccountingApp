@@ -5,6 +5,7 @@
 | Dimension | Grade | Notes |
 |-----------|-------|-------|
 | Startup guardrail | **YELLOW** | Phase 5B.13B blocks enabled PostgreSQL runtime before SQLite-only schema/recovery paths; schema deployment still not implemented |
+| Schema deployment plan | **YELLOW** | Phase 5B.13C design plan exists in `reports/postgres_schema_deployment_plan.md`; no DDL generator/deployer has been implemented |
 | Identity portability | **GREEN** | Production paths use get_inserted_id / ensure_insert_sql_returning; zero raw lastrowid in app modules |
 | Placeholder portability | **RED** | ~600+ literal ? placeholders; 5B.12H routes company/subscription trial/metadata DML through `execute_portable_write()`, but modules/accounting_engine still dominate |
 | Schema introspection portability | **RED** | PRAGMA / sqlite_master dominate outside small db_* helpers |
@@ -16,7 +17,7 @@
 | Auth portability | **YELLOW** | Straightforward queries but ? placeholders and schema ensure blocker |
 | Reporting portability | **RED** | accounting_engine heavy ? + strftime in SQL |
 | Data readiness | **GREEN** | FK orphans 0 on SQLite snapshot; cleanup phases documented |
-| Overall staging readiness | **RED** | NO-GO for ERP_ENABLE_POSTGRES_RUNTIME=1; startup now fails safe until PostgreSQL schema deployment exists |
+| Overall staging readiness | **RED** | NO-GO for ERP_ENABLE_POSTGRES_RUNTIME=1; startup fails safe and schema deployment remains design-only |
 
 ## Phase 5B.10 identity work (reflected)
 
@@ -26,4 +27,4 @@
 
 ## Overall recommendation
 
-**NO-GO** for Postgres runtime switch. Continue on SQLite. Phase 5B.13B added a safe startup gate, but PostgreSQL schema deployment is not implemented and broad placeholder/DDL portability remains the next engineering priority.
+**NO-GO** for Postgres runtime switch. Continue on SQLite. Phase 5B.13B added a safe startup gate and Phase 5B.13C adds the schema deployment plan, but PostgreSQL schema deployment is not implemented and broad placeholder/DDL portability remains the next engineering priority.
