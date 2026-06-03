@@ -20,6 +20,7 @@ from postgres_connection_adapter import parse_database_url_safely, redact_databa
 
 
 PROBE_ENABLE_ENV_VAR = "ERP_ENABLE_POSTGRES_PROBE"
+DEFAULT_PROBE_TIMEOUT_SECONDS = 5.0
 DEFAULT_DRIVER_PREFERENCE = ("psycopg", "psycopg2")
 PROHIBITED_ACTIONS = (
     "schema deployment",
@@ -53,7 +54,7 @@ class ProbeResult:
     error_message: str = ""
 
 
-Connector = Callable[[str, str], Any]
+Connector = Callable[[str, str, float], Any]
 
 
 def is_probe_enabled() -> bool:
@@ -70,6 +71,7 @@ def detect_postgres_driver(driver_preference: tuple[str, ...] = DEFAULT_DRIVER_P
 def build_probe_diagnostics(
     database_url: str | None = None,
     driver_preference: tuple[str, ...] = DEFAULT_DRIVER_PREFERENCE,
+    timeout_seconds: float = DEFAULT_PROBE_TIMEOUT_SECONDS,
 ) -> dict[str, Any]:
     value = os.environ.get("DATABASE_URL", "") if database_url is None else database_url
     driver_name, driver_detected = detect_postgres_driver(driver_preference)
@@ -86,21 +88,23 @@ def build_probe_diagnostics(
         "database_name": parsed["database"],
         "driver_name": driver_name,
         "driver_detected": driver_detected,
+        "timeout_seconds": timeout_seconds,
         "ready_for_probe": enabled and bool(value) and bool(parsed["valid"]) and driver_detected,
         "safe_behavior": "connect/disconnect only when explicitly enabled",
         "prohibited_actions": PROHIBITED_ACTIONS,
     }
 
 
-def _default_connector(database_url: str, driver_name: str):
+def _default_connector(database_url: str, driver_name: str, timeout_seconds: float):
     driver = import_module(driver_name)
-    connection = driver.connect(database_url)
-    try:
-        return connection
-    finally:
-        close = getattr(connection, "close", None)
-        if callable(close):
-            close()
+    return driver.connect(database_url, connect_timeout=timeout_seconds)
+
+
+def _connect_and_close(database_url: str, driver_name: str, timeout_seconds: float, connector: Connector) -> None:
+    connection = connector(database_url, driver_name, timeout_seconds)
+    close = getattr(connection, "close", None)
+    if callable(close):
+        close()
 
 
 def _blocked_result(status: ProbeStatus, diagnostics: dict[str, Any], message: str) -> ProbeResult:
@@ -119,8 +123,9 @@ def run_safe_connection_probe(
     database_url: str | None = None,
     driver_preference: tuple[str, ...] = DEFAULT_DRIVER_PREFERENCE,
     connector: Connector | None = None,
+    timeout_seconds: float = DEFAULT_PROBE_TIMEOUT_SECONDS,
 ) -> ProbeResult:
-    diagnostics = build_probe_diagnostics(database_url, driver_preference)
+    diagnostics = build_probe_diagnostics(database_url, driver_preference, timeout_seconds)
     value = os.environ.get("DATABASE_URL", "") if database_url is None else database_url
 
     if not diagnostics["probe_enabled"]:
@@ -139,9 +144,22 @@ def run_safe_connection_probe(
     if not diagnostics["driver_detected"]:
         return _blocked_result(ProbeStatus.DRIVER_MISSING, diagnostics, "No PostgreSQL driver is available.")
 
+    if timeout_seconds <= 0:
+        return _blocked_result(ProbeStatus.BLOCKED, diagnostics, "Probe timeout must be greater than zero seconds.")
+
     connect = connector or _default_connector
     try:
-        connect(value, str(diagnostics["driver_name"]))
+        _connect_and_close(value, str(diagnostics["driver_name"]), timeout_seconds, connect)
+    except TimeoutError as exc:
+        return ProbeResult(
+            status=ProbeStatus.PROBE_FAILED,
+            diagnostics=diagnostics,
+            driver_detected=True,
+            database_url_present=True,
+            probe_attempted=True,
+            probe_succeeded=False,
+            error_message=f"Connection probe timed out after {timeout_seconds:g} seconds: {exc}",
+        )
     except Exception as exc:  # pragma: no cover - exact driver exceptions vary.
         return ProbeResult(
             status=ProbeStatus.PROBE_FAILED,
@@ -150,7 +168,7 @@ def run_safe_connection_probe(
             database_url_present=True,
             probe_attempted=True,
             probe_succeeded=False,
-            error_message=f"{type(exc).__name__}: {exc}",
+            error_message=f"Connection probe failed during connect/disconnect: {type(exc).__name__}: {exc}",
         )
 
     return ProbeResult(

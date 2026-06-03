@@ -9,6 +9,7 @@ This phase adds a staging deployment command skeleton only. It does not deploy s
 - `--dry-run`: Default mode. Validates required offline artifacts, prints redacted database URL diagnostics, and displays planned deployment phases.
 - `--apply`: Fails immediately with `PostgreSQL deployment execution is not implemented yet.` and exits non-zero.
 - `--probe`: Runs the guarded PostgreSQL connection probe diagnostics only. The probe remains disabled unless `ERP_ENABLE_POSTGRES_PROBE=1` is set.
+- `--probe-timeout`: Optional connection timeout for `--probe`; defaults to `5` seconds.
 
 ## Validation Behavior
 
