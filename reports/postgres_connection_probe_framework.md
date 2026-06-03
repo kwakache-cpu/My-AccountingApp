@@ -1,15 +1,16 @@
 # PostgreSQL Connection Probe Framework
 
-Phase: 5B.14F
+Phase: 5B.14G
 
-This phase adds a strictly controlled PostgreSQL endpoint reachability probe. It is not schema deployment, migration, data movement, runtime activation, or a SQLite behavior change.
+This phase adds a strictly controlled PostgreSQL endpoint reachability probe through `postgres_staging_deployer.py --probe`. It is not schema deployment, migration, data movement, runtime activation, or a SQLite behavior change.
 
 ## Safety Model
 
 - Default behavior is blocked. No probe is allowed unless `ERP_ENABLE_POSTGRES_PROBE=1` is present.
-- The probe is isolated in `postgres_connection_probe.py` and is only invoked directly or through `postgres_staging_deployer.py --probe`.
+- The probe implementation is isolated in `postgres_connection_probe.py`; the supported operator entrypoint is `postgres_staging_deployer.py --probe`.
 - The staging deployer `--probe` path exits before deployment dry-run, artifact validation, migration, schema creation, or apply behavior.
 - When a probe is enabled and all prerequisites are present, the permitted operation is connection establishment followed immediately by disconnect.
+- Connection attempts use timeout handling. The default timeout is 5 seconds and the CLI may override it with `--probe-timeout`.
 - Diagnostics redact credentials and report only endpoint/configuration readiness signals.
 
 ## Enablement Flag
@@ -31,6 +32,8 @@ Any other value, including an unset variable, returns `ProbeStatus.PROBE_DISABLE
 - `probe_succeeded`
 - `error_message`
 
+Diagnostics include the redacted URL, driver discovery result, timeout seconds, and prohibited action list. Passwords are never printed.
+
 Supported statuses:
 
 - `BLOCKED`
@@ -48,6 +51,7 @@ Supported statuses:
 - It does not enable `ERP_ENABLE_POSTGRES_RUNTIME`.
 - It does not make PostgreSQL safe for staging cutover.
 - Driver behavior and network policy are still environment dependent.
+- A successful probe only proves that a TCP/TLS/authenticated connection can be opened and closed within the configured timeout.
 
 ## Prohibited Actions
 
@@ -70,4 +74,12 @@ Run diagnostics with:
 python postgres_staging_deployer.py --probe
 ```
 
+Optional timeout override:
+
+```powershell
+python postgres_staging_deployer.py --probe --probe-timeout 3
+```
+
 Without `ERP_ENABLE_POSTGRES_PROBE=1`, the command reports `PROBE_DISABLED` and does not attempt a connection.
+
+With `ERP_ENABLE_POSTGRES_PROBE=1`, the command requires `DATABASE_URL`, detects an installed PostgreSQL driver, opens one connection, and immediately closes it. It does not execute SQL.
