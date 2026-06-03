@@ -14,6 +14,12 @@ from pathlib import Path
 import sys
 from urllib.parse import urlsplit, urlunsplit
 
+from postgres_deployment_executor import (
+    APPLY_NOT_IMPLEMENTED_MESSAGE,
+    format_phase_summary,
+    run_deployment_dry_run,
+)
+
 
 REPO_ROOT = Path(__file__).resolve().parent
 REQUIRED_ARTIFACTS = (
@@ -23,7 +29,6 @@ REQUIRED_ARTIFACTS = (
     REPO_ROOT / "reports" / "postgres_deployment_dry_run_plan.md",
 )
 SKELETON_REPORT = REPO_ROOT / "reports" / "postgres_staging_deployment_skeleton.md"
-APPLY_NOT_IMPLEMENTED_MESSAGE = "PostgreSQL deployment execution is not implemented yet."
 
 DISPLAY_PHASES = (
     ("1", "migration metadata"),
@@ -93,9 +98,8 @@ def validate_required_artifacts(required_artifacts: tuple[Path, ...] = REQUIRED_
 
 
 def format_phase_display() -> str:
-    lines = ["Planned PostgreSQL deployment phases (display only):"]
-    lines.extend(f"{phase_number}. {phase_name}" for phase_number, phase_name in DISPLAY_PHASES)
-    return "\n".join(lines)
+    result = run_deployment_dry_run()
+    return format_phase_summary(result)
 
 
 def render_skeleton_report() -> str:
