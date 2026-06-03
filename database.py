@@ -389,13 +389,12 @@ def get_schema_manifest():
 
 
 def _get_existing_tables(conn):
-    rows = conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()
-    return {str(row[0]) for row in rows}
+    return set(list_tables(conn))
 
 
 def _get_existing_columns(conn, table_name):
     try:
-        return {str(row[1]) for row in conn.execute(f"PRAGMA table_info({table_name})").fetchall()}
+        return {column["name"] for column in list_columns(conn, table_name)}
     except sqlite3.Error:
         return set()
 
@@ -700,15 +699,11 @@ def get_postgres_readiness_diagnostics(conn=None):
     try:
         diagnostics_conn = diagnostics_conn or get_connection()
         if diagnostics_conn:
-            tables = [
-                row["name"]
-                for row in diagnostics_conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()
-                if not str(row["name"]).startswith("sqlite_")
-            ]
+            tables = list_tables(diagnostics_conn)
             for table_name in tables:
-                columns = diagnostics_conn.execute(f"PRAGMA table_info({table_name})").fetchall()
-                pk_columns = [row[1] for row in columns if int(row[5] or 0) > 0]
-                column_names = {row[1] for row in columns}
+                columns = list_columns(diagnostics_conn, table_name)
+                pk_columns = [column["name"] for column in columns if column.get("primary_key")]
+                column_names = {column["name"] for column in columns}
                 table_notes[table_name] = {
                     "has_primary_key": bool(pk_columns),
                     "primary_key_columns": pk_columns,
@@ -761,12 +756,9 @@ def get_data_migration_export_plan(conn=None):
     try:
         diagnostics_conn = diagnostics_conn or get_connection()
         if diagnostics_conn:
-            for row in diagnostics_conn.execute("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name").fetchall():
-                table_name = row["name"]
-                if str(table_name).startswith("sqlite_"):
-                    continue
+            for table_name in list_tables(diagnostics_conn):
                 count_row = diagnostics_conn.execute(f"SELECT COUNT(*) AS row_count FROM {table_name}").fetchone()
-                columns = [column[1] for column in diagnostics_conn.execute(f"PRAGMA table_info({table_name})").fetchall()]
+                columns = [column["name"] for column in list_columns(diagnostics_conn, table_name)]
                 tables.append(
                     {
                         "table": table_name,
@@ -1508,39 +1500,288 @@ def db_insert_ignore_sql(table_name, columns, conflict_columns=None, backend=Non
     return f"INSERT OR IGNORE INTO {table_name} ({column_sql}) VALUES ({placeholders})"
 
 
-def db_table_exists(conn, table_name):
+def _row_value(row, key, index=0, default=None):
+    if row is None:
+        return default
+    if isinstance(row, dict):
+        return row.get(key, default)
+    try:
+        return row[key]
+    except Exception:
+        try:
+            return row[index]
+        except Exception:
+            return default
+
+
+def list_tables(conn, backend=None, include_system=False):
+    if conn is None:
+        return []
+    backend = _normalize_db_backend(backend or get_active_db_backend())
+    if backend == "postgres":
+        rows = execute_portable_query(
+            conn,
+            """
+            SELECT table_name
+            FROM information_schema.tables
+            WHERE table_schema = current_schema()
+              AND table_type = 'BASE TABLE'
+            ORDER BY table_name
+            """,
+            (),
+            backend=backend,
+        ).fetchall()
+        return [str(_row_value(row, "table_name", 0) or "") for row in rows if _row_value(row, "table_name", 0)]
+    rows = execute_portable_query(
+        conn,
+        "SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name",
+        (),
+        backend=backend,
+    ).fetchall()
+    tables = [str(_row_value(row, "name", 0) or "") for row in rows if _row_value(row, "name", 0)]
+    if include_system:
+        return tables
+    return [table_name for table_name in tables if not table_name.startswith("sqlite_")]
+
+
+def list_columns(conn, table_name, backend=None):
+    if conn is None:
+        return []
+    backend = _normalize_db_backend(backend or get_active_db_backend())
+    if backend == "postgres":
+        rows = execute_portable_query(
+            conn,
+            """
+            SELECT
+                c.column_name,
+                c.ordinal_position,
+                c.data_type,
+                c.is_nullable,
+                c.column_default,
+                CASE WHEN kcu.column_name IS NULL THEN FALSE ELSE TRUE END AS primary_key
+            FROM information_schema.columns c
+            LEFT JOIN information_schema.table_constraints tc
+                ON tc.table_schema = c.table_schema
+               AND tc.table_name = c.table_name
+               AND tc.constraint_type = 'PRIMARY KEY'
+            LEFT JOIN information_schema.key_column_usage kcu
+                ON kcu.constraint_schema = tc.constraint_schema
+               AND kcu.constraint_name = tc.constraint_name
+               AND kcu.table_schema = c.table_schema
+               AND kcu.table_name = c.table_name
+               AND kcu.column_name = c.column_name
+            WHERE c.table_schema = current_schema()
+              AND c.table_name = ?
+            ORDER BY c.ordinal_position
+            """,
+            (table_name,),
+            backend=backend,
+        ).fetchall()
+        return [
+            {
+                "name": str(_row_value(row, "column_name", 0) or ""),
+                "ordinal_position": _row_value(row, "ordinal_position", 1),
+                "type": _row_value(row, "data_type", 2),
+                "nullable": str(_row_value(row, "is_nullable", 3, "YES")).upper() == "YES",
+                "default": _row_value(row, "column_default", 4),
+                "primary_key": bool(_row_value(row, "primary_key", 5, False)),
+            }
+            for row in rows
+            if _row_value(row, "column_name", 0)
+        ]
+    rows = conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+    return [
+        {
+            "name": str(_row_value(row, "name", 1) or ""),
+            "ordinal_position": _row_value(row, "cid", 0),
+            "type": _row_value(row, "type", 2),
+            "nullable": not bool(_row_value(row, "notnull", 3, 0)),
+            "default": _row_value(row, "dflt_value", 4),
+            "primary_key": bool(_row_value(row, "pk", 5, 0)),
+        }
+        for row in rows
+        if _row_value(row, "name", 1)
+    ]
+
+
+def list_indexes(conn, table_name=None, backend=None):
+    if conn is None:
+        return []
+    backend = _normalize_db_backend(backend or get_active_db_backend())
+    if backend == "postgres":
+        if table_name:
+            rows = execute_portable_query(
+                conn,
+                """
+                SELECT indexname, tablename, indexdef
+                FROM pg_indexes
+                WHERE schemaname = current_schema()
+                  AND tablename = ?
+                ORDER BY indexname
+                """,
+                (table_name,),
+                backend=backend,
+            ).fetchall()
+        else:
+            rows = execute_portable_query(
+                conn,
+                """
+                SELECT indexname, tablename, indexdef
+                FROM pg_indexes
+                WHERE schemaname = current_schema()
+                ORDER BY tablename, indexname
+                """,
+                (),
+                backend=backend,
+            ).fetchall()
+        return [
+            {
+                "name": str(_row_value(row, "indexname", 0) or ""),
+                "table": str(_row_value(row, "tablename", 1) or ""),
+                "definition": str(_row_value(row, "indexdef", 2) or ""),
+                "unique": "unique index" in str(_row_value(row, "indexdef", 2) or "").lower(),
+            }
+            for row in rows
+            if _row_value(row, "indexname", 0)
+        ]
+    if not table_name:
+        indexes = []
+        for current_table in list_tables(conn, backend=backend):
+            indexes.extend(list_indexes(conn, current_table, backend=backend))
+        return indexes
+    rows = conn.execute(f"PRAGMA index_list({table_name})").fetchall()
+    return [
+        {
+            "name": str(_row_value(row, "name", 1) or ""),
+            "table": table_name,
+            "unique": bool(_row_value(row, "unique", 2, 0)),
+            "origin": _row_value(row, "origin", 3),
+            "partial": bool(_row_value(row, "partial", 4, 0)),
+        }
+        for row in rows
+        if _row_value(row, "name", 1)
+    ]
+
+
+def db_table_exists(conn, table_name, backend=None):
     if conn is None:
         return False
-    if is_postgres():
-        row = conn.execute(
-            "SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = %s)",
+    backend = _normalize_db_backend(backend or get_active_db_backend())
+    if backend == "postgres":
+        row = execute_portable_query(
+            conn,
+            """
+            SELECT EXISTS (
+                SELECT 1
+                FROM information_schema.tables
+                WHERE table_schema = current_schema()
+                  AND table_name = ?
+                  AND table_type = 'BASE TABLE'
+            )
+            """,
             (table_name,),
+            backend=backend,
         ).fetchone()
-        return bool(row[0] if row else False)
+        return bool(_row_value(row, "exists", 0, False))
     return bool(
         execute_portable_query(
             conn,
             "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
             (table_name,),
+            backend=backend,
         ).fetchone()
     )
 
 
-def db_column_exists(conn, table_name, column_name):
+def db_column_exists(conn, table_name, column_name, backend=None):
     if conn is None:
         return False
-    if is_postgres():
-        row = conn.execute(
+    backend = _normalize_db_backend(backend or get_active_db_backend())
+    if backend == "postgres":
+        row = execute_portable_query(
+            conn,
             """
             SELECT EXISTS (
                 SELECT 1 FROM information_schema.columns
-                WHERE table_name = %s AND column_name = %s
+                WHERE table_schema = current_schema()
+                  AND table_name = ?
+                  AND column_name = ?
             )
             """,
             (table_name, column_name),
+            backend=backend,
         ).fetchone()
-        return bool(row[0] if row else False)
-    return column_name in {row[1] for row in conn.execute(f"PRAGMA table_info({table_name})").fetchall()}
+        return bool(_row_value(row, "exists", 0, False))
+    return column_name in {column["name"] for column in list_columns(conn, table_name, backend=backend)}
+
+
+def db_index_exists(conn, index_name, table_name=None, backend=None):
+    if conn is None:
+        return False
+    backend = _normalize_db_backend(backend or get_active_db_backend())
+    if backend == "postgres":
+        sql = """
+            SELECT EXISTS (
+                SELECT 1
+                FROM pg_indexes
+                WHERE schemaname = current_schema()
+                  AND indexname = ?
+        """
+        params = [index_name]
+        if table_name:
+            sql += " AND tablename = ?"
+            params.append(table_name)
+        sql += ")"
+        row = execute_portable_query(conn, sql, tuple(params), backend=backend).fetchone()
+        return bool(_row_value(row, "exists", 0, False))
+    return any(index["name"] == index_name for index in list_indexes(conn, table_name, backend=backend))
+
+
+def db_foreign_key_exists(conn, table_name, column_name=None, foreign_table=None, foreign_column=None, backend=None):
+    if conn is None:
+        return False
+    backend = _normalize_db_backend(backend or get_active_db_backend())
+    if backend == "postgres":
+        sql = """
+            SELECT EXISTS (
+                SELECT 1
+                FROM information_schema.table_constraints tc
+                JOIN information_schema.key_column_usage kcu
+                  ON kcu.constraint_schema = tc.constraint_schema
+                 AND kcu.constraint_name = tc.constraint_name
+                JOIN information_schema.constraint_column_usage ccu
+                  ON ccu.constraint_schema = tc.constraint_schema
+                 AND ccu.constraint_name = tc.constraint_name
+                WHERE tc.table_schema = current_schema()
+                  AND tc.constraint_type = 'FOREIGN KEY'
+                  AND tc.table_name = ?
+        """
+        params = [table_name]
+        if column_name:
+            sql += " AND kcu.column_name = ?"
+            params.append(column_name)
+        if foreign_table:
+            sql += " AND ccu.table_name = ?"
+            params.append(foreign_table)
+        if foreign_column:
+            sql += " AND ccu.column_name = ?"
+            params.append(foreign_column)
+        sql += ")"
+        row = execute_portable_query(conn, sql, tuple(params), backend=backend).fetchone()
+        return bool(_row_value(row, "exists", 0, False))
+    rows = conn.execute(f"PRAGMA foreign_key_list({table_name})").fetchall()
+    for row in rows:
+        from_column = str(_row_value(row, "from", 3) or "")
+        to_table = str(_row_value(row, "table", 2) or "")
+        to_column = str(_row_value(row, "to", 4) or "")
+        if column_name and from_column != column_name:
+            continue
+        if foreign_table and to_table != foreign_table:
+            continue
+        if foreign_column and to_column != foreign_column:
+            continue
+        return True
+    return False
 
 
 def db_create_index_sql(index_name, table_name, columns, unique=False, backend=None):
@@ -4218,13 +4459,7 @@ def get_subscription_billing_diagnostics(conn=None):
     owns_connection = conn is None
     conn = conn or _open_sqlite_connection()
     try:
-        table_rows = conn.execute(
-            """
-            SELECT name FROM sqlite_master
-            WHERE type = 'table' AND name IN ('company_subscriptions', 'license_payment_transactions', 'subscription_plan_settings')
-            """
-        ).fetchall()
-        table_names = {row[0] for row in table_rows}
+        table_names = set(list_tables(conn))
         summary = get_subscription_billing_summary(conn=conn)
         return {
             "ok": True,
@@ -4419,11 +4654,7 @@ def _mark_database_startup_identity(conn):
 
 
 def _table_exists(conn, table_name):
-    row = conn.execute(
-        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
-        (table_name,),
-    ).fetchone()
-    return bool(row)
+    return db_table_exists(conn, table_name)
 
 
 def is_database_valid(db_path=DB_PATH, logger_instance=None):
@@ -4436,13 +4667,10 @@ def is_database_valid(db_path=DB_PATH, logger_instance=None):
     try:
         conn = _open_sqlite_connection(path=db_path)
         required_tables = set(DATABASE_REQUIRED_TABLES)
-        existing_tables = {
-            row["name"]
-            for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()
-        }
+        existing_tables = set(list_tables(conn))
         if not required_tables.issubset(existing_tables):
             return False
-        company_columns = {row[1] for row in conn.execute("PRAGMA table_info(companies)").fetchall()}
+        company_columns = {column["name"] for column in list_columns(conn, "companies")}
         if "key" not in company_columns or "name" not in company_columns:
             return False
         return True
@@ -4512,10 +4740,7 @@ def get_database_production_readiness_report(db_path=DB_PATH, logger_instance=No
         conn = _open_sqlite_connection(path=db_path)
         report["sqlite_open_success"] = True
         required_tables = set(DATABASE_PRODUCTION_REQUIRED_TABLES)
-        existing_tables = {
-            row["name"]
-            for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()
-        }
+        existing_tables = set(list_tables(conn))
         report["companies_table_exists"] = "companies" in existing_tables
         report["database_identity_exists"] = "database_identity" in existing_tables
         report["schema_version_exists"] = "schema_version" in existing_tables

@@ -1,13 +1,44 @@
 # PostgreSQL Schema Deployment Plan
 
 Phase: 5B.13C  
-Status: design only. No data migration, Supabase deployment, production runtime enablement, or runtime behavior change is included.
+Status: design plus Phase 5B.13D introspection infrastructure. No data migration, Supabase deployment, production runtime enablement, or PostgreSQL schema deployment is included.
 
 ## Executive Summary
 
 The Phase 5B.13B startup gate now prevents enabled PostgreSQL runtime from entering SQLite-only schema/recovery paths. The next hard blocker is a PostgreSQL-native schema deployment path. Current schema ownership is split across `database.py` bootstrap functions, `ensure_schema_integrity()`, `_deploy_full_schema()`, runtime self-heal helpers, and `erp_migrations.py`; those paths use SQLite DDL, `PRAGMA table_info`, `sqlite_master`, `AUTOINCREMENT`, and `INSERT OR IGNORE`.
 
 The PostgreSQL target should be a deterministic initial schema deployer that creates tables, constraints, indexes, migration metadata, and seed data without touching SQLite runtime data. It should not reuse SQLite DDL strings directly.
+
+Phase 5B.13D update: backend-aware schema introspection helpers now exist for tables, columns, indexes, and foreign keys. Low-risk diagnostics/readiness metadata callers use the abstraction. SQLite schema deployment/self-heal paths remain SQLite-native, and PostgreSQL DDL deployment is still not implemented.
+
+## Current Introspection Inventory
+
+Helpers/callers now backend-aware:
+
+- `_get_existing_tables()`
+- `_get_existing_columns()`
+- `db_table_exists()`
+- `db_column_exists()`
+- `db_index_exists()`
+- `db_foreign_key_exists()`
+- `list_tables()`
+- `list_columns()`
+- `list_indexes()`
+- `get_postgres_readiness_diagnostics()`
+- `get_data_migration_export_plan()`
+- `get_subscription_billing_diagnostics()`
+- SQLite database readiness checks that only inspect metadata.
+
+Still intentionally SQLite-native in this phase:
+
+- `ensure_schema()`
+- `_deploy_full_schema()`
+- `ensure_schema_integrity()`
+- `_ensure_subscription_billing_schema()`
+- `_ensure_migration_metadata_tables()`
+- `_ensure_database_identity_table()`
+- `erp_migrations.py`
+- POS, inventory posting, payroll, and accounting posting schema guards.
 
 ## Target DDL Strategy
 
@@ -159,6 +190,8 @@ Prioritize tenant isolation and branch filtering:
 ## Deployment Phases
 
 ### A. Backend-Aware Schema Introspection Helpers
+
+Status: implemented in Phase 5B.13D for shared helper infrastructure and low-risk diagnostics/readiness callers.
 
 Objective: provide safe table/column/index/constraint existence checks for PostgreSQL without `PRAGMA` or `sqlite_master`.
 

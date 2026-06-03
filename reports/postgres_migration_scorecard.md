@@ -6,9 +6,10 @@
 |-----------|-------|-------|
 | Startup guardrail | **YELLOW** | Phase 5B.13B blocks enabled PostgreSQL runtime before SQLite-only schema/recovery paths; schema deployment still not implemented |
 | Schema deployment plan | **YELLOW** | Phase 5B.13C design plan exists in `reports/postgres_schema_deployment_plan.md`; no DDL generator/deployer has been implemented |
+| Schema introspection abstraction | **YELLOW** | Phase 5B.13D adds backend-aware table/column/index/FK helpers and converts low-risk diagnostics/readiness callers; schema deployment paths remain SQLite-native |
 | Identity portability | **GREEN** | Production paths use get_inserted_id / ensure_insert_sql_returning; zero raw lastrowid in app modules |
 | Placeholder portability | **RED** | ~600+ literal ? placeholders; 5B.12H routes company/subscription trial/metadata DML through `execute_portable_write()`, but modules/accounting_engine still dominate |
-| Schema introspection portability | **RED** | PRAGMA / sqlite_master dominate outside small db_* helpers |
+| Schema introspection portability | **YELLOW** | Shared helper layer exists, but many schema/self-heal and module callers still use SQLite-native PRAGMA/sqlite_master |
 | Transaction portability | **YELLOW** | db_begin/commit OK; BEGIN IMMEDIATE SQLite-only in lock wrapper |
 | Accounting portability | **YELLOW** | Journal identity GREEN; SQL dialect and strftime filters RED/YELLOW |
 | POS portability | **YELLOW** | Sale identity converted; placeholders + inventory PRAGMA remain |
@@ -27,4 +28,4 @@
 
 ## Overall recommendation
 
-**NO-GO** for Postgres runtime switch. Continue on SQLite. Phase 5B.13B added a safe startup gate and Phase 5B.13C adds the schema deployment plan, but PostgreSQL schema deployment is not implemented and broad placeholder/DDL portability remains the next engineering priority.
+**NO-GO** for Postgres runtime switch. Continue on SQLite. Phase 5B.13B added a safe startup gate, Phase 5B.13C adds the schema deployment plan, and Phase 5B.13D adds backend-aware introspection helpers, but PostgreSQL schema deployment is not implemented and broad placeholder/DDL portability remains the next engineering priority.
