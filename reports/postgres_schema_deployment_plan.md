@@ -1,7 +1,7 @@
 # PostgreSQL Schema Deployment Plan
 
 Phase: 5B.13C  
-Status: design plus Phase 5B.13D introspection infrastructure. No data migration, Supabase deployment, production runtime enablement, or PostgreSQL schema deployment is included.
+Status: design plus Phase 5B.13D introspection infrastructure and Phase 5B.13E offline DDL generation. No data migration, Supabase deployment, production runtime enablement, or PostgreSQL schema deployment is included.
 
 ## Executive Summary
 
@@ -10,6 +10,13 @@ The Phase 5B.13B startup gate now prevents enabled PostgreSQL runtime from enter
 The PostgreSQL target should be a deterministic initial schema deployer that creates tables, constraints, indexes, migration metadata, and seed data without touching SQLite runtime data. It should not reuse SQLite DDL strings directly.
 
 Phase 5B.13D update: backend-aware schema introspection helpers now exist for tables, columns, indexes, and foreign keys. Low-risk diagnostics/readiness metadata callers use the abstraction. SQLite schema deployment/self-heal paths remain SQLite-native, and PostgreSQL DDL deployment is still not implemented.
+
+Phase 5B.13E update: `postgres_schema_generator.py` now generates offline PostgreSQL DDL draft artifacts from the schema compatibility inventory:
+
+- `reports/postgres_generated_schema.sql`
+- `reports/postgres_generated_schema_summary.md`
+
+The generator captures all 51 SQLite tables, 67 indexes, and 47 foreign keys from the inventory report. It does not connect to any database and does not deploy schema.
 
 ## Current Introspection Inventory
 
@@ -207,6 +214,8 @@ Required tests:
 - No helper returns or logs full `DATABASE_URL`.
 
 ### B. PostgreSQL DDL Generator
+
+Status: implemented in Phase 5B.13E as an offline generator only. Generated SQL remains a draft artifact requiring manual review before any future deployer can use it.
 
 Objective: compile a structured schema manifest into PostgreSQL `CREATE TABLE`, constraints, indexes, and seed statements.
 
