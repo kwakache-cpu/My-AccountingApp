@@ -19,6 +19,7 @@ from postgres_deployment_executor import (
     format_phase_summary,
     run_deployment_dry_run,
 )
+from postgres_connection_probe import ProbeStatus, run_safe_connection_probe
 
 
 REPO_ROOT = Path(__file__).resolve().parent
@@ -115,6 +116,7 @@ This phase adds a staging deployment command skeleton only. It does not deploy s
 
 - `--dry-run`: Default mode. Validates required offline artifacts, prints redacted database URL diagnostics, and displays planned deployment phases.
 - `--apply`: Fails immediately with `{APPLY_NOT_IMPLEMENTED_MESSAGE}` and exits non-zero.
+- `--probe`: Runs the guarded PostgreSQL connection probe diagnostics only. The probe remains disabled unless `ERP_ENABLE_POSTGRES_PROBE=1` is set.
 
 ## Validation Behavior
 
@@ -132,8 +134,10 @@ Missing artifacts are reported with clear file paths. No SQL is parsed for execu
 
 - Default mode is dry-run.
 - `--apply` is blocked unconditionally.
+- `--probe` never calls deployment, migration, or schema creation paths.
 - Database URL diagnostics redact passwords and do not print secrets.
-- No PostgreSQL client, Supabase client, cursor, connection, or execute path is used.
+- Dry-run mode does not use any PostgreSQL client, Supabase client, cursor, connection, or execute path.
+- Probe mode is limited to the guarded connection probe framework and does not execute SQL.
 - SQLite runtime behavior is not imported, called, or modified.
 
 ## Current Limitations
@@ -156,7 +160,30 @@ def build_parser() -> argparse.ArgumentParser:
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--dry-run", action="store_true", help="Validate artifacts and display phases. This is the default.")
     mode.add_argument("--apply", action="store_true", help="Blocked: deployment execution is not implemented.")
+    mode.add_argument("--probe", action="store_true", help="Run guarded PostgreSQL connection probe diagnostics only.")
     return parser
+
+
+def run_probe(output_stream=sys.stdout, error_stream=sys.stderr) -> int:
+    result = run_safe_connection_probe()
+    diagnostics = result.diagnostics
+    stream = error_stream if result.status is ProbeStatus.PROBE_FAILED else output_stream
+
+    print("PostgreSQL safe connection probe diagnostics.", file=stream)
+    print(f"Status: {result.status.value}", file=stream)
+    print(f"Probe enabled: {diagnostics['probe_enabled']}", file=stream)
+    print(f"DATABASE_URL present: {result.database_url_present}", file=stream)
+    if diagnostics["database_url_redacted"]:
+        print(f"DATABASE_URL: {diagnostics['database_url_redacted']}", file=stream)
+    print(f"Driver detected: {result.driver_detected}", file=stream)
+    if diagnostics["driver_name"]:
+        print(f"Driver: {diagnostics['driver_name']}", file=stream)
+    print(f"Probe attempted: {result.probe_attempted}", file=stream)
+    print(f"Probe succeeded: {result.probe_succeeded}", file=stream)
+    if result.error_message:
+        print(f"Message: {result.error_message}", file=stream)
+    print("No deployment, migration, schema creation, data migration, SQL execution, or runtime activation was run.", file=stream)
+    return 1 if result.status is ProbeStatus.PROBE_FAILED else 0
 
 
 def run_dry_run(output_stream=sys.stdout, error_stream=sys.stderr) -> int:
@@ -189,6 +216,8 @@ def main(argv: list[str] | None = None, output_stream=sys.stdout, error_stream=s
     if args.apply:
         print(APPLY_NOT_IMPLEMENTED_MESSAGE, file=error_stream)
         return 1
+    if args.probe:
+        return run_probe(output_stream=output_stream, error_stream=error_stream)
     return run_dry_run(output_stream=output_stream, error_stream=error_stream)
 
 
