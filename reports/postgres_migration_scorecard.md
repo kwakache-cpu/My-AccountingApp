@@ -11,6 +11,7 @@
 | Schema validator | **YELLOW** | Phase 5B.13F adds offline `postgres_schema_validator.py` and validation report; score 90/100 with 51/51 tables, 67 indexes, 47 FKs, and no forbidden SQLite syntax in generated SQL |
 | Staging deployment skeleton | **YELLOW** | Phase 5B.13H adds `postgres_staging_deployer.py` with dry-run artifact checks, redacted DATABASE_URL diagnostics, and blocked `--apply`; execution is not implemented |
 | Post-deployment validation framework | **YELLOW** | Phase 5B.13I adds offline `postgres_postdeploy_validator.py` and a validation plan covering schema/table/column/index/FK/seed/migration/runtime readiness checks; no DB access or execution |
+| Deployment executor design | **YELLOW** | Phase 5B.14A adds `reports/postgres_deployment_executor_design.md` covering executor architecture, phase execution, transactions, rollback, migration history, validation checkpoints, logging, and safety protections; implementation has not started |
 | Identity portability | **GREEN** | Production paths use get_inserted_id / ensure_insert_sql_returning; zero raw lastrowid in app modules |
 | Placeholder portability | **RED** | ~600+ literal ? placeholders; 5B.12H routes company/subscription trial/metadata DML through `execute_portable_write()`, but modules/accounting_engine still dominate |
 | Schema introspection portability | **YELLOW** | Shared helper layer exists, but many schema/self-heal and module callers still use SQLite-native PRAGMA/sqlite_master |
@@ -32,4 +33,4 @@
 
 ## Overall recommendation
 
-**NO-GO** for Postgres runtime switch. Continue on SQLite. Phase 5B.13B added a safe startup gate, Phase 5B.13C adds the schema deployment plan, Phase 5B.13D adds backend-aware introspection helpers, Phase 5B.13E adds offline DDL generation, Phase 5B.13F adds offline schema validation, Phase 5B.13H adds a staging deployment CLI skeleton, and Phase 5B.13I adds a post-deployment validation framework, but PostgreSQL schema execution is not implemented and broad placeholder/DDL portability remains the next engineering priority.
+**NO-GO** for Postgres runtime switch. Continue on SQLite. Phase 5B.13B added a safe startup gate, Phase 5B.13C adds the schema deployment plan, Phase 5B.13D adds backend-aware introspection helpers, Phase 5B.13E adds offline DDL generation, Phase 5B.13F adds offline schema validation, Phase 5B.13H adds a staging deployment CLI skeleton, Phase 5B.13I adds a post-deployment validation framework, and Phase 5B.14A adds the deployment executor design, but PostgreSQL schema execution is not implemented and broad placeholder/DDL portability remains the next engineering priority.
