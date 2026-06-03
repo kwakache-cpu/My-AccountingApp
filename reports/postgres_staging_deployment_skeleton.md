@@ -8,6 +8,7 @@ This phase adds a staging deployment command skeleton only. It does not deploy s
 
 - `--dry-run`: Default mode. Validates required offline artifacts, prints redacted database URL diagnostics, and displays planned deployment phases.
 - `--apply`: Fails immediately with `PostgreSQL deployment execution is not implemented yet.` and exits non-zero.
+- `--probe`: Runs the guarded PostgreSQL connection probe diagnostics only. The probe remains disabled unless `ERP_ENABLE_POSTGRES_PROBE=1` is set.
 
 ## Validation Behavior
 
@@ -36,8 +37,10 @@ Missing artifacts are reported with clear file paths. No SQL is parsed for execu
 
 - Default mode is dry-run.
 - `--apply` is blocked unconditionally.
+- `--probe` never calls deployment, migration, or schema creation paths.
 - Database URL diagnostics redact passwords and do not print secrets.
-- No PostgreSQL client, Supabase client, cursor, connection, or execute path is used.
+- Dry-run mode does not use any PostgreSQL client, Supabase client, cursor, connection, or execute path.
+- Probe mode is limited to the guarded connection probe framework and does not execute SQL.
 - SQLite runtime behavior is not imported, called, or modified.
 
 ## Current Limitations
