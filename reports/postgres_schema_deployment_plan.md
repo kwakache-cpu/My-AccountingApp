@@ -1,7 +1,7 @@
 # PostgreSQL Schema Deployment Plan
 
 Phase: 5B.13C  
-Status: design plus Phase 5B.13D introspection infrastructure and Phase 5B.13E offline DDL generation. No data migration, Supabase deployment, production runtime enablement, or PostgreSQL schema deployment is included.
+Status: design plus Phase 5B.13D introspection infrastructure, Phase 5B.13E offline DDL generation, and Phase 5B.13F offline schema validation. No data migration, Supabase deployment, production runtime enablement, or PostgreSQL schema deployment is included.
 
 ## Executive Summary
 
@@ -17,6 +17,8 @@ Phase 5B.13E update: `postgres_schema_generator.py` now generates offline Postgr
 - `reports/postgres_generated_schema_summary.md`
 
 The generator captures all 51 SQLite tables, 67 indexes, and 47 foreign keys from the inventory report. It does not connect to any database and does not deploy schema.
+
+Phase 5B.13F update: `postgres_schema_validator.py` now validates the generated schema artifacts offline and writes `reports/postgres_schema_validation_report.md`. Current validation result is 90/100 with **YELLOW** deployment readiness: 51/51 tables represented, required core tables present, primary keys present, 67 indexes captured, 47 foreign keys captured, and no forbidden SQLite syntax in generated SQL. Manual review and unsupported-source construct items remain, and deployment is still not implemented.
 
 ## Current Introspection Inventory
 
@@ -216,6 +218,10 @@ Required tests:
 ### B. PostgreSQL DDL Generator
 
 Status: implemented in Phase 5B.13E as an offline generator only. Generated SQL remains a draft artifact requiring manual review before any future deployer can use it.
+
+### B2. PostgreSQL Schema Validator
+
+Status: implemented in Phase 5B.13F as an offline validator only. It checks generated SQL coverage against the schema compatibility inventory and reports forbidden SQLite syntax, missing required tables, missing primary keys, FK/index counts, unsupported-source construct count, and manual review count. It does not connect to PostgreSQL or deploy schema.
 
 Objective: compile a structured schema manifest into PostgreSQL `CREATE TABLE`, constraints, indexes, and seed statements.
 
