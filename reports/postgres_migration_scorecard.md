@@ -8,6 +8,7 @@
 | Schema deployment plan | **YELLOW** | Phase 5B.13C design plan exists in `reports/postgres_schema_deployment_plan.md`; deployer has not been implemented |
 | Schema introspection abstraction | **YELLOW** | Phase 5B.13D adds backend-aware table/column/index/FK helpers and converts low-risk diagnostics/readiness callers; schema deployment paths remain SQLite-native |
 | DDL generator | **YELLOW** | Phase 5B.13E adds offline `postgres_schema_generator.py` plus generated SQL/summary artifacts; no schema deployment or Supabase connection |
+| Schema validator | **YELLOW** | Phase 5B.13F adds offline `postgres_schema_validator.py` and validation report; score 90/100 with 51/51 tables, 67 indexes, 47 FKs, and no forbidden SQLite syntax in generated SQL |
 | Identity portability | **GREEN** | Production paths use get_inserted_id / ensure_insert_sql_returning; zero raw lastrowid in app modules |
 | Placeholder portability | **RED** | ~600+ literal ? placeholders; 5B.12H routes company/subscription trial/metadata DML through `execute_portable_write()`, but modules/accounting_engine still dominate |
 | Schema introspection portability | **YELLOW** | Shared helper layer exists, but many schema/self-heal and module callers still use SQLite-native PRAGMA/sqlite_master |
@@ -29,4 +30,4 @@
 
 ## Overall recommendation
 
-**NO-GO** for Postgres runtime switch. Continue on SQLite. Phase 5B.13B added a safe startup gate, Phase 5B.13C adds the schema deployment plan, Phase 5B.13D adds backend-aware introspection helpers, and Phase 5B.13E adds offline DDL generation, but PostgreSQL schema deployment is not implemented and broad placeholder/DDL portability remains the next engineering priority.
+**NO-GO** for Postgres runtime switch. Continue on SQLite. Phase 5B.13B added a safe startup gate, Phase 5B.13C adds the schema deployment plan, Phase 5B.13D adds backend-aware introspection helpers, Phase 5B.13E adds offline DDL generation, and Phase 5B.13F adds offline schema validation, but PostgreSQL schema deployment is not implemented and broad placeholder/DDL portability remains the next engineering priority.
