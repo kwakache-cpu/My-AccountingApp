@@ -20,6 +20,7 @@ from postgres_deployment_executor import (
     run_deployment_dry_run,
 )
 from postgres_connection_probe import DEFAULT_PROBE_TIMEOUT_SECONDS, ProbeStatus, run_safe_connection_probe
+from postgres_postdeploy_validator import PostDeployValidationStatus, execute_postdeploy_validation
 from postgres_schema_executor import (
     build_blocked_schema_apply_audit_log,
     build_schema_execution_plan,
@@ -127,6 +128,7 @@ This command defaults to a staging deployment dry-run. Guarded schema apply is a
 - `--confirm-schema-apply`: Required with `--apply` for guarded staging schema apply.
 - `--probe`: Runs the guarded PostgreSQL connection probe diagnostics only. The probe remains disabled unless `ERP_ENABLE_POSTGRES_PROBE=1` is set.
 - `--probe-timeout`: Optional connection timeout for `--probe`; defaults to `{DEFAULT_PROBE_TIMEOUT_SECONDS:g}` seconds.
+- `--validate-postdeploy`: Runs guarded read-only staging post-deployment validation queries. Requires `ERP_ENVIRONMENT=staging`, `DATABASE_URL`, deployed schema objects, and a PostgreSQL driver.
 
 ## Validation Behavior
 
@@ -152,6 +154,7 @@ The schema execution adapter parses `reports/postgres_generated_schema.sql` for 
 - Database URL diagnostics redact passwords and do not print secrets.
 - Dry-run mode does not use any PostgreSQL client, Supabase client, cursor, connection, or execute path.
 - Probe mode is limited to the guarded connection probe framework and does not execute SQL.
+- Post-deployment validation mode only executes SELECT metadata checks and writes `reports/postgres_postdeploy_validation_results.md`.
 - SQLite runtime behavior is not imported, called, or modified.
 
 ## Current Limitations
@@ -159,7 +162,7 @@ The schema execution adapter parses `reports/postgres_generated_schema.sql` for 
 - Data migration is not implemented.
 - Seed data deployment is not implemented.
 - Migration history writes are not implemented.
-- Post-deployment validation queries are not implemented.
+- Post-deployment validation execution is read-only and staging guarded.
 - Production deployment is blocked by `ERP_ENVIRONMENT=staging`.
 - Runtime cutover remains NO-GO.
 """
@@ -176,6 +179,7 @@ def build_parser() -> argparse.ArgumentParser:
     mode.add_argument("--dry-run", action="store_true", help="Validate artifacts and display phases. This is the default.")
     mode.add_argument("--apply", action="store_true", help="Guarded staging schema apply. Requires explicit environment and confirmation guards.")
     mode.add_argument("--probe", action="store_true", help="Run guarded PostgreSQL connection probe diagnostics only.")
+    mode.add_argument("--validate-postdeploy", action="store_true", help="Run guarded read-only staging post-deployment validation.")
     parser.add_argument(
         "--confirm-schema-apply",
         action="store_true",
@@ -282,6 +286,28 @@ def run_apply(confirm_schema_apply: bool = False, output_stream=sys.stdout, erro
     return 1
 
 
+def run_postdeploy_validation(output_stream=sys.stdout, error_stream=sys.stderr) -> int:
+    result = execute_postdeploy_validation()
+    stream = output_stream if result.status is PostDeployValidationStatus.PASSED else error_stream
+    print("PostgreSQL post-deployment validation execution.", file=stream)
+    print(f"Status: {result.status.value}", file=stream)
+    print(f"Blocked: {result.guard.blocked}", file=stream)
+    print(f"Checks planned: {result.checks_planned}", file=stream)
+    print(f"Checks executed: {result.checks_executed}", file=stream)
+    print(f"Checks passed: {result.checks_passed}", file=stream)
+    print(f"Checks failed: {result.checks_failed}", file=stream)
+    print("Guard results:", file=stream)
+    for guard_name, passed in result.guard.guard_results.items():
+        print(f"- {guard_name}: {passed}", file=stream)
+    if result.guard.redacted_database_url:
+        print(f"DATABASE_URL: {result.guard.redacted_database_url}", file=stream)
+    if result.error_message:
+        print(f"Message: {result.error_message}", file=stream)
+    print("Results report: reports/postgres_postdeploy_validation_results.md", file=stream)
+    print("Read-only SELECT validation only. No data writes, migrations, runtime activation, production deployment, or SQLite changes were run.", file=stream)
+    return 0 if result.status is PostDeployValidationStatus.PASSED else 1
+
+
 def run_dry_run(output_stream=sys.stdout, error_stream=sys.stderr) -> int:
     artifacts = validate_required_artifacts()
     if not artifacts.ok:
@@ -318,6 +344,8 @@ def main(argv: list[str] | None = None, output_stream=sys.stdout, error_stream=s
         return run_apply(confirm_schema_apply=args.confirm_schema_apply, output_stream=output_stream, error_stream=error_stream)
     if args.probe:
         return run_probe(timeout_seconds=args.probe_timeout, output_stream=output_stream, error_stream=error_stream)
+    if args.validate_postdeploy:
+        return run_postdeploy_validation(output_stream=output_stream, error_stream=error_stream)
     return run_dry_run(output_stream=output_stream, error_stream=error_stream)
 
 

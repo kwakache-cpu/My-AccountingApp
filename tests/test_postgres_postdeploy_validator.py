@@ -71,15 +71,16 @@ class PostdeployValidatorTests(unittest.TestCase):
         self.assertIn("Stage 1: Schema deployment validation", report)
         self.assertGreaterEqual(len(plan.inventory.tables), 1)
 
-    def test_no_db_access_or_sql_execution_paths(self):
+    def test_no_forbidden_runtime_or_write_paths(self):
         source = Path("postgres_postdeploy_validator.py").read_text(encoding="utf-8")
         forbidden_terms = [
             "sqlite3.connect",
-            "psycopg",
-            "conn.execute",
-            "cursor.execute",
             "create_engine",
             "supabase.create_client",
+            'os.environ.get("ERP_ENABLE_POSTGRES_RUNTIME"',
+            "os.environ['ERP_ENABLE_POSTGRES_RUNTIME']",
+            "init_db",
+            "get_connection",
         ]
         for term in forbidden_terms:
             self.assertNotIn(term, source)

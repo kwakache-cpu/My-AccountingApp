@@ -283,7 +283,7 @@ Offline framework definition only. No database connection, SQL execution, schema
 
 ## Current Limitations
 
-- PostgreSQL deployment execution is not implemented.
-- This framework does not query staging PostgreSQL.
+- Plan generation does not query staging PostgreSQL.
+- Validation execution is available separately through the guarded Phase 5B.14O read-only path.
 - Seed manifests and migration-history write behavior still need implementation.
 - Runtime cutover remains NO-GO.
