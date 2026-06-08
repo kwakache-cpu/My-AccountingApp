@@ -170,6 +170,11 @@ def _split_sql_items(sql_fragment: str) -> list[str]:
         char = sql_fragment[index]
         next_char = sql_fragment[index + 1] if index + 1 < len(sql_fragment) else ""
         if char == "'" and not in_double_quote:
+            if in_single_quote and next_char == "'":
+                current.append(char)
+                current.append(next_char)
+                index += 2
+                continue
             in_single_quote = not in_single_quote
         elif char == '"' and not in_single_quote:
             in_double_quote = not in_double_quote
@@ -186,9 +191,6 @@ def _split_sql_items(sql_fragment: str) -> list[str]:
                 index += 1
                 continue
         current.append(char)
-        if char == "'" and next_char == "'" and in_single_quote:
-            current.append(next_char)
-            index += 1
         index += 1
     trailing = "".join(current).strip()
     if trailing:
@@ -207,12 +209,39 @@ def _extract_sqlite_sections(report_text: str) -> dict[str, str]:
 
 def _extract_postgres_blocks(schema_sql: str) -> dict[str, str]:
     blocks: dict[str, str] = {}
-    pattern = re.compile(
-        r"\bCREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?([A-Za-z_][A-Za-z0-9_]*)\b(.*?);",
-        flags=re.IGNORECASE | re.DOTALL,
+    table_pattern = re.compile(
+        r"\bCREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?([A-Za-z_][A-Za-z0-9_]*)\b",
+        flags=re.IGNORECASE,
     )
-    for match in pattern.finditer(schema_sql):
-        blocks[match.group(1)] = match.group(0)
+    for match in table_pattern.finditer(schema_sql):
+        start = match.start()
+        open_index = schema_sql.find("(", match.end())
+        if open_index < 0:
+            continue
+        depth = 0
+        in_single_quote = False
+        in_double_quote = False
+        end = open_index
+        while end < len(schema_sql):
+            char = schema_sql[end]
+            if char == "'" and not in_double_quote:
+                in_single_quote = not in_single_quote
+            elif char == '"' and not in_single_quote:
+                in_double_quote = not in_double_quote
+            elif not in_single_quote and not in_double_quote:
+                if char == "(":
+                    depth += 1
+                elif char == ")":
+                    depth -= 1
+                    if depth == 0:
+                        end += 1
+                        while end < len(schema_sql) and schema_sql[end].isspace():
+                            end += 1
+                        if end < len(schema_sql) and schema_sql[end] == ";":
+                            end += 1
+                        blocks[match.group(1)] = schema_sql[start:end]
+                        break
+            end += 1
     return blocks
 
 

@@ -23,6 +23,8 @@ class SQLitePostgresMigrationReviewTests(unittest.TestCase):
             CREATE TABLE sample (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 amount REAL DEFAULT 0,
+                branch_id TEXT DEFAULT '',
+                sale_reference TEXT NOT NULL,
                 name TEXT NOT NULL
             )
             """,
@@ -31,6 +33,8 @@ class SQLitePostgresMigrationReviewTests(unittest.TestCase):
         self.assertTrue(columns["id"].primary_key)
         self.assertFalse(columns["id"].nullable)
         self.assertEqual(columns["amount"].default, "0")
+        self.assertEqual(columns["branch_id"].default, "''")
+        self.assertIn("sale_reference", columns)
         self.assertFalse(columns["name"].nullable)
 
     def test_missing_postgres_column_is_blocker(self):
