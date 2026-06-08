@@ -20,7 +20,11 @@ from postgres_deployment_executor import (
     run_deployment_dry_run,
 )
 from postgres_connection_probe import DEFAULT_PROBE_TIMEOUT_SECONDS, ProbeStatus, run_safe_connection_probe
-from postgres_schema_executor import build_schema_execution_plan, format_schema_execution_plan
+from postgres_schema_executor import (
+    build_schema_execution_plan,
+    format_schema_execution_plan,
+    validate_schema_apply_guard,
+)
 
 
 REPO_ROOT = Path(__file__).resolve().parent
@@ -116,7 +120,8 @@ This phase adds a staging deployment command skeleton only. It does not deploy s
 ## Supported CLI Options
 
 - `--dry-run`: Default mode. Validates required offline artifacts, prints redacted database URL diagnostics, and displays planned deployment phases.
-- `--apply`: Fails immediately with `{APPLY_NOT_IMPLEMENTED_MESSAGE}` and exits non-zero.
+- `--apply`: Validates guarded staging schema apply controls, then fails before SQL execution.
+- `--confirm-schema-apply`: Required with `--apply` for future schema apply; still does not permit SQL execution in this phase.
 - `--probe`: Runs the guarded PostgreSQL connection probe diagnostics only. The probe remains disabled unless `ERP_ENABLE_POSTGRES_PROBE=1` is set.
 - `--probe-timeout`: Optional connection timeout for `--probe`; defaults to `{DEFAULT_PROBE_TIMEOUT_SECONDS:g}` seconds.
 
@@ -128,7 +133,7 @@ The skeleton validates that these artifacts exist before a dry-run display:
 
 Missing artifacts are reported with clear file paths. No SQL is parsed for execution and no database calls are made.
 
-The schema execution adapter parses `reports/postgres_generated_schema.sql` for dry-run planning only. It does not execute statements from this CLI.
+The schema execution adapter parses `reports/postgres_generated_schema.sql` for dry-run planning and guarded apply diagnostics only. It does not execute statements from this CLI.
 
 ## Phase Display
 
@@ -137,7 +142,8 @@ The schema execution adapter parses `reports/postgres_generated_schema.sql` for 
 ## Safety Protections
 
 - Default mode is dry-run.
-- `--apply` is blocked unconditionally.
+- `--apply` validates guardrails but is blocked before SQL execution.
+- `--confirm-schema-apply` is required for future apply but does not override the phase block.
 - `--probe` never calls deployment, migration, or schema creation paths.
 - Schema execution planning is dry-run only and does not open a database connection.
 - Database URL diagnostics redact passwords and do not print secrets.
@@ -166,6 +172,11 @@ def build_parser() -> argparse.ArgumentParser:
     mode.add_argument("--dry-run", action="store_true", help="Validate artifacts and display phases. This is the default.")
     mode.add_argument("--apply", action="store_true", help="Blocked: deployment execution is not implemented.")
     mode.add_argument("--probe", action="store_true", help="Run guarded PostgreSQL connection probe diagnostics only.")
+    parser.add_argument(
+        "--confirm-schema-apply",
+        action="store_true",
+        help="Required future confirmation for schema apply. SQL execution remains blocked in this phase.",
+    )
     parser.add_argument(
         "--probe-timeout",
         type=float,
@@ -198,6 +209,33 @@ def run_probe(timeout_seconds: float = DEFAULT_PROBE_TIMEOUT_SECONDS, output_str
     return 1 if result.status is ProbeStatus.PROBE_FAILED else 0
 
 
+def run_apply(confirm_schema_apply: bool = False, output_stream=sys.stdout, error_stream=sys.stderr) -> int:
+    try:
+        plan = build_schema_execution_plan()
+        statements_planned = len(plan.statements)
+    except FileNotFoundError:
+        statements_planned = 0
+    diagnostics = validate_schema_apply_guard(
+        apply_flag=True,
+        confirmation_flag=confirm_schema_apply,
+        statements_planned=statements_planned,
+    )
+
+    print("PostgreSQL guarded schema apply diagnostics.", file=error_stream)
+    print(f"Status: {diagnostics.status.value}", file=error_stream)
+    print(f"Blocked: {diagnostics.blocked}", file=error_stream)
+    print(f"All guards passed: {diagnostics.all_guards_passed}", file=error_stream)
+    print(f"Statements planned: {diagnostics.statements_planned}", file=error_stream)
+    print(f"Schema path: {diagnostics.schema_path}", file=error_stream)
+    print("Guard results:", file=error_stream)
+    for guard_name, passed in diagnostics.guard_results.items():
+        print(f"- {guard_name}: {passed}", file=error_stream)
+    print(diagnostics.message, file=error_stream)
+    print(APPLY_NOT_IMPLEMENTED_MESSAGE, file=error_stream)
+    print("No SQL executed. No schema created. No migrations run.", file=error_stream)
+    return 1
+
+
 def run_dry_run(output_stream=sys.stdout, error_stream=sys.stderr) -> int:
     artifacts = validate_required_artifacts()
     if not artifacts.ok:
@@ -228,8 +266,7 @@ def main(argv: list[str] | None = None, output_stream=sys.stdout, error_stream=s
     parser = build_parser()
     args = parser.parse_args(argv)
     if args.apply:
-        print(APPLY_NOT_IMPLEMENTED_MESSAGE, file=error_stream)
-        return 1
+        return run_apply(confirm_schema_apply=args.confirm_schema_apply, output_stream=output_stream, error_stream=error_stream)
     if args.probe:
         return run_probe(timeout_seconds=args.probe_timeout, output_stream=output_stream, error_stream=error_stream)
     return run_dry_run(output_stream=output_stream, error_stream=error_stream)

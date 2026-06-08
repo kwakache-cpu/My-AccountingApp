@@ -8,6 +8,8 @@ tests may inject a mock connection to exercise execution and rollback behavior.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from enum import Enum
+import os
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +17,46 @@ from typing import Any
 REPO_ROOT = Path(__file__).resolve().parent
 DEFAULT_SCHEMA_PATH = REPO_ROOT / "reports" / "postgres_generated_schema.sql"
 EXECUTION_BLOCKED_MESSAGE = "Schema execution is blocked outside injected mock-connection tests."
+SCHEMA_APPLY_BLOCKED_MESSAGE = "Schema apply is blocked before SQL execution."
+SCHEMA_APPLY_ENABLE_ENV_VAR = "ERP_ENABLE_POSTGRES_SCHEMA_APPLY"
+STAGING_ENVIRONMENT = "staging"
+
+
+class SchemaApplyStatus(str, Enum):
+    BLOCKED = "BLOCKED"
+
+
+@dataclass(frozen=True)
+class SchemaApplyGuard:
+    apply_flag: bool
+    confirmation_flag: bool
+    schema_apply_enabled: bool
+    environment_is_staging: bool
+    database_url_present: bool
+    schema_file_exists: bool
+
+    @property
+    def all_required_conditions_passed(self) -> bool:
+        return (
+            self.apply_flag
+            and self.confirmation_flag
+            and self.schema_apply_enabled
+            and self.environment_is_staging
+            and self.database_url_present
+            and self.schema_file_exists
+        )
+
+
+@dataclass(frozen=True)
+class SchemaApplyDiagnostics:
+    status: SchemaApplyStatus
+    guard: SchemaApplyGuard
+    guard_results: dict[str, bool]
+    blocked: bool = True
+    all_guards_passed: bool = False
+    statements_planned: int = 0
+    schema_path: str = ""
+    message: str = SCHEMA_APPLY_BLOCKED_MESSAGE
 
 
 @dataclass(frozen=True)
@@ -38,6 +80,66 @@ class SchemaExecutionResult:
     rollback_succeeded: bool = False
     error_message: str = ""
     executed_statements: tuple[str, ...] = field(default_factory=tuple)
+
+
+def build_schema_apply_guard_diagnostics(
+    *,
+    apply_flag: bool,
+    confirmation_flag: bool,
+    schema_path: Path = DEFAULT_SCHEMA_PATH,
+    environ: dict[str, str] | None = None,
+    statements_planned: int = 0,
+) -> SchemaApplyDiagnostics:
+    env = os.environ if environ is None else environ
+    guard = SchemaApplyGuard(
+        apply_flag=apply_flag,
+        confirmation_flag=confirmation_flag,
+        schema_apply_enabled=env.get(SCHEMA_APPLY_ENABLE_ENV_VAR) == "1",
+        environment_is_staging=env.get("ERP_ENVIRONMENT") == STAGING_ENVIRONMENT,
+        database_url_present=bool(env.get("DATABASE_URL")),
+        schema_file_exists=schema_path.exists(),
+    )
+    guard_results = {
+        "explicit_apply_flag": guard.apply_flag,
+        "explicit_confirm_schema_apply_flag": guard.confirmation_flag,
+        SCHEMA_APPLY_ENABLE_ENV_VAR: guard.schema_apply_enabled,
+        "ERP_ENVIRONMENT_is_staging": guard.environment_is_staging,
+        "DATABASE_URL_present": guard.database_url_present,
+        "schema_file_exists": guard.schema_file_exists,
+    }
+    status = SchemaApplyStatus.BLOCKED
+    message = (
+        "All schema apply guards passed, but SQL execution is still disabled in this phase."
+        if guard.all_required_conditions_passed
+        else SCHEMA_APPLY_BLOCKED_MESSAGE
+    )
+    return SchemaApplyDiagnostics(
+        status=status,
+        guard=guard,
+        guard_results=guard_results,
+        blocked=True,
+        all_guards_passed=guard.all_required_conditions_passed,
+        statements_planned=statements_planned,
+        schema_path=str(schema_path),
+        message=message,
+    )
+
+
+def validate_schema_apply_guard(
+    *,
+    apply_flag: bool,
+    confirmation_flag: bool,
+    schema_path: Path = DEFAULT_SCHEMA_PATH,
+    environ: dict[str, str] | None = None,
+    statements_planned: int = 0,
+) -> SchemaApplyDiagnostics:
+    return build_schema_apply_guard_diagnostics(
+        apply_flag=apply_flag,
+        confirmation_flag=confirmation_flag,
+        schema_path=schema_path,
+        environ=environ,
+        statements_planned=statements_planned,
+    )
 
 
 def read_schema_sql(schema_path: Path = DEFAULT_SCHEMA_PATH) -> str:
