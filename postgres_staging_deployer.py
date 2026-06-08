@@ -21,7 +21,9 @@ from postgres_deployment_executor import (
 )
 from postgres_connection_probe import DEFAULT_PROBE_TIMEOUT_SECONDS, ProbeStatus, run_safe_connection_probe
 from postgres_schema_executor import (
+    build_blocked_schema_apply_audit_log,
     build_schema_execution_plan,
+    build_schema_execution_audit_log,
     format_schema_execution_plan,
     validate_schema_apply_guard,
 )
@@ -220,6 +222,7 @@ def run_apply(confirm_schema_apply: bool = False, output_stream=sys.stdout, erro
         confirmation_flag=confirm_schema_apply,
         statements_planned=statements_planned,
     )
+    audit_log = build_blocked_schema_apply_audit_log(diagnostics)
 
     print("PostgreSQL guarded schema apply diagnostics.", file=error_stream)
     print(f"Status: {diagnostics.status.value}", file=error_stream)
@@ -230,6 +233,12 @@ def run_apply(confirm_schema_apply: bool = False, output_stream=sys.stdout, erro
     print("Guard results:", file=error_stream)
     for guard_name, passed in diagnostics.guard_results.items():
         print(f"- {guard_name}: {passed}", file=error_stream)
+    print("Audit log:", file=error_stream)
+    print(f"- deployment_id: {audit_log.deployment_id}", file=error_stream)
+    print(f"- events: {len(audit_log.events)}", file=error_stream)
+    for event in audit_log.events:
+        print(f"- event_status: {event.status.value}", file=error_stream)
+        print(f"- rollback_required: {event.rollback_required}", file=error_stream)
     print(diagnostics.message, file=error_stream)
     print(APPLY_NOT_IMPLEMENTED_MESSAGE, file=error_stream)
     print("No SQL executed. No schema created. No migrations run.", file=error_stream)
@@ -256,7 +265,10 @@ def run_dry_run(output_stream=sys.stdout, error_stream=sys.stderr) -> int:
     print("", file=output_stream)
     print(format_phase_display(), file=output_stream)
     print("", file=output_stream)
-    print(format_schema_execution_plan(build_schema_execution_plan()), file=output_stream)
+    schema_plan = build_schema_execution_plan()
+    audit_log = build_schema_execution_audit_log(schema_plan)
+    print(format_schema_execution_plan(schema_plan), file=output_stream)
+    print(f"Audit events planned: {len(audit_log.events)}", file=output_stream)
     print("", file=output_stream)
     print("No SQL executed. No database connection attempted.", file=output_stream)
     return 0
