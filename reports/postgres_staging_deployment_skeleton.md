@@ -11,6 +11,7 @@ This command defaults to a staging deployment dry-run. Guarded schema apply is a
 - `--confirm-schema-apply`: Required with `--apply` for guarded staging schema apply.
 - `--probe`: Runs the guarded PostgreSQL connection probe diagnostics only. The probe remains disabled unless `ERP_ENABLE_POSTGRES_PROBE=1` is set.
 - `--probe-timeout`: Optional connection timeout for `--probe`; defaults to `5` seconds.
+- `--validate-postdeploy`: Runs guarded read-only staging post-deployment validation queries. Requires `ERP_ENVIRONMENT=staging`, `DATABASE_URL`, deployed schema objects, and a PostgreSQL driver.
 
 ## Validation Behavior
 
@@ -47,6 +48,7 @@ The schema execution adapter parses `reports/postgres_generated_schema.sql` for 
 - Database URL diagnostics redact passwords and do not print secrets.
 - Dry-run mode does not use any PostgreSQL client, Supabase client, cursor, connection, or execute path.
 - Probe mode is limited to the guarded connection probe framework and does not execute SQL.
+- Post-deployment validation mode only executes SELECT metadata checks and writes `reports/postgres_postdeploy_validation_results.md`.
 - SQLite runtime behavior is not imported, called, or modified.
 
 ## Current Limitations
@@ -54,6 +56,6 @@ The schema execution adapter parses `reports/postgres_generated_schema.sql` for 
 - Data migration is not implemented.
 - Seed data deployment is not implemented.
 - Migration history writes are not implemented.
-- Post-deployment validation queries are not implemented.
+- Post-deployment validation execution is read-only and staging guarded.
 - Production deployment is blocked by `ERP_ENVIRONMENT=staging`.
 - Runtime cutover remains NO-GO.
