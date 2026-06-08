@@ -1,8 +1,8 @@
-"""PostgreSQL staging deployment CLI skeleton.
+"""PostgreSQL staging deployment CLI.
 
-This entrypoint is intentionally non-executing. It validates offline artifacts,
-prints redacted diagnostics, and displays the planned deployment phases. Actual
-PostgreSQL deployment is not implemented in this phase.
+This entrypoint defaults to dry-run diagnostics. Staging schema apply is only
+available behind explicit environment and CLI guards; runtime activation and
+data migration are not implemented here.
 """
 
 from __future__ import annotations
@@ -24,6 +24,7 @@ from postgres_schema_executor import (
     build_blocked_schema_apply_audit_log,
     build_schema_execution_plan,
     build_schema_execution_audit_log,
+    execute_schema_plan_with_database_url,
     format_schema_execution_plan,
     validate_schema_apply_guard,
 )
@@ -117,13 +118,13 @@ def render_skeleton_report() -> str:
 
 Phase: 5B.13H
 
-This phase adds a staging deployment command skeleton only. It does not deploy schema, connect to Supabase, execute SQL, enable PostgreSQL runtime, migrate data, or modify SQLite behavior.
+This command defaults to a staging deployment dry-run. Guarded schema apply is available only for staging when every explicit control passes. It does not connect to Supabase, enable PostgreSQL runtime, migrate data, seed data, deploy to production, or modify SQLite behavior.
 
 ## Supported CLI Options
 
 - `--dry-run`: Default mode. Validates required offline artifacts, prints redacted database URL diagnostics, and displays planned deployment phases.
-- `--apply`: Validates guarded staging schema apply controls, then fails before SQL execution.
-- `--confirm-schema-apply`: Required with `--apply` for future schema apply; still does not permit SQL execution in this phase.
+- `--apply`: Validates guarded staging schema apply controls and may execute schema statements only when all guards and the safe probe pass.
+- `--confirm-schema-apply`: Required with `--apply` for guarded staging schema apply.
 - `--probe`: Runs the guarded PostgreSQL connection probe diagnostics only. The probe remains disabled unless `ERP_ENABLE_POSTGRES_PROBE=1` is set.
 - `--probe-timeout`: Optional connection timeout for `--probe`; defaults to `{DEFAULT_PROBE_TIMEOUT_SECONDS:g}` seconds.
 
@@ -135,7 +136,7 @@ The skeleton validates that these artifacts exist before a dry-run display:
 
 Missing artifacts are reported with clear file paths. No SQL is parsed for execution and no database calls are made.
 
-The schema execution adapter parses `reports/postgres_generated_schema.sql` for dry-run planning and guarded apply diagnostics only. It does not execute statements from this CLI.
+The schema execution adapter parses `reports/postgres_generated_schema.sql` for dry-run planning. In apply mode it may execute schema statements only after staging guards, confirmation, and the safe connection probe pass.
 
 ## Phase Display
 
@@ -144,10 +145,10 @@ The schema execution adapter parses `reports/postgres_generated_schema.sql` for 
 ## Safety Protections
 
 - Default mode is dry-run.
-- `--apply` validates guardrails but is blocked before SQL execution.
-- `--confirm-schema-apply` is required for future apply but does not override the phase block.
+- `--apply` validates guardrails and fails closed unless every required control passes.
+- `--confirm-schema-apply` is required for guarded apply.
 - `--probe` never calls deployment, migration, or schema creation paths.
-- Schema execution planning is dry-run only and does not open a database connection.
+- Schema execution never runs during dry-run and does not run automatically on startup.
 - Database URL diagnostics redact passwords and do not print secrets.
 - Dry-run mode does not use any PostgreSQL client, Supabase client, cursor, connection, or execute path.
 - Probe mode is limited to the guarded connection probe framework and does not execute SQL.
@@ -155,10 +156,11 @@ The schema execution adapter parses `reports/postgres_generated_schema.sql` for 
 
 ## Current Limitations
 
-- Actual PostgreSQL deployment execution is not implemented.
-- Migration history writes are not implemented.
+- Data migration is not implemented.
 - Seed data deployment is not implemented.
+- Migration history writes are not implemented.
 - Post-deployment validation queries are not implemented.
+- Production deployment is blocked by `ERP_ENVIRONMENT=staging`.
 - Runtime cutover remains NO-GO.
 """
 
@@ -172,7 +174,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="PostgreSQL staging deployment skeleton.")
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--dry-run", action="store_true", help="Validate artifacts and display phases. This is the default.")
-    mode.add_argument("--apply", action="store_true", help="Blocked: deployment execution is not implemented.")
+    mode.add_argument("--apply", action="store_true", help="Guarded staging schema apply. Requires explicit environment and confirmation guards.")
     mode.add_argument("--probe", action="store_true", help="Run guarded PostgreSQL connection probe diagnostics only.")
     parser.add_argument(
         "--confirm-schema-apply",
@@ -222,7 +224,6 @@ def run_apply(confirm_schema_apply: bool = False, output_stream=sys.stdout, erro
         confirmation_flag=confirm_schema_apply,
         statements_planned=statements_planned,
     )
-    audit_log = build_blocked_schema_apply_audit_log(diagnostics)
 
     print("PostgreSQL guarded schema apply diagnostics.", file=error_stream)
     print(f"Status: {diagnostics.status.value}", file=error_stream)
@@ -233,15 +234,51 @@ def run_apply(confirm_schema_apply: bool = False, output_stream=sys.stdout, erro
     print("Guard results:", file=error_stream)
     for guard_name, passed in diagnostics.guard_results.items():
         print(f"- {guard_name}: {passed}", file=error_stream)
+
+    if diagnostics.blocked:
+        audit_log = build_blocked_schema_apply_audit_log(diagnostics)
+        print("Audit log:", file=error_stream)
+        print(f"- deployment_id: {audit_log.deployment_id}", file=error_stream)
+        print(f"- events: {len(audit_log.events)}", file=error_stream)
+        for event in audit_log.events:
+            print(f"- event_status: {event.status.value}", file=error_stream)
+            print(f"- rollback_required: {event.rollback_required}", file=error_stream)
+        print(diagnostics.message, file=error_stream)
+        print(APPLY_NOT_IMPLEMENTED_MESSAGE, file=error_stream)
+        print("No SQL executed. No schema created. No migrations run.", file=error_stream)
+        return 1
+
+    probe_result = run_safe_connection_probe()
+    print(f"Probe status: {probe_result.status.value}", file=error_stream)
+    if probe_result.diagnostics.get("database_url_redacted"):
+        print(f"DATABASE_URL: {probe_result.diagnostics['database_url_redacted']}", file=error_stream)
+    if probe_result.status is not ProbeStatus.PROBE_SUCCEEDED:
+        audit_log = build_blocked_schema_apply_audit_log(diagnostics)
+        print("Audit log:", file=error_stream)
+        print(f"- deployment_id: {audit_log.deployment_id}", file=error_stream)
+        print(f"- events: {len(audit_log.events)}", file=error_stream)
+        print(f"Schema apply blocked: {probe_result.error_message}", file=error_stream)
+        print("No SQL executed. No schema created. No migrations run.", file=error_stream)
+        return 1
+
+    database_url = os.environ.get("DATABASE_URL", "")
+    driver_name = str(probe_result.diagnostics.get("driver_name", ""))
+    result = execute_schema_plan_with_database_url(
+        plan,
+        database_url=database_url,
+        driver_name=driver_name,
+    )
     print("Audit log:", file=error_stream)
-    print(f"- deployment_id: {audit_log.deployment_id}", file=error_stream)
-    print(f"- events: {len(audit_log.events)}", file=error_stream)
-    for event in audit_log.events:
-        print(f"- event_status: {event.status.value}", file=error_stream)
-        print(f"- rollback_required: {event.rollback_required}", file=error_stream)
-    print(diagnostics.message, file=error_stream)
-    print(APPLY_NOT_IMPLEMENTED_MESSAGE, file=error_stream)
-    print("No SQL executed. No schema created. No migrations run.", file=error_stream)
+    if result.audit_log is not None:
+        print(f"- deployment_id: {result.audit_log.deployment_id}", file=error_stream)
+        print(f"- events: {len(result.audit_log.events)}", file=error_stream)
+    print(f"Statements executed: {result.statements_executed}/{result.statements_planned}", file=error_stream)
+    print(f"Rollback attempted: {result.rollback_attempted}", file=error_stream)
+    print(f"Rollback succeeded: {result.rollback_succeeded}", file=error_stream)
+    if result.ok:
+        print("Schema apply completed for staging. PostgreSQL runtime remains disabled.", file=error_stream)
+        return 0
+    print(f"Schema apply failed: {result.error_message}", file=error_stream)
     return 1
 
 

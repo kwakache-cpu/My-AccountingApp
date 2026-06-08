@@ -4,6 +4,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from postgres_connection_probe import ProbeStatus
 from postgres_schema_executor import (
     SCHEMA_APPLY_BLOCKED_MESSAGE,
     SCHEMA_APPLY_ENABLE_ENV_VAR,
@@ -18,6 +19,7 @@ class PostgresSchemaApplyGuardTests(unittest.TestCase):
     def _valid_env(self):
         return {
             SCHEMA_APPLY_ENABLE_ENV_VAR: "1",
+            "ERP_ENABLE_POSTGRES_PROBE": "1",
             "ERP_ENVIRONMENT": "staging",
             "DATABASE_URL": "postgresql://user:secret@example.test/app",
         }
@@ -95,12 +97,12 @@ class PostgresSchemaApplyGuardTests(unittest.TestCase):
                 environ=self._valid_env(),
                 statements_planned=2,
             )
-        self.assertEqual(diagnostics.status, SchemaApplyStatus.BLOCKED)
-        self.assertTrue(diagnostics.blocked)
+        self.assertEqual(diagnostics.status, SchemaApplyStatus.READY)
+        self.assertFalse(diagnostics.blocked)
         self.assertTrue(diagnostics.all_guards_passed)
         self.assertTrue(all(diagnostics.guard_results.values()))
         self.assertEqual(diagnostics.statements_planned, 2)
-        self.assertIn("SQL execution is still disabled", diagnostics.message)
+        self.assertIn("successful guarded probe", diagnostics.message)
 
     def test_dry_run_unaffected(self):
         stdout = io.StringIO()
@@ -115,21 +117,28 @@ class PostgresSchemaApplyGuardTests(unittest.TestCase):
     def test_cli_apply_reports_guards_and_executes_no_sql(self):
         stdout = io.StringIO()
         stderr = io.StringIO()
-        with patch("postgres_staging_deployer.execute_schema_plan", create=True) as execute:
-            with patch.dict("os.environ", self._valid_env(), clear=True):
-                exit_code = main(
-                    ["--apply", "--confirm-schema-apply"],
-                    output_stream=stdout,
-                    error_stream=stderr,
-                )
+        failed_probe = unittest.mock.Mock(
+            status=ProbeStatus.PROBE_FAILED,
+            error_message="probe failed",
+            diagnostics={"database_url_redacted": "postgresql://user:***@example.test/app"},
+        )
+        with patch("postgres_staging_deployer.run_safe_connection_probe", return_value=failed_probe):
+            with patch("postgres_staging_deployer.execute_schema_plan_with_database_url") as execute:
+                with patch.dict("os.environ", self._valid_env(), clear=True):
+                    exit_code = main(
+                        ["--apply", "--confirm-schema-apply"],
+                        output_stream=stdout,
+                        error_stream=stderr,
+                    )
         self.assertEqual(exit_code, 1)
         self.assertEqual(stdout.getvalue(), "")
         output = stderr.getvalue()
         self.assertIn("PostgreSQL guarded schema apply diagnostics.", output)
-        self.assertIn("Status: BLOCKED", output)
-        self.assertIn("Blocked: True", output)
+        self.assertIn("Status: READY", output)
+        self.assertIn("Blocked: False", output)
         self.assertIn("All guards passed: True", output)
         self.assertIn("explicit_confirm_schema_apply_flag: True", output)
+        self.assertIn("Probe status: PROBE_FAILED", output)
         self.assertIn("No SQL executed. No schema created. No migrations run.", output)
         execute.assert_not_called()
 
