@@ -1,6 +1,6 @@
 # PostgreSQL Schema Dependency Graph
 
-Phase: 5B.14M
+Phase: 5B.14N
 
 This graph is derived from `reports/postgres_generated_schema.sql`. It is an offline analysis artifact only; no SQL was executed.
 
@@ -19,55 +19,55 @@ This graph is derived from `reports/postgres_generated_schema.sql`. It is an off
 |---:|---|---:|---|
 | 1 | `accounting_periods` | 2 | - |
 | 2 | `accounts_payable` | 3 | - |
-| 3 | `branch_type_catalog` | 9 | - |
-| 4 | `companies` | 14 | - |
-| 5 | `customers` | 18 | - |
-| 6 | `database_identity` | 19 | - |
-| 7 | `journal_entries` | 25 | - |
-| 8 | `license_payment_transactions` | 27 | - |
-| 9 | `maintenance_settings` | 28 | - |
-| 10 | `migration_history` | 29 | - |
-| 11 | `migration_logs` | 30 | - |
-| 12 | `payments` | 32 | - |
-| 13 | `payroll_records` | 34 | - |
-| 14 | `schema_version` | 43 | - |
-| 15 | `subscription_plan_settings` | 45 | - |
-| 16 | `suppliers` | 47 | - |
-| 17 | `system_logs` | 48 | - |
-| 18 | `system_settings` | 49 | - |
-| 19 | `transactions` | 50 | - |
-| 20 | `audit_logs` | 4 | `companies` |
-| 21 | `bills` | 7 | `suppliers` |
-| 22 | `branch_type_module_defaults` | 10 | `branch_type_catalog` |
-| 23 | `branches` | 11 | `companies` |
-| 24 | `cashier_closings` | 12 | `companies` |
-| 25 | `chart_of_accounts` | 13 | `companies` |
-| 26 | `company_subscriptions` | 15 | `companies` |
-| 27 | `counterparties` | 16 | `companies` |
-| 28 | `fixed_assets` | 20 | `companies` |
-| 29 | `inventory` | 21 | `companies` |
-| 30 | `inventory_import_batches` | 22 | `companies` |
-| 31 | `invoices` | 24 | `customers` |
+| 3 | `branch_type_catalog` | 4 | - |
+| 4 | `companies` | 5 | - |
+| 5 | `customers` | 6 | - |
+| 6 | `database_identity` | 7 | - |
+| 7 | `journal_entries` | 8 | - |
+| 8 | `license_payment_transactions` | 9 | - |
+| 9 | `maintenance_settings` | 10 | - |
+| 10 | `migration_history` | 11 | - |
+| 11 | `migration_logs` | 12 | - |
+| 12 | `payments` | 13 | - |
+| 13 | `payroll_records` | 14 | - |
+| 14 | `schema_version` | 15 | - |
+| 15 | `subscription_plan_settings` | 16 | - |
+| 16 | `suppliers` | 17 | - |
+| 17 | `system_logs` | 18 | - |
+| 18 | `system_settings` | 19 | - |
+| 19 | `transactions` | 20 | - |
+| 20 | `audit_logs` | 21 | `companies` |
+| 21 | `bills` | 22 | `suppliers` |
+| 22 | `branch_type_module_defaults` | 23 | `branch_type_catalog` |
+| 23 | `branches` | 24 | `companies` |
+| 24 | `cashier_closings` | 25 | `companies` |
+| 25 | `chart_of_accounts` | 26 | `companies` |
+| 26 | `company_subscriptions` | 27 | `companies` |
+| 27 | `counterparties` | 28 | `companies` |
+| 28 | `fixed_assets` | 29 | `companies` |
+| 29 | `inventory` | 30 | `companies` |
+| 30 | `inventory_import_batches` | 31 | `companies` |
+| 31 | `invoices` | 32 | `customers` |
 | 32 | `payroll` | 33 | `companies` |
-| 33 | `pending_approvals` | 35 | `companies` |
-| 34 | `pos_returns` | 36 | `companies` |
-| 35 | `pos_sales` | 38 | `companies` |
-| 36 | `pos_suspended_sales` | 39 | `companies` |
-| 37 | `purchase_orders` | 40 | `companies` |
-| 38 | `sales_invoices` | 42 | `companies` |
-| 39 | `supplier_transactions` | 46 | `companies`, `suppliers` |
-| 40 | `users` | 51 | `companies` |
-| 41 | `vouchers` | 52 | `companies` |
-| 42 | `bank_accounts` | 5 | `branches`, `companies` |
-| 43 | `bill_lines` | 6 | `bills` |
-| 44 | `branch_module_grants` | 8 | `branches`, `companies` |
-| 45 | `customer_transactions` | 17 | `branches`, `companies`, `customers` |
-| 46 | `invoice_lines` | 23 | `inventory`, `invoices` |
-| 47 | `journal_lines` | 26 | `chart_of_accounts`, `journal_entries` |
-| 48 | `payment_allocations` | 31 | `bills`, `branches`, `companies`, `invoices`, `payments` |
-| 49 | `pos_sale_lines` | 37 | `companies`, `pos_sales` |
-| 50 | `recurring_transactions` | 41 | `branches`, `companies` |
-| 51 | `stock_movements` | 44 | `branches`, `companies`, `inventory` |
+| 33 | `pending_approvals` | 34 | `companies` |
+| 34 | `pos_returns` | 35 | `companies` |
+| 35 | `pos_sales` | 36 | `companies` |
+| 36 | `pos_suspended_sales` | 37 | `companies` |
+| 37 | `purchase_orders` | 38 | `companies` |
+| 38 | `sales_invoices` | 39 | `companies` |
+| 39 | `supplier_transactions` | 40 | `companies`, `suppliers` |
+| 40 | `users` | 41 | `companies` |
+| 41 | `vouchers` | 42 | `companies` |
+| 42 | `bank_accounts` | 43 | `branches`, `companies` |
+| 43 | `bill_lines` | 44 | `bills` |
+| 44 | `branch_module_grants` | 45 | `branches`, `companies` |
+| 45 | `customer_transactions` | 46 | `branches`, `companies`, `customers` |
+| 46 | `invoice_lines` | 47 | `inventory`, `invoices` |
+| 47 | `journal_lines` | 48 | `chart_of_accounts`, `journal_entries` |
+| 48 | `payment_allocations` | 49 | `bills`, `branches`, `companies`, `invoices`, `payments` |
+| 49 | `pos_sale_lines` | 50 | `companies`, `pos_sales` |
+| 50 | `recurring_transactions` | 51 | `branches`, `companies` |
+| 51 | `stock_movements` | 52 | `branches`, `companies`, `inventory` |
 
 ## Foreign-Key Edges
 
@@ -123,24 +123,10 @@ vouchers -> companies
 
 ## Forward References In Current Statement Order
 
-These edges point to tables that appear later in the current generated SQL:
+No foreign-key edge points to a table that appears later in the regenerated SQL.
 
 ```text
-statement 4: audit_logs -> companies (companies statement 14)
-statement 5: bank_accounts -> companies (companies statement 14)
-statement 5: bank_accounts -> branches (branches statement 11)
-statement 6: bill_lines -> bills (bills statement 7)
-statement 7: bills -> suppliers (suppliers statement 47)
-statement 8: branch_module_grants -> companies (companies statement 14)
-statement 8: branch_module_grants -> branches (branches statement 11)
-statement 11: branches -> companies (companies statement 14)
-statement 12: cashier_closings -> companies (companies statement 14)
-statement 13: chart_of_accounts -> companies (companies statement 14)
-statement 17: customer_transactions -> customers (customers statement 18)
-statement 23: invoice_lines -> invoices (invoices statement 24)
-statement 31: payment_allocations -> payments (payments statement 32)
-statement 37: pos_sale_lines -> pos_sales (pos_sales statement 38)
-statement 46: supplier_transactions -> suppliers (suppliers statement 47)
+None.
 ```
 
 ## Mermaid Graph
@@ -198,4 +184,4 @@ graph TD
 
 ## Ordering Recommendation
 
-Regenerate table DDL in dependency-safe order before attempting schema apply again. Keep future executable indexes after all table creation statements. If future cycles appear, split cyclic foreign keys into post-table `ALTER TABLE ... ADD CONSTRAINT` statements.
+The generated schema now emits table DDL in dependency-safe order. Keep future executable indexes after all table creation statements. If future cycles appear, split cyclic foreign keys into post-table `ALTER TABLE ... ADD CONSTRAINT` statements.
