@@ -22,6 +22,7 @@ DEFAULT_SQLITE_SCHEMA_REPORT = REPO_ROOT / "reports" / "postgres_schema_compatib
 DEFAULT_POSTGRES_SCHEMA_PATH = REPO_ROOT / "reports" / "postgres_generated_schema.sql"
 DEFAULT_MIGRATION_PLAN_REPORT = REPO_ROOT / "reports" / "sqlite_postgres_migration_plan.md"
 DEFAULT_MISMATCH_REVIEW_REPORT = REPO_ROOT / "reports" / "sqlite_postgres_schema_mismatch_review.md"
+DEFAULT_DATA_VOLUME_AUDIT_REPORT = REPO_ROOT / "reports" / "sqlite_postgres_data_volume_audit.md"
 DEFAULT_BATCH_SIZE = 1_000
 SAFE_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
@@ -111,6 +112,34 @@ class MigrationResult:
     estimated_total_rows: int | None
     schema_mismatches: list[SchemaMismatchReview] = field(default_factory=list)
     blockers: list[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class TableVolumeEstimate:
+    table_name: str
+    row_count: int
+    estimated_data_bytes: int
+    estimated_csv_bytes: int
+    estimated_json_bytes: int
+
+
+@dataclass(frozen=True)
+class DataVolumeAudit:
+    db_path: Path
+    db_file_size_bytes: int
+    page_count: int
+    page_size: int
+    freelist_count: int
+    total_row_count: int
+    table_estimates: list[TableVolumeEstimate]
+    estimated_csv_export_bytes: int
+    estimated_json_export_bytes: int
+    estimated_compressed_export_bytes: int
+    estimated_postgres_upload_bytes: int
+    minimum_data_bundle_bytes: int
+    recommended_data_bundle_bytes: int
+    safe_data_bundle_2x_bytes: int
+    volume_classification: str
 
 
 def _read_text(path: Path) -> str:
@@ -276,6 +305,89 @@ def estimate_sqlite_row_counts(connection: sqlite3.Connection, tables: list[str]
         value = row["row_count"] if isinstance(row, sqlite3.Row) else row[0]
         counts[table_name] = int(value or 0)
     return counts
+
+
+def read_sqlite_page_metrics(connection: sqlite3.Connection) -> tuple[int, int, int]:
+    page_count = int(connection.execute("PRAGMA page_count").fetchone()[0] or 0)
+    page_size = int(connection.execute("PRAGMA page_size").fetchone()[0] or 0)
+    freelist_count = int(connection.execute("PRAGMA freelist_count").fetchone()[0] or 0)
+    return page_count, page_size, freelist_count
+
+
+def _bytes_to_mb(value: int) -> float:
+    return value / (1024 * 1024)
+
+
+def _ceil_mb_bytes(value: int, minimum_mb: int = 1) -> int:
+    mb = max(minimum_mb, math.ceil(value / (1024 * 1024)))
+    return mb * 1024 * 1024
+
+
+def classify_data_volume(total_bytes: int) -> str:
+    if total_bytes < 50 * 1024 * 1024:
+        return "SMALL"
+    if total_bytes < 1_024 * 1024 * 1024:
+        return "MEDIUM"
+    return "LARGE"
+
+
+def build_data_volume_audit(sqlite_db_path: Path = DEFAULT_SQLITE_DB_PATH) -> DataVolumeAudit:
+    db_path = sqlite_db_path.resolve()
+    db_file_size_bytes = db_path.stat().st_size
+    connection = open_sqlite_readonly(db_path)
+    try:
+        page_count, page_size, freelist_count = read_sqlite_page_metrics(connection)
+        tables = discover_sqlite_tables(connection)
+        row_counts = estimate_sqlite_row_counts(connection, tables)
+    finally:
+        connection.close()
+
+    total_rows = sum(row_counts.values())
+    active_db_bytes = max(0, (page_count - freelist_count) * page_size)
+    # Without reading rows, distribute active DB bytes by row count. Empty tables
+    # remain zero; metadata/index overhead stays represented in total estimates.
+    table_estimates: list[TableVolumeEstimate] = []
+    for table_name in tables:
+        row_count = row_counts.get(table_name, 0)
+        estimated_data_bytes = round((active_db_bytes * row_count / total_rows)) if total_rows else 0
+        estimated_csv_bytes = round(estimated_data_bytes * 1.15)
+        estimated_json_bytes = round(estimated_data_bytes * 1.6)
+        table_estimates.append(
+            TableVolumeEstimate(
+                table_name=table_name,
+                row_count=row_count,
+                estimated_data_bytes=estimated_data_bytes,
+                estimated_csv_bytes=estimated_csv_bytes,
+                estimated_json_bytes=estimated_json_bytes,
+            )
+        )
+    table_estimates.sort(key=lambda item: (-item.row_count, -item.estimated_data_bytes, item.table_name))
+
+    estimated_csv_export_bytes = max(db_file_size_bytes, round(active_db_bytes * 1.15))
+    estimated_json_export_bytes = max(db_file_size_bytes, round(active_db_bytes * 1.6))
+    estimated_compressed_export_bytes = round(estimated_csv_export_bytes * 0.45)
+    estimated_postgres_upload_bytes = round(estimated_csv_export_bytes * 1.25)
+    minimum_data_bundle_bytes = _ceil_mb_bytes(max(estimated_compressed_export_bytes, estimated_postgres_upload_bytes), minimum_mb=1)
+    recommended_data_bundle_bytes = _ceil_mb_bytes(round(minimum_data_bundle_bytes * 1.5), minimum_mb=1)
+    safe_data_bundle_2x_bytes = _ceil_mb_bytes(minimum_data_bundle_bytes * 2, minimum_mb=2)
+
+    return DataVolumeAudit(
+        db_path=db_path,
+        db_file_size_bytes=db_file_size_bytes,
+        page_count=page_count,
+        page_size=page_size,
+        freelist_count=freelist_count,
+        total_row_count=total_rows,
+        table_estimates=table_estimates,
+        estimated_csv_export_bytes=estimated_csv_export_bytes,
+        estimated_json_export_bytes=estimated_json_export_bytes,
+        estimated_compressed_export_bytes=estimated_compressed_export_bytes,
+        estimated_postgres_upload_bytes=estimated_postgres_upload_bytes,
+        minimum_data_bundle_bytes=minimum_data_bundle_bytes,
+        recommended_data_bundle_bytes=recommended_data_bundle_bytes,
+        safe_data_bundle_2x_bytes=safe_data_bundle_2x_bytes,
+        volume_classification=classify_data_volume(estimated_postgres_upload_bytes),
+    )
 
 
 def discover_sqlite_columns(connection: sqlite3.Connection, table_name: str) -> dict[str, ColumnDefinition]:
@@ -691,6 +803,88 @@ def render_mismatch_review(result: MigrationResult) -> str:
     return "\n".join(lines)
 
 
+def _format_mb(value: int) -> str:
+    return f"{_bytes_to_mb(value):.2f} MB"
+
+
+def render_data_volume_audit(audit: DataVolumeAudit) -> str:
+    largest_by_rows = sorted(audit.table_estimates, key=lambda item: (-item.row_count, item.table_name))[:10]
+    largest_by_size = sorted(audit.table_estimates, key=lambda item: (-item.estimated_data_bytes, item.table_name))[:10]
+    lines = [
+        "# SQLite to PostgreSQL Data Volume Audit",
+        "",
+        "Phase: 5B.15C",
+        "",
+        "Read-only sizing audit only. No rows were copied or exported, no PostgreSQL connection was opened, no PostgreSQL write was attempted, SQLite data was not modified, and PostgreSQL runtime was not enabled.",
+        "",
+        "## Database File",
+        "",
+        f"- DB file path: `{audit.db_path}`",
+        f"- DB file size: {_format_mb(audit.db_file_size_bytes)} ({audit.db_file_size_bytes} bytes)",
+        f"- SQLite page count: {audit.page_count}",
+        f"- SQLite page size: {audit.page_size} bytes",
+        f"- SQLite freelist count: {audit.freelist_count}",
+        f"- Total row count: {audit.total_row_count}",
+        f"- Migration volume classification: **{audit.volume_classification}**",
+        "",
+        "## Transfer Estimates",
+        "",
+        f"- Estimated CSV export size: {_format_mb(audit.estimated_csv_export_bytes)}",
+        f"- Estimated JSON export size: {_format_mb(audit.estimated_json_export_bytes)}",
+        f"- Estimated compressed export size: {_format_mb(audit.estimated_compressed_export_bytes)}",
+        f"- Estimated PostgreSQL upload size: {_format_mb(audit.estimated_postgres_upload_bytes)}",
+        f"- Minimum data needed: {_format_mb(audit.minimum_data_bundle_bytes)}",
+        f"- Recommended data bundle: {_format_mb(audit.recommended_data_bundle_bytes)}",
+        f"- Safe data bundle with 2x margin: {_format_mb(audit.safe_data_bundle_2x_bytes)}",
+        "",
+        "## Largest Tables By Rows",
+        "",
+        "| Table | Rows | Estimated data size | Estimated CSV | Estimated JSON |",
+        "|---|---:|---:|---:|---:|",
+    ]
+    for table in largest_by_rows:
+        lines.append(
+            f"| `{table.table_name}` | {table.row_count} | {_format_mb(table.estimated_data_bytes)} | {_format_mb(table.estimated_csv_bytes)} | {_format_mb(table.estimated_json_bytes)} |"
+        )
+    lines.extend(
+        [
+            "",
+            "## Largest Estimated Tables By Data Size",
+            "",
+            "| Table | Rows | Estimated data size | Estimated CSV | Estimated JSON |",
+            "|---|---:|---:|---:|---:|",
+        ]
+    )
+    for table in largest_by_size:
+        lines.append(
+            f"| `{table.table_name}` | {table.row_count} | {_format_mb(table.estimated_data_bytes)} | {_format_mb(table.estimated_csv_bytes)} | {_format_mb(table.estimated_json_bytes)} |"
+        )
+    lines.extend(
+        [
+            "",
+            "## Row Count Per Table",
+            "",
+            "| Table | Rows | Estimated data size |",
+            "|---|---:|---:|",
+        ]
+    )
+    for table in sorted(audit.table_estimates, key=lambda item: item.table_name):
+        lines.append(f"| `{table.table_name}` | {table.row_count} | {_format_mb(table.estimated_data_bytes)} |")
+    lines.extend(
+        [
+            "",
+            "## Estimation Notes",
+            "",
+            "- The audit used only `SELECT COUNT(*)`, `PRAGMA page_count`, `PRAGMA page_size`, and `PRAGMA freelist_count` against a read-only SQLite connection.",
+            "- Table byte estimates are proportional allocations from active SQLite pages by row count; they are planning estimates, not row exports.",
+            "- CSV/JSON estimates include serialization overhead; compressed estimate assumes roughly 55% compression from CSV.",
+            "- PostgreSQL upload estimate includes protocol/index/transaction overhead for planning the internet data bundle.",
+            "",
+        ]
+    )
+    return "\n".join(lines)
+
+
 def generate_migration_plan_report(output_path: Path = DEFAULT_MIGRATION_PLAN_REPORT, **plan_kwargs: Any) -> MigrationResult:
     result = build_migration_plan(**plan_kwargs)
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -705,12 +899,24 @@ def generate_mismatch_review_report(output_path: Path = DEFAULT_MISMATCH_REVIEW_
     return result
 
 
+def generate_data_volume_audit_report(
+    output_path: Path = DEFAULT_DATA_VOLUME_AUDIT_REPORT,
+    sqlite_db_path: Path = DEFAULT_SQLITE_DB_PATH,
+) -> DataVolumeAudit:
+    audit = build_data_volume_audit(sqlite_db_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(render_data_volume_audit(audit), encoding="utf-8")
+    return audit
+
+
 if __name__ == "__main__":
     plan = generate_migration_plan_report()
     generate_mismatch_review_report()
+    audit = generate_data_volume_audit_report()
     print(
         "Generated SQLite/PostgreSQL migration review: "
         f"tables={plan.sqlite_table_count}/{plan.postgres_table_count} "
         f"mismatches={len(plan.schema_mismatches)} "
-        f"batches={len(plan.batches)}"
+        f"batches={len(plan.batches)} "
+        f"db_size_mb={_bytes_to_mb(audit.db_file_size_bytes):.2f}"
     )

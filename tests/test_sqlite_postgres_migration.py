@@ -5,8 +5,10 @@ from pathlib import Path
 
 from sqlite_to_postgres_migration import (
     MismatchClassification,
+    build_data_volume_audit,
     build_migration_plan,
     build_schema_mismatch_reviews,
+    generate_data_volume_audit_report,
     generate_mismatch_review_report,
     parse_columns_from_create_sql,
     quote_identifier,
@@ -89,6 +91,27 @@ CREATE TABLE companies (key TEXT PRIMARY KEY, name TEXT, live_only TEXT)
         self.assertEqual(len(result.schema_mismatches), 1)
         self.assertIn("Blocker count: 1", report)
         self.assertIn("live_only", report)
+
+    def test_data_volume_audit_uses_read_only_counts_and_pragmas(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            sqlite_db = temp_path / "sample.db"
+            connection = sqlite3.connect(sqlite_db)
+            connection.execute("CREATE TABLE companies (key TEXT PRIMARY KEY, name TEXT)")
+            connection.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, company_key TEXT)")
+            connection.executemany("INSERT INTO companies (key, name) VALUES (?, ?)", [("c1", "One"), ("c2", "Two")])
+            connection.executemany("INSERT INTO users (id, company_key) VALUES (?, ?)", [(1, "c1"), (2, "c1"), (3, "c2")])
+            connection.commit()
+            connection.close()
+            output_path = temp_path / "volume.md"
+            audit = build_data_volume_audit(sqlite_db)
+            generated = generate_data_volume_audit_report(output_path=output_path, sqlite_db_path=sqlite_db)
+            report = output_path.read_text(encoding="utf-8")
+        self.assertEqual(audit.total_row_count, 5)
+        self.assertEqual(generated.total_row_count, 5)
+        self.assertGreater(audit.db_file_size_bytes, 0)
+        self.assertIn("SQLite to PostgreSQL Data Volume Audit", report)
+        self.assertIn("Recommended data bundle", report)
 
 
 if __name__ == "__main__":
