@@ -20,6 +20,8 @@ The generator captures all 51 SQLite tables, 67 indexes, and 47 foreign keys fro
 
 Phase 5B.13F update: `postgres_schema_validator.py` now validates the generated schema artifacts offline and writes `reports/postgres_schema_validation_report.md`. Current validation result is 90/100 with **YELLOW** deployment readiness: 51/51 tables represented, required core tables present, primary keys present, 67 indexes captured, 47 foreign keys captured, and no forbidden SQLite syntax in generated SQL. Manual review and unsupported-source construct items remain, and deployment is still not implemented.
 
+Phase 5B.15B update: `reports/sqlite_postgres_schema_mismatch_review.md` compares the live SQLite schema shape to the generated PostgreSQL schema before any row-copy work. The current review finds 47 live SQLite columns with no generated PostgreSQL target column, concentrated in `cashier_closings`, `pos_returns`, `pos_sales`, and `pos_suspended_sales`. All 47 are classified **BLOCKER** for data migration dry-run row mapping until the PostgreSQL schema plan is reconciled.
+
 ## Current Introspection Inventory
 
 Helpers/callers now backend-aware:
