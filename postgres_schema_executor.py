@@ -1,8 +1,8 @@
 """Guarded PostgreSQL schema execution adapter.
 
-This module prepares future staging schema execution, but the public deployment
-CLI remains non-executing. Real connections are intentionally out of scope:
-tests may inject a mock connection to exercise execution and rollback behavior.
+This module prepares guarded staging schema execution. Runtime integration and
+data migration remain out of scope; callers must provide explicit guards before
+opening any PostgreSQL connection.
 """
 
 from __future__ import annotations
@@ -10,6 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import Enum
+from importlib import import_module
 import os
 from pathlib import Path
 import re
@@ -22,13 +23,18 @@ DEFAULT_SCHEMA_PATH = REPO_ROOT / "reports" / "postgres_generated_schema.sql"
 EXECUTION_BLOCKED_MESSAGE = "Schema execution is blocked outside injected mock-connection tests."
 SCHEMA_APPLY_BLOCKED_MESSAGE = "Schema apply is blocked before SQL execution."
 SCHEMA_APPLY_ENABLE_ENV_VAR = "ERP_ENABLE_POSTGRES_SCHEMA_APPLY"
+SCHEMA_APPLY_PROBE_ENV_VAR = "ERP_ENABLE_POSTGRES_PROBE"
 STAGING_ENVIRONMENT = "staging"
 DEFAULT_AUDIT_PHASE_ID = "schema-apply"
 MAX_STATEMENT_PREVIEW_CHARS = 160
+DEFAULT_APPLY_CONNECT_TIMEOUT_SECONDS = 5
 
 
 class SchemaApplyStatus(str, Enum):
     BLOCKED = "BLOCKED"
+    READY = "READY"
+    APPLIED = "APPLIED"
+    FAILED = "FAILED"
 
 
 class SchemaExecutionAuditStatus(str, Enum):
@@ -46,6 +52,7 @@ class SchemaApplyGuard:
     apply_flag: bool
     confirmation_flag: bool
     schema_apply_enabled: bool
+    postgres_probe_enabled: bool
     environment_is_staging: bool
     database_url_present: bool
     schema_file_exists: bool
@@ -56,6 +63,7 @@ class SchemaApplyGuard:
             self.apply_flag
             and self.confirmation_flag
             and self.schema_apply_enabled
+            and self.postgres_probe_enabled
             and self.environment_is_staging
             and self.database_url_present
             and self.schema_file_exists
@@ -132,6 +140,7 @@ def build_schema_apply_guard_diagnostics(
         apply_flag=apply_flag,
         confirmation_flag=confirmation_flag,
         schema_apply_enabled=env.get(SCHEMA_APPLY_ENABLE_ENV_VAR) == "1",
+        postgres_probe_enabled=env.get(SCHEMA_APPLY_PROBE_ENV_VAR) == "1",
         environment_is_staging=env.get("ERP_ENVIRONMENT") == STAGING_ENVIRONMENT,
         database_url_present=bool(env.get("DATABASE_URL")),
         schema_file_exists=schema_path.exists(),
@@ -140,13 +149,14 @@ def build_schema_apply_guard_diagnostics(
         "explicit_apply_flag": guard.apply_flag,
         "explicit_confirm_schema_apply_flag": guard.confirmation_flag,
         SCHEMA_APPLY_ENABLE_ENV_VAR: guard.schema_apply_enabled,
+        SCHEMA_APPLY_PROBE_ENV_VAR: guard.postgres_probe_enabled,
         "ERP_ENVIRONMENT_is_staging": guard.environment_is_staging,
         "DATABASE_URL_present": guard.database_url_present,
         "schema_file_exists": guard.schema_file_exists,
     }
-    status = SchemaApplyStatus.BLOCKED
+    status = SchemaApplyStatus.READY if guard.all_required_conditions_passed else SchemaApplyStatus.BLOCKED
     message = (
-        "All schema apply guards passed, but SQL execution is still disabled in this phase."
+        "All schema apply guards passed. Execution may proceed only after a successful guarded probe."
         if guard.all_required_conditions_passed
         else SCHEMA_APPLY_BLOCKED_MESSAGE
     )
@@ -154,7 +164,7 @@ def build_schema_apply_guard_diagnostics(
         status=status,
         guard=guard,
         guard_results=guard_results,
-        blocked=True,
+        blocked=not guard.all_required_conditions_passed,
         all_guards_passed=guard.all_required_conditions_passed,
         statements_planned=statements_planned,
         schema_path=str(schema_path),
@@ -371,6 +381,28 @@ def _is_mock_connection(connection: Any) -> bool:
     return connection.__class__.__module__.startswith("unittest.mock")
 
 
+def open_postgres_connection(database_url: str, driver_name: str, connect_timeout_seconds: int = DEFAULT_APPLY_CONNECT_TIMEOUT_SECONDS):
+    driver = import_module(driver_name)
+    return driver.connect(database_url, connect_timeout=max(1, int(connect_timeout_seconds)))
+
+
+def _execute_statement(connection: Any, statement: str) -> None:
+    execute = getattr(connection, "execute", None)
+    if callable(execute):
+        execute(statement)
+        return
+    cursor_factory = getattr(connection, "cursor", None)
+    if not callable(cursor_factory):
+        raise RuntimeError("Injected connection does not expose execute() or cursor().")
+    cursor = cursor_factory()
+    try:
+        cursor.execute(statement)
+    finally:
+        close = getattr(cursor, "close", None)
+        if callable(close):
+            close()
+
+
 def _audit_event(
     *,
     deployment_id: str,
@@ -403,11 +435,12 @@ def execute_schema_plan_with_connection(
     connection: Any,
     *,
     allow_execution: bool = False,
+    allow_real_connection: bool = False,
     deployment_id: str | None = None,
     phase_id: str = DEFAULT_AUDIT_PHASE_ID,
 ) -> SchemaExecutionResult:
     audit_deployment_id = deployment_id or build_deployment_id()
-    if not allow_execution or not _is_mock_connection(connection):
+    if not allow_execution or (not _is_mock_connection(connection) and not allow_real_connection):
         timestamp = _utc_now_iso()
         audit_log = SchemaExecutionAuditLog(
             deployment_id=audit_deployment_id,
@@ -449,7 +482,7 @@ def execute_schema_plan_with_connection(
                     started_at=started_at,
                 )
             )
-            connection.execute(statement)
+            _execute_statement(connection, statement)
             executed.append(statement)
             events.append(
                 _audit_event(
@@ -468,7 +501,7 @@ def execute_schema_plan_with_connection(
     except Exception as exc:
         preview = build_statement_preview(statement) if "statement" in locals() else "Schema statement execution failed."
         failed_at = _utc_now_iso()
-        error_message = f"Mock schema execution failed: {type(exc).__name__}: {exc}"
+        error_message = f"Schema execution failed: {type(exc).__name__}: {exc}"
         events.append(
             _audit_event(
                 deployment_id=audit_deployment_id,
@@ -540,6 +573,33 @@ def execute_schema_plan_with_connection(
             events=tuple(events),
         ),
     )
+
+
+def execute_schema_plan_with_database_url(
+    plan: SchemaExecutionPlan,
+    *,
+    database_url: str,
+    driver_name: str,
+    connect_timeout_seconds: int = DEFAULT_APPLY_CONNECT_TIMEOUT_SECONDS,
+    connector: Any | None = None,
+    deployment_id: str | None = None,
+    phase_id: str = DEFAULT_AUDIT_PHASE_ID,
+) -> SchemaExecutionResult:
+    connect = connector or open_postgres_connection
+    connection = connect(database_url, driver_name, connect_timeout_seconds)
+    try:
+        return execute_schema_plan_with_connection(
+            plan,
+            connection,
+            allow_execution=True,
+            allow_real_connection=True,
+            deployment_id=deployment_id,
+            phase_id=phase_id,
+        )
+    finally:
+        close = getattr(connection, "close", None)
+        if callable(close):
+            close()
 
 
 def execute_schema_plan(

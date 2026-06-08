@@ -2,13 +2,13 @@
 
 Phase: 5B.13H
 
-This phase adds a staging deployment command skeleton only. It does not deploy schema, connect to Supabase, execute SQL, enable PostgreSQL runtime, migrate data, or modify SQLite behavior.
+This command defaults to a staging deployment dry-run. Guarded schema apply is available only for staging when every explicit control passes. It does not connect to Supabase, enable PostgreSQL runtime, migrate data, seed data, deploy to production, or modify SQLite behavior.
 
 ## Supported CLI Options
 
 - `--dry-run`: Default mode. Validates required offline artifacts, prints redacted database URL diagnostics, and displays planned deployment phases.
-- `--apply`: Validates guarded staging schema apply controls, then fails before SQL execution.
-- `--confirm-schema-apply`: Required with `--apply` for future schema apply; still does not permit SQL execution in this phase.
+- `--apply`: Validates guarded staging schema apply controls and may execute schema statements only when all guards and the safe probe pass.
+- `--confirm-schema-apply`: Required with `--apply` for guarded staging schema apply.
 - `--probe`: Runs the guarded PostgreSQL connection probe diagnostics only. The probe remains disabled unless `ERP_ENABLE_POSTGRES_PROBE=1` is set.
 - `--probe-timeout`: Optional connection timeout for `--probe`; defaults to `5` seconds.
 
@@ -23,7 +23,7 @@ The skeleton validates that these artifacts exist before a dry-run display:
 
 Missing artifacts are reported with clear file paths. No SQL is parsed for execution and no database calls are made.
 
-The schema execution adapter parses `reports/postgres_generated_schema.sql` for dry-run planning and guarded apply diagnostics only. It does not execute statements from this CLI.
+The schema execution adapter parses `reports/postgres_generated_schema.sql` for dry-run planning. In apply mode it may execute schema statements only after staging guards, confirmation, and the safe connection probe pass.
 
 ## Phase Display
 
@@ -40,10 +40,10 @@ The schema execution adapter parses `reports/postgres_generated_schema.sql` for 
 ## Safety Protections
 
 - Default mode is dry-run.
-- `--apply` validates guardrails but is blocked before SQL execution.
-- `--confirm-schema-apply` is required for future apply but does not override the phase block.
+- `--apply` validates guardrails and fails closed unless every required control passes.
+- `--confirm-schema-apply` is required for guarded apply.
 - `--probe` never calls deployment, migration, or schema creation paths.
-- Schema execution planning is dry-run only and does not open a database connection.
+- Schema execution never runs during dry-run and does not run automatically on startup.
 - Database URL diagnostics redact passwords and do not print secrets.
 - Dry-run mode does not use any PostgreSQL client, Supabase client, cursor, connection, or execute path.
 - Probe mode is limited to the guarded connection probe framework and does not execute SQL.
@@ -51,8 +51,9 @@ The schema execution adapter parses `reports/postgres_generated_schema.sql` for 
 
 ## Current Limitations
 
-- Actual PostgreSQL deployment execution is not implemented.
-- Migration history writes are not implemented.
+- Data migration is not implemented.
 - Seed data deployment is not implemented.
+- Migration history writes are not implemented.
 - Post-deployment validation queries are not implemented.
+- Production deployment is blocked by `ERP_ENVIRONMENT=staging`.
 - Runtime cutover remains NO-GO.
