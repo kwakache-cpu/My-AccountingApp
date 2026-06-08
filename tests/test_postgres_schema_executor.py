@@ -87,15 +87,14 @@ CREATE TABLE second (name TEXT);
         connection.commit.assert_not_called()
         self.assertIn("RuntimeError: boom", result.error_message)
 
-    def test_no_database_url_or_supabase_used_by_executor(self):
+    def test_no_supabase_or_direct_connection_used_by_executor(self):
         source = Path("postgres_schema_executor.py").read_text(encoding="utf-8")
         forbidden_terms = [
-            "DATABASE_URL",
-            "os.environ",
             "supabase",
             "create_client",
             "psycopg.connect",
             "psycopg2.connect",
+            "create_engine",
         ]
         for term in forbidden_terms:
             self.assertNotIn(term, source)

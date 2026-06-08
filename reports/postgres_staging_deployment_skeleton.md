@@ -7,7 +7,8 @@ This phase adds a staging deployment command skeleton only. It does not deploy s
 ## Supported CLI Options
 
 - `--dry-run`: Default mode. Validates required offline artifacts, prints redacted database URL diagnostics, and displays planned deployment phases.
-- `--apply`: Fails immediately with `PostgreSQL deployment execution is not implemented yet.` and exits non-zero.
+- `--apply`: Validates guarded staging schema apply controls, then fails before SQL execution.
+- `--confirm-schema-apply`: Required with `--apply` for future schema apply; still does not permit SQL execution in this phase.
 - `--probe`: Runs the guarded PostgreSQL connection probe diagnostics only. The probe remains disabled unless `ERP_ENABLE_POSTGRES_PROBE=1` is set.
 - `--probe-timeout`: Optional connection timeout for `--probe`; defaults to `5` seconds.
 
@@ -22,7 +23,7 @@ The skeleton validates that these artifacts exist before a dry-run display:
 
 Missing artifacts are reported with clear file paths. No SQL is parsed for execution and no database calls are made.
 
-The schema execution adapter parses `reports/postgres_generated_schema.sql` for dry-run planning only. It does not execute statements from this CLI.
+The schema execution adapter parses `reports/postgres_generated_schema.sql` for dry-run planning and guarded apply diagnostics only. It does not execute statements from this CLI.
 
 ## Phase Display
 
@@ -39,7 +40,8 @@ The schema execution adapter parses `reports/postgres_generated_schema.sql` for 
 ## Safety Protections
 
 - Default mode is dry-run.
-- `--apply` is blocked unconditionally.
+- `--apply` validates guardrails but is blocked before SQL execution.
+- `--confirm-schema-apply` is required for future apply but does not override the phase block.
 - `--probe` never calls deployment, migration, or schema creation paths.
 - Schema execution planning is dry-run only and does not open a database connection.
 - Database URL diagnostics redact passwords and do not print secrets.
