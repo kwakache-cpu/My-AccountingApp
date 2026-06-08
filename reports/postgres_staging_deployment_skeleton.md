@@ -22,6 +22,8 @@ The skeleton validates that these artifacts exist before a dry-run display:
 
 Missing artifacts are reported with clear file paths. No SQL is parsed for execution and no database calls are made.
 
+The schema execution adapter parses `reports/postgres_generated_schema.sql` for dry-run planning only. It does not execute statements from this CLI.
+
 ## Phase Display
 
 1. migration metadata
@@ -39,6 +41,7 @@ Missing artifacts are reported with clear file paths. No SQL is parsed for execu
 - Default mode is dry-run.
 - `--apply` is blocked unconditionally.
 - `--probe` never calls deployment, migration, or schema creation paths.
+- Schema execution planning is dry-run only and does not open a database connection.
 - Database URL diagnostics redact passwords and do not print secrets.
 - Dry-run mode does not use any PostgreSQL client, Supabase client, cursor, connection, or execute path.
 - Probe mode is limited to the guarded connection probe framework and does not execute SQL.
