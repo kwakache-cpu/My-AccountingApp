@@ -34,8 +34,11 @@ class SchemaApplyStatus(str, Enum):
 class SchemaExecutionAuditStatus(str, Enum):
     PLANNED = "PLANNED"
     BLOCKED = "BLOCKED"
+    RUNNING = "RUNNING"
+    COMPLETED = "COMPLETED"
     SUCCEEDED = "SUCCEEDED"
     FAILED = "FAILED"
+    ROLLED_BACK = "ROLLED_BACK"
 
 
 @dataclass(frozen=True)
@@ -92,6 +95,7 @@ class SchemaExecutionResult:
     rollback_succeeded: bool = False
     error_message: str = ""
     executed_statements: tuple[str, ...] = field(default_factory=tuple)
+    audit_log: "SchemaExecutionAuditLog | None" = None
 
 
 @dataclass(frozen=True)
@@ -365,6 +369,177 @@ def build_schema_execution_plan(schema_path: Path = DEFAULT_SCHEMA_PATH) -> Sche
 
 def _is_mock_connection(connection: Any) -> bool:
     return connection.__class__.__module__.startswith("unittest.mock")
+
+
+def _audit_event(
+    *,
+    deployment_id: str,
+    phase_id: str,
+    statement_index: int,
+    statement_preview: str,
+    status: SchemaExecutionAuditStatus,
+    started_at: str,
+    completed_at: str | None = None,
+    error_message: str = "",
+    rollback_required: bool = False,
+) -> SchemaExecutionAuditEvent:
+    completed = completed_at or started_at
+    return SchemaExecutionAuditEvent(
+        deployment_id=deployment_id,
+        phase_id=phase_id,
+        statement_index=statement_index,
+        statement_preview=statement_preview,
+        status=status,
+        started_at=started_at,
+        completed_at=completed,
+        duration_ms=0,
+        error_message=error_message,
+        rollback_required=rollback_required,
+    )
+
+
+def execute_schema_plan_with_connection(
+    plan: SchemaExecutionPlan,
+    connection: Any,
+    *,
+    allow_execution: bool = False,
+    deployment_id: str | None = None,
+    phase_id: str = DEFAULT_AUDIT_PHASE_ID,
+) -> SchemaExecutionResult:
+    audit_deployment_id = deployment_id or build_deployment_id()
+    if not allow_execution or not _is_mock_connection(connection):
+        timestamp = _utc_now_iso()
+        audit_log = SchemaExecutionAuditLog(
+            deployment_id=audit_deployment_id,
+            phase_id=phase_id,
+            events=(
+                _audit_event(
+                    deployment_id=audit_deployment_id,
+                    phase_id=phase_id,
+                    statement_index=0,
+                    statement_preview="Schema execution blocked before statement execution.",
+                    status=SchemaExecutionAuditStatus.BLOCKED,
+                    started_at=timestamp,
+                    error_message=EXECUTION_BLOCKED_MESSAGE,
+                ),
+            ),
+        )
+        return SchemaExecutionResult(
+            ok=False,
+            dry_run=plan.dry_run,
+            execution_allowed=False,
+            statements_planned=len(plan.statements),
+            error_message=EXECUTION_BLOCKED_MESSAGE,
+            audit_log=audit_log,
+        )
+
+    events: list[SchemaExecutionAuditEvent] = []
+    executed: list[str] = []
+    try:
+        for index, statement in enumerate(plan.statements, start=1):
+            preview = build_statement_preview(statement)
+            started_at = _utc_now_iso()
+            events.append(
+                _audit_event(
+                    deployment_id=audit_deployment_id,
+                    phase_id=phase_id,
+                    statement_index=index,
+                    statement_preview=preview,
+                    status=SchemaExecutionAuditStatus.RUNNING,
+                    started_at=started_at,
+                )
+            )
+            connection.execute(statement)
+            executed.append(statement)
+            events.append(
+                _audit_event(
+                    deployment_id=audit_deployment_id,
+                    phase_id=phase_id,
+                    statement_index=index,
+                    statement_preview=preview,
+                    status=SchemaExecutionAuditStatus.COMPLETED,
+                    started_at=started_at,
+                    completed_at=_utc_now_iso(),
+                )
+            )
+        commit = getattr(connection, "commit", None)
+        if callable(commit):
+            commit()
+    except Exception as exc:
+        preview = build_statement_preview(statement) if "statement" in locals() else "Schema statement execution failed."
+        failed_at = _utc_now_iso()
+        error_message = f"Mock schema execution failed: {type(exc).__name__}: {exc}"
+        events.append(
+            _audit_event(
+                deployment_id=audit_deployment_id,
+                phase_id=phase_id,
+                statement_index=index if "index" in locals() else 0,
+                statement_preview=preview,
+                status=SchemaExecutionAuditStatus.FAILED,
+                started_at=failed_at,
+                error_message=error_message,
+                rollback_required=True,
+            )
+        )
+        rollback_attempted = False
+        rollback_succeeded = False
+        rollback = getattr(connection, "rollback", None)
+        if callable(rollback):
+            rollback_attempted = True
+            try:
+                rollback()
+                rollback_succeeded = True
+                rollback_status = SchemaExecutionAuditStatus.ROLLED_BACK
+                rollback_error = ""
+            except Exception as rollback_exc:
+                rollback_status = SchemaExecutionAuditStatus.FAILED
+                rollback_error = f"Rollback failed: {type(rollback_exc).__name__}: {rollback_exc}"
+        else:
+            rollback_status = SchemaExecutionAuditStatus.FAILED
+            rollback_error = "Rollback method is unavailable on injected connection."
+        rollback_at = _utc_now_iso()
+        events.append(
+            _audit_event(
+                deployment_id=audit_deployment_id,
+                phase_id=phase_id,
+                statement_index=0,
+                statement_preview="Rollback after mock schema execution failure.",
+                status=rollback_status,
+                started_at=rollback_at,
+                error_message=rollback_error,
+                rollback_required=False,
+            )
+        )
+        return SchemaExecutionResult(
+            ok=False,
+            dry_run=False,
+            execution_allowed=True,
+            statements_planned=len(plan.statements),
+            statements_executed=len(executed),
+            rollback_attempted=rollback_attempted,
+            rollback_succeeded=rollback_succeeded,
+            error_message=error_message,
+            executed_statements=tuple(executed),
+            audit_log=SchemaExecutionAuditLog(
+                deployment_id=audit_deployment_id,
+                phase_id=phase_id,
+                events=tuple(events),
+            ),
+        )
+
+    return SchemaExecutionResult(
+        ok=True,
+        dry_run=False,
+        execution_allowed=True,
+        statements_planned=len(plan.statements),
+        statements_executed=len(executed),
+        executed_statements=tuple(executed),
+        audit_log=SchemaExecutionAuditLog(
+            deployment_id=audit_deployment_id,
+            phase_id=phase_id,
+            events=tuple(events),
+        ),
+    )
 
 
 def execute_schema_plan(
