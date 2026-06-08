@@ -8,10 +8,13 @@ tests may inject a mock connection to exercise execution and rollback behavior.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from enum import Enum
 import os
 from pathlib import Path
+import re
 from typing import Any
+from uuid import uuid4
 
 
 REPO_ROOT = Path(__file__).resolve().parent
@@ -20,10 +23,19 @@ EXECUTION_BLOCKED_MESSAGE = "Schema execution is blocked outside injected mock-c
 SCHEMA_APPLY_BLOCKED_MESSAGE = "Schema apply is blocked before SQL execution."
 SCHEMA_APPLY_ENABLE_ENV_VAR = "ERP_ENABLE_POSTGRES_SCHEMA_APPLY"
 STAGING_ENVIRONMENT = "staging"
+DEFAULT_AUDIT_PHASE_ID = "schema-apply"
+MAX_STATEMENT_PREVIEW_CHARS = 160
 
 
 class SchemaApplyStatus(str, Enum):
     BLOCKED = "BLOCKED"
+
+
+class SchemaExecutionAuditStatus(str, Enum):
+    PLANNED = "PLANNED"
+    BLOCKED = "BLOCKED"
+    SUCCEEDED = "SUCCEEDED"
+    FAILED = "FAILED"
 
 
 @dataclass(frozen=True)
@@ -80,6 +92,27 @@ class SchemaExecutionResult:
     rollback_succeeded: bool = False
     error_message: str = ""
     executed_statements: tuple[str, ...] = field(default_factory=tuple)
+
+
+@dataclass(frozen=True)
+class SchemaExecutionAuditEvent:
+    deployment_id: str
+    phase_id: str
+    statement_index: int
+    statement_preview: str
+    status: SchemaExecutionAuditStatus
+    started_at: str
+    completed_at: str
+    duration_ms: int
+    error_message: str = ""
+    rollback_required: bool = False
+
+
+@dataclass(frozen=True)
+class SchemaExecutionAuditLog:
+    deployment_id: str
+    phase_id: str
+    events: tuple[SchemaExecutionAuditEvent, ...] = field(default_factory=tuple)
 
 
 def build_schema_apply_guard_diagnostics(
@@ -139,6 +172,89 @@ def validate_schema_apply_guard(
         schema_path=schema_path,
         environ=environ,
         statements_planned=statements_planned,
+    )
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(UTC).isoformat()
+
+
+def build_deployment_id() -> str:
+    return f"schema-apply-{uuid4().hex}"
+
+
+def build_statement_preview(statement: str, max_chars: int = MAX_STATEMENT_PREVIEW_CHARS) -> str:
+    preview = " ".join(statement.split())
+    preview = re.sub(
+        r"(?i)(password|secret|token|key)(\s*=\s*)'[^']*'",
+        r"\1\2'***'",
+        preview,
+    )
+    preview = re.sub(
+        r"(?i)(password|secret|token|key)(\s*=\s*)\"[^\"]*\"",
+        lambda match: f'{match.group(1)}{match.group(2)}"***"',
+        preview,
+    )
+    if len(preview) <= max_chars:
+        return preview
+    return f"{preview[: max_chars - 3]}..."
+
+
+def build_schema_execution_audit_log(
+    plan: SchemaExecutionPlan,
+    *,
+    deployment_id: str | None = None,
+    phase_id: str = DEFAULT_AUDIT_PHASE_ID,
+) -> SchemaExecutionAuditLog:
+    audit_deployment_id = deployment_id or build_deployment_id()
+    events: list[SchemaExecutionAuditEvent] = []
+    for index, statement in enumerate(plan.statements, start=1):
+        timestamp = _utc_now_iso()
+        events.append(
+            SchemaExecutionAuditEvent(
+                deployment_id=audit_deployment_id,
+                phase_id=phase_id,
+                statement_index=index,
+                statement_preview=build_statement_preview(statement),
+                status=SchemaExecutionAuditStatus.PLANNED,
+                started_at=timestamp,
+                completed_at=timestamp,
+                duration_ms=0,
+                error_message="",
+                rollback_required=False,
+            )
+        )
+    return SchemaExecutionAuditLog(
+        deployment_id=audit_deployment_id,
+        phase_id=phase_id,
+        events=tuple(events),
+    )
+
+
+def build_blocked_schema_apply_audit_log(
+    diagnostics: SchemaApplyDiagnostics,
+    *,
+    deployment_id: str | None = None,
+    phase_id: str = DEFAULT_AUDIT_PHASE_ID,
+) -> SchemaExecutionAuditLog:
+    audit_deployment_id = deployment_id or build_deployment_id()
+    timestamp = _utc_now_iso()
+    event = SchemaExecutionAuditEvent(
+        deployment_id=audit_deployment_id,
+        phase_id=phase_id,
+        statement_index=0,
+        statement_preview="Schema apply blocked before SQL execution.",
+        status=SchemaExecutionAuditStatus.BLOCKED,
+        started_at=timestamp,
+        completed_at=timestamp,
+        duration_ms=0,
+        error_message=diagnostics.message,
+        rollback_required=False,
+    )
+    return SchemaExecutionAuditLog(
+        deployment_id=audit_deployment_id,
+        phase_id=phase_id,
+        events=(event,),
     )
 
 
