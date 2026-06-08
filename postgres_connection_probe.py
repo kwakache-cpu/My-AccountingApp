@@ -54,7 +54,7 @@ class ProbeResult:
     error_message: str = ""
 
 
-Connector = Callable[[str, str, float], Any]
+Connector = Callable[[str, str, int], Any]
 
 
 def is_probe_enabled() -> bool:
@@ -66,6 +66,10 @@ def detect_postgres_driver(driver_preference: tuple[str, ...] = DEFAULT_DRIVER_P
         if find_spec(driver_name) is not None:
             return driver_name, True
     return "", False
+
+
+def normalize_connect_timeout(timeout_seconds: float) -> int:
+    return max(1, int(timeout_seconds))
 
 
 def build_probe_diagnostics(
@@ -89,19 +93,20 @@ def build_probe_diagnostics(
         "driver_name": driver_name,
         "driver_detected": driver_detected,
         "timeout_seconds": timeout_seconds,
+        "connect_timeout_seconds": normalize_connect_timeout(timeout_seconds),
         "ready_for_probe": enabled and bool(value) and bool(parsed["valid"]) and driver_detected,
         "safe_behavior": "connect/disconnect only when explicitly enabled",
         "prohibited_actions": PROHIBITED_ACTIONS,
     }
 
 
-def _default_connector(database_url: str, driver_name: str, timeout_seconds: float):
+def _default_connector(database_url: str, driver_name: str, connect_timeout_seconds: int):
     driver = import_module(driver_name)
-    return driver.connect(database_url, connect_timeout=timeout_seconds)
+    return driver.connect(database_url, connect_timeout=connect_timeout_seconds)
 
 
-def _connect_and_close(database_url: str, driver_name: str, timeout_seconds: float, connector: Connector) -> None:
-    connection = connector(database_url, driver_name, timeout_seconds)
+def _connect_and_close(database_url: str, driver_name: str, connect_timeout_seconds: int, connector: Connector) -> None:
+    connection = connector(database_url, driver_name, connect_timeout_seconds)
     close = getattr(connection, "close", None)
     if callable(close):
         close()
@@ -144,12 +149,10 @@ def run_safe_connection_probe(
     if not diagnostics["driver_detected"]:
         return _blocked_result(ProbeStatus.DRIVER_MISSING, diagnostics, "No PostgreSQL driver is available.")
 
-    if timeout_seconds <= 0:
-        return _blocked_result(ProbeStatus.BLOCKED, diagnostics, "Probe timeout must be greater than zero seconds.")
-
     connect = connector or _default_connector
+    connect_timeout_seconds = int(diagnostics["connect_timeout_seconds"])
     try:
-        _connect_and_close(value, str(diagnostics["driver_name"]), timeout_seconds, connect)
+        _connect_and_close(value, str(diagnostics["driver_name"]), connect_timeout_seconds, connect)
     except TimeoutError as exc:
         return ProbeResult(
             status=ProbeStatus.PROBE_FAILED,
@@ -158,7 +161,7 @@ def run_safe_connection_probe(
             database_url_present=True,
             probe_attempted=True,
             probe_succeeded=False,
-            error_message=f"Connection probe timed out after {timeout_seconds:g} seconds: {exc}",
+            error_message=f"Connection probe timed out after {connect_timeout_seconds:g} seconds: {exc}",
         )
     except Exception as exc:  # pragma: no cover - exact driver exceptions vary.
         return ProbeResult(
