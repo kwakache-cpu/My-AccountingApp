@@ -1,6 +1,6 @@
 # SQLite to PostgreSQL Migration Plan
 
-Phase: 5B.15B
+Phase: 5B.15D
 
 Planning framework only. No real data migration, PostgreSQL writes, SQLite writes, runtime enablement, or production deployment was attempted.
 
@@ -12,7 +12,8 @@ Planning framework only. No real data migration, PostgreSQL writes, SQLite write
 - FK-safe migration tables planned: 51
 - Estimated total rows: 527
 - Estimated batches: 31
-- Schema mismatches reviewed: 47
+- Schema mismatches reviewed: 0
+- Schema reconciliation status: 47 prior blocker columns are represented in the current generated PostgreSQL schema artifact.
 
 ## Migration Order
 
@@ -70,7 +71,7 @@ Planning framework only. No real data migration, PostgreSQL writes, SQLite write
 
 ## Remaining Blockers
 
-- Blocking schema mismatch found; row-copy dry run must not proceed.
+- No blocking schema mismatch categories are present in the current generated schema artifact; dry-run row mapping may be planned after staging schema validation confirms the 47 reconciled columns exist.
 - Real row-copy execution is not implemented.
 - PostgreSQL runtime remains disabled.
 - Production deployment remains blocked.
