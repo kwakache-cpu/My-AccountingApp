@@ -1,15 +1,18 @@
 import tempfile
 import unittest
 from pathlib import Path
+import re
 
 from postgres_schema_generator import (
     ForeignKeyInventory,
     IndexInventory,
     TableInventory,
     build_schema_plan,
+    detect_dependency_cycles,
     generate_create_table_sql,
     generate_index_sql,
     generate_postgres_schema_plan,
+    order_tables_by_dependencies,
     parse_schema_compatibility_report,
 )
 
@@ -125,9 +128,73 @@ CREATE TABLE child (
             report_path.write_text(report, encoding="utf-8")
             plan = generate_postgres_schema_plan(report_path, sql_path, summary_path)
             self.assertEqual(plan.table_count, 2)
+            self.assertEqual(plan.ordered_tables, ["parent", "child"])
             self.assertTrue(sql_path.exists())
             self.assertTrue(summary_path.exists())
+            generated_sql = sql_path.read_text(encoding="utf-8")
+            self.assertLess(generated_sql.index("CREATE TABLE IF NOT EXISTS parent"), generated_sql.index("CREATE TABLE IF NOT EXISTS child"))
             self.assertIn("Deployment attempted: NO", summary_path.read_text(encoding="utf-8"))
+
+    def test_companies_ordered_before_audit_logs(self):
+        companies = TableInventory(name="companies", sqlite_sql="CREATE TABLE companies (key TEXT PRIMARY KEY)")
+        audit_logs = TableInventory(
+            name="audit_logs",
+            sqlite_sql="""
+            CREATE TABLE audit_logs (
+                id INTEGER PRIMARY KEY,
+                company_key TEXT,
+                FOREIGN KEY (company_key) REFERENCES companies(key)
+            )
+            """,
+            foreign_keys=[ForeignKeyInventory("company_key", "companies", "key", "NO ACTION")],
+        )
+        plan = build_schema_plan([audit_logs, companies])
+        self.assertEqual(plan.ordered_tables, ["companies", "audit_logs"])
+        self.assertLess(plan.sql.index("CREATE TABLE IF NOT EXISTS companies"), plan.sql.index("CREATE TABLE IF NOT EXISTS audit_logs"))
+
+    def test_parent_tables_ordered_before_child_tables(self):
+        grandparent = TableInventory(name="grandparent", sqlite_sql="CREATE TABLE grandparent (id INTEGER PRIMARY KEY)")
+        parent = TableInventory(
+            name="parent",
+            sqlite_sql="CREATE TABLE parent (id INTEGER PRIMARY KEY, grandparent_id INTEGER, FOREIGN KEY (grandparent_id) REFERENCES grandparent(id))",
+            foreign_keys=[ForeignKeyInventory("grandparent_id", "grandparent", "id", "NO ACTION")],
+        )
+        child = TableInventory(
+            name="child",
+            sqlite_sql="CREATE TABLE child (id INTEGER PRIMARY KEY, parent_id INTEGER, FOREIGN KEY (parent_id) REFERENCES parent(id))",
+            foreign_keys=[ForeignKeyInventory("parent_id", "parent", "id", "NO ACTION")],
+        )
+        ordered = order_tables_by_dependencies([child, parent, grandparent])
+        self.assertEqual([table.name for table in ordered], ["grandparent", "parent", "child"])
+
+    def test_cycle_detection_reports_cycle(self):
+        table_a = TableInventory(
+            name="table_a",
+            sqlite_sql="CREATE TABLE table_a (id INTEGER PRIMARY KEY, b_id INTEGER, FOREIGN KEY (b_id) REFERENCES table_b(id))",
+            foreign_keys=[ForeignKeyInventory("b_id", "table_b", "id", "NO ACTION")],
+        )
+        table_b = TableInventory(
+            name="table_b",
+            sqlite_sql="CREATE TABLE table_b (id INTEGER PRIMARY KEY, a_id INTEGER, FOREIGN KEY (a_id) REFERENCES table_a(id))",
+            foreign_keys=[ForeignKeyInventory("a_id", "table_a", "id", "NO ACTION")],
+        )
+        cycles = detect_dependency_cycles([table_a, table_b])
+        self.assertEqual(len(cycles), 1)
+        self.assertEqual(set(cycles[0]), {"table_a", "table_b"})
+        plan = build_schema_plan([table_a, table_b])
+        self.assertEqual(len(plan.dependency_cycles), 1)
+        self.assertIn("Dependency cycles: 1", plan.summary)
+        self.assertIn("ALTER TABLE FK phase", plan.summary)
+
+    def test_generated_schema_has_51_tables_and_no_sqlite_forbidden_syntax(self):
+        plan = generate_postgres_schema_plan()
+        self.assertEqual(plan.table_count, 51)
+        self.assertEqual(plan.foreign_key_count, 47)
+        self.assertEqual(len(plan.dependency_cycles), 0)
+        created_tables = re.findall(r"\bCREATE\s+TABLE\s+IF\s+NOT\s+EXISTS\s+([A-Za-z_][A-Za-z0-9_]*)\b", plan.sql)
+        self.assertEqual(len(created_tables), 51)
+        for forbidden in ("AUTOINCREMENT", "PRAGMA", "sqlite_master", "INSERT OR IGNORE", "BEGIN IMMEDIATE"):
+            self.assertNotIn(forbidden, plan.sql)
 
 
 if __name__ == "__main__":

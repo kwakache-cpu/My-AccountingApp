@@ -1,6 +1,6 @@
 # PostgreSQL Schema Ordering Analysis
 
-Phase: 5B.14M
+Phase: 5B.14M / 5B.14N
 
 This analysis investigates the staging schema apply failure:
 
@@ -10,9 +10,36 @@ UndefinedTable: relation "companies" does not exist
 
 No SQL was executed for this analysis. No deployment was rerun.
 
+## 5B.14N Resolution
+
+`postgres_schema_generator.py` now applies dependency ordering before rendering `reports/postgres_generated_schema.sql`.
+
+Regenerated artifact status:
+
+- `companies` is now statement **5**.
+- `audit_logs` is now statement **21**.
+- Forward references to `companies` before `CREATE TABLE companies`: **0**.
+- Total forward FK references in generated order: **0**.
+- Dependency cycles detected: **0**.
+- Tables preserved: **51**.
+- FK edges preserved: **47**.
+
+First 10 tables in the regenerated schema:
+
+1. `accounting_periods`
+2. `accounts_payable`
+3. `branch_type_catalog`
+4. `companies`
+5. `customers`
+6. `database_identity`
+7. `journal_entries`
+8. `license_payment_transactions`
+9. `maintenance_settings`
+10. `migration_history`
+
 ## Finding
 
-The failing statement is statement **4** in `reports/postgres_generated_schema.sql`:
+The original failing statement was statement **4** in the previous `reports/postgres_generated_schema.sql`:
 
 ```sql
 CREATE TABLE IF NOT EXISTS audit_logs
@@ -25,7 +52,7 @@ CREATE TABLE IF NOT EXISTS audit_logs
                       FOREIGN KEY (company_key) REFERENCES companies(key));
 ```
 
-`companies` is not created until statement **14**:
+In the failed artifact, `companies` was not created until statement **14**:
 
 ```sql
 CREATE TABLE IF NOT EXISTS companies
@@ -100,7 +127,7 @@ The current generated order also contains these forward dependencies:
 
 ## Corrected Ordering Plan
 
-Recommended immediate fix:
+Implemented fix:
 
 1. Generate all table creation statements in dependency order instead of alphabetical order.
 2. Keep `BEGIN` first and `COMMIT` last.
@@ -162,11 +189,11 @@ Recommended table order for the current artifact:
 50. `recurring_transactions`
 51. `stock_movements`
 
-## Recommended Generator Change
+## Generator Change
 
-Update `postgres_schema_generator.py` so `render_schema_sql()` receives tables sorted by topological dependency order rather than by table name. The dependency source already exists in `TableInventory.foreign_keys`.
+`postgres_schema_generator.py` now makes `render_schema_sql()` receive tables sorted by topological dependency order rather than by table name. The dependency source is `TableInventory.foreign_keys`.
 
-Suggested algorithm:
+Algorithm:
 
 1. Build a graph where each table points to the tables it references.
 2. Topologically sort so referenced tables come first.
@@ -174,4 +201,4 @@ Suggested algorithm:
 4. Detect cycles and report them as manual review blockers.
 5. Render tables in the dependency-safe order.
 
-No schema apply should be rerun until the generated SQL is regenerated and reviewed.
+Schema apply can be retried after this branch is reviewed and merged, using the guarded staging apply command only. Do not retry against production, and do not enable runtime as part of the retry.

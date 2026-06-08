@@ -10,13 +10,25 @@ Generated offline by `postgres_schema_generator.py`. No database connection or d
 - FK count captured: 47
 - Unsupported constructs: 42
 - Manual review items: 58
+- Dependency cycles: 0
 
 ## Validation
 
 - Every SQLite table represented: YES
 - FK inventory captured: YES
 - Index inventory captured: YES
+- Dependency ordering applied: YES
 - Deployment attempted: NO
+
+## Dependency Ordering
+
+- Table CREATE statements are ordered so referenced parent tables are emitted before child tables when no FK cycle exists.
+- Future executable index statements should be emitted after all table creation statements.
+- Future cyclic foreign keys should be emitted in a post-table `ALTER TABLE ... ADD CONSTRAINT` phase.
+
+## Dependency Cycles
+
+- None detected.
 
 ## Unsupported Constructs
 

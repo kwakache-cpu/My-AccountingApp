@@ -57,6 +57,8 @@ class SchemaValidationResult:
     foreign_key_count: int
     unsupported_construct_count: int
     manual_review_count: int
+    dependency_cycle_count: int
+    dependency_ordering_applied: str
     forbidden_syntax_found: list[str]
     validation_score: int
     deployment_readiness: str
@@ -205,6 +207,9 @@ def validate_postgres_schema_artifacts(
     foreign_key_count = count_foreign_keys(schema_sql)
     unsupported_construct_count = parse_summary_count(summary_text, "Unsupported constructs")
     manual_review_count = parse_summary_count(summary_text, "Manual review items")
+    dependency_cycle_count = parse_summary_count(summary_text, "Dependency cycles")
+    ordering_match = re.search(r"- Dependency ordering applied:\s*(.+)", summary_text)
+    dependency_ordering_applied = ordering_match.group(1).strip() if ordering_match else "UNKNOWN"
     forbidden_syntax_found = find_forbidden_sqlite_syntax(schema_sql)
 
     if missing_inventory_tables:
@@ -232,6 +237,8 @@ def validate_postgres_schema_artifacts(
         foreign_key_count=foreign_key_count,
         unsupported_construct_count=unsupported_construct_count,
         manual_review_count=manual_review_count,
+        dependency_cycle_count=dependency_cycle_count,
+        dependency_ordering_applied=dependency_ordering_applied,
         forbidden_syntax_found=forbidden_syntax_found,
         validation_score=validation_score,
         deployment_readiness=readiness,
@@ -269,6 +276,8 @@ def render_validation_report(result: SchemaValidationResult) -> str:
         f"- FK count: {result.foreign_key_count}",
         f"- Unsupported construct count: {result.unsupported_construct_count}",
         f"- Manual review count: {result.manual_review_count}",
+        f"- Dependency cycle count: {result.dependency_cycle_count}",
+        f"- Dependency ordering applied: {result.dependency_ordering_applied}",
         "",
         "## Missing Required Tables",
         "",

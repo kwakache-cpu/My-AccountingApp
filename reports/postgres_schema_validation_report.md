@@ -18,6 +18,8 @@ Validated offline from generated SQL and markdown reports. No database connectio
 - FK count: 47
 - Unsupported construct count: 42
 - Manual review count: 58
+- Dependency cycle count: 0
+- Dependency ordering applied: YES
 
 ## Missing Required Tables
 

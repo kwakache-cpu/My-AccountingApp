@@ -78,6 +78,8 @@ class GeneratedSchemaPlan:
     foreign_key_count: int
     unsupported_constructs: list[str]
     manual_review_items: list[str]
+    dependency_cycles: list[list[str]] = field(default_factory=list)
+    ordered_tables: list[str] = field(default_factory=list)
 
 
 def _strip_code_fence(sql_block: str) -> str:
@@ -127,6 +129,70 @@ def parse_schema_compatibility_report(report_text: str) -> list[TableInventory]:
     return sorted(tables, key=lambda table: table.name)
 
 
+def _table_dependencies(table: TableInventory, table_names: set[str]) -> set[str]:
+    return {
+        foreign_key.references_table
+        for foreign_key in table.foreign_keys
+        if foreign_key.references_table in table_names and foreign_key.references_table != table.name
+    }
+
+
+def detect_dependency_cycles(tables: list[TableInventory]) -> list[list[str]]:
+    table_map = {table.name: table for table in tables}
+    table_names = set(table_map)
+    visiting: set[str] = set()
+    visited: set[str] = set()
+    stack: list[str] = []
+    cycles: list[list[str]] = []
+    cycle_keys: set[tuple[str, ...]] = set()
+
+    def visit(table_name: str) -> None:
+        if table_name in visited:
+            return
+        if table_name in visiting:
+            cycle_start = stack.index(table_name)
+            cycle = stack[cycle_start:] + [table_name]
+            key = tuple(sorted(set(cycle)))
+            if key not in cycle_keys:
+                cycle_keys.add(key)
+                cycles.append(cycle)
+            return
+
+        visiting.add(table_name)
+        stack.append(table_name)
+        for dependency in sorted(_table_dependencies(table_map[table_name], table_names)):
+            visit(dependency)
+        stack.pop()
+        visiting.remove(table_name)
+        visited.add(table_name)
+
+    for table_name in sorted(table_names):
+        visit(table_name)
+    return cycles
+
+
+def order_tables_by_dependencies(tables: list[TableInventory]) -> list[TableInventory]:
+    table_map = {table.name: table for table in tables}
+    table_names = set(table_map)
+    remaining = set(table_names)
+    ordered_names: list[str] = []
+
+    while remaining:
+        ready = sorted(
+            table_name
+            for table_name in remaining
+            if not (_table_dependencies(table_map[table_name], table_names) & remaining)
+        )
+        if not ready:
+            # Preserve all tables and make cycles visible through detect_dependency_cycles().
+            ready = sorted(remaining)
+        for table_name in ready:
+            ordered_names.append(table_name)
+            remaining.remove(table_name)
+
+    return [table_map[table_name] for table_name in ordered_names]
+
+
 def _normalize_create_header(sql: str, table_name: str) -> str:
     return re.sub(
         rf"CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?{re.escape(table_name)}\b",
@@ -159,7 +225,8 @@ def _apply_type_mappings(sql: str) -> str:
 def generate_create_table_sql(table: TableInventory) -> str:
     sql = _normalize_create_header(table.sqlite_sql, table.name)
     sql = _apply_type_mappings(sql)
-    return sql.strip().rstrip(";") + ";"
+    normalized = "\n".join(line.rstrip() for line in sql.strip().splitlines())
+    return normalized.rstrip(";") + ";"
 
 
 def generate_index_sql(table: TableInventory) -> list[str]:
@@ -198,7 +265,7 @@ def _find_unsupported_constructs(tables: list[TableInventory]) -> list[str]:
     return sorted(findings)
 
 
-def _build_manual_review_items(tables: list[TableInventory]) -> list[str]:
+def _build_manual_review_items(tables: list[TableInventory], dependency_cycles: list[list[str]] | None = None) -> list[str]:
     items: list[str] = []
     for table in tables:
         for candidate in _find_boolean_candidates(table):
@@ -207,6 +274,8 @@ def _build_manual_review_items(tables: list[TableInventory]) -> list[str]:
             items.append(f"Index definitions require review: {table.name}")
         if re.search(r"\bTEXT\b.*\b(date|_date|created_at|updated_at|timestamp)\b", table.sqlite_sql, flags=re.IGNORECASE):
             items.append(f"Date/timestamp type review: {table.name}")
+    for cycle in dependency_cycles or []:
+        items.append("Dependency cycle requires ALTER TABLE FK phase: " + " -> ".join(cycle))
     return sorted(set(items))
 
 
@@ -229,11 +298,11 @@ def render_schema_sql(tables: list[TableInventory]) -> str:
     return "\n".join(sections)
 
 
-def render_summary(tables: list[TableInventory], sql: str) -> str:
+def render_summary(tables: list[TableInventory], sql: str, dependency_cycles: list[list[str]]) -> str:
     index_count = sum(len(table.indexes) for table in tables)
     foreign_key_count = sum(len(table.foreign_keys) for table in tables)
     unsupported_constructs = _find_unsupported_constructs(tables)
-    manual_review_items = _build_manual_review_items(tables)
+    manual_review_items = _build_manual_review_items(tables, dependency_cycles)
     represented_tables = sorted(table.name for table in tables if f"CREATE TABLE IF NOT EXISTS {table.name}" in sql)
     missing_tables = sorted(set(table.name for table in tables) - set(represented_tables))
 
@@ -250,17 +319,34 @@ def render_summary(tables: list[TableInventory], sql: str) -> str:
         f"- FK count captured: {foreign_key_count}",
         f"- Unsupported constructs: {len(unsupported_constructs)}",
         f"- Manual review items: {len(manual_review_items)}",
+        f"- Dependency cycles: {len(dependency_cycles)}",
         "",
         "## Validation",
         "",
         f"- Every SQLite table represented: {'YES' if not missing_tables else 'NO'}",
         f"- FK inventory captured: {'YES' if foreign_key_count else 'NO'}",
         f"- Index inventory captured: {'YES' if index_count else 'NO'}",
+        f"- Dependency ordering applied: {'YES' if not dependency_cycles else 'PARTIAL - cycles require ALTER TABLE phase'}",
         "- Deployment attempted: NO",
+        "",
+        "## Dependency Ordering",
+        "",
+        "- Table CREATE statements are ordered so referenced parent tables are emitted before child tables when no FK cycle exists.",
+        "- Future executable index statements should be emitted after all table creation statements.",
+        "- Future cyclic foreign keys should be emitted in a post-table `ALTER TABLE ... ADD CONSTRAINT` phase.",
+        "",
+        "## Dependency Cycles",
+        "",
+    ]
+    if dependency_cycles:
+        lines.extend(f"- {' -> '.join(cycle)}" for cycle in dependency_cycles)
+    else:
+        lines.append("- None detected.")
+    lines.extend([
         "",
         "## Unsupported Constructs",
         "",
-    ]
+    ])
     lines.extend(f"- {item}" for item in unsupported_constructs[:100])
     if not unsupported_constructs:
         lines.append("- None after type mapping pass.")
@@ -276,16 +362,20 @@ def render_summary(tables: list[TableInventory], sql: str) -> str:
 
 
 def build_schema_plan(tables: list[TableInventory]) -> GeneratedSchemaPlan:
-    sql = render_schema_sql(tables)
-    summary = render_summary(tables, sql)
+    dependency_cycles = detect_dependency_cycles(tables)
+    ordered_tables = order_tables_by_dependencies(tables)
+    sql = render_schema_sql(ordered_tables)
+    summary = render_summary(ordered_tables, sql, dependency_cycles)
     return GeneratedSchemaPlan(
         sql=sql,
         summary=summary,
-        table_count=len(tables),
-        index_count=sum(len(table.indexes) for table in tables),
-        foreign_key_count=sum(len(table.foreign_keys) for table in tables),
-        unsupported_constructs=_find_unsupported_constructs(tables),
-        manual_review_items=_build_manual_review_items(tables),
+        table_count=len(ordered_tables),
+        index_count=sum(len(table.indexes) for table in ordered_tables),
+        foreign_key_count=sum(len(table.foreign_keys) for table in ordered_tables),
+        unsupported_constructs=_find_unsupported_constructs(ordered_tables),
+        manual_review_items=_build_manual_review_items(ordered_tables, dependency_cycles),
+        dependency_cycles=dependency_cycles,
+        ordered_tables=[table.name for table in ordered_tables],
     )
 
 
