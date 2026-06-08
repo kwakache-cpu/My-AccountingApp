@@ -9,6 +9,7 @@ from postgres_connection_probe import (
     ProbeStatus,
     build_probe_diagnostics,
     is_probe_enabled,
+    normalize_connect_timeout,
     run_safe_connection_probe,
 )
 from postgres_staging_deployer import main
@@ -52,9 +53,38 @@ class PostgresConnectionProbeTests(unittest.TestCase):
         self.assertTrue(diagnostics["ready_for_probe"])
         self.assertTrue(diagnostics["database_url_present"])
         self.assertEqual(diagnostics["timeout_seconds"], 3.5)
+        self.assertEqual(diagnostics["connect_timeout_seconds"], 3)
         self.assertNotIn("super-secret", diagnostics["database_url_redacted"])
         self.assertIn("SQL execution", diagnostics["prohibited_actions"])
         self.assertIn("schema deployment", diagnostics["prohibited_actions"])
+
+    def test_timeout_5_float_becomes_integer_connect_timeout(self):
+        self.assertEqual(normalize_connect_timeout(5.0), 5)
+        url = "postgresql://user:pw@example.test/app"
+        connection = Mock()
+        driver = Mock()
+        driver.connect.return_value = connection
+        with patch.dict("os.environ", {PROBE_ENABLE_ENV_VAR: "1"}, clear=True):
+            with patch("postgres_connection_probe.find_spec", return_value=object()):
+                with patch("postgres_connection_probe.import_module", return_value=driver):
+                    result = run_safe_connection_probe(url, ("psycopg",), timeout_seconds=5.0)
+        self.assertEqual(result.status, ProbeStatus.PROBE_SUCCEEDED)
+        driver.connect.assert_called_once_with(url, connect_timeout=5)
+        connection.close.assert_called_once_with()
+
+    def test_subsecond_timeout_becomes_minimum_one_second_connect_timeout(self):
+        self.assertEqual(normalize_connect_timeout(0.2), 1)
+        url = "postgresql://user:pw@example.test/app"
+        connection = Mock()
+        driver = Mock()
+        driver.connect.return_value = connection
+        with patch.dict("os.environ", {PROBE_ENABLE_ENV_VAR: "1"}, clear=True):
+            with patch("postgres_connection_probe.find_spec", return_value=object()):
+                with patch("postgres_connection_probe.import_module", return_value=driver):
+                    result = run_safe_connection_probe(url, ("psycopg",), timeout_seconds=0.2)
+        self.assertEqual(result.status, ProbeStatus.PROBE_SUCCEEDED)
+        driver.connect.assert_called_once_with(url, connect_timeout=1)
+        connection.close.assert_called_once_with()
 
     def test_enabled_probe_connects_and_disconnects_only(self):
         connection = Mock()
@@ -71,7 +101,7 @@ class PostgresConnectionProbeTests(unittest.TestCase):
         self.assertEqual(result.status, ProbeStatus.PROBE_SUCCEEDED)
         self.assertTrue(result.probe_attempted)
         self.assertTrue(result.probe_succeeded)
-        connector.assert_called_once_with("postgresql://user:pw@example.test/app", "psycopg", 2.0)
+        connector.assert_called_once_with("postgresql://user:pw@example.test/app", "psycopg", 2)
         connection.close.assert_called_once_with()
 
     def test_enabled_probe_never_calls_sql_methods(self):
@@ -103,7 +133,7 @@ class PostgresConnectionProbeTests(unittest.TestCase):
         self.assertEqual(result.status, ProbeStatus.PROBE_FAILED)
         self.assertTrue(result.probe_attempted)
         self.assertFalse(result.probe_succeeded)
-        self.assertIn("timed out after 1.5 seconds", result.error_message)
+        self.assertIn("timed out after 1 seconds", result.error_message)
 
     def test_probe_never_executes_sql(self):
         source = Path("postgres_connection_probe.py").read_text(encoding="utf-8")
