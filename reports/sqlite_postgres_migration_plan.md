@@ -1,6 +1,6 @@
 # SQLite to PostgreSQL Migration Plan
 
-Phase: 5B.15E
+Phase: 5B.15F
 
 Planning framework only. No real data migration, PostgreSQL writes, SQLite writes, runtime enablement, or production deployment was attempted.
 
@@ -16,6 +16,9 @@ Planning framework only. No real data migration, PostgreSQL writes, SQLite write
 - Blocker count: 0
 - Staging postdeploy validation: PASSED, 754/754 read-only checks passed.
 - Reconciled POS/cashier/return/suspended-sale columns: 47/47 present in deployed PostgreSQL.
+- Row-copy dry-run planner: READY_FOR_DRY_RUN_COPY.
+- Dry-run row projection: 527 rows evaluated, 527 rows mappable, 0 rows unmappable.
+- Column mapping issues: 0.
 
 ## Migration Order
 
@@ -73,7 +76,7 @@ Planning framework only. No real data migration, PostgreSQL writes, SQLite write
 
 ## Remaining Blockers
 
-- No blocking schema mismatch categories were found; dry-run row mapping may be planned next.
-- Real row-copy execution is not implemented.
+- No blocking schema mismatch categories or dry-run row projection failures were found; actual row-copy engine may be built next.
+- Real row-copy execution remains unimplemented and unauthorized.
 - PostgreSQL runtime remains disabled.
 - Production deployment remains blocked.
