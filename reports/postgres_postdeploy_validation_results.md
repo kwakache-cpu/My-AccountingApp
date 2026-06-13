@@ -1,18 +1,25 @@
 # PostgreSQL Post-Deployment Validation Results
 
-Phase: 5B.14O
+Phase: 5B.15E
 
 Read-only staging validation only. No INSERT, UPDATE, DELETE, CREATE, ALTER, DROP, data migration, runtime enablement, production deployment, Supabase API call, or SQLite behavior change was attempted.
 
 ## Summary
 
 - Status: PASSED
-- Started at: 2026-06-08T19:51:10.928331+00:00
-- Completed at: 2026-06-08T19:53:39.912184+00:00
+- Started at: 2026-06-13T12:48:28.891955+00:00
+- Completed at: 2026-06-13T12:50:25.645574+00:00
 - Checks planned: 754
 - Checks executed: 754
 - Checks passed: 754
 - Checks failed: 0
+
+## Phase 5B.15E Revalidation
+
+- Local SQLite/PostgreSQL schema comparison rerun: 0 mismatches, 0 blockers.
+- Guarded staging postdeploy validation rerun: PASSED, 754/754 read-only checks passed.
+- Additional read-only `information_schema.columns` confirmation: 47/47 reconciled POS/cashier/return/suspended-sale columns present, missing=0.
+- Row-copy dry run may begin; real row-copy/data migration, PostgreSQL runtime activation, production deployment, and SQLite behavior changes remain blocked.
 
 ## Guards
 
