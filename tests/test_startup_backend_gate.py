@@ -13,6 +13,8 @@ class StartupBackendGateTests(TestCase):
                 "DB_BACKEND",
                 "DATABASE_URL",
                 "ERP_ENABLE_POSTGRES_RUNTIME",
+                "ERP_ENVIRONMENT",
+                "ERP_POSTGRES_PRODUCTION_APPROVED",
                 "EKA_DATA_DIR",
                 "ERP_PRODUCTION_MODE",
                 "ERP_SAFE_STARTUP_MODE",
@@ -63,15 +65,18 @@ class StartupBackendGateTests(TestCase):
         secret_url = "postgresql://user:super-secret@example.supabase.co:6543/postgres"
         with mock.patch.dict(
             os.environ,
-            {"DB_BACKEND": "postgres", "DATABASE_URL": secret_url, "ERP_ENABLE_POSTGRES_RUNTIME": "1"},
+            {"DB_BACKEND": "postgres", "DATABASE_URL": secret_url, "ERP_ENABLE_POSTGRES_RUNTIME": "1", "ERP_ENVIRONMENT": "staging"},
             clear=False,
         ), mock.patch.object(database, "_ensure_local_db_file") as ensure_local_db_file, mock.patch.object(
             database, "_open_sqlite_connection"
         ) as open_sqlite_connection:
             result = database.startup_database()
         self.assertFalse(result["ok"])
-        self.assertEqual(result["stage"], "postgres_schema_not_implemented")
+        self.assertEqual(result["stage"], "postgres_runtime_cutover_guard")
         self.assertEqual(result["active_backend"], "postgres")
+        self.assertTrue(result["runtime_cutover_guard_ok"])
+        self.assertEqual(result["schema_deployment_status"], "PASSED")
+        self.assertEqual(result["row_reconciliation_status"], "PASSED")
         self.assertFalse(result["recovery_attempted"])
         ensure_local_db_file.assert_not_called()
         open_sqlite_connection.assert_not_called()
@@ -81,13 +86,55 @@ class StartupBackendGateTests(TestCase):
         secret_url = "postgresql://user:super-secret@example.supabase.co:6543/postgres"
         with mock.patch.dict(
             os.environ,
-            {"DB_BACKEND": "postgres", "DATABASE_URL": secret_url, "ERP_ENABLE_POSTGRES_RUNTIME": "1"},
+            {"DB_BACKEND": "postgres", "DATABASE_URL": secret_url, "ERP_ENABLE_POSTGRES_RUNTIME": "1", "ERP_ENVIRONMENT": "staging"},
             clear=False,
         ):
             diagnostics = database.get_startup_backend_diagnostics()
         self.assertNotIn("super-secret", str(diagnostics))
         self.assertNotIn(secret_url, str(diagnostics))
         self.assertIn("***", diagnostics["database_url_label"])
+        self.assertEqual(diagnostics["schema_deployment_status"], "PASSED")
+        self.assertEqual(diagnostics["row_reconciliation_status"], "PASSED")
+        self.assertEqual(diagnostics["runtime_readiness_status"], "PASSED")
+        self.assertEqual(diagnostics["runtime_dryrun_status"], "PASSED")
+        self.assertTrue(diagnostics["environment_approved"])
+
+    def test_final_cutover_guard_requires_staging_or_production_approval(self):
+        database = self._load_database()
+        secret_url = "postgresql://user:super-secret@example.supabase.co:6543/postgres"
+        with mock.patch.dict(
+            os.environ,
+            {
+                "DB_BACKEND": "postgres",
+                "DATABASE_URL": secret_url,
+                "ERP_ENABLE_POSTGRES_RUNTIME": "1",
+                "ERP_ENVIRONMENT": "production",
+                "ERP_POSTGRES_PRODUCTION_APPROVED": "0",
+            },
+            clear=False,
+        ):
+            guard = database.validate_postgres_runtime_cutover_guard()
+        self.assertFalse(guard["ok"])
+        self.assertFalse(guard["environment_approved"])
+        self.assertIn("ERP_ENVIRONMENT", " ".join(guard["reasons"]))
+        self.assertNotIn("super-secret", str(guard))
+
+        with mock.patch.dict(
+            os.environ,
+            {
+                "DB_BACKEND": "postgres",
+                "DATABASE_URL": secret_url,
+                "ERP_ENABLE_POSTGRES_RUNTIME": "1",
+                "ERP_ENVIRONMENT": "staging",
+                "ERP_POSTGRES_PRODUCTION_APPROVED": "0",
+            },
+            clear=False,
+        ):
+            guard = database.validate_postgres_runtime_cutover_guard()
+        self.assertTrue(guard["ok"])
+        self.assertTrue(guard["environment_approved"])
+        self.assertEqual(guard["schema_deployment_status"], "PASSED")
+        self.assertEqual(guard["row_reconciliation_status"], "PASSED")
 
     def test_app_sqlite_startup_still_calls_ensure_schema_and_startup_database(self):
         database = self._load_database()
@@ -127,8 +174,8 @@ class StartupBackendGateTests(TestCase):
         )
         blocked_status = {
             "ok": False,
-            "stage": "postgres_schema_not_implemented",
-            "reason": "PostgreSQL runtime is enabled, but PostgreSQL schema deployment is not implemented yet.",
+            "stage": "postgres_runtime_cutover_guard",
+            "reason": "PostgreSQL runtime is selected; SQLite startup paths are blocked for controlled runtime cutover.",
             "configured_backend": "postgres",
             "active_backend": "postgres",
         }
