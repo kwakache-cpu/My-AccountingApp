@@ -67,7 +67,7 @@ class PostgresRuntimeSmokeTestTests(TestCase):
                 "should_run_sqlite_startup": False,
             },
             startup_database=lambda: {
-                "stage": "postgres_runtime_cutover_guard",
+                "stage": "postgres_runtime_startup",
                 "bootstrap_needed": False,
                 "recovery_attempted": False,
             },

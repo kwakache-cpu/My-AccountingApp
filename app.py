@@ -1746,12 +1746,21 @@ def main():
     if should_run_sqlite_startup():
         ensure_schema()
     else:
-        logger.error(
-            "Application startup blocked before SQLite schema path: configured_backend=%s active_backend=%s reason=%s",
-            startup_backend.get("configured_backend"),
-            startup_backend.get("active_backend"),
-            startup_backend.get("message"),
-        )
+        if startup_backend.get("runtime_cutover_guard_ok"):
+            logger.info(
+                "Application startup skipping SQLite schema path for PostgreSQL runtime: configured_backend=%s active_backend=%s schema_deployment_status=%s row_reconciliation_status=%s",
+                startup_backend.get("configured_backend"),
+                startup_backend.get("active_backend"),
+                startup_backend.get("schema_deployment_status"),
+                startup_backend.get("row_reconciliation_status"),
+            )
+        else:
+            logger.error(
+                "Application startup blocked before SQLite schema path: configured_backend=%s active_backend=%s reason=%s",
+                startup_backend.get("configured_backend"),
+                startup_backend.get("active_backend"),
+                startup_backend.get("message"),
+            )
     startup_status = startup_database()
     startup_mode = str(startup_status.get("startup_mode", startup_status.get("stage", ""))) if isinstance(startup_status, dict) else ""
     bootstrap_needed = (

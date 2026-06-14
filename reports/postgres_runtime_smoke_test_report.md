@@ -7,12 +7,12 @@ Controlled staging/local PostgreSQL runtime activation smoke test only. No commi
 ## Summary
 
 - Status: READY_FOR_STREAMLIT_SECRETS_CUTOVER
-- Started at: 2026-06-14T16:30:56.764054+00:00
-- Completed at: 2026-06-14T16:30:56.765043+00:00
+- Started at: 2026-06-14T17:56:06.888642+00:00
+- Completed at: 2026-06-14T17:56:06.890449+00:00
 - Configured backend: postgres
 - Active backend: postgres
 - Startup result: PASSED
-- Startup stage: postgres_runtime_cutover_guard
+- Startup stage: postgres_runtime_startup
 - SQLite bootstrap blocked: True
 - Read checks passed: 9
 - Read checks failed: 0
@@ -34,7 +34,7 @@ Controlled staging/local PostgreSQL runtime activation smoke test only. No commi
 
 | Category | Check | Count | Result | Detail |
 |---|---|---:|---|---|
-| startup | startup stays off SQLite bootstrap |  | PASSED | stage=postgres_runtime_cutover_guard; should_run_sqlite_startup=False |
+| startup | startup stays off SQLite bootstrap |  | PASSED | stage=postgres_runtime_startup; should_run_sqlite_startup=False |
 | connection | PostgreSQL connection opens | 1 | PASSED |  |
 | read_path | companies can be read | 8 | PASSED | SELECT COUNT(*) succeeded |
 | read_path | users can be read | 3 | PASSED | SELECT COUNT(*) succeeded |
