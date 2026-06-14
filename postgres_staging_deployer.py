@@ -1,8 +1,8 @@
 """PostgreSQL staging deployment CLI.
 
-This entrypoint defaults to dry-run diagnostics. Staging schema apply is only
-available behind explicit environment and CLI guards; runtime activation and
-data migration are not implemented here.
+This entrypoint defaults to dry-run diagnostics. Staging schema apply and row
+copy are only available behind explicit environment and CLI guards; runtime
+activation is not implemented here.
 """
 
 from __future__ import annotations
@@ -21,6 +21,7 @@ from postgres_deployment_executor import (
 )
 from postgres_connection_probe import DEFAULT_PROBE_TIMEOUT_SECONDS, ProbeStatus, run_safe_connection_probe
 from postgres_postdeploy_validator import PostDeployValidationStatus, execute_postdeploy_validation
+from sqlite_postgres_rowcopy_engine import RowCopyStatus, execute_guarded_row_copy_to_staging
 from postgres_schema_executor import (
     build_blocked_schema_apply_audit_log,
     build_schema_execution_plan,
@@ -180,6 +181,7 @@ def build_parser() -> argparse.ArgumentParser:
     mode.add_argument("--apply", action="store_true", help="Guarded staging schema apply. Requires explicit environment and confirmation guards.")
     mode.add_argument("--probe", action="store_true", help="Run guarded PostgreSQL connection probe diagnostics only.")
     mode.add_argument("--validate-postdeploy", action="store_true", help="Run guarded read-only staging post-deployment validation.")
+    mode.add_argument("--copy-rows", action="store_true", help="Guarded staging row-copy execution. Requires explicit environment, enable flag, DATABASE_URL, and confirmation.")
     parser.add_argument(
         "--confirm-schema-apply",
         action="store_true",
@@ -190,6 +192,11 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=DEFAULT_PROBE_TIMEOUT_SECONDS,
         help=f"Connection timeout for --probe in seconds. Defaults to {DEFAULT_PROBE_TIMEOUT_SECONDS:g}.",
+    )
+    parser.add_argument(
+        "--confirm-row-copy",
+        action="store_true",
+        help="Required with --copy-rows for guarded staging row-copy execution.",
     )
     return parser
 
@@ -308,6 +315,34 @@ def run_postdeploy_validation(output_stream=sys.stdout, error_stream=sys.stderr)
     return 0 if result.status is PostDeployValidationStatus.PASSED else 1
 
 
+def run_row_copy(confirm_row_copy: bool = False, output_stream=sys.stdout, error_stream=sys.stderr) -> int:
+    result = execute_guarded_row_copy_to_staging(
+        copy_rows_flag=True,
+        confirmation_flag=confirm_row_copy,
+    )
+    stream = output_stream if result.status is RowCopyStatus.COMPLETED else error_stream
+    print("PostgreSQL guarded row-copy execution.", file=stream)
+    print(f"Status: {result.status.value}", file=stream)
+    print(f"Blocked: {result.guard.blocked}", file=stream)
+    print(f"Dry-run status: {result.dryrun_status or 'not evaluated'}", file=stream)
+    print(f"Batches planned: {result.run_result.batches_planned}", file=stream)
+    print(f"Batches executed: {result.run_result.batches_executed}", file=stream)
+    print(f"Rows planned: {result.run_result.rows_planned}", file=stream)
+    print(f"Rows copied: {result.run_result.rows_copied}", file=stream)
+    print(f"Committed: {result.run_result.committed}", file=stream)
+    print(f"Rolled back: {result.run_result.rolled_back}", file=stream)
+    print("Guard results:", file=stream)
+    for guard_name, passed in result.guard.guard_results.items():
+        print(f"- {guard_name}: {passed}", file=stream)
+    if result.guard.redacted_database_url:
+        print(f"DATABASE_URL: {result.guard.redacted_database_url}", file=stream)
+    if result.error_message:
+        print(f"Message: {result.error_message}", file=stream)
+    print("Results report: reports/sqlite_postgres_rowcopy_results.md", file=stream)
+    print("PostgreSQL runtime remains disabled. Production deployment and SQLite writes were not run.", file=stream)
+    return 0 if result.status is RowCopyStatus.COMPLETED else 1
+
+
 def run_dry_run(output_stream=sys.stdout, error_stream=sys.stderr) -> int:
     artifacts = validate_required_artifacts()
     if not artifacts.ok:
@@ -346,6 +381,8 @@ def main(argv: list[str] | None = None, output_stream=sys.stdout, error_stream=s
         return run_probe(timeout_seconds=args.probe_timeout, output_stream=output_stream, error_stream=error_stream)
     if args.validate_postdeploy:
         return run_postdeploy_validation(output_stream=output_stream, error_stream=error_stream)
+    if args.copy_rows:
+        return run_row_copy(confirm_row_copy=args.confirm_row_copy, output_stream=output_stream, error_stream=error_stream)
     return run_dry_run(output_stream=output_stream, error_stream=error_stream)
 
 

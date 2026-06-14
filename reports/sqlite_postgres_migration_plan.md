@@ -1,8 +1,8 @@
 # SQLite to PostgreSQL Migration Plan
 
-Phase: 5B.15F
+Phase: 5B.15H
 
-Planning framework only. No real data migration, PostgreSQL writes, SQLite writes, runtime enablement, or production deployment was attempted.
+Planning and guarded staging row-copy framework only. No PostgreSQL runtime enablement, SQLite writes, application runtime change, or production deployment was attempted.
 
 ## Summary
 
@@ -19,6 +19,9 @@ Planning framework only. No real data migration, PostgreSQL writes, SQLite write
 - Row-copy dry-run planner: READY_FOR_DRY_RUN_COPY.
 - Dry-run row projection: 527 rows evaluated, 527 rows mappable, 0 rows unmappable.
 - Column mapping issues: 0.
+- Guarded real row-copy CLI: `python postgres_staging_deployer.py --copy-rows --confirm-row-copy`.
+- Required row-copy guards: `ERP_ENVIRONMENT=staging`, `ERP_ENABLE_POSTGRES_ROW_COPY=1`, `DATABASE_URL`, `--copy-rows`, and `--confirm-row-copy`.
+- Current row-copy results report: BLOCKED by default; 0 batches executed, 0 rows copied.
 
 ## Migration Order
 
@@ -76,7 +79,7 @@ Planning framework only. No real data migration, PostgreSQL writes, SQLite write
 
 ## Remaining Blockers
 
-- No blocking schema mismatch categories or dry-run row projection failures were found; actual row-copy engine may be built next.
-- Real row-copy execution remains unimplemented and unauthorized.
+- No blocking schema mismatch categories or dry-run row projection failures were found; guarded staging row-copy is implemented.
+- Real row-copy remains blocked unless every staging guard and explicit confirmation is present.
 - PostgreSQL runtime remains disabled.
 - Production deployment remains blocked.

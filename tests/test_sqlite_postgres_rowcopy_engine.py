@@ -1,14 +1,20 @@
 import sqlite3
 import tempfile
 import unittest
+import io
 from pathlib import Path
+from unittest.mock import Mock, patch
 
 from sqlite_postgres_rowcopy_dryrun import RowCopyDryRunResult, RowCopyDryRunStatus, TableRowCopyDryRun
 from sqlite_postgres_rowcopy_engine import (
+    ROW_COPY_ENABLE_ENV_VAR,
     RowCopyStatus,
     build_row_copy_batches_from_dryrun,
+    execute_guarded_row_copy_to_staging,
     execute_row_copy_batches_with_connection,
+    validate_row_copy_guard,
 )
+from postgres_staging_deployer import main
 
 
 class MockCursor:
@@ -42,6 +48,9 @@ class MockPostgresConnection:
 
     def rollback(self):
         self.events.append(("rollback",))
+
+    def close(self):
+        self.events.append(("connection_close",))
 
 
 class SQLitePostgresRowCopyEngineTests(unittest.TestCase):
@@ -185,16 +194,129 @@ class SQLitePostgresRowCopyEngineTests(unittest.TestCase):
     def test_no_real_connection_or_runtime_configuration_usage(self):
         source = Path("sqlite_postgres_rowcopy_engine.py").read_text(encoding="utf-8")
         forbidden_terms = [
-            "DATABASE_URL",
-            "os.environ",
             "sqlite3.connect",
-            "psycopg",
             "create_engine",
             "get_database_url",
             "ERP_ENABLE_POSTGRES_RUNTIME",
         ]
         for term in forbidden_terms:
             self.assertNotIn(term, source)
+
+    def _valid_env(self):
+        return {
+            ROW_COPY_ENABLE_ENV_VAR: "1",
+            "ERP_ENVIRONMENT": "staging",
+            "DATABASE_URL": "postgresql://user:secret@example.test/app",
+        }
+
+    def test_all_guards_missing_blocks(self):
+        guard = validate_row_copy_guard(copy_rows_flag=False, confirmation_flag=False, environ={}, driver_preference=("missing",))
+        self.assertTrue(guard.blocked)
+        self.assertEqual(guard.status, RowCopyStatus.BLOCKED)
+        self.assertFalse(guard.guard_results[ROW_COPY_ENABLE_ENV_VAR])
+        self.assertFalse(guard.guard_results["ERP_ENVIRONMENT_is_staging"])
+        self.assertFalse(guard.guard_results["DATABASE_URL_present"])
+        self.assertFalse(guard.guard_results["explicit_copy_rows_flag"])
+
+    def test_missing_confirmation_blocks(self):
+        guard = validate_row_copy_guard(
+            copy_rows_flag=True,
+            confirmation_flag=False,
+            environ=self._valid_env(),
+            driver_preference=("sqlite3",),
+        )
+        self.assertTrue(guard.blocked)
+        self.assertFalse(guard.guard_results["explicit_confirm_row_copy_flag"])
+
+    def test_non_staging_blocks(self):
+        env = self._valid_env()
+        env["ERP_ENVIRONMENT"] = "production"
+        guard = validate_row_copy_guard(
+            copy_rows_flag=True,
+            confirmation_flag=True,
+            environ=env,
+            driver_preference=("sqlite3",),
+        )
+        self.assertTrue(guard.blocked)
+        self.assertFalse(guard.guard_results["ERP_ENVIRONMENT_is_staging"])
+
+    def test_missing_database_url_blocks(self):
+        env = self._valid_env()
+        env.pop("DATABASE_URL")
+        guard = validate_row_copy_guard(
+            copy_rows_flag=True,
+            confirmation_flag=True,
+            environ=env,
+            driver_preference=("sqlite3",),
+        )
+        self.assertTrue(guard.blocked)
+        self.assertFalse(guard.guard_results["DATABASE_URL_present"])
+
+    def test_guarded_row_copy_opens_sqlite_through_readonly_factory_and_commits(self):
+        sqlite_conn = self._sqlite_conn()
+        postgres_conn = MockPostgresConnection()
+        sqlite_factory = Mock(return_value=sqlite_conn)
+        connector = Mock(return_value=postgres_conn)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_path = Path(temp_dir) / "rowcopy.md"
+            result = execute_guarded_row_copy_to_staging(
+                copy_rows_flag=True,
+                confirmation_flag=True,
+                sqlite_db_path=Path("source.db"),
+                output_path=output_path,
+                environ=self._valid_env(),
+                connector=connector,
+                sqlite_connection_factory=sqlite_factory,
+                dryrun_builder=Mock(return_value=self._dryrun()),
+            )
+            report = output_path.read_text(encoding="utf-8")
+        self.assertEqual(result.status, RowCopyStatus.COMPLETED)
+        self.assertTrue(result.run_result.committed)
+        self.assertEqual(result.run_result.rows_copied, 5)
+        sqlite_factory.assert_called_once_with(Path("source.db"))
+        connector.assert_called_once_with("postgresql://user:secret@example.test/app", result.guard.driver_name, 5)
+        self.assertIn(("commit",), postgres_conn.events)
+        self.assertIn(("connection_close",), postgres_conn.events)
+        self.assertIn("Status: COMPLETED", report)
+        self.assertNotIn("secret", report)
+
+    def test_guarded_row_copy_failure_rolls_back_and_closes_connections(self):
+        sqlite_conn = self._sqlite_conn()
+        postgres_conn = MockPostgresConnection(fail_after=1)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            result = execute_guarded_row_copy_to_staging(
+                copy_rows_flag=True,
+                confirmation_flag=True,
+                sqlite_db_path=Path("source.db"),
+                output_path=Path(temp_dir) / "rowcopy.md",
+                environ=self._valid_env(),
+                connector=Mock(return_value=postgres_conn),
+                sqlite_connection_factory=Mock(return_value=sqlite_conn),
+                dryrun_builder=Mock(return_value=self._dryrun()),
+            )
+        self.assertEqual(result.status, RowCopyStatus.ROLLED_BACK)
+        self.assertTrue(result.run_result.rolled_back)
+        self.assertIn(("rollback",), postgres_conn.events)
+        self.assertIn(("connection_close",), postgres_conn.events)
+        self.assertNotIn(("commit",), postgres_conn.events)
+
+    def test_cli_default_unaffected(self):
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with patch.dict("os.environ", {}, clear=True):
+            exit_code = main(["--dry-run"], output_stream=stdout, error_stream=stderr)
+        self.assertEqual(exit_code, 0)
+        self.assertIn("PostgreSQL staging deployment skeleton dry-run.", stdout.getvalue())
+        self.assertEqual(stderr.getvalue(), "")
+
+    def test_runtime_not_enabled_by_row_copy_sources(self):
+        deployer_source = Path("postgres_staging_deployer.py").read_text(encoding="utf-8")
+        engine_source = Path("sqlite_postgres_rowcopy_engine.py").read_text(encoding="utf-8")
+        for source in (deployer_source, engine_source):
+            self.assertNotIn("DB_BACKEND", source)
+            self.assertNotIn("ERP_ENABLE_POSTGRES_RUNTIME", source)
+            self.assertNotIn("init_db", source)
+            self.assertNotIn("get_connection", source)
 
 
 if __name__ == "__main__":
