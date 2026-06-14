@@ -192,7 +192,7 @@ def _startup_check(database_module: Any) -> tuple[str, str, bool, RuntimeSmokeCh
         passed = (
             active_backend == "postgres"
             and sqlite_blocked
-            and startup_status.get("stage") == "postgres_runtime_cutover_guard"
+            and startup_status.get("stage") == "postgres_runtime_startup"
             and not startup_status.get("bootstrap_needed")
             and not startup_status.get("recovery_attempted")
         )

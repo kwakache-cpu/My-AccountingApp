@@ -8949,6 +8949,40 @@ def startup_database():
     global LAST_RESTORE_SOURCE
     backend_diagnostics = get_startup_backend_diagnostics()
     if backend_diagnostics["postgres_schema_blocked"]:
+        if backend_diagnostics.get("runtime_cutover_guard_ok"):
+            logger.info(
+                "PostgreSQL startup allowed after cutover guard: configured_backend=%s active_backend=%s database_url_configured=%s schema_deployment_status=%s row_reconciliation_status=%s runtime_readiness_status=%s runtime_dryrun_status=%s",
+                backend_diagnostics["configured_backend"],
+                backend_diagnostics["active_backend"],
+                backend_diagnostics["database_url_configured"],
+                backend_diagnostics["schema_deployment_status"],
+                backend_diagnostics["row_reconciliation_status"],
+                backend_diagnostics["runtime_readiness_status"],
+                backend_diagnostics["runtime_dryrun_status"],
+            )
+            return {
+                "ok": True,
+                "stage": "postgres_runtime_startup",
+                "reason": "PostgreSQL runtime startup allowed after all cutover guards and validation evidence passed.",
+                "configured_backend": backend_diagnostics["configured_backend"],
+                "active_backend": backend_diagnostics["active_backend"],
+                "postgres_requested": backend_diagnostics["postgres_requested"],
+                "postgres_runtime_enabled": backend_diagnostics["postgres_runtime_enabled"],
+                "database_url_configured": backend_diagnostics["database_url_configured"],
+                "database_url_label": backend_diagnostics["database_url_label"],
+                "environment_label": backend_diagnostics["environment_label"],
+                "environment_approved": backend_diagnostics["environment_approved"],
+                "schema_deployment_status": backend_diagnostics["schema_deployment_status"],
+                "row_reconciliation_status": backend_diagnostics["row_reconciliation_status"],
+                "runtime_readiness_status": backend_diagnostics["runtime_readiness_status"],
+                "runtime_dryrun_status": backend_diagnostics["runtime_dryrun_status"],
+                "runtime_cutover_guard_ok": backend_diagnostics["runtime_cutover_guard_ok"],
+                "runtime_cutover_guard_reasons": [],
+                "startup_mode": "postgres_runtime_startup",
+                "bootstrap_needed": False,
+                "recovery_attempted": False,
+                "recovery_succeeded": False,
+            }
         logger.error(
             "PostgreSQL startup blocked before SQLite schema/recovery paths: configured_backend=%s active_backend=%s database_url_configured=%s cutover_guard_ok=%s reason=%s",
             backend_diagnostics["configured_backend"],

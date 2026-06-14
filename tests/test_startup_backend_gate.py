@@ -60,7 +60,7 @@ class StartupBackendGateTests(TestCase):
         self.assertFalse(diagnostics["postgres_schema_blocked"])
         self.assertIn("runtime", " ".join(diagnostics["reasons"]).lower())
 
-    def test_postgres_runtime_enabled_blocks_before_sqlite_startup(self):
+    def test_postgres_runtime_enabled_allows_startup_without_sqlite_bootstrap_when_evidence_passes(self):
         database = self._load_database()
         secret_url = "postgresql://user:super-secret@example.supabase.co:6543/postgres"
         with mock.patch.dict(
@@ -71,13 +71,37 @@ class StartupBackendGateTests(TestCase):
             database, "_open_sqlite_connection"
         ) as open_sqlite_connection:
             result = database.startup_database()
-        self.assertFalse(result["ok"])
-        self.assertEqual(result["stage"], "postgres_runtime_cutover_guard")
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["stage"], "postgres_runtime_startup")
+        self.assertEqual(result["startup_mode"], "postgres_runtime_startup")
         self.assertEqual(result["active_backend"], "postgres")
         self.assertTrue(result["runtime_cutover_guard_ok"])
         self.assertEqual(result["schema_deployment_status"], "PASSED")
         self.assertEqual(result["row_reconciliation_status"], "PASSED")
         self.assertFalse(result["recovery_attempted"])
+        ensure_local_db_file.assert_not_called()
+        open_sqlite_connection.assert_not_called()
+
+    def test_postgres_runtime_blocks_when_cutover_evidence_missing(self):
+        database = self._load_database()
+        secret_url = "postgresql://user:super-secret@example.supabase.co:6543/postgres"
+        missing_report = os.path.join(os.getcwd(), ".test-tmp", "startup_backend_gate", "missing_cutover_report.md")
+        with mock.patch.dict(
+            os.environ,
+            {"DB_BACKEND": "postgres", "DATABASE_URL": secret_url, "ERP_ENABLE_POSTGRES_RUNTIME": "1", "ERP_ENVIRONMENT": "staging"},
+            clear=False,
+        ), mock.patch.dict(
+            database.POSTGRES_CUTOVER_REPORTS,
+            {"schema_deployment": (missing_report, ("Status: PASSED",))},
+            clear=True,
+        ), mock.patch.object(database, "_ensure_local_db_file") as ensure_local_db_file, mock.patch.object(
+            database, "_open_sqlite_connection"
+        ) as open_sqlite_connection:
+            result = database.startup_database()
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["stage"], "postgres_runtime_cutover_guard")
+        self.assertFalse(result["runtime_cutover_guard_ok"])
+        self.assertIn("missing or stale", " ".join(result["runtime_cutover_guard_reasons"]).lower())
         ensure_local_db_file.assert_not_called()
         open_sqlite_connection.assert_not_called()
 
