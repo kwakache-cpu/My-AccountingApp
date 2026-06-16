@@ -680,6 +680,30 @@ def authenticate_access_key_read_path(conn, access_key):
     return {"matched": False, "active": False}
 
 
+def get_dashboard_metric_counts(conn, company_key):
+    """Read dashboard source counts using backend-aware SELECT helpers."""
+    inventory_value = execute_portable_query(
+        conn,
+        "SELECT COALESCE(SUM(qty * cost_price), 0) FROM inventory WHERE company_key = ?",
+        (company_key,),
+    ).fetchone()[0]
+    employee_count = execute_portable_query(
+        conn,
+        "SELECT COUNT(DISTINCT emp_name) FROM payroll WHERE company_key = ? AND COALESCE(status, 'Active') != 'Void'",
+        (company_key,),
+    ).fetchone()[0] or 0
+    fixed_asset_value = execute_portable_query(
+        conn,
+        "SELECT COALESCE(SUM(book_value), 0) FROM fixed_assets WHERE company_key = ?",
+        (company_key,),
+    ).fetchone()[0]
+    return {
+        "inventory_value": inventory_value,
+        "employee_count": employee_count,
+        "fixed_asset_value": fixed_asset_value,
+    }
+
+
 def wipe_company_records(conn, company_key):
     company_scoped_tables = [
         "users",
@@ -1301,26 +1325,18 @@ def _show_legacy_dashboard(company_key, company_name, role):
             try:
                 col1, col2, col3, col4 = st.columns(4)
 
-                inv_val = conn.execute(
-                    "SELECT COALESCE(SUM(qty * cost_price), 0) FROM inventory WHERE company_key = ?",
-                    (company_key,),
-                ).fetchone()[0]
+                dashboard_counts = get_dashboard_metric_counts(conn, company_key)
+                inv_val = dashboard_counts["inventory_value"]
                 col1.metric(label=f"Inventory Value ({st.session_state.currency_symbol})", value=format_currency(inv_val))
 
                 current_month = datetime.now().strftime('%Y-%m')
                 month_sales = get_month_sales_total(company_key, year_month=current_month, conn=conn)
                 col2.metric(label=f"Month Sales ({st.session_state.currency_symbol})", value=format_currency(month_sales))
 
-                emp_count = conn.execute(
-                    "SELECT COUNT(DISTINCT emp_name) FROM payroll WHERE company_key = ? AND COALESCE(status, 'Active') != 'Void'",
-                    (company_key,),
-                ).fetchone()[0] or 0
+                emp_count = dashboard_counts["employee_count"]
                 col3.metric("Employees", str(emp_count))
 
-                fa_val = conn.execute(
-                    "SELECT COALESCE(SUM(book_value), 0) FROM fixed_assets WHERE company_key = ?",
-                    (company_key,),
-                ).fetchone()[0]
+                fa_val = dashboard_counts["fixed_asset_value"]
                 col4.metric(label=f"Asset Value ({st.session_state.currency_symbol})", value=format_currency(fa_val))
             except sqlite3.OperationalError as db_schema_error:
                 if "no such table" in str(db_schema_error).lower():
@@ -1451,19 +1467,11 @@ def _show_local_dashboard(company_key, company_name, role):
             conn = get_connection()
             col1, col2, col3, col4 = st.columns(4)
 
-            inv_val = conn.execute(
-                "SELECT COALESCE(SUM(qty * cost_price), 0) FROM inventory WHERE company_key = ?",
-                (company_key,),
-            ).fetchone()[0]
+            dashboard_counts = get_dashboard_metric_counts(conn, company_key)
+            inv_val = dashboard_counts["inventory_value"]
             month_sales = get_month_sales_total(company_key, year_month=datetime.now().strftime('%Y-%m'), conn=conn)
-            emp_count = conn.execute(
-                "SELECT COUNT(DISTINCT emp_name) FROM payroll WHERE company_key = ? AND COALESCE(status, 'Active') != 'Void'",
-                (company_key,),
-            ).fetchone()[0] or 0
-            fa_val = conn.execute(
-                "SELECT COALESCE(SUM(book_value), 0) FROM fixed_assets WHERE company_key = ?",
-                (company_key,),
-            ).fetchone()[0]
+            emp_count = dashboard_counts["employee_count"]
+            fa_val = dashboard_counts["fixed_asset_value"]
 
             col1.metric("Inventory Value", format_currency(inv_val))
             col2.metric("Month Sales", format_currency(month_sales))
@@ -2427,7 +2435,7 @@ else:
                 
                 # Get actual metrics from database
                 try:
-                    total_companies = conn.execute("SELECT COUNT(*) FROM companies").fetchone()[0]
+                    total_companies = execute_portable_query(conn, "SELECT COUNT(*) FROM companies").fetchone()[0]
                 except Exception:
                     total_companies = 0
                 billing_snapshot = get_subscription_billing_admin_snapshot()

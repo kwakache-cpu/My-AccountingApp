@@ -1,3 +1,4 @@
+import os
 from unittest import TestCase, mock
 
 from test_support import ERPIsolatedTestCase
@@ -116,6 +117,98 @@ class PostgresAuthSubscriptionRuntimePortabilityTests(ERPIsolatedTestCase):
         self.assertIn("WHERE key = %s", fake.statements[0])
         self.assertNotIn("?", fake.statements[0])
         self.assertEqual(fake.params[0], ("COMPANY-1",))
+
+    def test_dashboard_metric_counts_use_portable_postgres_placeholders_without_sqlite(self):
+        import app
+
+        fake = _FakePostgresConn(row=(10,))
+        with mock.patch.object(self.database, "get_active_db_backend", return_value="postgres"), mock.patch.object(
+            self.database, "_open_sqlite_connection", side_effect=AssertionError("sqlite should not open")
+        ):
+            counts = app.get_dashboard_metric_counts(fake, "COMPANY-1")
+
+        self.assertEqual(counts["inventory_value"], 10)
+        self.assertEqual(counts["employee_count"], 10)
+        self.assertEqual(counts["fixed_asset_value"], 10)
+        self.assertEqual(len(fake.statements), 3)
+        self.assertTrue(all("company_key = %s" in statement for statement in fake.statements))
+        self.assertTrue(all("?" not in statement for statement in fake.statements))
+        self.assertTrue(all(params == ("COMPANY-1",) for params in fake.params))
+
+    def test_postgres_runtime_system_diagnostics_do_not_open_sqlite(self):
+        secret_url = "postgresql://user:super-secret@example.supabase.co:6543/postgres"
+        with mock.patch.dict(
+            os.environ,
+            {
+                "DB_BACKEND": "postgres",
+                "DATABASE_URL": secret_url,
+                "ERP_ENABLE_POSTGRES_RUNTIME": "1",
+                "ERP_ENVIRONMENT": "staging",
+            },
+            clear=False,
+        ), mock.patch.object(
+            self.database,
+            "get_postgres_readiness_diagnostics",
+            return_value={"active_backend": "postgres", "switch_blocked": False},
+        ), mock.patch.object(
+            self.database,
+            "get_startup_backend_diagnostics",
+            return_value={
+                "schema_deployment_status": "PASSED",
+                "row_reconciliation_status": "PASSED",
+                "runtime_readiness_status": "PASSED",
+                "runtime_dryrun_status": "PASSED",
+            },
+        ), mock.patch.object(
+            self.database,
+            "get_database_health_snapshot",
+            side_effect=AssertionError("sqlite health should not run"),
+        ), mock.patch.object(
+            self.database,
+            "get_sqlite_concurrency_diagnostics",
+            side_effect=AssertionError("sqlite diagnostics should not run"),
+        ), mock.patch.object(
+            self.database,
+            "_open_sqlite_connection",
+            side_effect=AssertionError("sqlite should not open"),
+        ):
+            diagnostics = self.database.get_db_diagnostics()
+
+        self.assertEqual(diagnostics["active_backend"], "postgres")
+        self.assertIsNone(diagnostics["db_path"])
+        self.assertIsNone(diagnostics["sqlite_concurrency"])
+        self.assertEqual(diagnostics["schema_deployment_status"], "PASSED")
+        self.assertNotIn("super-secret", str(diagnostics))
+
+    def test_recovery_restore_paths_are_blocked_under_postgres_runtime(self):
+        secret_url = "postgresql://user:super-secret@example.supabase.co:6543/postgres"
+        with mock.patch.dict(
+            os.environ,
+            {
+                "DB_BACKEND": "postgres",
+                "DATABASE_URL": secret_url,
+                "ERP_ENABLE_POSTGRES_RUNTIME": "1",
+                "ERP_ENVIRONMENT": "staging",
+            },
+            clear=False,
+        ), mock.patch.object(
+            self.database,
+            "get_database_health_snapshot",
+            side_effect=AssertionError("sqlite health should not run"),
+        ), mock.patch.object(
+            self.database,
+            "_open_sqlite_connection",
+            side_effect=AssertionError("sqlite should not open"),
+        ):
+            restore = self.database.restore_latest_cloud_backup_to_local()
+            recovery = self.database.attempt_production_database_recovery()
+
+        self.assertFalse(restore["ok"])
+        self.assertFalse(recovery["ok"])
+        self.assertEqual(restore["stage"], "postgres_runtime_recovery_blocked")
+        self.assertEqual(recovery["stage"], "postgres_runtime_recovery_blocked")
+        self.assertFalse(restore["replacement_performed"])
+        self.assertFalse(recovery["replacement_performed"])
 
 
 if __name__ == "__main__":
