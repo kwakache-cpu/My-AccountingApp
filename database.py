@@ -2145,8 +2145,10 @@ def get_sqlite_concurrency_diagnostics():
 
 
 def get_db_diagnostics():
-    health = get_database_health_snapshot(DB_PATH, logger_instance=logger)
     readiness = get_postgres_readiness_diagnostics()
+    postgres_active = is_postgres()
+    health = {} if postgres_active else get_database_health_snapshot(DB_PATH, logger_instance=logger)
+    startup_backend = get_startup_backend_diagnostics() if postgres_active else {}
     return {
         "configured_backend": get_db_backend(),
         "active_backend": get_active_db_backend(),
@@ -2154,13 +2156,17 @@ def get_db_diagnostics():
         "is_postgres": is_postgres(),
         "database_url_configured": bool(_get_database_url()),
         "database_url_label": _redact_database_url(_get_database_url()),
-        "db_path": DB_PATH,
-        "db_exists": health.get("file_exists"),
-        "company_count": health.get("company_count"),
-        "schema_version": health.get("schema_version"),
-        "database_uuid": health.get("database_uuid"),
+        "db_path": None if postgres_active else DB_PATH,
+        "db_exists": None if postgres_active else health.get("file_exists"),
+        "company_count": None if postgres_active else health.get("company_count"),
+        "schema_version": None if postgres_active else health.get("schema_version"),
+        "database_uuid": None if postgres_active else health.get("database_uuid"),
+        "schema_deployment_status": startup_backend.get("schema_deployment_status"),
+        "row_reconciliation_status": startup_backend.get("row_reconciliation_status"),
+        "runtime_readiness_status": startup_backend.get("runtime_readiness_status"),
+        "runtime_dryrun_status": startup_backend.get("runtime_dryrun_status"),
         "postgres_readiness": readiness,
-        "sqlite_concurrency": get_sqlite_concurrency_diagnostics(),
+        "sqlite_concurrency": None if postgres_active else get_sqlite_concurrency_diagnostics(),
     }
 
 
@@ -3418,6 +3424,24 @@ def restore_latest_cloud_backup_to_local(logger_instance=None, explicit_recovery
     global LAST_RESTORE_SOURCE, LAST_CLOUD_RESTORE_SKIP_REASON
     LAST_CLOUD_RESTORE_SKIP_REASON = None
     logger_instance = logger_instance or logger
+    if is_postgres():
+        skip_reason = "SQLite cloud restore is blocked while PostgreSQL runtime is active"
+        LAST_CLOUD_RESTORE_SKIP_REASON = skip_reason
+        logger_instance.warning(skip_reason)
+        return {
+            "ok": False,
+            "stage": "postgres_runtime_recovery_blocked",
+            "reason": skip_reason,
+            "bucket_name": None,
+            "object_name": None,
+            "selected_source_type": None,
+            "selected_object_path": None,
+            "replacement_performed": False,
+            "temp_download_succeeded": False,
+            "health": None,
+            "validation_attempts": [],
+            "restore_skipped_reason": skip_reason,
+        }
     if is_test_runtime() and not is_test_cloud_restore_allowed():
         skip_reason = "cloud restore is disabled during automated tests"
         LAST_CLOUD_RESTORE_SKIP_REASON = skip_reason
@@ -5041,6 +5065,24 @@ def attempt_production_database_recovery(force_restore=True):
     global LAST_CLOUD_RESTORE_SKIP_REASON
     LAST_CLOUD_RESTORE_SKIP_REASON = None
     logger.info("Trusted backup recovery invoked: db_path=%s force_restore=%s", DB_PATH, force_restore)
+    if is_postgres():
+        skip_reason = "SQLite trusted recovery is blocked while PostgreSQL runtime is active"
+        LAST_CLOUD_RESTORE_SKIP_REASON = skip_reason
+        logger.warning(skip_reason)
+        return {
+            "ok": False,
+            "stage": "postgres_runtime_recovery_blocked",
+            "reason": skip_reason,
+            "backend": "firebase_storage",
+            "bucket_name": None,
+            "object_name": None,
+            "recovery_source_found": False,
+            "temp_download_succeeded": False,
+            "replacement_performed": False,
+            "health": None,
+            "validation_attempts": [],
+            "restore_skipped_reason": skip_reason,
+        }
     if is_test_runtime() and not is_test_cloud_restore_allowed():
         skip_reason = "cloud recovery is disabled during automated tests"
         LAST_CLOUD_RESTORE_SKIP_REASON = skip_reason
