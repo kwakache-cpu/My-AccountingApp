@@ -4176,13 +4176,26 @@ def upsert_subscription_plan_setting(
     )
 
 
+def _row_to_dict(row, columns):
+    if row is None:
+        return None
+    if isinstance(row, dict):
+        return dict(row)
+    try:
+        return dict(row)
+    except Exception:
+        return {column: row[index] for index, column in enumerate(columns)}
+
+
 def get_subscription_plan_settings(conn=None):
     owns_connection = conn is None
-    conn = conn or _open_sqlite_connection()
+    conn = conn or get_connection()
     try:
-        cursor = conn.cursor()
-        _ensure_subscription_billing_schema(cursor)
-        rows = conn.execute(
+        if is_sqlite_backend():
+            cursor = conn.cursor()
+            _ensure_subscription_billing_schema(cursor)
+        rows = execute_portable_query(
+            conn,
             """
             SELECT plan_name, configured_amount, currency, duration_months, duration_days, features_json, updated_by, updated_at
             FROM subscription_plan_settings
@@ -4190,8 +4203,10 @@ def get_subscription_plan_settings(conn=None):
             """
         ).fetchall()
         settings = {}
+        columns = ("plan_name", "configured_amount", "currency", "duration_months", "duration_days", "features_json", "updated_by", "updated_at")
         for row in rows:
-            settings[str(row["plan_name"] or "").strip()] = dict(row)
+            row_dict = _row_to_dict(row, columns)
+            settings[str(row_dict["plan_name"] or "").strip()] = row_dict
         return settings
     finally:
         if owns_connection and conn:
@@ -4203,11 +4218,13 @@ def get_subscription_plan_setting(plan_name, conn=None):
     if not normalized_plan_name:
         return None
     owns_connection = conn is None
-    conn = conn or _open_sqlite_connection()
+    conn = conn or get_connection()
     try:
-        cursor = conn.cursor()
-        _ensure_subscription_billing_schema(cursor)
-        row = conn.execute(
+        if is_sqlite_backend():
+            cursor = conn.cursor()
+            _ensure_subscription_billing_schema(cursor)
+        row = execute_portable_query(
+            conn,
             """
             SELECT plan_name, configured_amount, currency, duration_months, duration_days, features_json, updated_by, updated_at
             FROM subscription_plan_settings
@@ -4216,7 +4233,10 @@ def get_subscription_plan_setting(plan_name, conn=None):
             """,
             (normalized_plan_name,),
         ).fetchone()
-        return dict(row) if row else None
+        return _row_to_dict(
+            row,
+            ("plan_name", "configured_amount", "currency", "duration_months", "duration_days", "features_json", "updated_by", "updated_at"),
+        ) if row else None
     finally:
         if owns_connection and conn:
             conn.close()
@@ -4338,10 +4358,11 @@ def get_company_subscription_snapshot(company_key, conn=None, as_of=None):
             "days_left": None,
         }
     owns_connection = conn is None
-    conn = conn or _open_sqlite_connection()
+    conn = conn or get_connection()
     try:
         today = _parse_datetime_like(as_of) or datetime.now()
-        row = conn.execute(
+        row = execute_portable_query(
+            conn,
             """
             SELECT cs.company_key, cs.plan_name, cs.status, cs.start_date, cs.end_date, cs.last_payment_reference,
                    c.subscription_expiry, c.status AS company_status, c.name AS company_name
@@ -4352,6 +4373,20 @@ def get_company_subscription_snapshot(company_key, conn=None, as_of=None):
             """,
             (normalized_key,),
         ).fetchone()
+        row = _row_to_dict(
+            row,
+            (
+                "company_key",
+                "plan_name",
+                "status",
+                "start_date",
+                "end_date",
+                "last_payment_reference",
+                "subscription_expiry",
+                "company_status",
+                "company_name",
+            ),
+        )
         if not row:
             return {
                 "ok": False,
@@ -4487,7 +4522,7 @@ def activate_company_subscription(
 
 def get_subscription_billing_summary(conn=None):
     owns_connection = conn is None
-    conn = conn or _open_sqlite_connection()
+    conn = conn or get_connection()
     try:
         configured_plans = get_subscription_plan_settings(conn=conn)
         totals_row = conn.execute(
@@ -4565,7 +4600,7 @@ def get_subscription_billing_summary(conn=None):
 
 def get_subscription_billing_diagnostics(conn=None):
     owns_connection = conn is None
-    conn = conn or _open_sqlite_connection()
+    conn = conn or get_connection()
     try:
         table_names = set(list_tables(conn))
         summary = get_subscription_billing_summary(conn=conn)

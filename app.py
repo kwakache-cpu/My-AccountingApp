@@ -6,6 +6,7 @@ from database import (
     DB_PATH,
     create_company_record,
     ensure_schema,
+    execute_portable_query,
     force_backup_after_company_creation,
     get_downloadable_backup_export,
     get_firebase_service_account_info,
@@ -606,6 +607,79 @@ def hash_login_password(password):
     return hashlib.sha256(password.encode("utf-8")).hexdigest()
 
 
+def authenticate_access_key_read_path(conn, access_key):
+    """Read-only company, branch, and staff access-key authentication lookup."""
+    admin = execute_portable_query(
+        conn,
+        "SELECT key, name, COALESCE(status, 'Active') FROM companies WHERE key = ?",
+        (access_key,),
+    ).fetchone()
+    if admin:
+        if admin[2] != "Active":
+            return {"matched": True, "active": False, "reason": "company_inactive", "company_key": admin[0]}
+        return {"matched": True, "active": True, "kind": "company", "user": {"key": admin[0], "name": admin[1], "role": "Master Admin"}}
+
+    branch_auth = execute_portable_query(
+        conn,
+        """
+        SELECT b.branch_id, b.company_key, b.branch_name, b.branch_access_key, c.name
+        FROM branches b
+        JOIN companies c ON c.key = b.company_key
+        WHERE b.branch_access_key = ?
+          AND COALESCE(c.status, 'Active') = 'Active'
+        LIMIT 1
+        """,
+        (access_key,),
+    ).fetchone()
+    if branch_auth:
+        return {
+            "matched": True,
+            "active": True,
+            "kind": "branch",
+            "user": {
+                "key": branch_auth[1],
+                "company_key": branch_auth[1],
+                "name": branch_auth[4],
+                "role": "Branch_Bookkeeper",
+                "branch_name": branch_auth[2],
+                "branch_id": branch_auth[0],
+            },
+        }
+
+    user_login = execute_portable_query(
+        conn,
+        """
+        SELECT u.company_key, c.name, u.role, u.full_name, u.branch_id
+        FROM users u
+        JOIN companies c ON c.key = u.company_key
+        WHERE u.login_key = ?
+          AND COALESCE(u.status, 'Active') = 'Active'
+          AND COALESCE(c.status, 'Active') = 'Active'
+        """,
+        (access_key,),
+    ).fetchone()
+    if user_login:
+        role_name = user_login[2]
+        branch_id = user_login[4]
+        if role_name == "Branch_Bookkeeper" and not branch_id:
+            return {"matched": True, "active": False, "reason": "branch_not_configured", "company_key": user_login[0], "role": role_name}
+        return {
+            "matched": True,
+            "active": True,
+            "kind": "user",
+            "user": {
+                "key": user_login[0],
+                "company_key": user_login[0],
+                "name": user_login[1],
+                "role": role_name,
+                "staff_name": user_login[3],
+                "branch_id": branch_id,
+            },
+        }
+
+    return {"matched": False, "active": False}
+
+
 def wipe_company_records(conn, company_key):
     company_scoped_tables = [
         "users",
@@ -1011,92 +1085,37 @@ def login_ui():
                         _init_session(user_obj)
                         st.rerun()
                     
-                    # Master Admin Check
-                    admin = conn.execute("SELECT key, name, COALESCE(status, 'Active') FROM companies WHERE key = ?", (access_key,)).fetchone()
-                    if admin:
-                        if admin[2] != "Active":
+                    auth_result = authenticate_access_key_read_path(conn, access_key)
+                    if auth_result.get("matched") and not auth_result.get("active"):
+                        st.session_state.login_attempts += 1
+                        try:
+                            conn.close()
+                        except Exception:
+                            pass
+                        if auth_result.get("reason") == "company_inactive":
                             st.error("This company is currently archived or inactive. Contact Gatekeeper to reactivate access.")
-                            conn.close()
-                            return
-                        user_obj = {"key": admin[0], "name": admin[1], "role": "Master Admin"}
-                        try:
-                            log_audit_action(conn, admin[0], "Master Admin", "Successful login", "Authentication")
-                        except Exception:
-                            logger.exception("Audit log failed for master admin login: %s", admin[0])
-                        try:
-                            conn.close()
-                        except Exception:
-                            pass
-                        _init_session(user_obj)
-                        st.rerun()
-                    
-                    # Branch Access Key Login
-                    branch_auth = conn.execute(
-                        """
-                        SELECT b.branch_id, b.company_key, b.branch_name, b.branch_access_key, c.name
-                        FROM branches b
-                        JOIN companies c ON c.key = b.company_key
-                        WHERE b.branch_access_key = ?
-                          AND COALESCE(c.status, 'Active') = 'Active'
-                        LIMIT 1
-                        """,
-                        (access_key,),
-                    ).fetchone()
-                    if branch_auth:
-                        user_obj = {
-                            "key": branch_auth[1],
-                            "company_key": branch_auth[1],
-                            "name": branch_auth[4],
-                            "role": "Branch_Bookkeeper",
-                            "branch_name": branch_auth[2],
-                            "branch_id": branch_auth[0],
-                        }
-                        try:
-                            log_audit_action(conn, branch_auth[1], "Branch_Bookkeeper", "Successful login", "Authentication", branch_id=branch_auth[0])
-                        except Exception:
-                            logger.exception("Audit log failed for branch login: %s", branch_auth[1])
-                        try:
-                            conn.close()
-                        except Exception:
-                            pass
-                        _init_session(user_obj)
-                        st.rerun()
-
-                    # Branch Bookkeeper / Staff Check
-                    user_login = conn.execute(
-                        """
-                        SELECT u.company_key, c.name, u.role, u.full_name, u.branch_id
-                        FROM users u
-                        JOIN companies c ON c.key = u.company_key
-                        WHERE u.login_key = ?
-                          AND COALESCE(u.status, 'Active') = 'Active'
-                          AND COALESCE(c.status, 'Active') = 'Active'
-                        """,
-                        (access_key,),
-                    ).fetchone()
-                    if user_login:
-                        role_name = user_login[2]
-                        branch_id = user_login[4]
-                        if role_name == "Branch_Bookkeeper" and not branch_id:
-                            st.session_state.login_attempts += 1
-                            conn.close()
+                        elif auth_result.get("reason") == "branch_not_configured":
                             st.error(
                                 "Branch access is not configured for this user. "
                                 "Contact your company administrator to assign a branch."
                             )
-                            return
-                        user_obj = {
-                            "key": user_login[0],
-                            "company_key": user_login[0],
-                            "name": user_login[1],
-                            "role": role_name,
-                            "staff_name": user_login[3],
-                            "branch_id": branch_id,
-                        }
+                        else:
+                            st.error("Access is not active. Contact your administrator.")
+                        return
+
+                    if auth_result.get("matched") and auth_result.get("active"):
+                        user_obj = auth_result["user"]
                         try:
-                            log_audit_action(conn, user_login[0], role_name, "Successful login", "Authentication", branch_id=user_login[4])
+                            log_audit_action(
+                                conn,
+                                user_obj.get("company_key") or user_obj.get("key"),
+                                user_obj.get("role"),
+                                "Successful login",
+                                "Authentication",
+                                branch_id=user_obj.get("branch_id"),
+                            )
                         except Exception:
-                            logger.exception("Audit log failed for staff login: %s", user_login[0])
+                            logger.exception("Audit log failed for login: %s", user_obj.get("key"))
                         try:
                             conn.close()
                         except Exception:
@@ -1147,7 +1166,8 @@ def login_ui():
         if st.button("Lookup Recovery Question", key="v3_lookup_recovery_question"):
             try:
                 conn = get_connection()
-                row = conn.execute(
+                row = execute_portable_query(
+                    conn,
                     "SELECT company_key, security_question FROM users WHERE login_key = ? AND COALESCE(status, 'Active') = 'Active' LIMIT 1",
                     (forgot_login_key.strip(),),
                 ).fetchone()
@@ -1176,7 +1196,8 @@ def login_ui():
                 else:
                     try:
                         conn = get_connection()
-                        reset_row = conn.execute(
+                        reset_row = execute_portable_query(
+                            conn,
                             "SELECT company_key, security_answer FROM users WHERE login_key = ? LIMIT 1",
                             (st.session_state.get("forgot_login_key"),),
                         ).fetchone()
@@ -1515,7 +1536,8 @@ def check_session_lock():
         conn = get_connection()
         # For users table login
         if 'staff_name' in user:
-            current_db_session = conn.execute(
+            current_db_session = execute_portable_query(
+                conn,
                 "SELECT current_session_id FROM users WHERE login_key = ? AND company_key = ?",
                 (st.session_state.get('login_key'), user['key'])
             ).fetchone()
