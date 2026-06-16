@@ -7,6 +7,7 @@ from database import (
     create_company_record,
     ensure_schema,
     execute_portable_query,
+    execute_portable_write,
     force_backup_after_company_creation,
     get_downloadable_backup_export,
     get_firebase_service_account_info,
@@ -15,6 +16,8 @@ from database import (
     get_recovery_source_diagnostics,
     get_sqlite_concurrency_diagnostics,
     get_startup_backend_diagnostics,
+    row_get,
+    rows_to_dicts,
     restore_latest_cloud_backup_to_local,
     should_run_sqlite_startup,
     startup_database,
@@ -413,13 +416,15 @@ def _get_bog_display_rate(currency_code):
 def _render_currency_sidebar_controls(selectbox_key):
     settings_conn = get_connection()
     try:
-        settings_row = settings_conn.execute(
+        settings_row = execute_portable_query(
+            settings_conn,
             "SELECT COALESCE(base_currency, 'GHS') AS base_currency, COALESCE(display_currency, 'GHS') AS display_currency, COALESCE(exchange_rate, 1.0) AS exchange_rate FROM system_settings WHERE id = 1"
         ).fetchone()
-        current_currency = str(settings_row["display_currency"]) if settings_row else "GHS"
+        current_currency = str(row_get(settings_row, "display_currency", "GHS") or "GHS") if settings_row else "GHS"
+        current_rate_value = row_get(settings_row, "exchange_rate") if settings_row else None
         current_rate = (
-            float(settings_row["exchange_rate"])
-            if settings_row and settings_row["exchange_rate"] not in (None, "")
+            float(current_rate_value)
+            if settings_row and current_rate_value not in (None, "")
             else _get_bog_display_rate(current_currency)
         )
         selected_currency = st.sidebar.selectbox(
@@ -440,14 +445,16 @@ def _render_currency_sidebar_controls(selectbox_key):
             st.sidebar.caption(f"BoG April 2026 sync: 1 {selected_currency} = {selected_rate:,.2f} GHS")
             st.sidebar.caption(f"Global display multiplier: 1 / {selected_rate:,.2f}")
         if selected_currency != current_currency or abs(current_rate - selected_rate) > 0.000001:
-            settings_conn.execute(
+            execute_portable_write(
+                settings_conn,
                 "UPDATE system_settings SET base_currency = ?, display_currency = ?, exchange_rate = ?, updated_at = CURRENT_TIMESTAMP WHERE id = 1",
                 ("GHS", selected_currency, selected_rate),
             )
             settings_conn.commit()
             st.rerun()
     finally:
-        settings_conn.close()
+        if settings_conn:
+            settings_conn.close()
 
 PAGE_LABELS = {
     "dashboard": "📊 Dashboard",
@@ -615,9 +622,12 @@ def authenticate_access_key_read_path(conn, access_key):
         (access_key,),
     ).fetchone()
     if admin:
-        if admin[2] != "Active":
-            return {"matched": True, "active": False, "reason": "company_inactive", "company_key": admin[0]}
-        return {"matched": True, "active": True, "kind": "company", "user": {"key": admin[0], "name": admin[1], "role": "Master Admin"}}
+        admin_key = row_get(admin, "key", row_get(admin, 0))
+        admin_name = row_get(admin, "name", row_get(admin, 1))
+        admin_status = row_get(admin, "status", row_get(admin, 2, "Active"))
+        if admin_status != "Active":
+            return {"matched": True, "active": False, "reason": "company_inactive", "company_key": admin_key}
+        return {"matched": True, "active": True, "kind": "company", "user": {"key": admin_key, "name": admin_name, "role": "Master Admin"}}
 
     branch_auth = execute_portable_query(
         conn,
@@ -632,17 +642,21 @@ def authenticate_access_key_read_path(conn, access_key):
         (access_key,),
     ).fetchone()
     if branch_auth:
+        branch_id = row_get(branch_auth, "branch_id", row_get(branch_auth, 0))
+        company_key = row_get(branch_auth, "company_key", row_get(branch_auth, 1))
+        branch_name = row_get(branch_auth, "branch_name", row_get(branch_auth, 2))
+        company_name = row_get(branch_auth, "name", row_get(branch_auth, 4))
         return {
             "matched": True,
             "active": True,
             "kind": "branch",
             "user": {
-                "key": branch_auth[1],
-                "company_key": branch_auth[1],
-                "name": branch_auth[4],
+                "key": company_key,
+                "company_key": company_key,
+                "name": company_name,
                 "role": "Branch_Bookkeeper",
-                "branch_name": branch_auth[2],
-                "branch_id": branch_auth[0],
+                "branch_name": branch_name,
+                "branch_id": branch_id,
             },
         }
 
@@ -659,20 +673,23 @@ def authenticate_access_key_read_path(conn, access_key):
         (access_key,),
     ).fetchone()
     if user_login:
-        role_name = user_login[2]
-        branch_id = user_login[4]
+        role_name = row_get(user_login, "role", row_get(user_login, 2))
+        branch_id = row_get(user_login, "branch_id", row_get(user_login, 4))
+        company_key = row_get(user_login, "company_key", row_get(user_login, 0))
+        company_name = row_get(user_login, "name", row_get(user_login, 1))
+        staff_name = row_get(user_login, "full_name", row_get(user_login, 3))
         if role_name == "Branch_Bookkeeper" and not branch_id:
-            return {"matched": True, "active": False, "reason": "branch_not_configured", "company_key": user_login[0], "role": role_name}
+            return {"matched": True, "active": False, "reason": "branch_not_configured", "company_key": company_key, "role": role_name}
         return {
             "matched": True,
             "active": True,
             "kind": "user",
             "user": {
-                "key": user_login[0],
-                "company_key": user_login[0],
-                "name": user_login[1],
+                "key": company_key,
+                "company_key": company_key,
+                "name": company_name,
                 "role": role_name,
-                "staff_name": user_login[3],
+                "staff_name": staff_name,
                 "branch_id": branch_id,
             },
         }
@@ -682,25 +699,25 @@ def authenticate_access_key_read_path(conn, access_key):
 
 def get_dashboard_metric_counts(conn, company_key):
     """Read dashboard source counts using backend-aware SELECT helpers."""
-    inventory_value = execute_portable_query(
+    inventory_row = execute_portable_query(
         conn,
-        "SELECT COALESCE(SUM(qty * cost_price), 0) FROM inventory WHERE company_key = ?",
+        "SELECT COALESCE(SUM(qty * cost_price), 0) AS inventory_value FROM inventory WHERE company_key = ?",
         (company_key,),
-    ).fetchone()[0]
-    employee_count = execute_portable_query(
+    ).fetchone()
+    employee_row = execute_portable_query(
         conn,
-        "SELECT COUNT(DISTINCT emp_name) FROM payroll WHERE company_key = ? AND COALESCE(status, 'Active') != 'Void'",
+        "SELECT COUNT(DISTINCT emp_name) AS employee_count FROM payroll WHERE company_key = ? AND COALESCE(status, 'Active') != 'Void'",
         (company_key,),
-    ).fetchone()[0] or 0
-    fixed_asset_value = execute_portable_query(
+    ).fetchone()
+    fixed_asset_row = execute_portable_query(
         conn,
-        "SELECT COALESCE(SUM(book_value), 0) FROM fixed_assets WHERE company_key = ?",
+        "SELECT COALESCE(SUM(book_value), 0) AS fixed_asset_value FROM fixed_assets WHERE company_key = ?",
         (company_key,),
-    ).fetchone()[0]
+    ).fetchone()
     return {
-        "inventory_value": inventory_value,
-        "employee_count": employee_count,
-        "fixed_asset_value": fixed_asset_value,
+        "inventory_value": row_get(inventory_row, "inventory_value", row_get(inventory_row, 0, 0)) or 0,
+        "employee_count": row_get(employee_row, "employee_count", row_get(employee_row, 0, 0)) or 0,
+        "fixed_asset_value": row_get(fixed_asset_row, "fixed_asset_value", row_get(fixed_asset_row, 0, 0)) or 0,
     }
 
 
@@ -723,15 +740,15 @@ def wipe_company_records(conn, company_key):
     conn.execute("DELETE FROM companies WHERE key = ?", (company_key,))
 
 def check_maintenance_status():
-    """NATIVE SQLITE FIX: No  wrapper"""
     conn = None
     try:
         conn = get_connection()
-        cursor = conn.cursor()
-        cursor.execute("SELECT maintenance_date, is_active FROM maintenance_settings WHERE id = 1")
-        maint_setting = cursor.fetchone()
-        if maint_setting and maint_setting[1]:
-            return {'active': True, 'date': maint_setting[0]}
+        maint_setting = execute_portable_query(
+            conn,
+            "SELECT maintenance_date, is_active FROM maintenance_settings WHERE id = 1",
+        ).fetchone()
+        if maint_setting and row_get(maint_setting, "is_active", row_get(maint_setting, 1)):
+            return {'active': True, 'date': row_get(maint_setting, "maintenance_date", row_get(maint_setting, 0))}
         return {'active': False}
     except Exception as e:
         return {'active': False}
@@ -1195,10 +1212,10 @@ def login_ui():
                     "SELECT company_key, security_question FROM users WHERE login_key = ? AND COALESCE(status, 'Active') = 'Active' LIMIT 1",
                     (forgot_login_key.strip(),),
                 ).fetchone()
-                if row and row["security_question"]:
+                if row and row_get(row, "security_question"):
                     st.session_state.forgot_login_key = forgot_login_key.strip()
-                    st.session_state.forgot_security_question = row["security_question"]
-                    st.session_state.forgot_company_key = row["company_key"]
+                    st.session_state.forgot_security_question = row_get(row, "security_question")
+                    st.session_state.forgot_company_key = row_get(row, "company_key")
                     st.success("Security question loaded. Answer it to reset your password.")
                 else:
                     st.error("No active user found for that login key or no recovery question is set.")
@@ -1225,15 +1242,16 @@ def login_ui():
                             "SELECT company_key, security_answer FROM users WHERE login_key = ? LIMIT 1",
                             (st.session_state.get("forgot_login_key"),),
                         ).fetchone()
-                        if reset_row and reset_row["security_answer"] == hash_login_password(recovery_answer):
-                            conn.execute(
+                        if reset_row and row_get(reset_row, "security_answer") == hash_login_password(recovery_answer):
+                            execute_portable_write(
+                                conn,
                                 "UPDATE users SET password_hash = ? WHERE login_key = ?",
                                 (hash_login_password(new_password), st.session_state.get("forgot_login_key")),
                             )
                             conn.commit()
                             log_audit_action(
                                 conn,
-                                reset_row["company_key"],
+                                row_get(reset_row, "company_key"),
                                 "Recovery",
                                 "Password reset",
                                 "Authentication",
@@ -1380,7 +1398,8 @@ def _show_legacy_dashboard(company_key, company_name, role):
 
                 with col2:
                     st.subheader("Low Stock Items")
-                    low_stock_data = conn.execute(
+                    low_stock_data = execute_portable_query(
+                        conn,
                         """SELECT item_name, qty, unit FROM inventory
                            WHERE company_key = ? AND qty <= 10
                            ORDER BY qty ASC LIMIT 10""",
@@ -1389,8 +1408,14 @@ def _show_legacy_dashboard(company_key, company_name, role):
 
                     if low_stock_data:
                         low_stock = pd.DataFrame(
-                            low_stock_data,
-                            columns=['Item', 'Quantity', 'Unit'],
+                            [
+                                {
+                                    "Item": row_get(row, "item_name", row_get(row, 0)),
+                                    "Quantity": row_get(row, "qty", row_get(row, 1)),
+                                    "Unit": row_get(row, "unit", row_get(row, 2)),
+                                }
+                                for row in low_stock_data
+                            ],
                         )
                         st.dataframe(low_stock, width='stretch')
                     else:
@@ -1554,7 +1579,7 @@ def check_session_lock():
             conn.close()
             return True
         
-        if current_db_session and current_db_session[0] != session_uuid:
+        if current_db_session and row_get(current_db_session, "current_session_id", row_get(current_db_session, 0)) != session_uuid:
             # Session revoked
             _clear_session()
             st.error("Account active on another device. Please upgrade for more branch licenses.")
@@ -1579,16 +1604,26 @@ def _has_restored_data_without_admin_users():
     conn = None
     try:
         conn = get_connection()
-        company_count = conn.execute("SELECT COUNT(*) FROM companies WHERE COALESCE(status, 'Active') = 'Active'").fetchone()[0]
+        company_count_row = execute_portable_query(
+            conn,
+            "SELECT COUNT(*) AS company_count FROM companies WHERE COALESCE(status, 'Active') = 'Active'",
+        ).fetchone()
+        company_count = row_get(company_count_row, "company_count", row_get(company_count_row, 0, 0)) or 0
         if company_count == 0:
             return False  # No companies, no repair needed
         
         # Check if users table exists and has active admin-capable users
         try:
             # Only count users with admin-capable roles (not just any user)
-            admin_user_count = conn.execute(
-                "SELECT COUNT(*) FROM users WHERE role IN ('Master Admin', 'System Admin', 'Sub-Admin') AND COALESCE(status, 'Active') = 'Active'"
-            ).fetchone()[0]
+            admin_user_count_row = execute_portable_query(
+                conn,
+                "SELECT COUNT(*) AS admin_user_count FROM users WHERE role IN ('Master Admin', 'System Admin', 'Sub-Admin') AND COALESCE(status, 'Active') = 'Active'",
+            ).fetchone()
+            admin_user_count = row_get(
+                admin_user_count_row,
+                "admin_user_count",
+                row_get(admin_user_count_row, 0, 0),
+            )
             return int(admin_user_count or 0) == 0
         except Exception:
             # If users table doesn't exist or query fails, no repair needed
@@ -1610,7 +1645,8 @@ def _get_restored_companies_needing_admin():
     conn = None
     try:
         conn = get_connection()
-        companies = conn.execute(
+        companies = execute_portable_query(
+            conn,
             """SELECT c.key, c.name FROM companies c
                WHERE COALESCE(c.status, 'Active') = 'Active'
                AND NOT EXISTS (
@@ -1621,7 +1657,7 @@ def _get_restored_companies_needing_admin():
                )
                ORDER BY c.name"""
         ).fetchall()
-        return companies or []
+        return rows_to_dicts(companies) if companies else []
     except Exception as exc:
         logger.warning("Failed to get restored companies: %s", sanitize_error_message(exc))
         return []
@@ -2130,10 +2166,17 @@ def _render_primary_sidebar(user, include_settings=True):
     if user.get("role") in {"Dev", "Master Admin", "System Admin", "Owner / CEO"}:
         try:
             conn = get_connection()
-            branches = conn.execute("SELECT branch_id, branch_name FROM branches WHERE company_key = ? ORDER BY branch_name", (user['key'],)).fetchall()
+            branches = execute_portable_query(
+                conn,
+                "SELECT branch_id, branch_name FROM branches WHERE company_key = ? ORDER BY branch_name",
+                (user['key'],),
+            ).fetchall()
             conn.close()
             if branches:
-                branch_options = ["All Branches"] + [f"{b[1]} ({b[0]})" for b in branches]
+                branch_options = ["All Branches"] + [
+                    f"{row_get(branch, 'branch_name', row_get(branch, 1))} ({row_get(branch, 'branch_id', row_get(branch, 0))})"
+                    for branch in branches
+                ]
                 current_branch = st.session_state.get("active_branch_id", "All Branches")
                 selected_branch_display = next((opt for opt in branch_options if current_branch in opt or (current_branch is None and opt == "All Branches")), "All Branches")
                 selected_branch = st.sidebar.selectbox("Active Branch", branch_options, index=branch_options.index(selected_branch_display) if selected_branch_display in branch_options else 0, key="branch_selector")
@@ -2155,12 +2198,13 @@ def _render_primary_sidebar(user, include_settings=True):
         if not branch_name and user.get("branch_id") and user.get("key"):
             try:
                 conn = get_connection()
-                branch_row = conn.execute(
+                branch_row = execute_portable_query(
+                    conn,
                     "SELECT branch_name FROM branches WHERE company_key = ? AND branch_id = ?",
                     (user["key"], user["branch_id"]),
                 ).fetchone()
                 conn.close()
-                branch_name = branch_row[0] if branch_row else None
+                branch_name = row_get(branch_row, "branch_name", row_get(branch_row, 0)) if branch_row else None
             except Exception:
                 branch_name = None
         if branch_name:
@@ -2435,7 +2479,11 @@ else:
                 
                 # Get actual metrics from database
                 try:
-                    total_companies = execute_portable_query(conn, "SELECT COUNT(*) FROM companies").fetchone()[0]
+                    total_companies_row = execute_portable_query(
+                        conn,
+                        "SELECT COUNT(*) AS company_count FROM companies",
+                    ).fetchone()
+                    total_companies = row_get(total_companies_row, "company_count", row_get(total_companies_row, 0, 0))
                 except Exception:
                     total_companies = 0
                 billing_snapshot = get_subscription_billing_admin_snapshot()
@@ -2766,17 +2814,24 @@ else:
                     if total_companies:
                         selected_health_company = None
                         try:
-                            health_companies = conn.execute(
+                            health_companies = execute_portable_query(
+                                conn,
                                 "SELECT key, name FROM companies ORDER BY name LIMIT 100"
                             ).fetchall()
                             if health_companies:
-                                health_company_names = [f"{row['name']} ({row['key']})" for row in health_companies]
+                                health_company_names = [
+                                    f"{row_get(row, 'name')} ({row_get(row, 'key')})"
+                                    for row in health_companies
+                                ]
                                 selected_health_label = st.selectbox(
                                     "Accounting integrity company",
                                     health_company_names,
                                     key="journal_dominance_company_select",
                                 )
-                                selected_health_company = health_companies[health_company_names.index(selected_health_label)]["key"]
+                                selected_health_company = row_get(
+                                    health_companies[health_company_names.index(selected_health_label)],
+                                    "key",
+                                )
                         except Exception as journal_company_error:
                             logger.warning("Could not load companies for journal dominance diagnostics: %s", sanitize_error_message(journal_company_error))
                         if selected_health_company:
@@ -3126,10 +3181,12 @@ else:
                 st.markdown("---")
                 st.subheader("Master Price Setting")
                 try:
-                    current_price_row = conn.execute(
+                    current_price_row = execute_portable_query(
+                        conn,
                         "SELECT master_price_per_month FROM system_settings WHERE id = 1"
                     ).fetchone()
-                    current_price = float(current_price_row[0]) if current_price_row and current_price_row[0] is not None else 500.0
+                    current_price_value = row_get(current_price_row, "master_price_per_month", row_get(current_price_row, 0))
+                    current_price = float(current_price_value) if current_price_row and current_price_value is not None else 500.0
                 except Exception:
                     current_price = 500.0
                 with st.form("master_price_setting_form"):
@@ -3376,7 +3433,8 @@ else:
                     (SELECT COUNT(*) FROM inventory WHERE company_key = c.key) as item_count
                     FROM companies c ORDER BY c.name
                 """
-                portfolio_df = pd.read_sql(query, conn)
+                portfolio_rows = execute_portable_query(conn, query).fetchall()
+                portfolio_df = pd.DataFrame(rows_to_dicts(portfolio_rows))
                 st.dataframe(portfolio_df, width='stretch')
 
                 try:

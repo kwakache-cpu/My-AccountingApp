@@ -8,11 +8,15 @@ import sqlite3
 import pandas as pd
 
 from database import (
+    execute_portable_query,
     execute_write_transaction,
     ensure_insert_sql_returning,
     get_connection,
     get_inserted_id,
+    list_columns,
     log_audit_action as database_log_audit_action,
+    row_get,
+    rows_to_dicts,
     with_retry_on_lock,
 )
 
@@ -66,7 +70,8 @@ def _normalize_account_lookup_name(value):
 
 
 def _load_chart_account_rows(conn):
-    return conn.execute(
+    return execute_portable_query(
+        conn,
         f"""
         SELECT
             id,
@@ -297,11 +302,14 @@ def get_period_control_diagnostics(company_key, as_of_date=None, conn=None):
 
 def _system_setting_value(conn, column_name, default=None):
     try:
-        columns = {row[1] for row in conn.execute("PRAGMA table_info(system_settings)").fetchall()}
+        columns = {column["name"] for column in list_columns(conn, "system_settings")}
         if column_name not in columns:
             return default
-        row = conn.execute(f"SELECT {column_name} AS value FROM system_settings WHERE id = 1").fetchone()
-        return row["value"] if row and "value" in row.keys() else default
+        row = execute_portable_query(
+            conn,
+            f"SELECT {column_name} AS value FROM system_settings WHERE id = 1",
+        ).fetchone()
+        return row_get(row, "value", row_get(row, 0, default)) if row else default
     except sqlite3.Error:
         return default
 
@@ -417,7 +425,8 @@ def _controlled_source_table_sql_list():
 
 
 def _chart_account_structure(conn):
-    return [dict(row) for row in conn.execute(
+    return rows_to_dicts(execute_portable_query(
+        conn,
         f"""
         SELECT
             id,
@@ -432,7 +441,7 @@ def _chart_account_structure(conn):
         FROM chart_of_accounts
         ORDER BY {_coa_code_expression()}, {_coa_name_expression()}
         """
-    ).fetchall()]
+    ).fetchall())
 
 
 def get_chart_of_accounts_diagnostics(conn=None):

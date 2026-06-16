@@ -1,4 +1,6 @@
 import os
+from collections import namedtuple
+from types import SimpleNamespace
 from unittest import TestCase, mock
 
 from test_support import ERPIsolatedTestCase
@@ -18,6 +20,12 @@ class _FakeCursor:
         return self._rows[0] if self._rows else None
 
 
+class _DescribedCursor(_FakeCursor):
+    def __init__(self, rows=None, row=None, columns=()):
+        super().__init__(rows=rows, row=row)
+        self.description = [(column,) for column in columns]
+
+
 class _FakePostgresConn:
     def __init__(self, rows=None, row=None):
         self.rows = rows or []
@@ -35,7 +43,151 @@ class _FakePostgresConn:
         self.closed = True
 
 
+class _DescribedPostgresConn(_FakePostgresConn):
+    def __init__(self, rows=None, row=None, columns=()):
+        super().__init__(rows=rows, row=row)
+        self.columns = tuple(columns)
+
+    def execute(self, statement, params=()):
+        self.statements.append(statement)
+        self.params.append(params)
+        return _DescribedCursor(rows=self.rows, row=self.row, columns=self.columns)
+
+
+class _SequentialPostgresConn(_FakePostgresConn):
+    def __init__(self, responses):
+        super().__init__()
+        self.responses = list(responses)
+
+    def execute(self, statement, params=()):
+        self.statements.append(statement)
+        self.params.append(params)
+        row, columns = self.responses.pop(0)
+        return _DescribedCursor(row=row, columns=columns)
+
+
+class _AttrDict(dict):
+    def __getattr__(self, name):
+        return self.get(name)
+
+    def __setattr__(self, name, value):
+        self[name] = value
+
+
 class PostgresAuthSubscriptionRuntimePortabilityTests(ERPIsolatedTestCase):
+    def test_row_helpers_support_common_runtime_row_shapes(self):
+        sqlite_row = self.conn.execute(
+            "SELECT 'SQLite Co' AS name, 'GHS' AS display_currency"
+        ).fetchone()
+        tuple_row = ("Tuple Co", "USD")
+        described_columns = [SimpleNamespace(name="name"), SimpleNamespace(name="display_currency")]
+        NamedRow = namedtuple("NamedRow", ["name", "display_currency"])
+        named_row = NamedRow("Named Co", "EUR")
+        object_row = SimpleNamespace(name="Object Co", display_currency="GBP")
+
+        self.assertEqual(self.database.row_get({"name": "Dict Co"}, "name"), "Dict Co")
+        self.assertEqual(self.database.row_get(sqlite_row, "display_currency"), "GHS")
+        self.assertEqual(
+            self.database.row_get(tuple_row, "display_currency", columns=("name", "display_currency")),
+            "USD",
+        )
+        self.assertEqual(self.database.row_get(named_row, "display_currency"), "EUR")
+        self.assertEqual(self.database.row_get(object_row, "display_currency"), "GBP")
+        self.assertEqual(self.database.row_to_dict(tuple_row, columns=("name", "display_currency"))[0], "Tuple Co")
+        self.assertEqual(
+            self.database.rows_to_dicts([tuple_row], columns=("name", "display_currency"))[0]["name"],
+            "Tuple Co",
+        )
+        self.assertEqual(
+            self.database.row_to_dict(tuple_row, columns=described_columns)["display_currency"],
+            "USD",
+        )
+
+    def test_execute_portable_query_returns_key_and_index_compatible_postgres_rows(self):
+        fake = _DescribedPostgresConn(row=("GHS", 1.0), columns=("display_currency", "exchange_rate"))
+        with mock.patch.object(self.database, "get_active_db_backend", return_value="postgres"):
+            row = self.database.execute_portable_query(
+                fake,
+                "SELECT display_currency, exchange_rate FROM system_settings WHERE id = ?",
+                (1,),
+            ).fetchone()
+
+        self.assertEqual(row["display_currency"], "GHS")
+        self.assertEqual(row[0], "GHS")
+        self.assertIn("WHERE id = %s", fake.statements[0])
+        self.assertNotIn("?", fake.statements[0])
+
+    def test_sidebar_currency_controls_tolerate_postgres_tuple_rows(self):
+        import app
+
+        fake_conn = _DescribedPostgresConn(
+            row=("GHS", "USD", 10.0),
+            columns=("base_currency", "display_currency", "exchange_rate"),
+        )
+        fake_sidebar = SimpleNamespace(
+            selectbox=mock.Mock(return_value="USD"),
+            caption=mock.Mock(),
+        )
+        fake_st = SimpleNamespace(sidebar=fake_sidebar, session_state=_AttrDict(), rerun=mock.Mock())
+
+        with mock.patch.object(app, "st", fake_st), mock.patch.object(
+            app, "get_connection", return_value=fake_conn
+        ), mock.patch.object(
+            app, "_get_bog_display_rate", return_value=10.0
+        ), mock.patch.object(
+            self.database, "get_active_db_backend", return_value="postgres"
+        ), mock.patch.object(
+            self.database, "_open_sqlite_connection", side_effect=AssertionError("sqlite should not open")
+        ):
+            app._render_currency_sidebar_controls("currency_test")
+
+        self.assertEqual(fake_st.session_state.display_currency, "USD")
+        self.assertEqual(fake_st.session_state.exchange_rate, 10.0)
+        self.assertTrue(fake_conn.closed)
+        self.assertIn("SELECT COALESCE", fake_conn.statements[0])
+
+    def test_module_currency_helpers_tolerate_postgres_tuple_rows(self):
+        import modules
+
+        display_conn = _DescribedPostgresConn(row=("USD",), columns=("currency",))
+        rate_conn = _DescribedPostgresConn(
+            row=("USD", 11.65),
+            columns=("display_currency", "exchange_rate"),
+        )
+        fake_session = _AttrDict()
+        with mock.patch.object(modules, "st", SimpleNamespace(session_state=fake_session)), mock.patch.object(
+            modules, "get_connection", side_effect=[display_conn, rate_conn]
+        ), mock.patch.object(
+            self.database, "get_active_db_backend", return_value="postgres"
+        ), mock.patch.object(
+            self.database, "_open_sqlite_connection", side_effect=AssertionError("sqlite should not open")
+        ):
+            self.assertEqual(modules.get_display_currency(), "USD")
+            self.assertEqual(modules.get_exchange_rate(), 11.65)
+
+        self.assertTrue(display_conn.closed)
+        self.assertTrue(rate_conn.closed)
+        self.assertIn("SELECT COALESCE", display_conn.statements[0])
+        self.assertIn("SELECT COALESCE", rate_conn.statements[0])
+
+    def test_financials_portable_dataframe_reads_postgres_rows(self):
+        import financials
+
+        fake = _DescribedPostgresConn(
+            rows=[("Customer One", "GHS"), ("Customer Two", "USD")],
+            columns=("name", "currency"),
+        )
+        with mock.patch.object(self.database, "get_active_db_backend", return_value="postgres"):
+            df = financials._portable_read_dataframe(
+                fake,
+                "SELECT name, currency FROM customers WHERE company_key = ? ORDER BY name",
+                ("COMPANY-1",),
+            )
+
+        self.assertEqual(list(df["name"]), ["Customer One", "Customer Two"])
+        self.assertIn("company_key = %s", fake.statements[0])
+        self.assertNotIn("?", fake.statements[0])
+
     def test_get_subscription_plan_settings_works_with_injected_postgres_like_connection(self):
         fake = _FakePostgresConn(
             rows=[
@@ -121,7 +273,7 @@ class PostgresAuthSubscriptionRuntimePortabilityTests(ERPIsolatedTestCase):
     def test_dashboard_metric_counts_use_portable_postgres_placeholders_without_sqlite(self):
         import app
 
-        fake = _FakePostgresConn(row=(10,))
+        fake = _DescribedPostgresConn(row=(10,), columns=("metric_value",))
         with mock.patch.object(self.database, "get_active_db_backend", return_value="postgres"), mock.patch.object(
             self.database, "_open_sqlite_connection", side_effect=AssertionError("sqlite should not open")
         ):
@@ -134,6 +286,25 @@ class PostgresAuthSubscriptionRuntimePortabilityTests(ERPIsolatedTestCase):
         self.assertTrue(all("company_key = %s" in statement for statement in fake.statements))
         self.assertTrue(all("?" not in statement for statement in fake.statements))
         self.assertTrue(all(params == ("COMPANY-1",) for params in fake.params))
+
+    def test_company_context_repair_check_uses_postgres_connection_without_sqlite(self):
+        import app
+
+        fake = _SequentialPostgresConn(
+            [
+                ((1,), ("company_count",)),
+                ((0,), ("admin_user_count",)),
+            ]
+        )
+        with mock.patch.object(app, "get_connection", return_value=fake), mock.patch.object(
+            self.database, "get_active_db_backend", return_value="postgres"
+        ), mock.patch.object(
+            self.database, "_open_sqlite_connection", side_effect=AssertionError("sqlite should not open")
+        ):
+            self.assertTrue(app._has_restored_data_without_admin_users())
+
+        self.assertTrue(fake.closed)
+        self.assertEqual(len(fake.statements), 2)
 
     def test_postgres_runtime_system_diagnostics_do_not_open_sqlite(self):
         secret_url = "postgresql://user:super-secret@example.supabase.co:6543/postgres"
