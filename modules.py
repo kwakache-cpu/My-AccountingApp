@@ -739,6 +739,7 @@ from database import (
     create_company_record,
     ensure_company_trial_subscription,
     ensure_branch_licensing_schema_integrity,
+    execute_portable_query,
     execute_write_transaction,
     fetch_branch_manager_candidates,
     fetch_branch_manager_select_options,
@@ -772,6 +773,9 @@ from database import (
     get_recovery_source_diagnostics,
     get_subscription_billing_diagnostics,
     get_subscription_billing_summary,
+    row_get,
+    row_to_dict,
+    rows_to_dicts,
     upsert_subscription_plan_setting,
     log_audit_action as database_log_audit_action,
 )
@@ -1412,11 +1416,12 @@ def _create_legacy_voucher_if_enabled(
 def get_company_branches(company_key):
     conn = get_connection()
     try:
-        rows = conn.execute(
+        rows = execute_portable_query(
+            conn,
             "SELECT branch_id, branch_name, location, branch_type FROM branches WHERE company_key = ? ORDER BY branch_name",
             (company_key,),
         ).fetchall()
-        return [dict(row) for row in rows]
+        return rows_to_dicts(rows)
     finally:
         conn.close()
 
@@ -2802,7 +2807,7 @@ def _summarize_ai_assistant_data(records):
 
 
 def _row_to_dict(row):
-    return dict(row) if row is not None else {}
+    return row_to_dict(row) or {}
 
 
 def _generate_staff_login_key(company_key, role_name):
@@ -2841,11 +2846,12 @@ def _load_registered_supplier_names(company_key):
     conn = None
     try:
         conn = get_connection()
-        rows = conn.execute(
+        rows = execute_portable_query(
+            conn,
             "SELECT name FROM suppliers WHERE company_key = ? ORDER BY name",
             (company_key,),
         ).fetchall()
-        return [str(row["name"]).strip() for row in rows if str(row["name"] or "").strip()]
+        return [str(row_get(row, "name", row_get(row, 0)) or "").strip() for row in rows if str(row_get(row, "name", row_get(row, 0)) or "").strip()]
     except Exception:
         return []
     finally:
@@ -2942,10 +2948,11 @@ def get_display_currency():
     conn = None
     try:
         conn = get_connection()
-        row = conn.execute(
+        row = execute_portable_query(
+            conn,
             "SELECT COALESCE(display_currency, base_currency, 'GHS') AS currency FROM system_settings WHERE id = 1"
         ).fetchone()
-        return str(row["currency"] or BASE_CURRENCY) if row else BASE_CURRENCY
+        return str(row_get(row, "currency", row_get(row, 0, BASE_CURRENCY)) or BASE_CURRENCY) if row else BASE_CURRENCY
     except Exception:
         return BASE_CURRENCY
     finally:
@@ -2964,13 +2971,15 @@ def get_exchange_rate():
     conn = None
     try:
         conn = get_connection()
-        row = conn.execute(
+        row = execute_portable_query(
+            conn,
             "SELECT COALESCE(display_currency, 'GHS') AS display_currency, COALESCE(exchange_rate, 1.0) AS exchange_rate FROM system_settings WHERE id = 1"
         ).fetchone()
         if row:
-            display_currency = str(row["display_currency"] or BASE_CURRENCY).upper()
+            display_currency = str(row_get(row, "display_currency", row_get(row, 0, BASE_CURRENCY)) or BASE_CURRENCY).upper()
             fallback_rate = BOG_DISPLAY_RATES.get(display_currency, 1.0)
-            rate = float(row["exchange_rate"]) if row["exchange_rate"] not in (None, "") else fallback_rate
+            exchange_rate_value = row_get(row, "exchange_rate", row_get(row, 1))
+            rate = float(exchange_rate_value) if exchange_rate_value not in (None, "") else fallback_rate
         else:
             rate = 1.0
         st.session_state.exchange_rate = rate
@@ -3066,7 +3075,8 @@ def _load_accounting_ai_context(company_key):
         except Exception:
             transactions = []
         try:
-            inventory = conn.execute(
+            inventory = execute_portable_query(
+                conn,
                 """
                 SELECT item_name, qty, cost_price, price
                 FROM inventory
@@ -3080,7 +3090,8 @@ def _load_accounting_ai_context(company_key):
             inventory = []
         journal_entries = []
         try:
-            journal_entries = conn.execute(
+            journal_entries = execute_portable_query(
+                conn,
                 """
                 SELECT je.date, je.description, je.reference, jl.debit, jl.credit, c.name as account_name
                 FROM journal_entries je
@@ -3094,9 +3105,9 @@ def _load_accounting_ai_context(company_key):
             ).fetchall()
         except sqlite3.Error:
             journal_entries = []
-        tx_summary = [dict(row) for row in transactions] if transactions else []
-        inventory_summary = [dict(row) for row in inventory] if inventory else []
-        journal_summary = [dict(row) for row in journal_entries] if journal_entries else []
+        tx_summary = rows_to_dicts(transactions) if transactions else []
+        inventory_summary = rows_to_dicts(inventory) if inventory else []
+        journal_summary = rows_to_dicts(journal_entries) if journal_entries else []
         return (
             f"Recent transactions: {tx_summary if tx_summary else 'None available'}. "
             f"Recent inventory rows: {inventory_summary if inventory_summary else 'None available'}. "

@@ -1457,6 +1457,124 @@ def convert_placeholders_for_backend(sql, backend=None, *, strict_quoted_literal
     return "".join(converted)
 
 
+class CompatibleRow(dict):
+    """Dict-like row that also preserves positional access for legacy callers."""
+
+    def __init__(self, mapping=None, values=None):
+        super().__init__(mapping or {})
+        self._values = tuple(values) if values is not None else tuple(super().values())
+
+    def __getitem__(self, key):
+        if isinstance(key, int):
+            return self._values[key]
+        return super().__getitem__(key)
+
+    def __iter__(self):
+        return iter(self._values)
+
+
+def _normalize_row_columns(columns=None):
+    normalized = []
+    for column in columns or ():
+        if isinstance(column, (tuple, list)) and column:
+            normalized.append(str(column[0]))
+        elif hasattr(column, "name"):
+            normalized.append(str(column.name))
+        else:
+            normalized.append(str(column))
+    return tuple(normalized)
+
+
+def row_to_dict(row, columns=None):
+    """Return a dict-like row for dict, sqlite3.Row, tuple, namedtuple, or object rows."""
+    if row is None:
+        return None
+    if isinstance(row, CompatibleRow):
+        return row
+    if isinstance(row, dict):
+        return CompatibleRow(dict(row), values=list(row.values()))
+    if hasattr(row, "_asdict"):
+        mapping = dict(row._asdict())
+        return CompatibleRow(mapping, values=list(mapping.values()))
+    if hasattr(row, "keys"):
+        try:
+            keys = list(row.keys())
+            mapping = {key: row[key] for key in keys}
+            return CompatibleRow(mapping, values=[mapping[key] for key in keys])
+        except Exception:
+            pass
+
+    normalized_columns = _normalize_row_columns(columns)
+    if normalized_columns:
+        values = tuple(row) if isinstance(row, (tuple, list)) else tuple(
+            getattr(row, column, None) for column in normalized_columns
+        )
+        mapping = {
+            column: values[index] if index < len(values) else None
+            for index, column in enumerate(normalized_columns)
+        }
+        return CompatibleRow(mapping, values=values)
+
+    try:
+        mapping = dict(row)
+        return CompatibleRow(mapping, values=list(mapping.values()))
+    except Exception:
+        pass
+
+    attrs = {
+        name: getattr(row, name)
+        for name in dir(row)
+        if not name.startswith("_") and not callable(getattr(row, name, None))
+    }
+    return CompatibleRow(attrs, values=list(attrs.values()))
+
+
+def rows_to_dicts(rows, columns=None):
+    return [row_to_dict(row, columns=columns) for row in (rows or [])]
+
+
+def row_get(row, key, default=None, columns=None):
+    if row is None:
+        return default
+    if isinstance(row, (tuple, list)) and isinstance(key, int):
+        return row[key] if 0 <= key < len(row) else default
+    row_dict = row_to_dict(row, columns=columns)
+    if row_dict is None:
+        return default
+    try:
+        return row_dict[key]
+    except Exception:
+        return default
+
+
+class PortableCursorResult:
+    """Cursor adapter that returns key/index compatible rows when metadata is available."""
+
+    def __init__(self, cursor):
+        self._cursor = cursor
+        self.description = getattr(cursor, "description", None)
+
+    def _columns(self):
+        return _normalize_row_columns(self.description)
+
+    def _convert_row(self, row):
+        columns = self._columns()
+        return row_to_dict(row, columns=columns) if columns else row
+
+    def fetchone(self):
+        return self._convert_row(self._cursor.fetchone())
+
+    def fetchall(self):
+        return [self._convert_row(row) for row in self._cursor.fetchall()]
+
+    def __iter__(self):
+        for row in self._cursor:
+            yield self._convert_row(row)
+
+    def __getattr__(self, name):
+        return getattr(self._cursor, name)
+
+
 def execute_portable_query(conn, sql, params=(), backend=None):
     """
     Execute SQL using backend-appropriate placeholder syntax.
@@ -1470,7 +1588,10 @@ def execute_portable_query(conn, sql, params=(), backend=None):
         if backend == "postgres"
         else str(sql or "")
     )
-    return conn.execute(executable_sql, params)
+    cursor = conn.execute(executable_sql, params)
+    if isinstance(cursor, PortableCursorResult):
+        return cursor
+    return PortableCursorResult(cursor) if getattr(cursor, "description", None) else cursor
 
 
 def execute_portable_write(conn, sql, params=(), backend=None):
@@ -4201,14 +4322,7 @@ def upsert_subscription_plan_setting(
 
 
 def _row_to_dict(row, columns):
-    if row is None:
-        return None
-    if isinstance(row, dict):
-        return dict(row)
-    try:
-        return dict(row)
-    except Exception:
-        return {column: row[index] for index, column in enumerate(columns)}
+    return row_to_dict(row, columns=columns)
 
 
 def get_subscription_plan_settings(conn=None):
@@ -4549,7 +4663,8 @@ def get_subscription_billing_summary(conn=None):
     conn = conn or get_connection()
     try:
         configured_plans = get_subscription_plan_settings(conn=conn)
-        totals_row = conn.execute(
+        totals_row = execute_portable_query(
+            conn,
             """
             SELECT
                 COALESCE(SUM(CASE WHEN status = 'success' THEN expected_amount ELSE 0 END), 0) AS total_verified_revenue,
@@ -4558,14 +4673,16 @@ def get_subscription_billing_summary(conn=None):
             FROM license_payment_transactions
             """
         ).fetchone()
-        subscription_counts = conn.execute(
+        subscription_counts = execute_portable_query(
+            conn,
             """
             SELECT status, COUNT(*) AS row_count
             FROM company_subscriptions
             GROUP BY status
             """
         ).fetchall()
-        revenue_by_plan = conn.execute(
+        revenue_by_plan = execute_portable_query(
+            conn,
             """
             SELECT COALESCE(NULLIF(plan_name, ''), 'Unspecified') AS plan_name,
                    COUNT(*) AS payment_count,
@@ -4575,7 +4692,8 @@ def get_subscription_billing_summary(conn=None):
             ORDER BY revenue DESC, plan_name
             """
         ).fetchall()
-        recent_payments = conn.execute(
+        recent_payments = execute_portable_query(
+            conn,
             """
             SELECT reference, company_key, company_name, plan_name, expected_amount, currency, status, verified_at, paid_at
             FROM license_payment_transactions
@@ -4583,7 +4701,8 @@ def get_subscription_billing_summary(conn=None):
             LIMIT 10
             """
         ).fetchall()
-        next_expiries = conn.execute(
+        next_expiries = execute_portable_query(
+            conn,
             """
             SELECT company_key, plan_name, status, end_date
             FROM company_subscriptions
@@ -4592,8 +4711,12 @@ def get_subscription_billing_summary(conn=None):
             LIMIT 10
             """
         ).fetchall()
-        status_map = {str(row["status"] or "").strip().lower(): int(row["row_count"] or 0) for row in subscription_counts}
-        latest_success = conn.execute(
+        status_map = {
+            str(row_get(row, "status", "") or "").strip().lower(): int(row_get(row, "row_count", 0) or 0)
+            for row in subscription_counts
+        }
+        latest_success = execute_portable_query(
+            conn,
             """
             SELECT reference, company_key, plan_name, expected_amount, currency, verified_at
             FROM license_payment_transactions
@@ -4604,17 +4727,17 @@ def get_subscription_billing_summary(conn=None):
         ).fetchone()
         return {
             "ok": True,
-            "total_verified_revenue": int(totals_row["total_verified_revenue"] or 0),
-            "failed_payment_count": int(totals_row["failed_payment_count"] or 0),
-            "abandoned_payment_count": int(totals_row["abandoned_payment_count"] or 0),
+            "total_verified_revenue": int(row_get(totals_row, "total_verified_revenue", 0) or 0),
+            "failed_payment_count": int(row_get(totals_row, "failed_payment_count", 0) or 0),
+            "abandoned_payment_count": int(row_get(totals_row, "abandoned_payment_count", 0) or 0),
             "active_subscriptions": status_map.get("active", 0),
             "trial_subscriptions": status_map.get("trial", 0),
             "expired_subscriptions": status_map.get("expired", 0),
             "cancelled_subscriptions": status_map.get("cancelled", 0),
-            "revenue_by_plan": [dict(row) for row in revenue_by_plan],
-            "recent_payments": [dict(row) for row in recent_payments],
-            "next_expiries": [dict(row) for row in next_expiries],
-            "latest_successful_payment": dict(latest_success) if latest_success else None,
+            "revenue_by_plan": rows_to_dicts(revenue_by_plan),
+            "recent_payments": rows_to_dicts(recent_payments),
+            "next_expiries": rows_to_dicts(next_expiries),
+            "latest_successful_payment": row_to_dict(latest_success) if latest_success else None,
             "configured_plan_prices": configured_plans,
         }
     finally:
@@ -8330,7 +8453,7 @@ class PostgresManagedConnection:
     def execute(self, sql, params=()):
         cursor = self._conn.cursor()
         cursor.execute(sql, params or ())
-        return cursor
+        return PortableCursorResult(cursor) if getattr(cursor, "description", None) else cursor
 
     def cursor(self):
         return self._conn.cursor()

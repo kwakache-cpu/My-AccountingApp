@@ -9,7 +9,14 @@ import pandas as pd
 import streamlit as st
 from security_utils import build_user_safe_error, sanitize_error_message
 
-from database import ensure_insert_sql_returning, get_connection, get_inserted_id
+from database import (
+    ensure_insert_sql_returning,
+    execute_portable_query,
+    get_connection,
+    get_inserted_id,
+    row_get,
+    rows_to_dicts,
+)
 from accounting_engine import (
     close_fiscal_year,
     generate_cash_flow_statement as engine_generate_cash_flow_statement,
@@ -134,7 +141,7 @@ def _journal_df(company_key, branch_id=None, start_date=None, end_date=None, acc
             params.append(f"%{str(account_name).lower()}%")
         query += " ORDER BY date(je.date), je.id, COALESCE(c.name, c.account_name)"
         try:
-            df = pd.read_sql_query(query, conn, params=params)
+            df = _portable_read_dataframe(conn, query, tuple(params))
         except (pd.errors.DatabaseError, AttributeError, sqlite3.DatabaseError):
             return pd.DataFrame()
         if not df.empty:
@@ -176,9 +183,13 @@ def _chart_lookup():
 
 
 def _party_id(conn, table_name, company_key, name):
-    row = conn.execute(f"SELECT id FROM {table_name} WHERE company_key = ? AND name = ?", (company_key, name)).fetchone()
+    row = execute_portable_query(
+        conn,
+        f"SELECT id FROM {table_name} WHERE company_key = ? AND name = ?",
+        (company_key, name),
+    ).fetchone()
     if row:
-        return int(row["id"])
+        return int(row_get(row, "id", row_get(row, 0)))
     cursor = conn.execute(
         ensure_insert_sql_returning(
             f"INSERT INTO {table_name} (company_key, name, currency) VALUES (?, ?, 'GHS')"
@@ -206,6 +217,11 @@ def _account_label(account_code, account_name):
     code = str(account_code or "").strip()
     name = str(account_name or "").strip()
     return f"{code} - {name}" if code else name
+
+
+def _portable_read_dataframe(conn, query, params=()):
+    rows = execute_portable_query(conn, query, params or ()).fetchall()
+    return pd.DataFrame(rows_to_dicts(rows))
 
 
 def _convert_money_frame_legacy(dataframe):
@@ -463,7 +479,8 @@ def _get_changes_in_equity_legacy(company_key, start_date=None, end_date=None, a
 def get_depreciation_schedule(company_key):
     conn = get_connection()
     try:
-        df = pd.read_sql_query(
+        df = _portable_read_dataframe(
+            conn,
             """
             SELECT
                 asset_name AS "Asset Name",
@@ -482,8 +499,7 @@ def get_depreciation_schedule(company_key):
             WHERE company_key = ?
             ORDER BY asset_name
             """,
-            conn,
-            params=(company_key,),
+            (company_key,),
         )
         return df
     finally:
@@ -574,7 +590,11 @@ def show_invoice_manager(company_key, role):
                 conn.close()
                 st.rerun()
         conn = get_connection()
-        df = pd.read_sql_query("SELECT name, email, phone, currency, created_at FROM customers WHERE company_key = ? ORDER BY name", conn, params=(company_key,))
+        df = _portable_read_dataframe(
+            conn,
+            "SELECT name, email, phone, currency, created_at FROM customers WHERE company_key = ? ORDER BY name",
+            (company_key,),
+        )
         conn.close()
         st.dataframe(format_currency_dataframe(df), use_container_width=True)
         _csv_button("Customers", df, f"customers_csv_{company_key}")
@@ -591,14 +611,25 @@ def show_invoice_manager(company_key, role):
                 conn.close()
                 st.rerun()
         conn = get_connection()
-        df = pd.read_sql_query("SELECT name, email, phone, currency, created_at FROM suppliers WHERE company_key = ? ORDER BY name", conn, params=(company_key,))
+        df = _portable_read_dataframe(
+            conn,
+            "SELECT name, email, phone, currency, created_at FROM suppliers WHERE company_key = ? ORDER BY name",
+            (company_key,),
+        )
         conn.close()
         st.dataframe(format_currency_dataframe(df), use_container_width=True)
         _csv_button("Suppliers", df, f"suppliers_csv_{company_key}")
 
     with tabs[2]:
         conn = get_connection()
-        customers = [row[0] for row in conn.execute("SELECT name FROM customers WHERE company_key = ? ORDER BY name", (company_key,)).fetchall()]
+        customers = [
+            str(row_get(row, "name", row_get(row, 0)) or "")
+            for row in execute_portable_query(
+                conn,
+                "SELECT name FROM customers WHERE company_key = ? ORDER BY name",
+                (company_key,),
+            ).fetchall()
+        ]
         conn.close()
         invoice_items = []
         invoice_items_total = 0.0
@@ -699,14 +730,25 @@ def show_invoice_manager(company_key, role):
                 conn.close()
                 st.rerun()
         conn = get_connection()
-        df = pd.read_sql_query("SELECT invoice_number, invoice_date, due_date, status, approval_status, amount, currency, description FROM invoices WHERE company_key = ? ORDER BY invoice_date DESC", conn, params=(company_key,))
+        df = _portable_read_dataframe(
+            conn,
+            "SELECT invoice_number, invoice_date, due_date, status, approval_status, amount, currency, description FROM invoices WHERE company_key = ? ORDER BY invoice_date DESC",
+            (company_key,),
+        )
         conn.close()
         st.dataframe(format_currency_dataframe(df), use_container_width=True)
         _csv_button("Invoices", df, f"invoices_csv_{company_key}")
 
     with tabs[3]:
         conn = get_connection()
-        suppliers = [row[0] for row in conn.execute("SELECT name FROM suppliers WHERE company_key = ? ORDER BY name", (company_key,)).fetchall()]
+        suppliers = [
+            str(row_get(row, "name", row_get(row, 0)) or "")
+            for row in execute_portable_query(
+                conn,
+                "SELECT name FROM suppliers WHERE company_key = ? ORDER BY name",
+                (company_key,),
+            ).fetchall()
+        ]
         expense_account_options = get_purchase_expense_account_options(company_key, conn=conn)
         conn.close()
         with st.form(f"bill_form_{company_key}"):
@@ -802,7 +844,11 @@ def show_invoice_manager(company_key, role):
                 conn.close()
                 st.rerun()
         conn = get_connection()
-        df = pd.read_sql_query("SELECT bill_number, bill_date, due_date, status, approval_status, amount, currency, description FROM bills WHERE company_key = ? ORDER BY bill_date DESC", conn, params=(company_key,))
+        df = _portable_read_dataframe(
+            conn,
+            "SELECT bill_number, bill_date, due_date, status, approval_status, amount, currency, description FROM bills WHERE company_key = ? ORDER BY bill_date DESC",
+            (company_key,),
+        )
         conn.close()
         st.dataframe(format_currency_dataframe(df), use_container_width=True)
         _csv_button("Bills", df, f"bills_csv_{company_key}")
@@ -892,7 +938,11 @@ def show_invoice_manager(company_key, role):
                 conn.close()
                 st.rerun()
         conn = get_connection()
-        df = pd.read_sql_query("SELECT payment_date, payment_type, status, approval_status, amount, currency, method, reference, created_by FROM payments WHERE company_key = ? ORDER BY payment_date DESC", conn, params=(company_key,))
+        df = _portable_read_dataframe(
+            conn,
+            "SELECT payment_date, payment_type, status, approval_status, amount, currency, method, reference, created_by FROM payments WHERE company_key = ? ORDER BY payment_date DESC",
+            (company_key,),
+        )
         conn.close()
         st.dataframe(format_currency_dataframe(df), use_container_width=True)
         _csv_button("Payments", df, f"payments_csv_{company_key}")
@@ -917,10 +967,10 @@ def show_customers_page(company_key, role):
             st.rerun()
 
     conn = get_connection()
-    df = pd.read_sql_query(
-        "SELECT name, email, phone, currency, created_at FROM customers WHERE company_key = ? ORDER BY name",
+    df = _portable_read_dataframe(
         conn,
-        params=(company_key,),
+        "SELECT name, email, phone, currency, created_at FROM customers WHERE company_key = ? ORDER BY name",
+        (company_key,),
     )
     conn.close()
     st.dataframe(format_currency_dataframe(df), use_container_width=True)
@@ -958,10 +1008,10 @@ def show_suppliers_page(company_key, role):
             st.rerun()
 
     conn = get_connection()
-    df = pd.read_sql_query(
-        "SELECT name, email, phone, currency, created_at FROM suppliers WHERE company_key = ? ORDER BY name",
+    df = _portable_read_dataframe(
         conn,
-        params=(company_key,),
+        "SELECT name, email, phone, currency, created_at FROM suppliers WHERE company_key = ? ORDER BY name",
+        (company_key,),
     )
     conn.close()
     st.dataframe(format_currency_dataframe(df), use_container_width=True)
@@ -974,7 +1024,14 @@ def show_create_invoice_page(company_key, role):
     if not require_permission(role, "create_invoice", action_label="create invoices", company_key=company_key):
         return
     conn = get_connection()
-    customers = [row[0] for row in conn.execute("SELECT name FROM customers WHERE company_key = ? ORDER BY name", (company_key,)).fetchall()]
+    customers = [
+        str(row_get(row, "name", row_get(row, 0)) or "")
+        for row in execute_portable_query(
+            conn,
+            "SELECT name FROM customers WHERE company_key = ? ORDER BY name",
+            (company_key,),
+        ).fetchall()
+    ]
     conn.close()
     invoice_items = []
     invoice_items_total = 0.0
@@ -1010,11 +1067,12 @@ def show_create_invoice_page(company_key, role):
                 conn.close()
                 st.warning("Invoice amount must match the total of the invoice items before posting.")
                 return
-            row = conn.execute(
+            row = execute_portable_query(
+                conn,
                 "SELECT id FROM customers WHERE company_key = ? AND name = ? LIMIT 1",
                 (company_key, customer_name),
             ).fetchone()
-            customer_id = int(row["id"]) if row else None
+            customer_id = int(row_get(row, "id", row_get(row, 0))) if row else None
             output_vat = _tax_amount(amount, output_vat_rate)
             output_nhil = _tax_amount(amount, output_nhil_rate)
             output_getfund = _tax_amount(amount, output_getfund_rate)
@@ -1108,10 +1166,10 @@ def show_create_invoice_page(company_key, role):
             st.rerun()
 
     conn = get_connection()
-    df = pd.read_sql_query(
-        "SELECT invoice_number, invoice_date, due_date, status, approval_status, amount, currency, description FROM invoices WHERE company_key = ? ORDER BY invoice_date DESC",
+    df = _portable_read_dataframe(
         conn,
-        params=(company_key,),
+        "SELECT invoice_number, invoice_date, due_date, status, approval_status, amount, currency, description FROM invoices WHERE company_key = ? ORDER BY invoice_date DESC",
+        (company_key,),
     )
     conn.close()
     st.dataframe(format_currency_dataframe(df), use_container_width=True)
@@ -1128,7 +1186,14 @@ def show_receive_payment_page(company_key, role):
     ):
         return
     conn = get_connection()
-    customers = [row[0] for row in conn.execute("SELECT name FROM customers WHERE company_key = ? ORDER BY name", (company_key,)).fetchall()]
+    customers = [
+        str(row_get(row, "name", row_get(row, 0)) or "")
+        for row in execute_portable_query(
+            conn,
+            "SELECT name FROM customers WHERE company_key = ? ORDER BY name",
+            (company_key,),
+        ).fetchall()
+    ]
     conn.close()
     with st.form(f"receive_payment_form_{company_key}"):
         customer_name = st.selectbox("Customer", [""] + customers)
@@ -1148,11 +1213,12 @@ def show_receive_payment_page(company_key, role):
             ):
                 conn.close()
                 return
-            row = conn.execute(
+            row = execute_portable_query(
+                conn,
                 "SELECT id FROM customers WHERE company_key = ? AND name = ? LIMIT 1",
                 (company_key, customer_name),
             ).fetchone()
-            customer_id = int(row["id"]) if row else None
+            customer_id = int(row_get(row, "id", row_get(row, 0))) if row else None
             payment_cursor = conn.execute(
                 ensure_insert_sql_returning(
                     "INSERT INTO payments (company_key, payment_date, payment_type, status, amount, currency, method, reference, approval_status, created_by) VALUES (?, ?, ?, ?, ?, 'GHS', ?, ?, ?, ?)"
@@ -1221,10 +1287,10 @@ def show_receive_payment_page(company_key, role):
             st.rerun()
 
     conn = get_connection()
-    df = pd.read_sql_query(
-        "SELECT payment_date, payment_type, status, approval_status, amount, currency, method, reference, created_by FROM payments WHERE company_key = ? AND payment_type = 'Customer Receipt' ORDER BY payment_date DESC",
+    df = _portable_read_dataframe(
         conn,
-        params=(company_key,),
+        "SELECT payment_date, payment_type, status, approval_status, amount, currency, method, reference, created_by FROM payments WHERE company_key = ? AND payment_type = 'Customer Receipt' ORDER BY payment_date DESC",
+        (company_key,),
     )
     conn.close()
     st.dataframe(format_currency_dataframe(df), use_container_width=True)
@@ -1241,7 +1307,14 @@ def show_supplier_payment_page(company_key, role):
     ):
         return
     conn = get_connection()
-    suppliers = [row[0] for row in conn.execute("SELECT name FROM suppliers WHERE company_key = ? ORDER BY name", (company_key,)).fetchall()]
+    suppliers = [
+        str(row_get(row, "name", row_get(row, 0)) or "")
+        for row in execute_portable_query(
+            conn,
+            "SELECT name FROM suppliers WHERE company_key = ? ORDER BY name",
+            (company_key,),
+        ).fetchall()
+    ]
     conn.close()
     with st.form(f"supplier_payment_form_{company_key}"):
         supplier_name = st.selectbox("Supplier", [""] + suppliers)
@@ -1261,11 +1334,12 @@ def show_supplier_payment_page(company_key, role):
             ):
                 conn.close()
                 return
-            row = conn.execute(
+            row = execute_portable_query(
+                conn,
                 "SELECT id FROM suppliers WHERE company_key = ? AND name = ? LIMIT 1",
                 (company_key, supplier_name),
             ).fetchone()
-            supplier_id = int(row["id"]) if row else None
+            supplier_id = int(row_get(row, "id", row_get(row, 0))) if row else None
             payment_cursor = conn.execute(
                 ensure_insert_sql_returning(
                     "INSERT INTO payments (company_key, payment_date, payment_type, status, amount, currency, method, reference, approval_status, created_by) VALUES (?, ?, ?, ?, ?, 'GHS', ?, ?, ?, ?)"
@@ -1334,10 +1408,10 @@ def show_supplier_payment_page(company_key, role):
             st.rerun()
 
     conn = get_connection()
-    df = pd.read_sql_query(
-        "SELECT payment_date, payment_type, status, approval_status, amount, currency, method, reference, created_by FROM payments WHERE company_key = ? AND payment_type = 'Supplier Payment' ORDER BY payment_date DESC",
+    df = _portable_read_dataframe(
         conn,
-        params=(company_key,),
+        "SELECT payment_date, payment_type, status, approval_status, amount, currency, method, reference, created_by FROM payments WHERE company_key = ? AND payment_type = 'Supplier Payment' ORDER BY payment_date DESC",
+        (company_key,),
     )
     conn.close()
     st.dataframe(format_currency_dataframe(df), use_container_width=True)
