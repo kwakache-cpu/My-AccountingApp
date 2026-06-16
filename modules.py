@@ -737,9 +737,11 @@ from database import (
     create_branch_scoped_user,
     create_company_branch,
     create_company_record,
+    db_table_exists,
     ensure_company_trial_subscription,
     ensure_branch_licensing_schema_integrity,
     execute_portable_query,
+    execute_portable_write,
     execute_write_transaction,
     fetch_branch_manager_candidates,
     fetch_branch_manager_select_options,
@@ -773,6 +775,8 @@ from database import (
     get_recovery_source_diagnostics,
     get_subscription_billing_diagnostics,
     get_subscription_billing_summary,
+    is_postgres_backend,
+    list_columns,
     row_get,
     row_to_dict,
     rows_to_dicts,
@@ -807,6 +811,11 @@ from accounting_engine import (
 )
 
 import migration_cleanup as migration_cleanup_service
+
+
+def _portable_read_dataframe(conn, query, params=()):
+    rows = execute_portable_query(conn, query, params or ()).fetchall()
+    return pd.DataFrame(rows_to_dicts(rows))
 
 
 def can_access_migration_cleanup(role):
@@ -2739,11 +2748,7 @@ def request_ai_chat_completion(messages, temperature=0.3, max_tokens=1024):
 
 
 def _table_exists(conn, table_name):
-    row = conn.execute(
-        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
-        (table_name,),
-    ).fetchone()
-    return bool(row)
+    return db_table_exists(conn, table_name)
 
 
 def _fetch_ai_assistant_records(conn, client_id):
@@ -2767,7 +2772,8 @@ def _fetch_ai_assistant_records(conn, client_id):
         logger.warning("AI assistant journal activity fallback failed for company %s: %s", client_id, sanitize_error_message(exc))
 
     if _table_exists(conn, "payroll"):
-        payroll_rows = conn.execute(
+        payroll_rows = execute_portable_query(
+            conn,
             """
             SELECT created_at, emp_name, basic_salary, allowances, paye, net_salary, month, year, payment_status
             FROM payroll
@@ -2777,7 +2783,7 @@ def _fetch_ai_assistant_records(conn, client_id):
             """,
             (client_id, since_date),
         ).fetchall()
-        records["payroll"] = [dict(row) for row in payroll_rows]
+        records["payroll"] = [row_to_dict(row) for row in payroll_rows]
 
     return records
 
@@ -3822,18 +3828,19 @@ def show_journal_entries(company_key, role):
     chart_conn = None
     try:
         chart_conn = get_connection()
-        account_rows = chart_conn.execute(
+        account_rows = execute_portable_query(
+            chart_conn,
             """
             SELECT COALESCE(account_code, '') AS account_code,
                    COALESCE(name, account_name) AS account_name
             FROM chart_of_accounts
             ORDER BY COALESCE(account_code, ''), COALESCE(name, account_name)
-            """
+            """,
         ).fetchall()
         account_options = [
-            f"{str(row['account_code']).strip()} - {str(row['account_name']).strip()}".strip(" -")
+            f"{str(row_get(row, 'account_code', '')).strip()} - {str(row_get(row, 'account_name', '')).strip()}".strip(" -")
             for row in account_rows
-            if str(row["account_name"] or "").strip()
+            if str(row_get(row, "account_name", "") or "").strip()
         ]
     except Exception:
         account_options = []
@@ -3867,7 +3874,7 @@ def show_journal_entries(company_key, role):
             query += "\n            AND je.branch_id = ?"
             params.append(branch_id)
         query += "\n            ORDER BY date(je.date) DESC, je.id DESC"
-        transactions_df = pd.read_sql_query(query, conn, params=params)
+        transactions_df = _portable_read_dataframe(conn, query, tuple(params))
     except Exception:
         transactions_df = pd.DataFrame(
             columns=[
@@ -4381,8 +4388,7 @@ def save_invoice_lines(conn, invoice_id, invoice_items):
 
 
 def _inventory_has_average_cost(conn):
-    columns = {row[1] for row in conn.execute("PRAGMA table_info(inventory)").fetchall()}
-    return "average_cost" in columns
+    return "average_cost" in {column["name"] for column in list_columns(conn, "inventory")}
 
 
 def apply_invoice_stock_effects(
@@ -4619,19 +4625,25 @@ def init_db():
 
 def log_system_event(level, module_name, message):
     conn = get_connection()
+    if conn is None:
+        return
     try:
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS system_logs (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                timestamp TEXT,
-                level TEXT,
-                module_name TEXT,
-                message TEXT
+        if not is_postgres_backend():
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS system_logs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp TEXT,
+                    level TEXT,
+                    module_name TEXT,
+                    message TEXT
+                )
+                """
             )
-            """
-        )
-        conn.execute(
+        elif not db_table_exists(conn, "system_logs"):
+            return
+        execute_portable_write(
+            conn,
             "INSERT INTO system_logs (timestamp, level, module_name, message) VALUES (?, ?, ?, ?)",
             (datetime.now().isoformat(timespec="seconds"), level, module_name, message),
         )
@@ -8785,9 +8797,13 @@ def show_chart_of_accounts_page(conn, demo_on):
             st.success("Account saved.")
             st.rerun()
 
-    rows = conn.execute("SELECT account_name, account_type, balance FROM chart_of_accounts ORDER BY account_name").fetchall()
+    rows = execute_portable_query(
+        conn,
+        "SELECT account_name, account_type, balance FROM chart_of_accounts ORDER BY account_name",
+    ).fetchall()
     if rows:
-        df = pd.DataFrame(rows, columns=["Account Name", "Account Type", "Balance"])
+        df = pd.DataFrame(rows_to_dicts(rows))
+        df = df.rename(columns={"account_name": "Account Name", "account_type": "Account Type", "balance": "Balance"})
         st.dataframe(format_currency_dataframe(df), use_container_width=True)
     else:
         st.caption("No chart of accounts records yet.")
@@ -9274,14 +9290,14 @@ def show_inventory(company_key, role):
         metrics_conn = None
         try:
             metrics_conn = get_connection()
-            metrics_df = pd.read_sql_query(
+            metrics_df = _portable_read_dataframe(
+                metrics_conn,
                 """
                 SELECT qty as quantity, min_stock_level, expiry_date, (qty * cost_price) as total_value
                 FROM inventory
                 WHERE company_key = ?
                 """,
-                metrics_conn,
-                params=(company_key,),
+                (company_key,),
             )
             inventory_metrics = _compute_inventory_health_metrics(metrics_df)
         except Exception as exc:
@@ -9324,14 +9340,17 @@ def show_inventory(company_key, role):
                     "total_value": [6000.0, 600.0],
                 })
             else:
-                query = """
+                df = _portable_read_dataframe(
+                    conn,
+                    """
                     SELECT id, item_code, barcode, item_name, category, description, brand, supplier_name,
                            expiry_date, batch_number, vat_category, unit, min_stock_level, tax_rate,
                            warehouse_location, is_active, opening_balance, qty as quantity,
                            price as unit_price, cost_price, (qty * cost_price) as total_value
                     FROM inventory WHERE company_key = ?
-                """
-                df = pd.read_sql_query(query, conn, params=(company_key,))
+                    """,
+                    (company_key,),
+                )
             conn.close()
 
             if not df.empty:
@@ -10428,7 +10447,8 @@ def show_chart_of_accounts(company_key, role):
     try:
         conn = get_connection()
         coa_diagnostics = get_chart_of_accounts_diagnostics(conn=conn)
-        rows = conn.execute(
+        rows = execute_portable_query(
+            conn,
             """
             SELECT
                 COALESCE(account_code, '') AS account_code,
@@ -10440,20 +10460,20 @@ def show_chart_of_accounts(company_key, role):
                 COALESCE(is_active, 1) AS is_active
             FROM chart_of_accounts
             ORDER BY COALESCE(account_code, ''), COALESCE(name, account_name)
-            """
+            """,
         ).fetchall()
         if rows:
-            df = pd.DataFrame(
-                rows,
-                columns=[
-                    "Account Code",
-                    "Account Name",
-                    "Account Type",
-                    "Posting Allowed",
-                    "Control Account",
-                    "Manual Posting Allowed",
-                    "Active",
-                ],
+            df = pd.DataFrame(rows_to_dicts(rows))
+            df = df.rename(
+                columns={
+                    "account_code": "Account Code",
+                    "account_name": "Account Name",
+                    "account_type": "Account Type",
+                    "posting_allowed": "Posting Allowed",
+                    "control_account": "Control Account",
+                    "allow_manual_posting": "Manual Posting Allowed",
+                    "is_active": "Active",
+                }
             )
             st.dataframe(format_currency_dataframe(df), use_container_width=True)
         else:
@@ -11122,35 +11142,48 @@ def show_pos(company_key, company_name, role):
         conn = get_connection()
         ensure_cashier_closings_schema(conn)
         ensure_pos_sales_schema(conn)
-        company_row = conn.execute("SELECT name, barcode_input_source FROM companies WHERE key = ?", (company_key,)).fetchone()
+        company_row = execute_portable_query(
+            conn,
+            "SELECT name, barcode_input_source FROM companies WHERE key = ?",
+            (company_key,),
+        ).fetchone()
         active_branch_id = st.session_state.get("active_branch_id")
         branch_row = None
         if active_branch_id:
-            branch_row = conn.execute(
+            branch_row = execute_portable_query(
+                conn,
                 "SELECT branch_name FROM branches WHERE company_key = ? AND branch_id = ?",
                 (company_key, active_branch_id),
             ).fetchone()
-        items = conn.execute(
+        items = execute_portable_query(
+            conn,
             f"SELECT {INVENTORY_POS_LOOKUP_COLUMNS} FROM inventory WHERE company_key = ? AND qty > 0",
             (company_key,),
         ).fetchall()
         customers = get_customer_balances(company_key, conn=conn)
         conn.close()
 
-        company_label = company_row[0] if company_row else company_name
-        branch_label = branch_row["branch_name"] if branch_row and "branch_name" in branch_row.keys() else ""
-        barcode_input_source = company_row[1] if company_row and company_row[1] else "Keyboard Entry"
-        items_df = (
-            pd.DataFrame(
-                items,
-                columns=[
-                    "ID", "Item Name", "Item Code", "Category", "Brand", "Qty", "Price",
-                    "Cost Price", "Barcode", "Min Stock Level", "Tax Rate", "Expiry Date",
-                ],
+        company_label = row_get(company_row, "name", row_get(company_row, 0, company_name)) if company_row else company_name
+        branch_label = row_get(branch_row, "branch_name", "") if branch_row else ""
+        barcode_input_source = row_get(company_row, "barcode_input_source", row_get(company_row, 1, "Keyboard Entry")) if company_row else "Keyboard Entry"
+        items_df = pd.DataFrame(rows_to_dicts(items)) if items else pd.DataFrame()
+        if not items_df.empty:
+            items_df = items_df.rename(
+                columns={
+                    "id": "ID",
+                    "item_name": "Item Name",
+                    "item_code": "Item Code",
+                    "category": "Category",
+                    "brand": "Brand",
+                    "qty": "Qty",
+                    "price": "Price",
+                    "cost_price": "Cost Price",
+                    "barcode": "Barcode",
+                    "min_stock_level": "Min Stock Level",
+                    "tax_rate": "Tax Rate",
+                    "expiry_date": "Expiry Date",
+                }
             )
-            if items
-            else pd.DataFrame()
-        )
         if not items_df.empty:
             items_df["Barcode"] = items_df["Barcode"].fillna("")
         receipt_html_key = f"pos_receipt_html_{company_key}"
@@ -16372,18 +16405,14 @@ def show_dashboard(company_key, company_name, role):
                 """
                 low_stock_params = [company_key]
                 try:
-                    inventory_columns = {row[1] for row in conn.execute("PRAGMA table_info(inventory)").fetchall()}
+                    inventory_columns = {column["name"] for column in list_columns(conn, "inventory")}
                     if active_branch_id and "branch_id" in inventory_columns:
                         low_stock_sql += " AND COALESCE(branch_id, '') = ?"
                         low_stock_params.append(str(active_branch_id))
                 except Exception:
                     pass
                 low_stock_sql += " ORDER BY qty ASC LIMIT 10"
-                low_stock = pd.read_sql_query(
-                    low_stock_sql,
-                    conn,
-                    params=tuple(low_stock_params),
-                )
+                low_stock = _portable_read_dataframe(conn, low_stock_sql, tuple(low_stock_params))
                 if low_stock.empty:
                     st.success("All stock levels are adequate.")
                 else:
