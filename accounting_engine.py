@@ -166,7 +166,7 @@ def _is_posting_status(value):
 
 
 def _source_document_columns(conn, table_name):
-    return {row[1] for row in conn.execute(f"PRAGMA table_info({table_name})").fetchall()}
+    return {column["name"] for column in list_columns(conn, table_name)}
 
 
 def _sync_source_document_posting(conn, source_table, source_id, entry_id, posting_user=None, source_type=None):
@@ -1859,7 +1859,8 @@ def _journal_dataframe(company_key, start_date=None, end_date=None, branch_id=No
             query += " AND c.id = ?"
             params.append(int(account_id))
         query += " ORDER BY date(je.date), je.id, jl.id"
-        return pd.read_sql_query(query, conn, params=params)
+        rows = execute_portable_query(conn, query, tuple(params)).fetchall()
+        return pd.DataFrame(rows_to_dicts(rows))
     finally:
         if owns_connection and conn:
             conn.close()

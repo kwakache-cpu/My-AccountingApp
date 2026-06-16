@@ -1519,7 +1519,8 @@ def _show_local_dashboard(company_key, company_name, role):
 
             with right_col:
                 st.subheader("Low Stock Items")
-                low_stock = pd.read_sql_query(
+                low_stock_rows = execute_portable_query(
+                    conn,
                     """
                     SELECT item_name AS Item, qty AS Quantity, unit AS Unit
                     FROM inventory
@@ -1527,9 +1528,9 @@ def _show_local_dashboard(company_key, company_name, role):
                     ORDER BY qty ASC
                     LIMIT 10
                     """,
-                    conn,
-                    params=(company_key,),
-                )
+                    (company_key,),
+                ).fetchall()
+                low_stock = pd.DataFrame(rows_to_dicts(low_stock_rows))
                 if low_stock.empty:
                     st.success("All stock levels are adequate!")
                 else:

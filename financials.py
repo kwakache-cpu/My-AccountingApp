@@ -160,23 +160,25 @@ def _chart_lookup():
     conn = get_connection()
     try:
         try:
-            rows = conn.execute(
+            rows = execute_portable_query(
+                conn,
                 """
                 SELECT COALESCE(code, account_code, '') AS account_code,
                        COALESCE(name, account_name) AS account_name,
                        COALESCE(type, category, account_type) AS account_type
                 FROM chart_of_accounts
                 ORDER BY COALESCE(name, account_name)
-                """
+                """,
             ).fetchall()
         except sqlite3.Error:
             return []
         return {
-            str(row["account_name"]): {
-                "account_type": str(row["account_type"]),
-                "account_code": str(row["account_code"] or ""),
+            str(row_get(row, "account_name", "")): {
+                "account_type": str(row_get(row, "account_type", "")),
+                "account_code": str(row_get(row, "account_code", "") or ""),
             }
             for row in rows
+            if row_get(row, "account_name")
         }
     finally:
         conn.close()

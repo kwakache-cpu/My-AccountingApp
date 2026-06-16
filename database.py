@@ -1015,6 +1015,15 @@ def is_postgres_backend():
     return is_postgres()
 
 
+def should_skip_sqlite_runtime_ddl(conn=None):
+    """
+    Return True when SQLite-only runtime DDL/PRAGMA self-heal must not execute.
+    PostgreSQL schema is deployed via guarded staging apply; runtime pages must not
+    attempt CREATE TABLE/AUTOINCREMENT/PRAGMA/sqlite_master repairs.
+    """
+    return is_postgres_backend()
+
+
 def get_database_url():
     """Return configured DATABASE_URL without redaction."""
     return _get_database_url()
@@ -5595,6 +5604,8 @@ def ensure_branch_licensing_schema_integrity(conn):
     """
     Additive branch licensing tables/columns. Safe on every startup; PostgreSQL-friendly types.
     """
+    if should_skip_sqlite_runtime_ddl(conn):
+        return
     cursor = conn.cursor()
     cursor.execute(
         """
@@ -7880,6 +7891,8 @@ def ensure_inventory_schema_integrity(conn):
     """
     if conn is None:
         raise RuntimeError("Database connection is required for inventory schema integrity checks.")
+    if should_skip_sqlite_runtime_ddl(conn):
+        return
 
     cursor = conn.cursor()
     cursor.execute(
@@ -7998,6 +8011,8 @@ def ensure_stock_movements_schema_integrity(conn):
     """
     if conn is None:
         raise RuntimeError("Database connection is required for stock movement schema integrity checks.")
+    if should_skip_sqlite_runtime_ddl(conn):
+        return
 
     cursor = conn.cursor()
     cursor.execute(
@@ -8052,6 +8067,8 @@ def ensure_cashier_closings_schema(conn):
     """
     if conn is None:
         raise RuntimeError("Database connection is required for cashier closing schema integrity checks.")
+    if should_skip_sqlite_runtime_ddl(conn):
+        return
 
     cursor = conn.cursor()
     cursor.execute(
@@ -8104,6 +8121,8 @@ def ensure_pos_sales_schema(conn):
     """
     if conn is None:
         raise RuntimeError("Database connection is required for POS sale schema integrity checks.")
+    if should_skip_sqlite_runtime_ddl(conn):
+        return
 
     cursor = conn.cursor()
     cursor.execute("PRAGMA table_info(stock_movements)")
