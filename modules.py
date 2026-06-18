@@ -818,6 +818,14 @@ def _portable_read_dataframe(conn, query, params=()):
     return pd.DataFrame(rows_to_dicts(rows))
 
 
+def _portable_fetchall(conn, query, params=()):
+    return execute_portable_query(conn, query, params or ()).fetchall()
+
+
+def _portable_fetchone(conn, query, params=()):
+    return execute_portable_query(conn, query, params or ()).fetchone()
+
+
 def can_access_migration_cleanup(role):
     return migration_cleanup_service.can_access_migration_cleanup(role)
 
@@ -15536,7 +15544,7 @@ def _dashboard_pos_branch_sql(branch_id, alias=""):
 
 def _dashboard_stock_movement_branch_sql(conn, branch_id):
     try:
-        movement_columns = {row[1] for row in conn.execute("PRAGMA table_info(stock_movements)").fetchall()}
+        movement_columns = {column["name"] for column in list_columns(conn, "stock_movements")}
     except Exception:
         movement_columns = set()
     if branch_id and "branch_id" in movement_columns:
@@ -15554,7 +15562,8 @@ def _dashboard_branch_ledger_balance(conn, company_key, branch_id, account_name_
         ]
     )
     params = [company_key, str(branch_id)] + [f"%{pattern.lower()}%" for pattern in account_name_patterns]
-    row = conn.execute(
+    row = _portable_fetchone(
+        conn,
         f"""
         SELECT COALESCE(SUM(jl.debit - jl.credit), 0) AS balance
         FROM journal_entries je
@@ -15567,8 +15576,8 @@ def _dashboard_branch_ledger_balance(conn, company_key, branch_id, account_name_
           AND COALESCE(je.approval_status, 'Posted') = 'Posted'
         """,
         tuple(params),
-    ).fetchone()
-    return float(row["balance"] or 0.0) if row else 0.0
+    )
+    return float(row_get(row, "balance", 0) or 0.0) if row else 0.0
 
 
 def _fetch_dashboard_kpi_snapshot(conn, company_key, branch_id=None):
@@ -15578,27 +15587,29 @@ def _fetch_dashboard_kpi_snapshot(conn, company_key, branch_id=None):
     branch_sql, branch_params = _dashboard_pos_branch_sql(branch_id)
     inv_branch_sql, inv_branch_params = "", []
     try:
-        inventory_columns = {row[1] for row in conn.execute("PRAGMA table_info(inventory)").fetchall()}
+        inventory_columns = {column["name"] for column in list_columns(conn, "inventory")}
         if branch_id and "branch_id" in inventory_columns:
             inv_branch_sql = " AND COALESCE(branch_id, '') = ? "
             inv_branch_params = [str(branch_id)]
     except Exception:
         pass
 
-    inv_row = conn.execute(
+    inv_row = _portable_fetchone(
+        conn,
         f"SELECT COALESCE(SUM(qty * cost_price), 0) AS total FROM inventory WHERE company_key = ?{inv_branch_sql}",
         tuple([company_key, *inv_branch_params]),
-    ).fetchone()
-    inventory_value = float(inv_row["total"] or 0.0) if inv_row else 0.0
+    )
+    inventory_value = float(row_get(inv_row, "total", 0) or 0.0) if inv_row else 0.0
 
-    inventory_rows = conn.execute(
+    inventory_rows = _portable_fetchall(
+        conn,
         f"SELECT qty, min_stock_level FROM inventory WHERE company_key = ?{inv_branch_sql}",
         tuple([company_key, *inv_branch_params]),
-    ).fetchall()
+    )
     low_stock_count = sum(
         1
         for row in inventory_rows
-        if _get_inventory_stock_status(row["qty"], row["min_stock_level"]) in {"LOW STOCK", "OUT OF STOCK"}
+        if _get_inventory_stock_status(row_get(row, "qty"), row_get(row, "min_stock_level")) in {"LOW STOCK", "OUT OF STOCK"}
     )
 
     month_sales = float(get_month_sales_total(company_key, year_month=month_key, branch_id=branch_id, conn=conn) or 0.0)
@@ -15613,8 +15624,8 @@ def _fetch_dashboard_kpi_snapshot(conn, company_key, branch_id=None):
               {branch_sql}
         """
         pos_today_params = [company_key, today.isoformat(), *branch_params]
-        pos_today_row = conn.execute(pos_today_sql, tuple(pos_today_params)).fetchone()
-        today_sales = float(pos_today_row["total"] or 0.0) if pos_today_row else 0.0
+        pos_today_row = _portable_fetchone(conn, pos_today_sql, tuple(pos_today_params))
+        today_sales = float(row_get(pos_today_row, "total", 0) or 0.0) if pos_today_row else 0.0
     except Exception:
         today_sales = 0.0
     if today_sales <= 0:
@@ -15633,8 +15644,8 @@ def _fetch_dashboard_kpi_snapshot(conn, company_key, branch_id=None):
         if branch_id:
             journal_today_sql += " AND je.branch_id = ?"
             journal_params.append(str(branch_id))
-        journal_row = conn.execute(journal_today_sql, tuple(journal_params)).fetchone()
-        today_sales = float(journal_row["sales_total"] or 0.0) if journal_row else 0.0
+        journal_row = _portable_fetchone(conn, journal_today_sql, tuple(journal_params))
+        today_sales = float(row_get(journal_row, "sales_total", 0) or 0.0) if journal_row else 0.0
 
     gross_profit = 0.0
     try:
@@ -15688,7 +15699,8 @@ def _fetch_dashboard_kpi_snapshot(conn, company_key, branch_id=None):
             2,
         )
 
-    cash_bank_row = conn.execute(
+    cash_bank_row = _portable_fetchone(
+        conn,
         """
         SELECT COALESCE(SUM(jl.debit - jl.credit), 0) AS balance
         FROM journal_entries je
@@ -15706,8 +15718,8 @@ def _fetch_dashboard_kpi_snapshot(conn, company_key, branch_id=None):
         """
         + (" AND je.branch_id = ?" if branch_id else ""),
         tuple([company_key, str(branch_id)] if branch_id else [company_key]),
-    ).fetchone()
-    cash_bank_balance = float(cash_bank_row["balance"] or 0.0) if cash_bank_row else 0.0
+    )
+    cash_bank_balance = float(row_get(cash_bank_row, "balance", 0) or 0.0) if cash_bank_row else 0.0
 
     return {
         "today_sales": round(today_sales, 2),
@@ -15734,7 +15746,8 @@ def _fetch_dashboard_sales_analytics(conn, company_key, branch_id=None):
     try:
         ensure_pos_sales_schema(conn)
         window_start = (datetime.now().date() - timedelta(days=29)).isoformat()
-        daily_rows = conn.execute(
+        daily_rows = _portable_fetchall(
+            conn,
             f"""
             SELECT sale_date AS sale_day, COALESCE(SUM(grand_total), 0) AS sales_total
             FROM pos_sales ps
@@ -15745,11 +15758,12 @@ def _fetch_dashboard_sales_analytics(conn, company_key, branch_id=None):
             ORDER BY sale_date
             """,
             tuple([company_key, window_start, *branch_params]),
-        ).fetchall()
+        )
         analytics["daily_sales"] = [
-            {"sale_day": str(row["sale_day"]), "sales_total": float(row["sales_total"] or 0.0)} for row in daily_rows
+            {"sale_day": str(row_get(row, "sale_day")), "sales_total": float(row_get(row, "sales_total", 0) or 0.0)} for row in daily_rows
         ]
-        top_rows = conn.execute(
+        top_rows = _portable_fetchall(
+            conn,
             f"""
             SELECT psl.item_name AS item_name,
                    COALESCE(SUM(psl.qty_sold), 0) AS qty_sold,
@@ -15764,16 +15778,17 @@ def _fetch_dashboard_sales_analytics(conn, company_key, branch_id=None):
             LIMIT 10
             """,
             tuple([company_key, window_start, *branch_params]),
-        ).fetchall()
+        )
         analytics["top_items"] = [
             {
-                "item_name": str(row["item_name"] or "Item"),
-                "qty_sold": float(row["qty_sold"] or 0.0),
-                "revenue": float(row["revenue"] or 0.0),
+                "item_name": str(row_get(row, "item_name") or "Item"),
+                "qty_sold": float(row_get(row, "qty_sold", 0) or 0.0),
+                "revenue": float(row_get(row, "revenue", 0) or 0.0),
             }
             for row in top_rows
         ]
-        payment_rows = conn.execute(
+        payment_rows = _portable_fetchall(
+            conn,
             f"""
             SELECT COALESCE(NULLIF(payment_method, ''), 'Unknown') AS payment_method,
                    COALESCE(SUM(grand_total), 0) AS sales_total,
@@ -15786,16 +15801,17 @@ def _fetch_dashboard_sales_analytics(conn, company_key, branch_id=None):
             ORDER BY sales_total DESC
             """,
             tuple([company_key, window_start, *branch_params]),
-        ).fetchall()
+        )
         analytics["payment_methods"] = [
             {
-                "payment_method": str(row["payment_method"]),
-                "sales_total": float(row["sales_total"] or 0.0),
-                "sale_count": int(row["sale_count"] or 0),
+                "payment_method": str(row_get(row, "payment_method")),
+                "sales_total": float(row_get(row, "sales_total", 0) or 0.0),
+                "sale_count": int(row_get(row, "sale_count", 0) or 0),
             }
             for row in payment_rows
         ]
-        cashier_rows = conn.execute(
+        cashier_rows = _portable_fetchall(
+            conn,
             f"""
             SELECT COALESCE(NULLIF(cashier, ''), 'Unknown') AS cashier,
                    COALESCE(SUM(grand_total), 0) AS sales_total
@@ -15808,12 +15824,13 @@ def _fetch_dashboard_sales_analytics(conn, company_key, branch_id=None):
             LIMIT 10
             """,
             tuple([company_key, window_start, *branch_params]),
-        ).fetchall()
+        )
         analytics["cashier_sales"] = [
-            {"cashier": str(row["cashier"]), "sales_total": float(row["sales_total"] or 0.0)} for row in cashier_rows
+            {"cashier": str(row_get(row, "cashier")), "sales_total": float(row_get(row, "sales_total", 0) or 0.0)} for row in cashier_rows
         ]
         branch_filter_sql, branch_filter_params = _dashboard_pos_branch_sql(branch_id)
-        branch_rows = conn.execute(
+        branch_rows = _portable_fetchall(
+            conn,
             f"""
             SELECT COALESCE(NULLIF(branch_id, ''), 'Unassigned') AS branch_id,
                    COALESCE(SUM(grand_total), 0) AS sales_total
@@ -15825,9 +15842,9 @@ def _fetch_dashboard_sales_analytics(conn, company_key, branch_id=None):
             ORDER BY sales_total DESC
             """,
             tuple([company_key, window_start, *branch_filter_params]),
-        ).fetchall()
+        )
         analytics["branch_sales"] = [
-            {"branch_id": str(row["branch_id"]), "sales_total": float(row["sales_total"] or 0.0)} for row in branch_rows
+            {"branch_id": str(row_get(row, "branch_id")), "sales_total": float(row_get(row, "sales_total", 0) or 0.0)} for row in branch_rows
         ]
         analytics["has_pos_data"] = bool(
             analytics["daily_sales"] or analytics["top_items"] or analytics["payment_methods"]
@@ -15842,7 +15859,7 @@ def _fetch_dashboard_inventory_insights(conn, company_key, branch_id=None):
     branch_sql, branch_params = _dashboard_pos_branch_sql(branch_id, alias="ps")
     inv_branch_sql, inv_branch_params = "", []
     try:
-        inventory_columns = {row[1] for row in conn.execute("PRAGMA table_info(inventory)").fetchall()}
+        inventory_columns = {column["name"] for column in list_columns(conn, "inventory")}
         if branch_id and "branch_id" in inventory_columns:
             inv_branch_sql = " AND COALESCE(branch_id, '') = ? "
             inv_branch_params = [str(branch_id)]
@@ -15858,7 +15875,8 @@ def _fetch_dashboard_inventory_insights(conn, company_key, branch_id=None):
     }
     try:
         ensure_pos_sales_schema(conn)
-        fast_rows = conn.execute(
+        fast_rows = _portable_fetchall(
+            conn,
             f"""
             SELECT psl.item_name AS item_name, COALESCE(SUM(psl.qty_sold), 0) AS qty_sold
             FROM pos_sale_lines psl
@@ -15871,11 +15889,12 @@ def _fetch_dashboard_inventory_insights(conn, company_key, branch_id=None):
             LIMIT 8
             """,
             tuple([company_key, window_start, *branch_params]),
-        ).fetchall()
+        )
         insights["fast_moving"] = [
-            {"item_name": str(row["item_name"]), "qty_sold": float(row["qty_sold"] or 0.0)} for row in fast_rows
+            {"item_name": str(row_get(row, "item_name")), "qty_sold": float(row_get(row, "qty_sold", 0) or 0.0)} for row in fast_rows
         ]
-        profitable_rows = conn.execute(
+        profitable_rows = _portable_fetchall(
+            conn,
             f"""
             SELECT psl.item_name AS item_name,
                    COALESCE(SUM(psl.line_total), 0) AS revenue,
@@ -15889,18 +15908,19 @@ def _fetch_dashboard_inventory_insights(conn, company_key, branch_id=None):
             LIMIT 8
             """,
             tuple([company_key, window_start, *branch_params]),
-        ).fetchall()
+        )
         insights["most_profitable"] = [
             {
-                "item_name": str(row["item_name"]),
-                "profit": round(float(row["revenue"] or 0.0) - float(row["cost_total"] or 0.0), 2),
+                "item_name": str(row_get(row, "item_name")),
+                "profit": round(float(row_get(row, "revenue", 0) or 0.0) - float(row_get(row, "cost_total", 0) or 0.0), 2),
             }
             for row in profitable_rows
         ]
     except Exception:
         pass
 
-    inventory_rows = conn.execute(
+    inventory_rows = _portable_fetchall(
+        conn,
         f"""
         SELECT item_name, qty, expiry_date
         FROM inventory
@@ -15908,10 +15928,11 @@ def _fetch_dashboard_inventory_insights(conn, company_key, branch_id=None):
         {inv_branch_sql}
         """,
         tuple([company_key, *inv_branch_params]),
-    ).fetchall()
+    )
     sold_names = set()
     try:
-        sold_rows = conn.execute(
+        sold_rows = _portable_fetchall(
+            conn,
             f"""
             SELECT DISTINCT psl.item_name
             FROM pos_sale_lines psl
@@ -15921,23 +15942,23 @@ def _fetch_dashboard_inventory_insights(conn, company_key, branch_id=None):
               {branch_sql}
             """,
             tuple([company_key, (datetime.now().date() - timedelta(days=90)).isoformat(), *branch_params]),
-        ).fetchall()
-        sold_names = {str(row["item_name"]) for row in sold_rows}
+        )
+        sold_names = {str(row_get(row, "item_name")) for row in sold_rows}
     except Exception:
         pass
 
     dead_stock_rows = []
     for row in inventory_rows:
-        qty = float(row["qty"] or 0.0)
+        qty = float(row_get(row, "qty", 0) or 0.0)
         if qty <= 0:
             continue
-        item_name = str(row["item_name"] or "")
+        item_name = str(row_get(row, "item_name") or "")
         if item_name not in sold_names:
             dead_stock_rows.append({"item_name": item_name, "qty": qty})
     insights["dead_stock"] = sorted(dead_stock_rows, key=lambda item: item["qty"], reverse=True)[:8]
 
     for row in inventory_rows:
-        expiry_status = _get_inventory_expiry_status(row["expiry_date"])
+        expiry_status = _get_inventory_expiry_status(row_get(row, "expiry_date"))
         if expiry_status == "EXPIRING SOON":
             insights["expiring_summary"]["expiring_soon"] += 1
         elif expiry_status == "EXPIRED":
@@ -15947,7 +15968,8 @@ def _fetch_dashboard_inventory_insights(conn, company_key, branch_id=None):
 
     try:
         ensure_stock_movements_schema_integrity(conn)
-        movement_rows = conn.execute(
+        movement_rows = _portable_fetchall(
+            conn,
             f"""
             SELECT date(created_at) AS movement_day,
                    COALESCE(SUM(
@@ -15965,9 +15987,9 @@ def _fetch_dashboard_inventory_insights(conn, company_key, branch_id=None):
             ORDER BY movement_day
             """,
             tuple([company_key, window_start, *movement_branch_params]),
-        ).fetchall()
+        )
         insights["movement_trend"] = [
-            {"movement_day": str(row["movement_day"]), "net_qty": float(row["net_qty"] or 0.0)} for row in movement_rows
+            {"movement_day": str(row_get(row, "movement_day")), "net_qty": float(row_get(row, "net_qty", 0) or 0.0)} for row in movement_rows
         ]
     except Exception:
         pass
