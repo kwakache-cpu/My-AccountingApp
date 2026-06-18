@@ -2253,15 +2253,16 @@ def get_ar_aging_report(company_key, as_of_date=None):
     report_date = pd.Timestamp(as_of_date or datetime.now().date())
     conn = get_connection()
     try:
-        customers = conn.execute(
-            "SELECT id, customer_id, name, phone, email FROM customers WHERE company_key = ? ORDER BY name",
+        customers = execute_portable_query(
+            conn,
+            "SELECT id, customer_id, name, phone, email FROM customers WHERE company_key = ? ORDER BY customers.name",
             (company_key,),
         ).fetchall()
         rows = []
         for customer in customers:
-            customer_id = int(customer["id"])
+            customer_id = int(row_get(customer, "id"))
             gl_balance = get_customer_balance(company_key, customer_id, as_of_date=report_date.date(), conn=conn)
-            customer_label = customer["customer_id"] or f"CUST-{customer_id:06d}"
+            customer_label = row_get(customer, "customer_id") or f"CUST-{customer_id:06d}"
             document_remaining_total = 0.0
             invoice_rows = conn.execute(
                 """
@@ -2414,23 +2415,24 @@ def get_supplier_balances(company_key, as_of_date=None, conn=None):
     owns_connection = conn is None
     conn = conn or get_connection()
     try:
-        rows = conn.execute(
+        rows = execute_portable_query(
+            conn,
             """
             SELECT id, name, email, phone, address
             FROM suppliers
             WHERE company_key = ?
-            ORDER BY name
+            ORDER BY suppliers.name
             """,
             (company_key,),
         ).fetchall()
         return [
             {
-                "id": int(row["id"]),
-                "name": row["name"],
-                "email": row["email"],
-                "phone": row["phone"],
-                "address": row["address"],
-                "balance": get_supplier_balance(company_key, int(row["id"]), as_of_date=as_of_date, conn=conn),
+                "id": int(row_get(row, "id")),
+                "name": row_get(row, "name"),
+                "email": row_get(row, "email"),
+                "phone": row_get(row, "phone"),
+                "address": row_get(row, "address"),
+                "balance": get_supplier_balance(company_key, int(row_get(row, "id")), as_of_date=as_of_date, conn=conn),
             }
             for row in rows
         ]
@@ -2932,23 +2934,24 @@ def get_customer_balances(company_key, as_of_date=None, conn=None):
     owns_connection = conn is None
     conn = conn or get_connection()
     try:
-        rows = conn.execute(
+        rows = execute_portable_query(
+            conn,
             """
             SELECT id, customer_id, name, phone, email
             FROM customers
             WHERE company_key = ?
-            ORDER BY name
+            ORDER BY customers.name
             """,
             (company_key,),
         ).fetchall()
         return [
             {
-                "id": int(row["id"]),
-                "customer_id": row["customer_id"] or f"CUST-{int(row['id']):06d}",
-                "name": row["name"],
-                "phone": row["phone"],
-                "email": row["email"],
-                "balance": get_customer_balance(company_key, int(row["id"]), as_of_date=as_of_date, conn=conn),
+                "id": int(row_get(row, "id")),
+                "customer_id": row_get(row, "customer_id") or f"CUST-{int(row_get(row, 'id')):06d}",
+                "name": row_get(row, "name"),
+                "phone": row_get(row, "phone"),
+                "email": row_get(row, "email"),
+                "balance": get_customer_balance(company_key, int(row_get(row, "id")), as_of_date=as_of_date, conn=conn),
             }
             for row in rows
         ]
