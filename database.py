@@ -1475,7 +1475,9 @@ class CompatibleRow(dict):
 
     def __getitem__(self, key):
         if isinstance(key, int):
-            return self._values[key]
+            if 0 <= key < len(self._values):
+                return self._values[key]
+            raise IndexError("tuple index out of range")
         return super().__getitem__(key)
 
     def __iter__(self):
@@ -1554,6 +1556,14 @@ def row_get(row, key, default=None, columns=None):
         return row_dict[key]
     except Exception:
         return default
+
+
+def fetch_scalar(conn, sql, params=(), default=None, key=0):
+    """Return a single scalar from the first column of the first result row."""
+    row = execute_portable_query(conn, sql, params or ()).fetchone()
+    if row is None:
+        return default
+    return row_get(row, key, default)
 
 
 class PortableCursorResult:
@@ -1741,15 +1751,10 @@ def db_insert_ignore_sql(table_name, columns, conflict_columns=None, backend=Non
 def _row_value(row, key, index=0, default=None):
     if row is None:
         return default
-    if isinstance(row, dict):
-        return row.get(key, default)
-    try:
-        return row[key]
-    except Exception:
-        try:
-            return row[index]
-        except Exception:
-            return default
+    mapping = row_to_dict(row)
+    if mapping is not None and key in mapping:
+        return mapping[key]
+    return row_get(row, index, default)
 
 
 def list_tables(conn, backend=None, include_system=False):
@@ -5691,9 +5696,7 @@ def _fetch_company_name(conn, company_key):
     ).fetchone()
     if row is None:
         return ""
-    if isinstance(row, sqlite3.Row):
-        return str(row["name"] or "").strip()
-    return str(row[0] or "").strip()
+    return str(row_get(row, "name", row_get(row, 0, "")) or "").strip()
 
 
 def _derive_branch_code(branch_name):
@@ -5708,20 +5711,18 @@ def backfill_branch_codes(conn):
         return 0
     if not _branch_licensing_column_exists(conn, "branches", "branch_code"):
         return 0
-    rows = conn.execute(
+    rows = execute_portable_query(
+        conn,
         """
         SELECT branch_id, branch_name
         FROM branches
         WHERE branch_code IS NULL OR TRIM(branch_code) = ''
-        """
+        """,
     ).fetchall()
     updated = 0
     for row in rows:
-        if isinstance(row, sqlite3.Row):
-            branch_id = row["branch_id"]
-            branch_name = row["branch_name"]
-        else:
-            branch_id, branch_name = row[0], row[1]
+        branch_id = row_get(row, "branch_id", row_get(row, 0))
+        branch_name = row_get(row, "branch_name", row_get(row, 1))
         fallback_code = str(branch_name or "").strip() or str(branch_id or "").strip()
         conn.execute(
             "UPDATE branches SET branch_code = ? WHERE branch_id = ?",
@@ -5817,9 +5818,7 @@ def count_active_branches(conn, company_key, exclude_branch_id=None):
     row = execute_portable_query(conn, query, tuple(params)).fetchone()
     if row is None:
         return 0
-    if isinstance(row, sqlite3.Row):
-        return int(row["active_count"] or 0)
-    return int(row[0] or 0)
+    return int(row_get(row, "active_count", row_get(row, 0, 0)) or 0)
 
 
 def get_company_branch_license_snapshot(conn, company_key, *, ensure_schema=True):
@@ -5838,8 +5837,8 @@ def get_company_branch_license_snapshot(conn, company_key, *, ensure_schema=True
     max_branches = 1
     number_of_branches = 1
     if row is not None:
-        max_branches = max(int(row[0] or 1), 1)
-        number_of_branches = max(int(row[1] or 1), 1)
+        max_branches = max(int(row_get(row, 0, 1) or 1), 1)
+        number_of_branches = max(int(row_get(row, 1, 1) or 1), 1)
     active_branch_count = count_active_branches(conn, normalized_company_key)
     remaining_active_slots = max(0, max_branches - active_branch_count)
     return {
@@ -5881,7 +5880,8 @@ def evaluate_active_branch_creation(conn, company_key, *, is_active=True, exclud
 
 def get_branch_type_catalog(conn):
     ensure_branch_licensing_schema_integrity(conn)
-    rows = conn.execute(
+    rows = execute_portable_query(
+        conn,
         """
         SELECT branch_type_key, branch_type_name, description
         FROM branch_type_catalog
@@ -5891,22 +5891,13 @@ def get_branch_type_catalog(conn):
     ).fetchall()
     catalog = []
     for row in rows:
-        if isinstance(row, sqlite3.Row):
-            catalog.append(
-                {
-                    "branch_type_key": row["branch_type_key"],
-                    "branch_type_name": row["branch_type_name"],
-                    "description": row["description"],
-                }
-            )
-        else:
-            catalog.append(
-                {
-                    "branch_type_key": row[0],
-                    "branch_type_name": row[1],
-                    "description": row[2],
-                }
-            )
+        catalog.append(
+            {
+                "branch_type_key": row_get(row, "branch_type_key", row_get(row, 0)),
+                "branch_type_name": row_get(row, "branch_type_name", row_get(row, 1)),
+                "description": row_get(row, "description", row_get(row, 2)),
+            }
+        )
     return catalog
 
 
@@ -5949,54 +5940,28 @@ def list_company_branches_with_grants(conn, company_key):
     catalog_by_key = {item["branch_type_key"]: item["branch_type_name"] for item in get_branch_type_catalog(conn)}
     branches = []
     for row in rows:
-        if isinstance(row, sqlite3.Row):
-            branch_type_value = row["branch_type"]
-            branches.append(
-                {
-                    "branch_id": row["branch_id"],
-                    "branch_name": row["branch_name"],
-                    "branch_code": row["branch_code"],
-                    "branch_type": branch_type_value,
-                    "branch_type_key": _normalize_branch_type_key(branch_type_value),
-                    "branch_type_name": catalog_by_key.get(
-                        _normalize_branch_type_key(branch_type_value),
-                        str(branch_type_value or ""),
-                    ),
-                    "is_active": int(row["is_active"] or 0),
-                    "deployment_status": row["deployment_status"],
-                    "branch_tier": row["branch_tier"],
-                    "branch_manager": row["branch_manager"],
-                    "manager_user_id": row["manager_user_id"],
-                    "manager_user_name": row["manager_user_name"],
-                    "module_grant_count": int(row["module_grant_count"] or 0),
-                    "branch_access_key": row["branch_access_key"],
-                    "location": row["location"],
-                    "created_at": row["created_at"],
-                }
-            )
-        else:
-            branch_type_value = row[3]
-            type_key = _normalize_branch_type_key(branch_type_value)
-            branches.append(
-                {
-                    "branch_id": row[0],
-                    "branch_name": row[1],
-                    "branch_code": row[2],
-                    "branch_type": branch_type_value,
-                    "branch_type_key": type_key,
-                    "branch_type_name": catalog_by_key.get(type_key, str(branch_type_value or "")),
-                    "is_active": int(row[4] or 0),
-                    "deployment_status": row[5],
-                    "branch_tier": row[6],
-                    "branch_manager": row[7],
-                    "manager_user_id": row[8],
-                    "manager_user_name": row[9],
-                    "module_grant_count": int(row[10] or 0),
-                    "branch_access_key": row[11],
-                    "location": row[12],
-                    "created_at": row[13],
-                }
-            )
+        branch_type_value = row_get(row, "branch_type", row_get(row, 3))
+        type_key = _normalize_branch_type_key(branch_type_value)
+        branches.append(
+            {
+                "branch_id": row_get(row, "branch_id", row_get(row, 0)),
+                "branch_name": row_get(row, "branch_name", row_get(row, 1)),
+                "branch_code": row_get(row, "branch_code", row_get(row, 2)),
+                "branch_type": branch_type_value,
+                "branch_type_key": type_key,
+                "branch_type_name": catalog_by_key.get(type_key, str(branch_type_value or "")),
+                "is_active": int(row_get(row, "is_active", row_get(row, 4, 0)) or 0),
+                "deployment_status": row_get(row, "deployment_status", row_get(row, 5)),
+                "branch_tier": row_get(row, "branch_tier", row_get(row, 6)),
+                "branch_manager": row_get(row, "branch_manager", row_get(row, 7)),
+                "manager_user_id": row_get(row, "manager_user_id", row_get(row, 8)),
+                "manager_user_name": row_get(row, "manager_user_name", row_get(row, 9)),
+                "module_grant_count": int(row_get(row, "module_grant_count", row_get(row, 10, 0)) or 0),
+                "branch_access_key": row_get(row, "branch_access_key", row_get(row, 11)),
+                "location": row_get(row, "location", row_get(row, 12)),
+                "created_at": row_get(row, "created_at", row_get(row, 13)),
+            }
+        )
     return branches
 
 
@@ -6012,11 +5977,8 @@ def repair_branch_module_grants(conn, company_key, *, ensure_schema=True):
     branches_processed = 0
     grants_inserted = 0
     for row in rows:
-        if isinstance(row, sqlite3.Row):
-            branch_id = row["branch_id"]
-            branch_type = row["branch_type"]
-        else:
-            branch_id, branch_type = row[0], row[1]
+        branch_id = row_get(row, "branch_id", row_get(row, 0))
+        branch_type = row_get(row, "branch_type", row_get(row, 1))
         result = ensure_branch_module_grants_for_branch(
             conn,
             normalized_company_key,
@@ -6273,18 +6235,7 @@ def _fetch_company_user_by_user_id(conn, company_key, user_id):
     ).fetchone()
     if row is None:
         return None
-    if isinstance(row, sqlite3.Row):
-        return dict(row)
-    return {
-        "id": row[0],
-        "user_id": row[1],
-        "company_key": row[2],
-        "branch_id": row[3],
-        "full_name": row[4],
-        "role": row[5],
-        "status": row[6],
-        "login_key": row[7],
-    }
+    return dict(row_to_dict(row))
 
 
 def assign_branch_manager(
@@ -6354,7 +6305,7 @@ def assign_branch_manager(
         "branch_id": normalized_branch_id,
         "manager_user_id": normalized_manager_user_id,
         "manager_role": target_role,
-        "branch_access_key": branch_row[2] if not isinstance(branch_row, sqlite3.Row) else branch_row["branch_access_key"],
+        "branch_access_key": row_get(branch_row, "branch_access_key", row_get(branch_row, 2)),
     }
 
 
@@ -6374,20 +6325,7 @@ def list_branch_users(conn, company_key, branch_id):
     ).fetchall()
     users = []
     for row in rows:
-        if isinstance(row, sqlite3.Row):
-            users.append(dict(row))
-        else:
-            users.append(
-                {
-                    "id": row[0],
-                    "user_id": row[1],
-                    "full_name": row[2],
-                    "role": row[3],
-                    "login_key": row[4],
-                    "status": row[5],
-                    "branch_id": row[6],
-                }
-            )
+        users.append(dict(row_to_dict(row)))
     return users
 
 
@@ -6521,8 +6459,8 @@ def update_branch_user_status(
     ).fetchone()
     if not row:
         return {"ok": False, "reason": "User not found."}
-    user_role = row[1] if not isinstance(row, sqlite3.Row) else row["role"]
-    user_branch_id = row[2] if not isinstance(row, sqlite3.Row) else row["branch_id"]
+    user_role = row_get(row, "role", row_get(row, 1))
+    user_branch_id = row_get(row, "branch_id", row_get(row, 2))
     if str(user_branch_id or "").strip() != normalized_branch_id:
         return {"ok": False, "reason": "User does not belong to this branch."}
     if str(user_role or "").strip() in PRIVILEGED_COMPANY_USER_ROLES:
@@ -6568,12 +6506,7 @@ def fetch_branch_manager_candidates(conn, company_key, branch_id):
     ).fetchall()
     candidates = []
     for row in rows:
-        if isinstance(row, sqlite3.Row):
-            candidates.append(dict(row))
-        else:
-            candidates.append(
-                {"user_id": row[0], "full_name": row[1], "role": row[2], "branch_id": row[3]}
-            )
+        candidates.append(dict(row_to_dict(row)))
     return candidates
 
 
@@ -6609,7 +6542,7 @@ def _fetch_branch_type_default_module_keys(conn, branch_type_key):
         """,
         (normalized_key,),
     ).fetchall()
-    return {str(row[0] if not isinstance(row, sqlite3.Row) else row["module_key"]) for row in rows}
+    return {str(row_get(row, "module_key", row_get(row, 0))) for row in rows}
 
 
 def get_branch_enabled_modules(conn, company_key, branch_id):
@@ -6627,7 +6560,7 @@ def get_branch_enabled_modules(conn, company_key, branch_id):
         """,
         (normalized_company_key, normalized_branch_id),
     ).fetchall()
-    return {str(row[0] if not isinstance(row, sqlite3.Row) else row["module_key"]) for row in rows}
+    return {str(row_get(row, "module_key", row_get(row, 0))) for row in rows}
 
 
 def refresh_branch_module_grants_for_type_change(
@@ -6723,22 +6656,7 @@ def update_company_branch(
     if not row:
         return {"ok": False, "reason": "Branch not found."}
 
-    if isinstance(row, sqlite3.Row):
-        current = dict(row)
-    else:
-        current = {
-            "branch_id": row[0],
-            "branch_name": row[1],
-            "branch_code": row[2],
-            "location": row[3],
-            "branch_type": row[4],
-            "branch_access_key": row[5],
-            "manager_user_id": row[6],
-            "branch_manager": row[7],
-            "is_active": row[8],
-            "deployment_status": row[9],
-            "branch_tier": row[10],
-        }
+    current = dict(row_to_dict(row))
 
     old_type_key = _normalize_branch_type_key(current.get("branch_type"))
     old_active = int(current.get("is_active") or 0)
@@ -6887,18 +6805,7 @@ def list_company_staff_for_assignment(conn, company_key):
     ).fetchall()
     staff = []
     for row in rows:
-        if isinstance(row, sqlite3.Row):
-            entry = dict(row)
-        else:
-            entry = {
-                "id": row[0],
-                "user_id": row[1],
-                "full_name": row[2],
-                "role": row[3],
-                "branch_id": row[4],
-                "status": row[5],
-                "login_key": row[6],
-            }
+        entry = dict(row_to_dict(row))
         user_pk = entry.get("id")
         full_name = str(entry.get("full_name") or "").strip()
         role = str(entry.get("role") or "").strip()
@@ -6945,7 +6852,7 @@ def update_company_staff_branch_assignment(
     ).fetchone()
     if not row:
         return {"ok": False, "reason": "User not found."}
-    user_role = row[1] if not isinstance(row, sqlite3.Row) else row["role"]
+    user_role = row_get(row, "role", row_get(row, 1))
     if str(user_role or "").strip() in PRIVILEGED_COMPANY_USER_ROLES:
         return {"ok": False, "reason": "Privileged users cannot be reassigned from staff administration."}
 

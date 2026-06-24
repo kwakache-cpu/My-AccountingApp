@@ -760,6 +760,7 @@ from database import (
     ensure_inventory_schema_integrity,
     ensure_stock_movements_schema_integrity,
     ensure_pos_sales_schema,
+    fetch_scalar,
     force_backup_after_company_creation,
     get_firebase_service_account_info,
     get_connection,
@@ -2224,10 +2225,12 @@ def get_master_price_per_month():
     conn = None
     try:
         conn = get_connection()
-        row = conn.execute(
-            "SELECT master_price_per_month FROM system_settings WHERE id = 1"
+        row = execute_portable_query(
+            conn,
+            "SELECT master_price_per_month FROM system_settings WHERE id = 1",
         ).fetchone()
-        return float(row[0]) if row and row[0] is not None else 500.0
+        value = row_get(row, "master_price_per_month", row_get(row, 0))
+        return float(value) if row and value is not None else 500.0
     except Exception as exc:
         logger.warning("Falling back to default master price: %s", sanitize_error_message(exc))
         return 500.0
@@ -3230,11 +3233,12 @@ def is_period_locked(company_key, entry_date, conn=None):
     if conn is None:
         return False
     try:
-        period_columns = {row[1] for row in conn.execute("PRAGMA table_info(accounting_periods)").fetchall()}
+        period_columns = {column["name"] for column in list_columns(conn, "accounting_periods")}
         status_clause = ""
         if "status" in period_columns:
             status_clause = " OR lower(COALESCE(status, 'Open')) IN ('closed', 'locked')"
-        row = conn.execute(
+        row = execute_portable_query(
+            conn,
             f"""
             SELECT 1
             FROM accounting_periods
@@ -4576,7 +4580,8 @@ def show_debtors_by_city_report(company_key):
     conn = None
     try:
         conn = get_connection()
-        city_rows = conn.execute(
+        city_rows = execute_portable_query(
+            conn,
             """
             SELECT DISTINCT COALESCE(NULLIF(city_region, ''), 'Unassigned') AS city_region
             FROM counterparties
@@ -4585,7 +4590,10 @@ def show_debtors_by_city_report(company_key):
             """,
             (company_key,),
         ).fetchall()
-        city_options = ["All Cities"] + [row[0] for row in city_rows]
+        city_options = ["All Cities"] + [
+            str(row_get(row, "city_region", row_get(row, 0)) or "")
+            for row in city_rows
+        ]
         selected_city = st.selectbox("Filter by City / Region", city_options, key=f"debtor_city_{company_key}")
 
         customer_balance_map = {row["name"]: float(row["balance"] or 0.0) for row in get_customer_balances(company_key, conn=conn)}
@@ -8073,21 +8081,25 @@ def _import_sales_from_excel(conn, company_key, doc_type, file_obj, created_by):
 def get_financial_metrics():
     conn = get_connection()
     try:
-        revenue = conn.execute(
-            "SELECT COALESCE(SUM(amount), 0) FROM sales_invoices WHERE status = 'Paid'"
-        ).fetchone()[0] or 0.0
-        payables = conn.execute(
+        revenue = fetch_scalar(
+            conn,
+            "SELECT COALESCE(SUM(amount), 0) FROM sales_invoices WHERE status = 'Paid'",
+            default=0.0,
+        ) or 0.0
+        payables = fetch_scalar(
+            conn,
             """
             SELECT COALESCE(SUM(jl.credit - jl.debit), 0)
             FROM journal_entries je
             JOIN journal_lines jl ON jl.entry_id = je.id
             JOIN chart_of_accounts c ON c.id = jl.account_id
             WHERE lower(COALESCE(NULLIF(c.name, ''), NULLIF(c.account_name, ''), '')) LIKE 'accounts payable%'
-            """
-        ).fetchone()[0] or 0.0
+            """,
+            default=0.0,
+        ) or 0.0
         has_data = (
-            (conn.execute("SELECT COUNT(*) FROM sales_invoices").fetchone()[0] or 0)
-            + (conn.execute("SELECT COUNT(*) FROM bills").fetchone()[0] or 0)
+            (fetch_scalar(conn, "SELECT COUNT(*) FROM sales_invoices", default=0) or 0)
+            + (fetch_scalar(conn, "SELECT COUNT(*) FROM bills", default=0) or 0)
         ) > 0
     finally:
         conn.close()
@@ -8122,10 +8134,12 @@ def get_demo_financial_metrics():
 def get_system_health_snapshot():
     conn = get_connection()
     try:
-        company_count = conn.execute("SELECT COUNT(*) FROM companies").fetchone()[0] or 0
-        active_licenses = conn.execute(
-            "SELECT COUNT(*) FROM companies WHERE status = 'Active'"
-        ).fetchone()[0] or 0
+        company_count = fetch_scalar(conn, "SELECT COUNT(*) FROM companies", default=0) or 0
+        active_licenses = fetch_scalar(
+            conn,
+            "SELECT COUNT(*) FROM companies WHERE status = 'Active'",
+            default=0,
+        ) or 0
         db_status = "Online"
     except Exception:
         company_count = 0
@@ -15231,20 +15245,25 @@ def _statement_export_buttons(statement_key, title, dataframe, summary_lines):
 
 
 def _get_reports_data(conn, company_key):
-    inventory_value = conn.execute(
+    inventory_value = fetch_scalar(
+        conn,
         "SELECT COALESCE(SUM(qty * cost_price), 0) FROM inventory WHERE company_key = ?",
         (company_key,),
-    ).fetchone()[0] or 0.0
-    asset_value = conn.execute(
+        default=0.0,
+    ) or 0.0
+    asset_value = fetch_scalar(
+        conn,
         """
         SELECT COALESCE(SUM(COALESCE(book_value, opening_book_value, cost, 0)), 0)
         FROM fixed_assets
         WHERE company_key = ? AND COALESCE(status, 'Active') != 'Disposed'
         """,
         (company_key,),
-    ).fetchone()[0] or 0.0
+        default=0.0,
+    ) or 0.0
     cash_on_hand = get_account_total(company_key, "Cash", balance_side="debit", conn=conn)
-    accounts_payable = conn.execute(
+    accounts_payable = fetch_scalar(
+        conn,
         """
         SELECT COALESCE(SUM(jl.credit - jl.debit), 0)
         FROM journal_entries je
@@ -15254,26 +15273,31 @@ def _get_reports_data(conn, company_key):
           AND lower(COALESCE(NULLIF(c.name, ''), NULLIF(c.account_name, ''), '')) LIKE 'accounts payable%'
         """,
         (company_key,),
-    ).fetchone()[0] or 0.0
+        default=0.0,
+    ) or 0.0
     outstanding_loans = get_account_total(company_key, "Loans Payable", balance_side="credit", conn=conn)
     total_revenue = get_account_total(company_key, "Sales", balance_side="credit", conn=conn)
     total_expenses = get_account_total(company_key, "Expense", balance_side="debit", conn=conn)
-    payroll_total = conn.execute(
+    payroll_total = fetch_scalar(
+        conn,
         """
         SELECT COALESCE(SUM(net_salary), 0)
         FROM payroll
         WHERE company_key = ? AND COALESCE(status, 'Active') != 'Void'
         """,
         (company_key,),
-    ).fetchone()[0] or 0.0
-    asset_purchases = conn.execute(
+        default=0.0,
+    ) or 0.0
+    asset_purchases = fetch_scalar(
+        conn,
         """
         SELECT COALESCE(SUM(cost), 0)
         FROM fixed_assets
         WHERE company_key = ? AND COALESCE(status, 'Active') != 'Void'
         """,
         (company_key,),
-    ).fetchone()[0] or 0.0
+        default=0.0,
+    ) or 0.0
     asset_sales = get_account_total(company_key, "Fixed Assets", balance_side="credit", conn=conn)
     journal_activity = get_recent_accounting_activity(company_key, limit=200, conn=conn)
     sales_rows = [
@@ -16139,13 +16163,15 @@ def show_dashboard(company_key, company_name, role):
         branch_label = active_branch_id
         try:
             conn = get_connection()
-            branch_row = conn.execute(
+            branch_row = execute_portable_query(
+                conn,
                 "SELECT branch_name FROM branches WHERE company_key = ? AND branch_id = ?",
                 (company_key, active_branch_id),
             ).fetchone()
             conn.close()
-            if branch_row and branch_row[0]:
-                branch_label = f"{branch_row[0]} ({active_branch_id})"
+            branch_name = row_get(branch_row, "branch_name", row_get(branch_row, 0))
+            if branch_row and branch_name:
+                branch_label = f"{branch_name} ({active_branch_id})"
         except Exception:
             pass
         st.caption(f"Branch context: {branch_label}")
@@ -16702,7 +16728,7 @@ def show_audit_trail(company_key, role="User", branch_id=None):
         return
     try:
         conn = get_connection()
-        audit_columns = {row[1] for row in conn.execute("PRAGMA table_info(audit_logs)").fetchall()}
+        audit_columns = {column["name"] for column in list_columns(conn, "audit_logs")}
         action_type_expr = "COALESCE(NULLIF(action_type, ''), 'legacy')" if "action_type" in audit_columns else "'legacy'"
         document_ref_expr = "COALESCE(document_ref, '')" if "document_ref" in audit_columns else "''"
         if company_key == "ADMIN" or company_key == "DEMO":
@@ -16834,7 +16860,8 @@ def _branch_display_code(branch):
 def _render_branch_internal_id_diagnostics(conn, company_key, role):
     if _normalize_role_name(role) != "Dev":
         return
-    rows = conn.execute(
+    rows = execute_portable_query(
+        conn,
         """
         SELECT branch_name,
                COALESCE(NULLIF(TRIM(branch_code), ''), branch_name, branch_id) AS branch_code,
@@ -16853,9 +16880,9 @@ def _render_branch_internal_id_diagnostics(conn, company_key, role):
             pd.DataFrame(
                 [
                     {
-                        "Branch Name": row[0],
-                        "Branch Code": row[1],
-                        "Internal branch_id": row[2],
+                        "Branch Name": row_get(row, "branch_name", row_get(row, 0)),
+                        "Branch Code": row_get(row, "branch_code", row_get(row, 1)),
+                        "Internal branch_id": row_get(row, "branch_id", row_get(row, 2)),
                     }
                     for row in rows
                 ]
@@ -17031,12 +17058,13 @@ def _resolve_branch_manager_session_branch(user, company_key):
             return None
         conn = get_connection()
         try:
-            row = conn.execute(
+            row = execute_portable_query(
+                conn,
                 "SELECT branch_id FROM branches WHERE company_key = ? AND manager_user_id = ?",
                 (company_key, user.get("user_id")),
             ).fetchone()
             if row:
-                return str(row[0])
+                return str(row_get(row, "branch_id", row_get(row, 0)))
         except Exception:
             pass
         finally:
@@ -17055,7 +17083,8 @@ def _render_branch_users_panel(company_key, branch_id, role, *, panel_key_prefix
         conn = get_connection()
     company_admin = is_company_branch_admin(role)
     try:
-        branch_row = conn.execute(
+        branch_row = execute_portable_query(
+            conn,
             """
             SELECT branch_name,
                    COALESCE(NULLIF(TRIM(branch_code), ''), branch_name, branch_id) AS branch_code
@@ -17064,8 +17093,8 @@ def _render_branch_users_panel(company_key, branch_id, role, *, panel_key_prefix
             """,
             (company_key, branch_id),
         ).fetchone()
-        branch_label = branch_row[0] if branch_row else branch_id
-        branch_code = branch_row[1] if branch_row else branch_id
+        branch_label = row_get(branch_row, "branch_name", row_get(branch_row, 0, branch_id)) if branch_row else branch_id
+        branch_code = row_get(branch_row, "branch_code", row_get(branch_row, 1, branch_id)) if branch_row else branch_id
         st.subheader(f"Branch Users — {branch_label}")
         st.caption(f"Branch Code: {branch_code}")
 
@@ -17341,14 +17370,16 @@ def _render_staff_assignment_tab(company_key, role):
     conn = get_connection()
     try:
         ensure_branch_licensing_schema_integrity(conn)
-        branches = conn.execute(
+        branches = execute_portable_query(
+            conn,
             "SELECT branch_id, branch_name FROM branches WHERE company_key = ? ORDER BY branch_name",
             (company_key,),
         ).fetchall()
-        branch_keys = [""] + [row[0] for row in branches]
+        branch_keys = [""] + [row_get(row, "branch_id", row_get(row, 0)) for row in branches]
         branch_options = {"": "Unassigned"}
         for row in branches:
-            branch_options[row[0]] = row[1]
+            branch_id_value = row_get(row, "branch_id", row_get(row, 0))
+            branch_options[branch_id_value] = row_get(row, "branch_name", row_get(row, 1))
         staff_rows = list_company_staff_for_assignment(conn, company_key)
         if not staff_rows:
             st.info(
@@ -17733,15 +17764,19 @@ def show_branch_management(company_key, role):
             branch_conn = get_connection()
             try:
                 ensure_branch_licensing_schema_integrity(branch_conn)
-                branch_rows = branch_conn.execute(
+                branch_rows = execute_portable_query(
+                    branch_conn,
                     "SELECT branch_id, branch_name FROM branches WHERE company_key = ? ORDER BY branch_name",
                     (company_key,),
                 ).fetchall()
                 if not branch_rows:
                     st.info("Create a branch before managing branch users.")
                 else:
-                    branch_ids = [row[0] for row in branch_rows]
-                    branch_name_map = {row[0]: row[1] for row in branch_rows}
+                    branch_ids = [row_get(row, "branch_id", row_get(row, 0)) for row in branch_rows]
+                    branch_name_map = {
+                        row_get(row, "branch_id", row_get(row, 0)): row_get(row, "branch_name", row_get(row, 1))
+                        for row in branch_rows
+                    }
                     selected_branch_id = st.selectbox(
                         "Select branch",
                         branch_ids,
@@ -17772,7 +17807,8 @@ def _render_branch_performance_tab(company_key, role):
     st.subheader("Branch Performance Comparison")
     conn = get_connection()
     try:
-        branches = conn.execute(
+        branches = execute_portable_query(
+            conn,
             """
             SELECT branch_id, branch_name,
                    COALESCE(NULLIF(TRIM(branch_code), ''), branch_name, branch_id) AS branch_code
@@ -17782,8 +17818,11 @@ def _render_branch_performance_tab(company_key, role):
             """,
             (company_key,),
         ).fetchall()
-        branch_options = [b[1] for b in branches]
-        branch_code_map = {b[0]: b[2] for b in branches}
+        branch_options = [row_get(row, "branch_name", row_get(row, 1)) for row in branches]
+        branch_code_map = {
+            row_get(row, "branch_id", row_get(row, 0)): row_get(row, "branch_code", row_get(row, 2))
+            for row in branches
+        }
         if len(branches) < 2:
             st.info("At least two branches are required for comparison.")
             return
