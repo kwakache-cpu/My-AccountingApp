@@ -12,12 +12,15 @@ from database import (
     execute_write_transaction,
     ensure_insert_sql_returning,
     fetch_scalar,
+    get_active_db_backend,
     get_connection,
     get_inserted_id,
     list_columns,
+    list_tables,
     log_audit_action as database_log_audit_action,
     row_get,
     rows_to_dicts,
+    sql_year_month_equals,
     with_retry_on_lock,
 )
 
@@ -619,8 +622,13 @@ def get_finance_integrity_diagnostics(company_key, as_of_date=None, branch_id=No
             2,
         )
         inventory_query, inventory_params = _inventory_value_query(conn, company_key, branch_id=branch_id)
-        inventory_row = conn.execute(inventory_query, inventory_params).fetchone()
-        inventory_subledger_total = round(float(inventory_row["inventory_value"] or 0.0), 2) if inventory_row else 0.0
+        inventory_subledger_total = round(
+            float(
+                fetch_scalar(conn, inventory_query, inventory_params, default=0.0)
+                or 0.0
+            ),
+            2,
+        )
         inventory_gl_balance = round(
             float(
                 get_account_total(
@@ -634,7 +642,8 @@ def get_finance_integrity_diagnostics(company_key, as_of_date=None, branch_id=No
             ),
             2,
         )
-        unbalanced_journal_rows = conn.execute(
+        unbalanced_journal_rows = execute_portable_query(
+            conn,
             """
             SELECT je.id
             FROM journal_entries je
@@ -649,7 +658,8 @@ def get_finance_integrity_diagnostics(company_key, as_of_date=None, branch_id=No
             tuple([company_key] + ([branch_id] if branch_id else [])),
         ).fetchall()
         orphaned_journal_refs = []
-        source_rows = conn.execute(
+        source_rows = execute_portable_query(
+            conn,
             """
             SELECT id, source_table, source_id, reference
             FROM journal_entries
@@ -663,25 +673,23 @@ def get_finance_integrity_diagnostics(company_key, as_of_date=None, branch_id=No
             """.format(branch_clause="AND branch_id = ?" if branch_id else ""),
             tuple([company_key] + ([branch_id] if branch_id else [])),
         ).fetchall()
+        known_tables = {table_name.lower() for table_name in list_tables(conn)}
         for row in source_rows:
-            source_table = str(row["source_table"] or "").strip().lower()
-            source_id = int(row["source_id"])
-            exists = conn.execute(
-                "SELECT name FROM sqlite_master WHERE type='table' AND name = ?",
-                (source_table,),
-            ).fetchone()
-            if not exists:
+            source_table = str(row_get(row, "source_table", "") or "").strip().lower()
+            source_id = int(row_get(row, "source_id", 0) or 0)
+            if source_table not in known_tables:
                 orphaned_journal_refs.append(
-                    {"entry_id": int(row["id"]), "source_table": source_table, "source_id": source_id, "reason": "source table missing"}
+                    {"entry_id": int(row_get(row, "id", 0) or 0), "source_table": source_table, "source_id": source_id, "reason": "source table missing"}
                 )
                 continue
-            source_match = conn.execute(
+            source_match = execute_portable_query(
+                conn,
                 f"SELECT id FROM {source_table} WHERE id = ? LIMIT 1",
                 (source_id,),
             ).fetchone()
             if not source_match:
                 orphaned_journal_refs.append(
-                    {"entry_id": int(row["id"]), "source_table": source_table, "source_id": source_id, "reason": "source document missing"}
+                    {"entry_id": int(row_get(row, "id", 0) or 0), "source_table": source_table, "source_id": source_id, "reason": "source document missing"}
                 )
 
         source_document_mismatches = _resolve_source_document_mismatches(conn, company_key, branch_id=branch_id)
@@ -1903,9 +1911,9 @@ def get_account_total(company_key, account_name_like, start_date=None, end_date=
         if branch_id:
             query += " AND je.branch_id = ?"
             params.append(branch_id)
-        row = conn.execute(query, tuple(params)).fetchone()
-        debit_total = round(float(row["debit_total"] or 0.0), 2) if row else 0.0
-        credit_total = round(float(row["credit_total"] or 0.0), 2) if row else 0.0
+        row = execute_portable_query(conn, query, tuple(params)).fetchone()
+        debit_total = round(float(row_get(row, "debit_total", 0) or 0.0), 2)
+        credit_total = round(float(row_get(row, "credit_total", 0) or 0.0), 2)
         if balance_side == "debit":
             return round(debit_total - credit_total, 2)
         if balance_side == "credit":
@@ -1918,27 +1926,26 @@ def get_account_total(company_key, account_name_like, start_date=None, end_date=
 
 def get_month_sales_total(company_key, year_month=None, branch_id=None, conn=None):
     period_value = str(year_month or datetime.now().strftime("%Y-%m")).strip()
-    start_date = f"{period_value}-01"
     owns_connection = conn is None
     conn = conn or get_connection()
     try:
-        query = """
+        month_predicate = sql_year_month_equals("je.date", backend=get_active_db_backend())
+        query = f"""
             SELECT COALESCE(SUM(jl.credit), 0) AS sales_total
             FROM journal_entries je
             JOIN journal_lines jl ON jl.entry_id = je.id
             JOIN chart_of_accounts c ON c.id = jl.account_id
             WHERE je.company_key = ?
-              AND strftime('%Y-%m', je.date) = ?
-              AND lower(COALESCE(NULLIF(c.name, ''), NULLIF(c.account_name, ''), '')) LIKE 'sales%'
+              AND {month_predicate}
+              AND lower(COALESCE(NULLIF(c.name, ''), NULLIF(c.account_name, ''), '')) LIKE lower(?)
               AND COALESCE(je.is_voided, 0) = 0
               AND COALESCE(je.approval_status, 'Posted') = 'Posted'
         """
-        params = [company_key, period_value]
+        params = [company_key, period_value, "sales%"]
         if branch_id:
             query += " AND je.branch_id = ?"
             params.append(branch_id)
-        row = conn.execute(query, tuple(params)).fetchone()
-        return round(float(row["sales_total"] or 0.0), 2) if row else 0.0
+        return round(float(fetch_scalar(conn, query, tuple(params), default=0.0) or 0.0), 2)
     finally:
         if owns_connection and conn:
             conn.close()
@@ -2277,7 +2284,8 @@ def get_ar_aging_report(company_key, as_of_date=None):
             gl_balance = get_customer_balance(company_key, customer_id, as_of_date=report_date.date(), conn=conn)
             customer_label = row_get(customer, "customer_id") or f"CUST-{customer_id:06d}"
             document_remaining_total = 0.0
-            invoice_rows = conn.execute(
+            invoice_rows = execute_portable_query(
+                conn,
                 """
                 SELECT
                     i.id,
@@ -2328,24 +2336,24 @@ def get_ar_aging_report(company_key, as_of_date=None):
                 ),
             ).fetchall()
             for invoice in invoice_rows:
-                original_amount = round(float(invoice["original_amount"] or 0.0), 2)
-                paid_amount = round(float(invoice["paid_amount"] or 0.0), 2)
+                original_amount = round(float(row_get(invoice, "original_amount", 0) or 0.0), 2)
+                paid_amount = round(float(row_get(invoice, "paid_amount", 0) or 0.0), 2)
                 remaining = round(original_amount - paid_amount, 2)
                 if remaining <= 0.005:
                     continue
-                due_date = pd.Timestamp(invoice["due_date"] or invoice["invoice_date"] or report_date)
+                due_date = pd.Timestamp(row_get(invoice, "due_date") or row_get(invoice, "invoice_date") or report_date)
                 days_overdue = max(int((report_date - due_date).days), 0)
                 document_remaining_total = round(document_remaining_total + remaining, 2)
                 rows.append(
                     {
                         "customer_id": customer_label,
-                        "customer_name": customer["name"],
+                        "customer_name": row_get(customer, "name"),
                         "document_type": "Invoice",
-                        "document_number": invoice["invoice_number"] or f"INV-{int(invoice['id'])}",
-                        "document_date": invoice["invoice_date"],
-                        "due_date": invoice["due_date"],
-                        "phone": customer["phone"],
-                        "email": customer["email"],
+                        "document_number": row_get(invoice, "invoice_number") or f"INV-{int(row_get(invoice, 'id', 0))}",
+                        "document_date": row_get(invoice, "invoice_date"),
+                        "due_date": row_get(invoice, "due_date"),
+                        "phone": row_get(customer, "phone"),
+                        "email": row_get(customer, "email"),
                         "original_amount": original_amount,
                         "paid_amount": paid_amount,
                         "remaining_balance": remaining,
@@ -2357,7 +2365,8 @@ def get_ar_aging_report(company_key, as_of_date=None):
                 )
             legacy_balance = round(gl_balance - document_remaining_total, 2)
             if abs(legacy_balance) >= 0.005:
-                oldest_row = conn.execute(
+                oldest_row = execute_portable_query(
+                    conn,
                     f"""
                     SELECT MIN(date(je.date)) AS oldest_open_date
                     FROM journal_entries je
@@ -2366,25 +2375,25 @@ def get_ar_aging_report(company_key, as_of_date=None):
                     WHERE je.company_key = ?
                       AND je.customer_id = ?
                       AND jl.debit > 0
-                      AND lower({_coa_name_expression()}) LIKE 'accounts receivable%'
+                      AND lower({_coa_name_expression()}) LIKE lower(?)
                       AND date(je.date) <= date(?)
                       AND COALESCE(je.is_voided, 0) = 0
                       AND COALESCE(je.approval_status, 'Posted') = 'Posted'
                     """,
-                    (company_key, customer_id, _resolve_date(report_date.date())),
+                    (company_key, customer_id, "accounts receivable%", _resolve_date(report_date.date())),
                 ).fetchone()
-                oldest_date = pd.Timestamp(oldest_row["oldest_open_date"]) if oldest_row and oldest_row["oldest_open_date"] else report_date
+                oldest_date = pd.Timestamp(row_get(oldest_row, "oldest_open_date")) if oldest_row and row_get(oldest_row, "oldest_open_date") else report_date
                 days = max(int((report_date - oldest_date).days), 0)
                 rows.append(
                     {
                         "customer_id": customer_label,
-                        "customer_name": customer["name"],
+                        "customer_name": row_get(customer, "name"),
                         "document_type": "Legacy / Unallocated",
                         "document_number": "Unallocated AR Balance",
                         "document_date": oldest_date.date().isoformat() if hasattr(oldest_date, "date") else str(oldest_date),
                         "due_date": oldest_date.date().isoformat() if hasattr(oldest_date, "date") else str(oldest_date),
-                        "phone": customer["phone"],
-                        "email": customer["email"],
+                        "phone": row_get(customer, "phone"),
+                        "email": row_get(customer, "email"),
                         "original_amount": round(legacy_balance, 2),
                         "paid_amount": 0.0,
                         "remaining_balance": round(legacy_balance, 2),
@@ -2403,22 +2412,23 @@ def get_supplier_balance(company_key, supplier_id, as_of_date=None, conn=None):
     owns_connection = conn is None
     conn = conn or get_connection()
     try:
-        row = conn.execute(
-            f"""
+        query = f"""
             SELECT COALESCE(SUM(jl.credit - jl.debit), 0) AS balance
             FROM journal_entries je
             JOIN journal_lines jl ON jl.entry_id = je.id
             JOIN chart_of_accounts c ON c.id = jl.account_id
             WHERE je.company_key = ?
               AND je.supplier_id = ?
-              AND lower({_coa_name_expression()}) LIKE 'accounts payable%'
+              AND lower({_coa_name_expression()}) LIKE lower(?)
               AND COALESCE(je.is_voided, 0) = 0
               AND COALESCE(je.approval_status, 'Posted') = 'Posted'
-              {"AND date(je.date) <= date(?)" if as_of_date else ""}
-            """,
-            (company_key, int(supplier_id), _resolve_date(as_of_date)) if as_of_date else (company_key, int(supplier_id)),
-        ).fetchone()
-        return round(float(row["balance"] or 0.0), 2) if row else 0.0
+        """
+        params = [company_key, int(supplier_id), "accounts payable%"]
+        if as_of_date:
+            query += " AND date(je.date) <= date(?)"
+            params.append(_resolve_date(as_of_date))
+        balance = fetch_scalar(conn, query, tuple(params), default=0.0)
+        return round(float(balance or 0.0), 2)
     finally:
         if owns_connection and conn:
             conn.close()
@@ -2922,22 +2932,23 @@ def get_customer_balance(company_key, customer_id, as_of_date=None, conn=None):
     owns_connection = conn is None
     conn = conn or get_connection()
     try:
-        row = conn.execute(
-            f"""
+        query = f"""
             SELECT COALESCE(SUM(jl.debit - jl.credit), 0) AS balance
             FROM journal_entries je
             JOIN journal_lines jl ON jl.entry_id = je.id
             JOIN chart_of_accounts c ON c.id = jl.account_id
             WHERE je.company_key = ?
               AND je.customer_id = ?
-              AND lower({_coa_name_expression()}) LIKE 'accounts receivable%'
+              AND lower({_coa_name_expression()}) LIKE lower(?)
               AND COALESCE(je.is_voided, 0) = 0
               AND COALESCE(je.approval_status, 'Posted') = 'Posted'
-              { "AND date(je.date) <= date(?)" if as_of_date else "" }
-            """,
-            (company_key, int(customer_id), _resolve_date(as_of_date)) if as_of_date else (company_key, int(customer_id)),
-        ).fetchone()
-        return round(float(row["balance"] or 0.0), 2) if row else 0.0
+        """
+        params = [company_key, int(customer_id), "accounts receivable%"]
+        if as_of_date:
+            query += " AND date(je.date) <= date(?)"
+            params.append(_resolve_date(as_of_date))
+        balance = fetch_scalar(conn, query, tuple(params), default=0.0)
+        return round(float(balance or 0.0), 2)
     finally:
         if owns_connection and conn:
             conn.close()
