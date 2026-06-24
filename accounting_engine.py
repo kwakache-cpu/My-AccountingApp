@@ -11,6 +11,7 @@ from database import (
     execute_portable_query,
     execute_write_transaction,
     ensure_insert_sql_returning,
+    fetch_scalar,
     get_connection,
     get_inserted_id,
     list_columns,
@@ -209,14 +210,12 @@ def _sync_source_document_posting(conn, source_table, source_id, entry_id, posti
 def _period_locked(conn, company_key, entry_date):
     if not company_key or not entry_date:
         return False
-    period_columns = {
-        row[1]
-        for row in conn.execute("PRAGMA table_info(accounting_periods)").fetchall()
-    }
+    period_columns = {column["name"] for column in list_columns(conn, "accounting_periods")}
     status_clause = ""
     if "status" in period_columns:
         status_clause = " OR lower(COALESCE(status, 'Open')) IN ('closed', 'locked')"
-    row = conn.execute(
+    row = execute_portable_query(
+        conn,
         f"""
         SELECT 1
         FROM accounting_periods
@@ -238,13 +237,11 @@ def get_period_control_diagnostics(company_key, as_of_date=None, conn=None):
     owns_connection = conn is None
     conn = conn or get_connection()
     try:
-        period_columns = {
-            row[1]
-            for row in conn.execute("PRAGMA table_info(accounting_periods)").fetchall()
-        }
+        period_columns = {column["name"] for column in list_columns(conn, "accounting_periods")}
         has_status = "status" in period_columns
         current_period = _period_label_for_date(as_of_date or datetime.now().date())
-        rows = conn.execute(
+        rows = execute_portable_query(
+            conn,
             """
             SELECT period_label,
                    start_date,
@@ -263,23 +260,23 @@ def get_period_control_diagnostics(company_key, as_of_date=None, conn=None):
         normalized_rows = []
         current_status = "Open"
         for row in rows:
-            status = str(row["status"] or "Open").strip().title()
-            if bool(int(row["is_locked"] or 0)):
+            status = str(row_get(row, "status", "Open") or "Open").strip().title()
+            if bool(int(row_get(row, "is_locked", 0) or 0)):
                 status = "Locked"
             if status not in period_counts:
                 status = "Open"
             period_counts[status] += 1
             item = {
-                "period_label": row["period_label"],
-                "start_date": row["start_date"],
-                "end_date": row["end_date"],
+                "period_label": row_get(row, "period_label"),
+                "start_date": row_get(row, "start_date"),
+                "end_date": row_get(row, "end_date"),
                 "status": status,
-                "is_locked": bool(int(row["is_locked"] or 0)),
-                "locked_at": row["locked_at"],
-                "locked_by": row["locked_by"],
+                "is_locked": bool(int(row_get(row, "is_locked", 0) or 0)),
+                "locked_at": row_get(row, "locked_at"),
+                "locked_by": row_get(row, "locked_by"),
             }
             normalized_rows.append(item)
-            if str(row["period_label"]) == current_period:
+            if str(row_get(row, "period_label")) == current_period:
                 current_status = status
         warnings = []
         if not has_status:
@@ -397,7 +394,7 @@ def _coa_code_expression():
 
 
 def _inventory_value_query(conn, company_key, branch_id=None):
-    inventory_columns = {row[1] for row in conn.execute("PRAGMA table_info(inventory)").fetchall()}
+    inventory_columns = {column["name"] for column in list_columns(conn, "inventory")}
     query = """
         SELECT COALESCE(SUM(COALESCE(qty, 0) * COALESCE(cost_price, 0)), 0) AS inventory_value
         FROM inventory
@@ -1569,14 +1566,30 @@ def allocate_payment(payment_id, invoice_id=None, bill_id=None, amount=None, cre
             invoice = conn.execute("SELECT amount FROM invoices WHERE id = ?", (invoice_id,)).fetchone()
             if not invoice:
                 raise ValueError(f"Invoice {invoice_id} does not exist.")
-            outstanding = float(invoice["amount"] or 0.0) - float(conn.execute("SELECT COALESCE(SUM(amount), 0) FROM payment_allocations WHERE invoice_id = ?", (invoice_id,)).fetchone()[0] or 0.0)
+            outstanding = float(invoice["amount"] or 0.0) - float(
+                fetch_scalar(
+                    conn,
+                    "SELECT COALESCE(SUM(amount), 0) FROM payment_allocations WHERE invoice_id = ?",
+                    (invoice_id,),
+                    default=0.0,
+                )
+                or 0.0
+            )
             if amount > outstanding:
                 raise ValueError(f"Allocation amount exceeds outstanding invoice balance ({outstanding:.2f}).")
         if bill_id:
             bill = conn.execute("SELECT amount FROM bills WHERE id = ?", (bill_id,)).fetchone()
             if not bill:
                 raise ValueError(f"Bill {bill_id} does not exist.")
-            outstanding = float(bill["amount"] or 0.0) - float(conn.execute("SELECT COALESCE(SUM(amount), 0) FROM payment_allocations WHERE bill_id = ?", (bill_id,)).fetchone()[0] or 0.0)
+            outstanding = float(bill["amount"] or 0.0) - float(
+                fetch_scalar(
+                    conn,
+                    "SELECT COALESCE(SUM(amount), 0) FROM payment_allocations WHERE bill_id = ?",
+                    (bill_id,),
+                    default=0.0,
+                )
+                or 0.0
+            )
             if amount > outstanding:
                 raise ValueError(f"Allocation amount exceeds outstanding bill balance ({outstanding:.2f}).")
 
