@@ -1466,6 +1466,46 @@ def convert_placeholders_for_backend(sql, backend=None, *, strict_quoted_literal
     return "".join(converted)
 
 
+def escape_postgres_percent_literals(sql):
+    """Escape literal `%` tokens for psycopg2 while preserving `%s` bind placeholders."""
+    normalized = str(sql or "")
+    if "%" not in normalized:
+        return normalized
+    converted = []
+    index = 0
+    length = len(normalized)
+    while index < length:
+        if normalized[index] == "%":
+            if index + 1 < length and normalized[index + 1] == "s":
+                converted.append("%s")
+                index += 2
+                continue
+            converted.append("%%")
+            index += 1
+            continue
+        converted.append(normalized[index])
+        index += 1
+    return "".join(converted)
+
+
+def prepare_postgres_executable_sql(sql, backend=None):
+    backend = _normalize_db_backend(backend or get_active_db_backend())
+    normalized = str(sql or "")
+    if backend != "postgres":
+        return normalized
+    converted = convert_placeholders_for_backend(normalized, backend=backend)
+    return escape_postgres_percent_literals(converted)
+
+
+def sql_year_month_equals(column_sql, backend=None):
+    """Return a portable year-month equality predicate using `?` placeholders."""
+    backend = _normalize_db_backend(backend or get_active_db_backend())
+    column_expr = str(column_sql or "").strip() or "date"
+    if backend == "postgres":
+        return f"to_char(CAST({column_expr} AS date), 'YYYY-MM') = ?"
+    return f"strftime('%Y-%m', {column_expr}) = ?"
+
+
 class CompatibleRow(dict):
     """Dict-like row that also preserves positional access for legacy callers."""
 
@@ -1602,12 +1642,15 @@ def execute_portable_query(conn, sql, params=(), backend=None):
     if conn is None:
         raise ValueError("A database connection is required for execute_portable_query().")
     backend = _normalize_db_backend(backend or get_active_db_backend())
-    executable_sql = (
-        convert_placeholders_for_backend(sql, backend=backend)
-        if backend == "postgres"
-        else str(sql or "")
-    )
-    cursor = conn.execute(executable_sql, params)
+    if backend == "postgres" and hasattr(conn, "_execute_prepared"):
+        cursor = conn._execute_prepared(sql, params or (), backend=backend)
+    else:
+        executable_sql = (
+            prepare_postgres_executable_sql(sql, backend=backend)
+            if backend == "postgres"
+            else str(sql or "")
+        )
+        cursor = conn.execute(executable_sql, params or ())
     if isinstance(cursor, PortableCursorResult):
         return cursor
     return PortableCursorResult(cursor) if getattr(cursor, "description", None) else cursor
@@ -1622,8 +1665,10 @@ def execute_portable_write(conn, sql, params=(), backend=None):
     if conn is None:
         raise ValueError("A database connection is required for execute_portable_write().")
     backend = _normalize_db_backend(backend or get_active_db_backend())
+    if backend == "postgres" and hasattr(conn, "_execute_prepared"):
+        return conn._execute_prepared(sql, params or (), backend=backend)
     executable_sql = (
-        convert_placeholders_for_backend(sql, backend=backend)
+        prepare_postgres_executable_sql(sql, backend=backend)
         if backend == "postgres"
         else str(sql or "")
     )
@@ -1640,7 +1685,7 @@ def executemany_portable_write(conn, sql, seq_of_params, backend=None):
         raise ValueError("A database connection is required for executemany_portable_write().")
     backend = _normalize_db_backend(backend or get_active_db_backend())
     executable_sql = (
-        convert_placeholders_for_backend(sql, backend=backend)
+        prepare_postgres_executable_sql(sql, backend=backend)
         if backend == "postgres"
         else str(sql or "")
     )
@@ -8376,10 +8421,14 @@ class PostgresManagedConnection:
         self._conn = raw_connection
         self.in_transaction = False
 
-    def execute(self, sql, params=()):
+    def _execute_prepared(self, sql, params=(), backend=None):
+        executable_sql = prepare_postgres_executable_sql(sql, backend=backend or "postgres")
         cursor = self._conn.cursor()
-        cursor.execute(sql, params or ())
+        cursor.execute(executable_sql, params or ())
         return PortableCursorResult(cursor) if getattr(cursor, "description", None) else cursor
+
+    def execute(self, sql, params=()):
+        return self._execute_prepared(sql, params or (), backend="postgres")
 
     def cursor(self):
         return self._conn.cursor()

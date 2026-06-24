@@ -7189,7 +7189,8 @@ def _cached_pos_inventory_search_rows(company_key, search_value):
 
 
 def _lookup_inventory_by_barcode(conn, company_key, barcode_value):
-    return conn.execute(
+    return execute_portable_query(
+        conn,
         f"""
         SELECT {INVENTORY_POS_LOOKUP_COLUMNS}
         FROM inventory
@@ -7204,7 +7205,8 @@ def _lookup_inventory_for_pos(conn, company_key, search_value):
     if not normalized_value:
         return None, None, None
 
-    exact_match = conn.execute(
+    exact_match = execute_portable_query(
+        conn,
         f"""
         SELECT {INVENTORY_POS_LOOKUP_COLUMNS}
         FROM inventory
@@ -7222,13 +7224,14 @@ def _lookup_inventory_for_pos(conn, company_key, search_value):
         (company_key, normalized_value, normalized_value, normalized_value, normalized_value, normalized_value),
     ).fetchone()
     if exact_match:
-        if str(exact_match["barcode"] or "").strip() == normalized_value:
+        if str(row_get(exact_match, "barcode", "") or "").strip() == normalized_value:
             return exact_match, "barcode", "in_company"
-        if str(exact_match["item_code"] or "").strip() == normalized_value:
+        if str(row_get(exact_match, "item_code", "") or "").strip() == normalized_value:
             return exact_match, "item_code", "in_company"
         return exact_match, "item_name", "in_company"
 
-    fallback_match = conn.execute(
+    fallback_match = execute_portable_query(
+        conn,
         f"""
         SELECT {INVENTORY_POS_LOOKUP_COLUMNS}
         FROM inventory
@@ -7255,7 +7258,8 @@ def _lookup_inventory_for_pos(conn, company_key, search_value):
     if fallback_match:
         return fallback_match, "manual_search", "in_company"
 
-    other_company_match = conn.execute(
+    other_company_match = execute_portable_query(
+        conn,
         """
         SELECT id, item_name, item_code, category, brand, qty, price, cost_price, barcode, min_stock_level, company_key
         FROM inventory
@@ -7294,7 +7298,8 @@ def _search_inventory_for_pos(conn, company_key, search_value):
     normalized_value = str(search_value or "").strip()
     if not normalized_value:
         return []
-    return conn.execute(
+    return execute_portable_query(
+        conn,
         f"""
         SELECT {INVENTORY_POS_LOOKUP_COLUMNS}
         FROM inventory
@@ -7847,14 +7852,8 @@ def _post_inventory_import_opening_value(conn, company_key, import_reference, ro
 
 
 def _normalize_pos_item_row(item_row):
-    if isinstance(item_row, dict):
-        return item_row
-    if item_row is None:
-        return {}
-    try:
-        return dict(item_row)
-    except Exception:
-        return {key: item_row[key] for key in item_row.keys()}
+    mapping = row_to_dict(item_row)
+    return dict(mapping) if mapping else {}
 
 
 def _add_item_to_pos_cart(company_key, item_row):
@@ -15660,11 +15659,11 @@ def _fetch_dashboard_kpi_snapshot(conn, company_key, branch_id=None):
             JOIN chart_of_accounts c ON c.id = jl.account_id
             WHERE je.company_key = ?
               AND date(je.date) = date(?)
-              AND lower(COALESCE(NULLIF(c.name, ''), NULLIF(c.account_name, ''), '')) LIKE 'sales%'
+              AND lower(COALESCE(NULLIF(c.name, ''), NULLIF(c.account_name, ''), '')) LIKE lower(?)
               AND COALESCE(je.is_voided, 0) = 0
               AND COALESCE(je.approval_status, 'Posted') = 'Posted'
         """
-        journal_params = [company_key, today.isoformat()]
+        journal_params = [company_key, today.isoformat(), "sales%"]
         if branch_id:
             journal_today_sql += " AND je.branch_id = ?"
             journal_params.append(str(branch_id))
@@ -15733,15 +15732,15 @@ def _fetch_dashboard_kpi_snapshot(conn, company_key, branch_id=None):
         WHERE je.company_key = ?
           AND lower(COALESCE(NULLIF(c.type, ''), NULLIF(c.account_type, ''), NULLIF(c.category, ''), '')) = 'asset'
           AND (
-              lower(COALESCE(NULLIF(c.name, ''), NULLIF(c.account_name, ''), '')) LIKE 'cash%'
-              OR lower(COALESCE(NULLIF(c.name, ''), NULLIF(c.account_name, ''), '')) LIKE 'bank%'
-              OR lower(COALESCE(NULLIF(c.name, ''), NULLIF(c.account_name, ''), '')) LIKE 'mobile money%'
+              lower(COALESCE(NULLIF(c.name, ''), NULLIF(c.account_name, ''), '')) LIKE lower(?)
+              OR lower(COALESCE(NULLIF(c.name, ''), NULLIF(c.account_name, ''), '')) LIKE lower(?)
+              OR lower(COALESCE(NULLIF(c.name, ''), NULLIF(c.account_name, ''), '')) LIKE lower(?)
           )
           AND COALESCE(je.is_voided, 0) = 0
           AND COALESCE(je.approval_status, 'Posted') = 'Posted'
         """
         + (" AND je.branch_id = ?" if branch_id else ""),
-        tuple([company_key, str(branch_id)] if branch_id else [company_key]),
+        tuple([company_key, "cash%", "bank%", "mobile money%"] + ([str(branch_id)] if branch_id else [])),
     )
     cash_bank_balance = float(row_get(cash_bank_row, "balance", 0) or 0.0) if cash_bank_row else 0.0
 
