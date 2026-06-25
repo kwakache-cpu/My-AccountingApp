@@ -180,3 +180,36 @@ class PosSaleIdentityTests(ERPIsolatedTestCase):
         ).fetchone()
         self.assertIsNone(row["posted_entry_id"])
         self.assertIsNone(row["cogs_posted_entry_id"])
+
+    def test_pos_write_failure_rolls_back_and_releases_sqlite_connection(self):
+        sale_reference = f"POS-ROLLBACK-{datetime_suffix('R')}"
+
+        def failing_pos_write(conn, diagnostics):
+            self.assertEqual(diagnostics["active_backend"], "sqlite")
+            self.assertIsNotNone(diagnostics["sqlite_db_path"])
+            pos_sale_id = self.modules._persist_pos_sale(
+                conn,
+                self.company_key,
+                "MAIN",
+                sale_reference,
+                self._receipt_data(sale_reference=sale_reference),
+                self._sample_cart(),
+            )
+            self.assertGreater(int(pos_sale_id), 0)
+            raise RuntimeError("forced POS write failure")
+
+        with self.assertRaises(RuntimeError):
+            self.modules._run_pos_write_transaction(failing_pos_write, operation_name="pos_checkout_test_failure")
+
+        rollback_row = self.conn.execute(
+            "SELECT COUNT(*) AS c FROM pos_sales WHERE company_key = ? AND sale_reference = ?",
+            (self.company_key, sale_reference),
+        ).fetchone()
+        self.assertEqual(int(rollback_row["c"]), 0)
+
+        probe_conn = self.database.get_connection()
+        try:
+            probe_row = probe_conn.execute("SELECT COUNT(*) AS c FROM companies").fetchone()
+            self.assertGreaterEqual(int(probe_row["c"]), 1)
+        finally:
+            probe_conn.close()

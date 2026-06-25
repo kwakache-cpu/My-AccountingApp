@@ -738,6 +738,7 @@ from database import (
     create_branch_scoped_user,
     create_company_branch,
     create_company_record,
+    DB_PATH,
     db_table_exists,
     dataframe_from_portable_rows,
     ensure_company_trial_subscription,
@@ -769,6 +770,7 @@ from database import (
     get_firebase_service_account_info,
     get_cached_table_column_names,
     get_connection,
+    get_active_db_backend,
     get_inserted_id,
     ensure_insert_sql_returning,
     get_database_health_snapshot,
@@ -5378,7 +5380,8 @@ def _persist_pos_sale(conn, company_key, branch_id, sale_reference, receipt_data
     pos_sale_id = get_inserted_id(cursor)
     for sale_line in sale_cart:
         _recalculate_pos_line(sale_line)
-        conn.execute(
+        execute_portable_write(
+            conn,
             """
             INSERT INTO pos_sale_lines (
                 pos_sale_id, company_key, inventory_item_id, item_name, item_code, barcode,
@@ -6767,6 +6770,50 @@ def _validate_pos_cart_at_checkout(conn, company_key, sale_cart):
         if checkout_error:
             return checkout_error
     return None
+
+
+def _get_pos_write_backend_diagnostics(operation_name="pos_write"):
+    active_backend = get_active_db_backend()
+    return {
+        "operation": operation_name,
+        "active_backend": active_backend,
+        "postgres_runtime": bool(is_postgres_backend()),
+        "sqlite_db_path": None if active_backend == "postgres" else DB_PATH,
+    }
+
+
+def _log_pos_write_backend_diagnostics(diagnostics, status, error=None):
+    safe_error = sanitize_error_message(error) if error else None
+    message = (
+        "POS write backend diagnostics: operation={operation} status={status} "
+        "active_backend={active_backend} postgres_runtime={postgres_runtime} sqlite_db_path={sqlite_db_path}"
+    ).format(status=status, **diagnostics)
+    if safe_error:
+        message = f"{message} error={safe_error}"
+    if status in {"failed", "rolled_back"}:
+        logger.warning(message)
+    else:
+        logger.info(message)
+    try:
+        log_system_event("INFO" if status != "failed" else "WARNING", "POS", message)
+    except Exception:
+        logger.debug("POS backend diagnostic system event skipped.", exc_info=True)
+
+
+def _run_pos_write_transaction(callback, operation_name="pos_checkout"):
+    diagnostics = _get_pos_write_backend_diagnostics(operation_name)
+    _log_pos_write_backend_diagnostics(diagnostics, "starting")
+    try:
+        result = execute_db_write_transaction(
+            lambda tx_conn: callback(tx_conn, diagnostics),
+            operation_name=operation_name,
+            backend=diagnostics["active_backend"],
+        )
+        _log_pos_write_backend_diagnostics(diagnostics, "committed")
+        return result
+    except Exception as exc:
+        _log_pos_write_backend_diagnostics(diagnostics, "failed", error=exc)
+        raise
 
 
 def _revalidate_pos_cart_inventory(conn, company_key, cart_lines):
@@ -12208,247 +12255,259 @@ def show_pos(company_key, company_name, role):
                     discount_approval_reason = approval_state.get("reason")
 
                 try:
-                    conn = get_connection()
-                    ensure_pos_sales_schema(conn)
-                    checkout_inventory_error = _validate_pos_cart_at_checkout(conn, company_key, sale_cart)
-                    if checkout_inventory_error:
-                        st.session_state[checkout_complete_key] = False
-                        st.error(checkout_inventory_error)
-                        conn.close()
-                        return
-                    line_items = []
-                    total = round(float(current_summary["grand_total"] or 0.0), 2)
-                    pos_tax_total = round(float(current_summary["tax_total"] or 0.0), 2)
-                    pos_net_sales = round(total - pos_tax_total, 2)
-                    cost_of_goods_sold = 0.0
-                    for sale_line in sale_cart:
-                        _recalculate_pos_line(sale_line)
-                        line_items.append(
-                            {
-                                "name": sale_line["name"],
-                                "qty": sale_line["qty"],
-                                "price": sale_line["price"],
-                            }
+                    def _pos_checkout_write(conn, pos_backend_diagnostics):
+                        ensure_pos_sales_schema(conn)
+                        logger.info(
+                            "POS checkout write opened: active_backend=%s sqlite_db_path=%s",
+                            pos_backend_diagnostics.get("active_backend"),
+                            pos_backend_diagnostics.get("sqlite_db_path"),
                         )
-                        cost_of_goods_sold += float(sale_line["qty"]) * float(sale_line.get("cost_price") or 0.0)
-                        if sale_line["inventory_item_id"] is not None:
-                            current_item = conn.execute(
-                                "SELECT qty FROM inventory WHERE id = ? AND company_key = ?",
-                                (int(sale_line["inventory_item_id"]), company_key),
-                            ).fetchone()
-                            current_qty = float(current_item["qty"] or 0) if current_item else 0.0
-                            if float(sale_line["qty"]) > current_qty:
-                                st.warning(f"Insufficient stock for {sale_line['name']}.")
-                                conn.close()
-                                return
-                            execute_portable_write(
-                                conn,
-                                "UPDATE inventory SET qty = qty - ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND company_key = ?",
-                                (sale_line["qty"], int(sale_line["inventory_item_id"]), company_key),
+                        checkout_inventory_error = _validate_pos_cart_at_checkout(conn, company_key, sale_cart)
+                        if checkout_inventory_error:
+                            return {"ok": False, "level": "error", "message": checkout_inventory_error}
+                        line_items = []
+                        total = round(float(current_summary["grand_total"] or 0.0), 2)
+                        pos_tax_total = round(float(current_summary["tax_total"] or 0.0), 2)
+                        pos_net_sales = round(total - pos_tax_total, 2)
+                        cost_of_goods_sold = 0.0
+                        for sale_line in sale_cart:
+                            _recalculate_pos_line(sale_line)
+                            line_items.append(
+                                {
+                                    "name": sale_line["name"],
+                                    "qty": sale_line["qty"],
+                                    "price": sale_line["price"],
+                                }
                             )
-                    payment_account_map = {
-                        "Cash": ("Cash", "Asset"),
-                        "Mobile Money": ("Mobile Money", "Asset"),
-                        "Bank Transfer": ("Bank", "Asset"),
-                        "Card": ("Bank", "Asset"),
-                        "On Credit": ("Accounts Receivable", "Asset"),
-                    }
-                    receipt_account, receipt_category = payment_account_map.get(payment_method, ("Cash", "Asset"))
-                    narration = ", ".join(f"{item['name']} x{item['qty']}" for item in line_items)
-                    branch_id = st.session_state.get("active_branch_id")
-                    legacy_sale_id = _create_legacy_voucher_if_enabled(
-                        conn,
-                        company_key,
-                        branch_id,
-                        sale_date.isoformat(),
-                        "Sales",
-                        "Sales Revenue",
-                        total,
-                        role,
-                        narration=f"POS Sale: {narration}",
-                        payment_method=payment_method,
-                    )
-                    sale_reference = f"POS-{legacy_sale_id or datetime.now().strftime('%Y%m%d%H%M%S')}"
-                    sale_datetime = f"{sale_date.isoformat()} {datetime.now().strftime('%H:%M:%S')}"
-                    receipt_data = {
-                        "company_key": company_key,
-                        "company_name": company_label,
-                        "branch_name": branch_label,
-                        "receipt_number": sale_reference,
-                        "sale_reference": sale_reference,
-                        "sale_date": sale_date.isoformat(),
-                        "sale_datetime": sale_datetime,
-                        "cashier": role,
-                        "payment_method": payment_method,
-                        "payment_reference": payment_reference,
-                        "subtotal": float(current_summary["subtotal"] or 0.0),
-                        "discount_total": float(current_summary["discount_total"] or 0.0),
-                        "tax_total": float(current_summary["tax_total"] or 0.0),
-                        "grand_total": float(current_summary["grand_total"] or 0.0),
-                        "discount_approved_by": discount_approved_by,
-                        "amount_tendered": float(cash_tendered or 0.0) if payment_method == "Cash" else None,
-                        "change_due": max(float(cash_tendered or 0.0) - float(current_summary["grand_total"] or 0.0), 0.0)
-                        if payment_method == "Cash"
-                        else 0.0,
-                        "items": [
-                            {
-                                "name": sale_line["name"],
-                                "qty": int(sale_line["qty"]),
-                                "price": float(sale_line["price"] or 0.0),
-                                "line_total": float(sale_line.get("line_total") or 0.0),
-                            }
-                            for sale_line in sale_cart
-                        ],
-                    }
-                    pos_sale_id = _persist_pos_sale(
-                        conn,
-                        company_key,
-                        branch_id,
-                        sale_reference,
-                        receipt_data,
-                        sale_cart,
-                        customer_id=selected_credit_customer_id if payment_method == "On Credit" else None,
-                    )
-                    journal_lines, _ = build_sales_tax_journal_lines(
-                        conn,
-                        company_key,
-                        receipt_account_name=receipt_account,
-                        receipt_account_type=receipt_category,
-                        amount=pos_net_sales,
-                        output_vat=pos_tax_total,
-                    )
-                    post_journal_entry(
-                        company_key=company_key,
-                        date=sale_date,
-                        description="POS sale",
-                        reference=sale_reference,
-                        lines=journal_lines,
-                        created_by=role,
-                        branch_id=branch_id,
-                        customer_id=selected_credit_customer_id if payment_method == "On Credit" else None,
-                        source_module="POS",
-                        source_table="pos_sales",
-                        source_type="POS Sale",
-                        source_id=int(pos_sale_id),
-                        conn=conn,
-                    )
-                    if payment_method == "On Credit":
-                        ledger_result = _record_customer_ledger_transaction(
+                            cost_of_goods_sold += float(sale_line["qty"]) * float(sale_line.get("cost_price") or 0.0)
+                            if sale_line["inventory_item_id"] is not None:
+                                current_item = conn.execute(
+                                    "SELECT qty FROM inventory WHERE id = ? AND company_key = ?",
+                                    (int(sale_line["inventory_item_id"]), company_key),
+                                ).fetchone()
+                                current_qty = float(current_item["qty"] or 0) if current_item else 0.0
+                                if float(sale_line["qty"]) > current_qty:
+                                    return {"ok": False, "level": "warning", "message": f"Insufficient stock for {sale_line['name']}."}
+                                execute_portable_write(
+                                    conn,
+                                    "UPDATE inventory SET qty = qty - ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND company_key = ?",
+                                    (sale_line["qty"], int(sale_line["inventory_item_id"]), company_key),
+                                )
+                        payment_account_map = {
+                            "Cash": ("Cash", "Asset"),
+                            "Mobile Money": ("Mobile Money", "Asset"),
+                            "Bank Transfer": ("Bank", "Asset"),
+                            "Card": ("Bank", "Asset"),
+                            "On Credit": ("Accounts Receivable", "Asset"),
+                        }
+                        receipt_account, receipt_category = payment_account_map.get(payment_method, ("Cash", "Asset"))
+                        narration = ", ".join(f"{item['name']} x{item['qty']}" for item in line_items)
+                        branch_id = st.session_state.get("active_branch_id")
+                        legacy_sale_id = _create_legacy_voucher_if_enabled(
                             conn,
                             company_key,
-                            selected_credit_customer_id,
-                            "Debit",
-                            total,
-                            f"POS sale on credit: {narration}",
-                            role,
-                            branch_id=branch_id,
-                            reference=sale_reference,
-                            transaction_date=sale_date,
-                        )
-                        _ensure_counterparty(
-                            conn,
-                            company_key,
-                            ledger_result["customer_name"],
-                            "Customer",
-                            "",
+                            branch_id,
                             sale_date.isoformat(),
+                            "Sales",
+                            "Sales Revenue",
                             total,
+                            role,
+                            narration=f"POS Sale: {narration}",
+                            payment_method=payment_method,
                         )
-                    else:
-                        ledger_result = None
-                    if cost_of_goods_sold > 0:
+                        sale_reference = f"POS-{legacy_sale_id or datetime.now().strftime('%Y%m%d%H%M%S')}"
+                        sale_datetime = f"{sale_date.isoformat()} {datetime.now().strftime('%H:%M:%S')}"
+                        receipt_data = {
+                            "company_key": company_key,
+                            "company_name": company_label,
+                            "branch_name": branch_label,
+                            "receipt_number": sale_reference,
+                            "sale_reference": sale_reference,
+                            "sale_date": sale_date.isoformat(),
+                            "sale_datetime": sale_datetime,
+                            "cashier": role,
+                            "payment_method": payment_method,
+                            "payment_reference": payment_reference,
+                            "subtotal": float(current_summary["subtotal"] or 0.0),
+                            "discount_total": float(current_summary["discount_total"] or 0.0),
+                            "tax_total": float(current_summary["tax_total"] or 0.0),
+                            "grand_total": float(current_summary["grand_total"] or 0.0),
+                            "discount_approved_by": discount_approved_by,
+                            "amount_tendered": float(cash_tendered or 0.0) if payment_method == "Cash" else None,
+                            "change_due": max(float(cash_tendered or 0.0) - float(current_summary["grand_total"] or 0.0), 0.0)
+                            if payment_method == "Cash"
+                            else 0.0,
+                            "items": [
+                                {
+                                    "name": sale_line["name"],
+                                    "qty": int(sale_line["qty"]),
+                                    "price": float(sale_line["price"] or 0.0),
+                                    "line_total": float(sale_line.get("line_total") or 0.0),
+                                }
+                                for sale_line in sale_cart
+                            ],
+                        }
+                        pos_sale_id = _persist_pos_sale(
+                            conn,
+                            company_key,
+                            branch_id,
+                            sale_reference,
+                            receipt_data,
+                            sale_cart,
+                            customer_id=selected_credit_customer_id if payment_method == "On Credit" else None,
+                        )
+                        journal_lines, _ = build_sales_tax_journal_lines(
+                            conn,
+                            company_key,
+                            receipt_account_name=receipt_account,
+                            receipt_account_type=receipt_category,
+                            amount=pos_net_sales,
+                            output_vat=pos_tax_total,
+                        )
                         post_journal_entry(
                             company_key=company_key,
                             date=sale_date,
-                            description="Inventory issued to cost of goods sold",
-                            reference=f"COGS-{datetime.now().strftime('%Y%m%d%H%M%S')}",
-                            lines=[
-                                {"account_id": get_account_id(conn, "Cost of Goods Sold", "Expense"), "debit": cost_of_goods_sold, "credit": 0},
-                                {"account_id": get_account_id(conn, "Inventory", "Asset"), "debit": 0, "credit": cost_of_goods_sold},
-                            ],
+                            description="POS sale",
+                            reference=sale_reference,
+                            lines=journal_lines,
                             created_by=role,
                             branch_id=branch_id,
                             customer_id=selected_credit_customer_id if payment_method == "On Credit" else None,
                             source_module="POS",
                             source_table="pos_sales",
-                            source_type="POS COGS",
+                            source_type="POS Sale",
                             source_id=int(pos_sale_id),
                             conn=conn,
                         )
-                    conn.commit()
-                    _invalidate_inventory_search_cache()
-                    log_audit_action(
-                        conn,
-                        company_key,
-                        role,
-                        "POS Sale",
-                        "POS",
-                        f"Sold {narration} for GHS{float(total):.2f}" + (
-                            f" on credit to {ledger_result['customer_name']}" if ledger_result else ""
-                        ),
-                        branch_id=branch_id,
-                    )
-                    if discount_authority["total_discount"] > 0:
-                        discount_log_message = (
-                            "Applied POS discount of {amount} ({percent:.2f}% of subtotal) on sale {reference}".format(
-                                amount=format_currency(discount_authority["total_discount"]),
-                                percent=discount_authority["discount_percent"],
+                        if payment_method == "On Credit":
+                            ledger_result = _record_customer_ledger_transaction(
+                                conn,
+                                company_key,
+                                selected_credit_customer_id,
+                                "Debit",
+                                total,
+                                f"POS sale on credit: {narration}",
+                                role,
+                                branch_id=branch_id,
                                 reference=sale_reference,
+                                transaction_date=sale_date,
                             )
-                        )
-                        log_system_event("INFO", "POS", f"{discount_log_message} for company_key={company_key}")
+                            _ensure_counterparty(
+                                conn,
+                                company_key,
+                                ledger_result["customer_name"],
+                                "Customer",
+                                "",
+                                sale_date.isoformat(),
+                                total,
+                            )
+                        else:
+                            ledger_result = None
+                        if cost_of_goods_sold > 0:
+                            post_journal_entry(
+                                company_key=company_key,
+                                date=sale_date,
+                                description="Inventory issued to cost of goods sold",
+                                reference=f"COGS-{datetime.now().strftime('%Y%m%d%H%M%S')}",
+                                lines=[
+                                    {"account_id": get_account_id(conn, "Cost of Goods Sold", "Expense"), "debit": cost_of_goods_sold, "credit": 0},
+                                    {"account_id": get_account_id(conn, "Inventory", "Asset"), "debit": 0, "credit": cost_of_goods_sold},
+                                ],
+                                created_by=role,
+                                branch_id=branch_id,
+                                customer_id=selected_credit_customer_id if payment_method == "On Credit" else None,
+                                source_module="POS",
+                                source_table="pos_sales",
+                                source_type="POS COGS",
+                                source_id=int(pos_sale_id),
+                                conn=conn,
+                            )
                         log_audit_action(
                             conn,
                             company_key,
                             role,
-                            "POS Discount Applied",
+                            "POS Sale",
                             "POS",
-                            details=discount_log_message,
+                            f"Sold {narration} for GHS{float(total):.2f}" + (
+                                f" on credit to {ledger_result['customer_name']}" if ledger_result else ""
+                            ),
                             branch_id=branch_id,
-                            action_type="admin",
-                            document_ref=sale_reference,
                         )
-                        if discount_authority["requires_approval"] and discount_authority["can_approve"]:
-                            log_system_event("INFO", "POS", f"Manager-approved POS discount for sale {sale_reference} company_key={company_key}")
-                            log_audit_action(
-                                conn,
-                                company_key,
-                                role,
-                                "POS Discount Approved",
-                                "POS",
-                                details=f"Manager-approved discount for sale {sale_reference}",
-                                branch_id=branch_id,
-                                action_type="admin",
-                                document_ref=sale_reference,
-                            )
-                        elif discount_approved_by:
-                            override_details = (
-                                "cashier={cashier}; approver={approver}; discount_amount={amount}; reason={reason}".format(
-                                    cashier=_get_pos_cashier_identity(role),
-                                    approver=discount_approved_by,
+                        if discount_authority["total_discount"] > 0:
+                            discount_log_message = (
+                                "Applied POS discount of {amount} ({percent:.2f}% of subtotal) on sale {reference}".format(
                                     amount=format_currency(discount_authority["total_discount"]),
-                                    reason=discount_approval_reason or "No reason provided",
+                                    percent=discount_authority["discount_percent"],
+                                    reference=sale_reference,
                                 )
                             )
-                            log_system_event("INFO", "POS", f"Manager-approved POS discount completed on sale {sale_reference} company_key={company_key}")
+                            log_system_event("INFO", "POS", f"{discount_log_message} for company_key={company_key}")
                             log_audit_action(
                                 conn,
                                 company_key,
                                 role,
-                                "POS Discount Approved",
+                                "POS Discount Applied",
                                 "POS",
-                                details=override_details,
+                                details=discount_log_message,
                                 branch_id=branch_id,
                                 action_type="admin",
                                 document_ref=sale_reference,
                             )
+                            if discount_authority["requires_approval"] and discount_authority["can_approve"]:
+                                log_system_event("INFO", "POS", f"Manager-approved POS discount for sale {sale_reference} company_key={company_key}")
+                                log_audit_action(
+                                    conn,
+                                    company_key,
+                                    role,
+                                    "POS Discount Approved",
+                                    "POS",
+                                    details=f"Manager-approved discount for sale {sale_reference}",
+                                    branch_id=branch_id,
+                                    action_type="admin",
+                                    document_ref=sale_reference,
+                                )
+                            elif discount_approved_by:
+                                override_details = (
+                                    "cashier={cashier}; approver={approver}; discount_amount={amount}; reason={reason}".format(
+                                        cashier=_get_pos_cashier_identity(role),
+                                        approver=discount_approved_by,
+                                        amount=format_currency(discount_authority["total_discount"]),
+                                        reason=discount_approval_reason or "No reason provided",
+                                    )
+                                )
+                                log_system_event("INFO", "POS", f"Manager-approved POS discount completed on sale {sale_reference} company_key={company_key}")
+                                log_audit_action(
+                                    conn,
+                                    company_key,
+                                    role,
+                                    "POS Discount Approved",
+                                    "POS",
+                                    details=override_details,
+                                    branch_id=branch_id,
+                                    action_type="admin",
+                                    document_ref=sale_reference,
+                                )
+                        return {
+                            "ok": True,
+                            "receipt_data": receipt_data,
+                            "receipt_html": _build_receipt_html(receipt_data) if print_receipt else None,
+                            "receipt_text": _build_receipt(receipt_data) if print_receipt else None,
+                        }
+
+                    checkout_result = _run_pos_write_transaction(_pos_checkout_write, operation_name="pos_checkout")
+                    if not checkout_result.get("ok"):
+                        st.session_state[checkout_complete_key] = False
+                        if checkout_result.get("level") == "warning":
+                            st.warning(checkout_result.get("message") or "POS checkout could not be completed.")
+                        else:
+                            st.error(checkout_result.get("message") or "POS checkout could not be completed.")
+                        return
+                    _invalidate_inventory_search_cache()
                     if print_receipt:
-                        conn.commit()
-                        st.session_state["last_receipt_data"] = receipt_data
-                        st.session_state[last_receipt_data_key] = receipt_data
-                        st.session_state[receipt_key] = _build_receipt(receipt_data)
-                        st.session_state[receipt_html_key] = _build_receipt_html(receipt_data)
-                    conn.close()
+                        st.session_state["last_receipt_data"] = checkout_result["receipt_data"]
+                        st.session_state[last_receipt_data_key] = checkout_result["receipt_data"]
+                        st.session_state[receipt_key] = checkout_result["receipt_text"]
+                        st.session_state[receipt_html_key] = checkout_result["receipt_html"]
                     st.session_state[checkout_complete_key] = True
                     _clear_pos_cart_state(company_key)
                     st.session_state[pos_success_key] = True
@@ -12462,6 +12521,7 @@ def show_pos(company_key, company_name, role):
                     )
                     st.rerun()
                 except Exception as e:
+                    st.session_state[checkout_complete_key] = False
                     st.error(build_user_safe_error(e, role))
 
             if st.session_state.pop(checkout_request_key, False):

@@ -55,6 +55,18 @@ This phase hardens the highest-risk write paths identified in final certificatio
 - Fixed asset depreciation journals remain reference-traceable but are not yet source-linked with `source_table='fixed_assets'` for every depreciation run.
 - Critical workflows still need staging against a real PostgreSQL database, not only SQLite-backed regression and source-contract tests.
 
+## Urgent POS SQLite Lock Follow-Up
+
+After manual POS quantity/sale testing exposed a `database is locked` crash against `data/eka_enterprise_v3.db`, the checkout write flow was hardened again:
+
+- POS checkout writes now run through `_run_pos_write_transaction()`, which delegates to `execute_db_write_transaction()` and logs active backend diagnostics.
+- Diagnostics record whether the active runtime is PostgreSQL or SQLite and include the SQLite DB path only when SQLite is the active backend.
+- Checkout inventory updates, POS sale persistence, journal posting, customer ledger writes, and audit logging now execute under one backend-aware transaction boundary.
+- Failed POS checkout writes rollback through the transaction wrapper and release owned connections, reducing stale SQLite lock risk.
+- Regression coverage now verifies a forced POS write failure rolls back the `pos_sales` insert and allows a new database connection/read immediately afterward.
+
+The lock incident also confirms why a PostgreSQL certification session can still touch SQLite: the application intentionally falls back to SQLite unless `DB_BACKEND=postgres`, PostgreSQL runtime enablement, and a valid PostgreSQL database URL are all present.
+
 ## Tests Added or Updated
 
 - Updated final certification tests to require `execute_db_write_transaction()` in journal and branch-admin transaction paths.
