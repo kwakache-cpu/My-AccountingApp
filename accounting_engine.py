@@ -8,6 +8,7 @@ import sqlite3
 import pandas as pd
 
 from database import (
+    db_table_exists,
     execute_portable_query,
     execute_write_transaction,
     ensure_insert_sql_returning,
@@ -20,6 +21,7 @@ from database import (
     log_audit_action as database_log_audit_action,
     row_get,
     rows_to_dicts,
+    sql_group_concat,
     sql_year_month_equals,
     with_retry_on_lock,
 )
@@ -499,11 +501,7 @@ def get_chart_of_accounts_diagnostics(conn=None):
 def _resolve_source_document_mismatches(conn, company_key, branch_id=None):
     mismatches = []
     for table_name in sorted(CONTROLLED_SOURCE_TABLES):
-        table_exists = conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name = ?",
-            (table_name,),
-        ).fetchone()
-        if not table_exists:
+        if not db_table_exists(conn, table_name):
             continue
         columns = _source_document_columns(conn, table_name)
         if "id" not in columns:
@@ -513,12 +511,17 @@ def _resolve_source_document_mismatches(conn, company_key, branch_id=None):
         if branch_id and "branch_id" in columns:
             query += " AND branch_id = ?"
             params.append(branch_id)
-        rows = conn.execute(query, tuple(params)).fetchall()
+        rows = execute_portable_query(conn, query, tuple(params)).fetchall()
         for row in rows:
             status = _safe_doc_status(row, columns)
-            row_id = int(row["id"])
-            posted_entry_id = int(row["posted_entry_id"]) if "posted_entry_id" in columns and row["posted_entry_id"] not in (None, "") else None
-            journal_ref = conn.execute(
+            row_id = int(row_get(row, "id", 0) or 0)
+            posted_entry_id = (
+                int(row_get(row, "posted_entry_id"))
+                if "posted_entry_id" in columns and row_get(row, "posted_entry_id") not in (None, "")
+                else None
+            )
+            journal_ref = execute_portable_query(
+                conn,
                 """
                 SELECT id
                 FROM journal_entries
@@ -554,12 +557,14 @@ def _resolve_source_document_mismatches(conn, company_key, branch_id=None):
 
 def _source_document_duplicate_postings(conn, company_key, branch_id=None):
     branch_clause = "AND branch_id = ?" if branch_id else ""
-    rows = conn.execute(
+    journal_ids_expr = sql_group_concat("id", backend=get_active_db_backend())
+    rows = execute_portable_query(
+        conn,
         """
         SELECT lower(COALESCE(source_table, '')) AS source_table,
                source_id,
                COUNT(*) AS journal_count,
-               GROUP_CONCAT(id) AS journal_ids
+               {journal_ids_expr} AS journal_ids
         FROM journal_entries
         WHERE company_key = ?
           AND COALESCE(is_voided, 0) = 0
@@ -569,15 +574,19 @@ def _source_document_duplicate_postings(conn, company_key, branch_id=None):
           {branch_clause}
         GROUP BY lower(COALESCE(source_table, '')), source_id
         HAVING COUNT(*) > 1
-        """.format(branch_clause=branch_clause, controlled_tables=_controlled_source_table_sql_list()),
+        """.format(
+            branch_clause=branch_clause,
+            controlled_tables=_controlled_source_table_sql_list(),
+            journal_ids_expr=journal_ids_expr,
+        ),
         tuple([company_key] + ([branch_id] if branch_id else [])),
     ).fetchall()
     return [
         {
-            "source_table": row["source_table"],
-            "source_id": int(row["source_id"]),
-            "journal_count": int(row["journal_count"] or 0),
-            "journal_ids": str(row["journal_ids"] or ""),
+            "source_table": row_get(row, "source_table"),
+            "source_id": int(row_get(row, "source_id", 0) or 0),
+            "journal_count": int(row_get(row, "journal_count", 0) or 0),
+            "journal_ids": str(row_get(row, "journal_ids", "") or ""),
         }
         for row in rows
     ]
