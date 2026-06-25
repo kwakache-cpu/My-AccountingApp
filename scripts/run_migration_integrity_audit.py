@@ -130,8 +130,15 @@ def _score_area(findings):
     return "GREEN"
 
 
+def _migration_report_timestamp() -> str:
+    override = str(os.environ.get("EKA_MIGRATION_REPORT_TIMESTAMP", "") or "").strip()
+    if override:
+        return override
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+
+
 def run_audit(db_path: Path):
-    audited_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    audited_at = _migration_report_timestamp()
     conn = _connect_readonly(db_path)
     sections = {}
     row_counts = {}

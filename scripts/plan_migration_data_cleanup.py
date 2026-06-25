@@ -571,7 +571,8 @@ def plan_payment_cleanup(conn) -> list[CleanupItem]:
 
 
 def build_cleanup_plan(db_path: Path) -> CleanupPlan:
-    generated_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    override = str(os.environ.get("EKA_MIGRATION_REPORT_TIMESTAMP", "") or "").strip()
+    generated_at = override or datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
     conn = _connect_readonly(db_path)
     try:
         items: list[CleanupItem] = []

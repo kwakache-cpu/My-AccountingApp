@@ -10,12 +10,19 @@ import streamlit as st
 from security_utils import build_user_safe_error, sanitize_error_message
 
 from database import (
+    dataframe_from_portable_rows,
+    db_table_exists,
     ensure_insert_sql_returning,
     execute_portable_query,
+    fetch_scalar,
+    get_active_db_backend,
     get_connection,
     get_inserted_id,
+    is_postgres_backend,
     row_get,
     rows_to_dicts,
+    sql_date_on_or_after,
+    sql_date_on_or_before,
 )
 from accounting_engine import (
     close_fiscal_year,
@@ -131,15 +138,15 @@ def _journal_df(company_key, branch_id=None, start_date=None, end_date=None, acc
             query += " AND je.branch_id = ?"
             params.append(branch_id)
         if start_date:
-            query += " AND date(je.date) >= date(?)"
+            query += f" AND {sql_date_on_or_after('je.date')}"
             params.append(_resolve_date(start_date))
         if end_date:
-            query += " AND date(je.date) <= date(?)"
+            query += f" AND {sql_date_on_or_before('je.date')}"
             params.append(_resolve_date(end_date))
         if account_name:
             query += " AND lower(COALESCE(c.name, c.account_name)) LIKE ?"
             params.append(f"%{str(account_name).lower()}%")
-        query += " ORDER BY date(je.date), je.id, COALESCE(c.name, c.account_name)"
+        query += " ORDER BY CAST(je.date AS date), je.id, COALESCE(c.name, c.account_name)"
         try:
             df = _portable_read_dataframe(conn, query, tuple(params))
         except (pd.errors.DatabaseError, AttributeError, sqlite3.DatabaseError):
@@ -1702,10 +1709,10 @@ def get_ledger_balances(company_key, start_date=None, end_date=None, account_nam
         """
         params = [company_key]
         if start_date:
-            query += " AND date(je.date) >= date(?)"
+            query += f" AND {sql_date_on_or_after('je.date')}"
             params.append(_resolve_date(start_date))
         if end_date:
-            query += " AND date(je.date) <= date(?)"
+            query += f" AND {sql_date_on_or_before('je.date')}"
             params.append(_resolve_date(end_date))
         if account_name:
             query += " AND lower(COALESCE(c.name, c.account_name, '')) LIKE ?"
@@ -1714,17 +1721,17 @@ def get_ledger_balances(company_key, start_date=None, end_date=None, account_nam
             GROUP BY COALESCE(c.code, c.account_code, ''), COALESCE(c.name, c.account_name, ''), COALESCE(c.type, c.category, c.account_type, '')
             ORDER BY COALESCE(c.code, c.account_code, ''), COALESCE(c.name, c.account_name, '')
         """
-        rows = conn.execute(query, params).fetchall()
+        rows = execute_portable_query(conn, query, tuple(params)).fetchall()
         if not rows:
             return {}
         balances = {}
         for row in rows:
-            debit = float(row["total_debit"] or 0.0)
-            credit = float(row["total_credit"] or 0.0)
-            account_type = str(row["account_type"] or "")
+            debit = float(row_get(row, "total_debit", 0) or 0.0)
+            credit = float(row_get(row, "total_credit", 0) or 0.0)
+            account_type = str(row_get(row, "account_type", "") or "")
             balance = debit - credit if _normal_balance(account_type) == "debit" else credit - debit
-            balances[str(row["account_name"] or "")] = {
-                "account_code": str(row["account_code"] or ""),
+            balances[str(row_get(row, "account_name", "") or "")] = {
+                "account_code": str(row_get(row, "account_code", "") or ""),
                 "account_type": account_type,
                 "debit": debit,
                 "credit": credit,
@@ -1735,6 +1742,72 @@ def get_ledger_balances(company_key, start_date=None, end_date=None, account_nam
         return {}
     finally:
         conn.close()
+
+
+def _financial_report_runtime_diagnostics(company_key, start_date=None, end_date=None, branch_id=None):
+    diagnostics = {
+        "company_key": company_key,
+        "backend": get_active_db_backend(),
+        "postgres_runtime": is_postgres_backend(),
+        "start_date": _resolve_date(start_date) if start_date else None,
+        "end_date": _resolve_date(end_date) if end_date else None,
+        "branch_id": branch_id or "(all branches)",
+    }
+    conn = get_connection()
+    try:
+        for table_name in ("journal_entries", "journal_lines", "chart_of_accounts", "customers", "suppliers"):
+            if not db_table_exists(conn, table_name):
+                diagnostics[f"{table_name}_rows"] = 0
+                continue
+            if table_name == "journal_entries":
+                query = """
+                    SELECT COUNT(*) AS row_count
+                    FROM journal_entries
+                    WHERE company_key = ?
+                      AND COALESCE(is_voided, 0) = 0
+                      AND COALESCE(approval_status, 'Posted') = 'Posted'
+                """
+                params = [company_key]
+                if branch_id:
+                    query += " AND branch_id = ?"
+                    params.append(branch_id)
+                if start_date:
+                    query += f" AND {sql_date_on_or_after('date')}"
+                    params.append(_resolve_date(start_date))
+                if end_date:
+                    query += f" AND {sql_date_on_or_before('date')}"
+                    params.append(_resolve_date(end_date))
+            elif table_name == "journal_lines":
+                query = """
+                    SELECT COUNT(*) AS row_count
+                    FROM journal_lines jl
+                    JOIN journal_entries je ON je.id = jl.entry_id
+                    WHERE je.company_key = ?
+                      AND COALESCE(je.is_voided, 0) = 0
+                      AND COALESCE(je.approval_status, 'Posted') = 'Posted'
+                """
+                params = [company_key]
+                if branch_id:
+                    query += " AND je.branch_id = ?"
+                    params.append(branch_id)
+                if start_date:
+                    query += f" AND {sql_date_on_or_after('je.date')}"
+                    params.append(_resolve_date(start_date))
+                if end_date:
+                    query += f" AND {sql_date_on_or_before('je.date')}"
+                    params.append(_resolve_date(end_date))
+            elif table_name == "chart_of_accounts":
+                query = "SELECT COUNT(*) AS row_count FROM chart_of_accounts"
+                params = []
+            else:
+                query = f"SELECT COUNT(*) AS row_count FROM {table_name} WHERE company_key = ?"
+                params = [company_key]
+            diagnostics[f"{table_name}_rows"] = int(
+                fetch_scalar(conn, query, tuple(params), default=0) or 0
+            )
+    finally:
+        conn.close()
+    return diagnostics
 
 
 def get_trial_balance(company_key, start_date=None, end_date=None, account_name=None):
@@ -2108,6 +2181,20 @@ def show_financial_reports(company_key, role=None):
         ("Statement of Changes in Equity", equity_df),
         ("Depreciation Schedule", depreciation_df),
     ]
+    reports_empty = all(_safe_dataframe(df, []).empty for _, df in report_defs)
+    if reports_empty:
+        diagnostics = _financial_report_runtime_diagnostics(
+            company_key,
+            start_date=start_date,
+            end_date=end_date,
+            branch_id=st.session_state.get("active_branch_id"),
+        )
+        st.warning(
+            "No financial report rows were returned for the current filters. "
+            "Use the diagnostics below to confirm company scope, date range, and PostgreSQL row counts."
+        )
+        st.dataframe(pd.DataFrame([diagnostics]), use_container_width=True, hide_index=True)
+
     for tab, (label, df) in zip(tabs, report_defs):
         with tab:
             display_df = _ifrs_account_display(_convert_money_frame(_safe_dataframe(df, [])))
