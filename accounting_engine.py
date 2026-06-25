@@ -21,6 +21,7 @@ from database import (
     log_audit_action as database_log_audit_action,
     row_get,
     rows_to_dicts,
+    sql_date_on_or_before,
     sql_group_concat,
     sql_year_month_equals,
     with_retry_on_lock,
@@ -2434,7 +2435,7 @@ def get_supplier_balance(company_key, supplier_id, as_of_date=None, conn=None):
         """
         params = [company_key, int(supplier_id), "accounts payable%"]
         if as_of_date:
-            query += " AND date(je.date) <= date(?)"
+            query += f" AND {sql_date_on_or_before('je.date')}"
             params.append(_resolve_date(as_of_date))
         balance = fetch_scalar(conn, query, tuple(params), default=0.0)
         return round(float(balance or 0.0), 2)
@@ -2457,6 +2458,7 @@ def get_supplier_balances(company_key, as_of_date=None, conn=None):
             """,
             (company_key,),
         ).fetchall()
+        balance_map = _supplier_balance_map(company_key, as_of_date=as_of_date, conn=conn)
         return [
             {
                 "id": int(row_get(row, "id")),
@@ -2464,7 +2466,7 @@ def get_supplier_balances(company_key, as_of_date=None, conn=None):
                 "email": row_get(row, "email"),
                 "phone": row_get(row, "phone"),
                 "address": row_get(row, "address"),
-                "balance": get_supplier_balance(company_key, int(row_get(row, "id")), as_of_date=as_of_date, conn=conn),
+                "balance": balance_map.get(int(row_get(row, "id")), 0.0),
             }
             for row in rows
         ]
@@ -2937,6 +2939,68 @@ def get_reporting_trust_diagnostics(company_key, start_date=None, end_date=None,
             conn.close()
 
 
+def _customer_balance_map(company_key, as_of_date=None, conn=None):
+    date_filter = ""
+    params = [company_key, "accounts receivable%"]
+    if as_of_date:
+        date_filter = f" AND {sql_date_on_or_before('je.date')}"
+        params.append(_resolve_date(as_of_date))
+    rows = execute_portable_query(
+        conn,
+        f"""
+        SELECT je.customer_id AS customer_id,
+               COALESCE(SUM(jl.debit - jl.credit), 0) AS balance
+        FROM journal_entries je
+        JOIN journal_lines jl ON jl.entry_id = je.id
+        JOIN chart_of_accounts c ON c.id = jl.account_id
+        WHERE je.company_key = ?
+          AND je.customer_id IS NOT NULL
+          AND lower({_coa_name_expression()}) LIKE lower(?)
+          AND COALESCE(je.is_voided, 0) = 0
+          AND COALESCE(je.approval_status, 'Posted') = 'Posted'
+          {date_filter}
+        GROUP BY je.customer_id
+        """,
+        tuple(params),
+    ).fetchall()
+    return {
+        int(row_get(row, "customer_id")): round(float(row_get(row, "balance", 0) or 0.0), 2)
+        for row in rows
+        if row_get(row, "customer_id") not in (None, "")
+    }
+
+
+def _supplier_balance_map(company_key, as_of_date=None, conn=None):
+    date_filter = ""
+    params = [company_key, "accounts payable%"]
+    if as_of_date:
+        date_filter = f" AND {sql_date_on_or_before('je.date')}"
+        params.append(_resolve_date(as_of_date))
+    rows = execute_portable_query(
+        conn,
+        f"""
+        SELECT je.supplier_id AS supplier_id,
+               COALESCE(SUM(jl.credit - jl.debit), 0) AS balance
+        FROM journal_entries je
+        JOIN journal_lines jl ON jl.entry_id = je.id
+        JOIN chart_of_accounts c ON c.id = jl.account_id
+        WHERE je.company_key = ?
+          AND je.supplier_id IS NOT NULL
+          AND lower({_coa_name_expression()}) LIKE lower(?)
+          AND COALESCE(je.is_voided, 0) = 0
+          AND COALESCE(je.approval_status, 'Posted') = 'Posted'
+          {date_filter}
+        GROUP BY je.supplier_id
+        """,
+        tuple(params),
+    ).fetchall()
+    return {
+        int(row_get(row, "supplier_id")): round(float(row_get(row, "balance", 0) or 0.0), 2)
+        for row in rows
+        if row_get(row, "supplier_id") not in (None, "")
+    }
+
+
 def get_customer_balance(company_key, customer_id, as_of_date=None, conn=None):
     owns_connection = conn is None
     conn = conn or get_connection()
@@ -2954,7 +3018,7 @@ def get_customer_balance(company_key, customer_id, as_of_date=None, conn=None):
         """
         params = [company_key, int(customer_id), "accounts receivable%"]
         if as_of_date:
-            query += " AND date(je.date) <= date(?)"
+            query += f" AND {sql_date_on_or_before('je.date')}"
             params.append(_resolve_date(as_of_date))
         balance = fetch_scalar(conn, query, tuple(params), default=0.0)
         return round(float(balance or 0.0), 2)
@@ -2977,6 +3041,7 @@ def get_customer_balances(company_key, as_of_date=None, conn=None):
             """,
             (company_key,),
         ).fetchall()
+        balance_map = _customer_balance_map(company_key, as_of_date=as_of_date, conn=conn)
         return [
             {
                 "id": int(row_get(row, "id")),
@@ -2984,7 +3049,7 @@ def get_customer_balances(company_key, as_of_date=None, conn=None):
                 "name": row_get(row, "name"),
                 "phone": row_get(row, "phone"),
                 "email": row_get(row, "email"),
-                "balance": get_customer_balance(company_key, int(row_get(row, "id")), as_of_date=as_of_date, conn=conn),
+                "balance": balance_map.get(int(row_get(row, "id")), 0.0),
             }
             for row in rows
         ]

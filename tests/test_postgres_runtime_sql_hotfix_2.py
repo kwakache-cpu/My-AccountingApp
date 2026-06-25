@@ -43,7 +43,7 @@ class PostgresRuntimeSqlHotfix2Tests(ERPIsolatedTestCase):
 
         fake = _DescribedPostgresConn(row=(1250.0,), columns=("total",))
         with mock.patch.object(self.database, "get_active_db_backend", return_value="postgres"), mock.patch.object(
-            modules, "list_columns", return_value=[]
+            modules, "get_cached_table_column_names", return_value=set()
         ), mock.patch.object(
             modules, "get_month_sales_total", return_value=0.0
         ), mock.patch.object(
@@ -53,7 +53,7 @@ class PostgresRuntimeSqlHotfix2Tests(ERPIsolatedTestCase):
         ), mock.patch.object(
             modules, "generate_income_statement", return_value=[]
         ), mock.patch.object(
-            modules, "ensure_pos_sales_schema", return_value=None
+            modules, "_dashboard_pos_tables_ready", return_value=False
         ):
             snapshot = modules._fetch_dashboard_kpi_snapshot(fake, "COMPANY-1")
 
@@ -69,9 +69,18 @@ class PostgresRuntimeSqlHotfix2Tests(ERPIsolatedTestCase):
             rows=[(1, "CUST-001", "Acme Ltd", "024", "a@example.com")],
             columns=("id", "customer_id", "name", "phone", "email"),
         )
-        with mock.patch.object(self.database, "get_active_db_backend", return_value="postgres"), mock.patch.object(
-            accounting_engine, "get_customer_balance", return_value=0.0
-        ):
+
+        def _sequential_execute(statement, params=()):
+            fake.statements.append(statement)
+            fake.params.append(params)
+            if "FROM customers" in statement:
+                return _DescribedCursor(rows=fake.rows, columns=fake.columns)
+            if "GROUP BY je.customer_id" in statement:
+                return _DescribedCursor(rows=[(1, 0.0)], columns=("customer_id", "balance"))
+            return _DescribedCursor(row=(0.0,), columns=("balance",))
+
+        fake.execute = _sequential_execute
+        with mock.patch.object(self.database, "get_active_db_backend", return_value="postgres"):
             rows = accounting_engine.get_customer_balances("COMPANY-1", conn=fake)
 
         self.assertEqual(len(rows), 1)

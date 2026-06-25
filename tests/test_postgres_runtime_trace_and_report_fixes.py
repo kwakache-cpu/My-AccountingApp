@@ -145,7 +145,7 @@ class PostgresRuntimeTraceAndReportFixesTests(ERPIsolatedTestCase):
         with mock.patch.object(self.database, "get_active_db_backend", return_value="postgres"), mock.patch.object(
             modules, "db_table_exists", return_value=True
         ), mock.patch.object(
-            modules, "list_columns", return_value=[{"name": "qty"}, {"name": "min_stock_level"}, {"name": "cost_price"}]
+            modules, "get_cached_table_column_names", return_value={"qty", "min_stock_level", "cost_price"}
         ), mock.patch.object(
             modules, "get_month_sales_total", return_value=0.0
         ), mock.patch.object(

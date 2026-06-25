@@ -1522,6 +1522,11 @@ def sql_date_on_or_after(column_sql):
     return f"{sql_cast_as_date(column_sql)} >= CAST(? AS date)"
 
 
+def sql_date_on_or_before(column_sql):
+    """Return a portable on-or-before date predicate using one `?` parameter."""
+    return f"{sql_cast_as_date(column_sql)} <= CAST(? AS date)"
+
+
 def sql_group_concat(column_sql, separator=",", backend=None):
     """Return a portable grouped string aggregation expression."""
     backend = _normalize_db_backend(backend or get_active_db_backend())
@@ -1608,6 +1613,84 @@ def row_to_dict(row, columns=None):
 
 def rows_to_dicts(rows, columns=None):
     return [row_to_dict(row, columns=columns) for row in (rows or [])]
+
+
+_TABLE_COLUMN_CACHE = {}
+_TABLE_COLUMN_CACHE_TTL_SECONDS = 300
+_POSTGRES_QUERY_TIMINGS = []
+_POSTGRES_QUERY_TIMINGS_LIMIT = 200
+
+
+def get_cached_table_column_names(conn, table_name, backend=None, *, cache_seconds=None):
+    """Return table column names with a short-lived cache on PostgreSQL runtime reads."""
+    backend = _normalize_db_backend(backend or get_active_db_backend())
+    ttl = int(cache_seconds or _TABLE_COLUMN_CACHE_TTL_SECONDS)
+    cache_key = (backend, str(table_name or "").strip())
+    if backend == "postgres" and cache_key[1]:
+        cached = _TABLE_COLUMN_CACHE.get(cache_key)
+        now = time.monotonic()
+        if cached and (now - cached[0]) < ttl:
+            return set(cached[1])
+    column_names = {str(column["name"]) for column in list_columns(conn, table_name, backend=backend)}
+    if backend == "postgres" and cache_key[1]:
+        _TABLE_COLUMN_CACHE[cache_key] = (time.monotonic(), tuple(sorted(column_names)))
+    return column_names
+
+
+def clear_cached_table_column_names():
+    _TABLE_COLUMN_CACHE.clear()
+
+
+def record_postgres_query_timing(label, elapsed_seconds, sql=None):
+    """Record lightweight PostgreSQL read-path timing without altering query results."""
+    if not is_postgres_backend():
+        return
+    entry = {
+        "label": str(label or "query"),
+        "elapsed_ms": round(float(elapsed_seconds or 0.0) * 1000.0, 2),
+        "sql_preview": str(sql or "").strip().replace("\n", " ")[:240],
+    }
+    _POSTGRES_QUERY_TIMINGS.append(entry)
+    if len(_POSTGRES_QUERY_TIMINGS) > _POSTGRES_QUERY_TIMINGS_LIMIT:
+        del _POSTGRES_QUERY_TIMINGS[:- _POSTGRES_QUERY_TIMINGS_LIMIT]
+    logger.debug("PostgreSQL query timing: %s took %.2fms", entry["label"], entry["elapsed_ms"])
+
+
+def get_postgres_query_timings(limit=25):
+    if not is_postgres_backend():
+        return []
+    normalized_limit = max(1, int(limit or 25))
+    return list(reversed(_POSTGRES_QUERY_TIMINGS[-normalized_limit:]))
+
+
+def clear_postgres_query_timings():
+    _POSTGRES_QUERY_TIMINGS.clear()
+
+
+def execute_timed_portable_query(conn, sql, params=(), *, label=None, backend=None):
+    started = time.perf_counter()
+    result = execute_portable_query(conn, sql, params or (), backend=backend)
+    record_postgres_query_timing(label or "portable_query", time.perf_counter() - started, sql=sql)
+    return result
+
+
+def dataframe_from_portable_rows(rows, column_labels=None):
+    """Build a pandas DataFrame from portable rows without losing dict column values."""
+    import pandas as pd
+
+    dict_rows = rows_to_dicts(rows)
+    if not dict_rows:
+        if column_labels:
+            return pd.DataFrame(columns=[str(label) for label in column_labels.values()])
+        return pd.DataFrame()
+    frame = pd.DataFrame(dict_rows)
+    if column_labels:
+        rename_map = {source: target for source, target in column_labels.items() if source in frame.columns}
+        frame = frame.rename(columns=rename_map)
+        ordered = [column_labels[key] for key in column_labels if column_labels[key] in frame.columns]
+        extras = [column for column in frame.columns if column not in ordered]
+        frame = frame[ordered + extras]
+    return frame
 
 
 def row_get(row, key, default=None, columns=None):
