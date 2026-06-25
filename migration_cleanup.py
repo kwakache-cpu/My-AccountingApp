@@ -105,6 +105,42 @@ def _company_scope_clause(role: str, company_key: str | None, column: str = "com
     return f" AND {column} = ?", [company_key]
 
 
+def _portable_query(conn, sql: str, params: tuple[Any, ...] | list[Any] = ()):
+    from database import execute_portable_query
+
+    return execute_portable_query(conn, sql, tuple(params or ()))
+
+
+def _portable_write(conn, sql: str, params: tuple[Any, ...] | list[Any] = ()):
+    from database import execute_portable_write
+
+    return execute_portable_write(conn, sql, tuple(params or ()))
+
+
+def _row_dict(row) -> dict[str, Any]:
+    from database import row_to_dict
+
+    return dict(row_to_dict(row))
+
+
+def _begin_transaction(conn) -> None:
+    conn.execute("BEGIN")
+
+
+def _commit_transaction(conn) -> None:
+    if hasattr(conn, "commit"):
+        conn.commit()
+    else:
+        conn.execute("COMMIT")
+
+
+def _rollback_transaction(conn) -> None:
+    if hasattr(conn, "rollback"):
+        conn.rollback()
+    else:
+        conn.execute("ROLLBACK")
+
+
 def get_runtime_db_path() -> Path:
     from database import DB_PATH
 
@@ -121,7 +157,19 @@ def readonly_connection(
     db_path: Path | None = None,
     *,
     busy_timeout_ms: int = READONLY_BUSY_TIMEOUT_MS,
-) -> Iterator[sqlite3.Connection]:
+) -> Iterator[Any]:
+    from database import get_connection, is_postgres_backend
+
+    if is_postgres_backend():
+        conn = get_connection()
+        if conn is None:
+            raise RuntimeError("Could not open PostgreSQL connection for migration cleanup review.")
+        try:
+            yield conn
+        finally:
+            conn.close()
+        return
+
     path = db_path or get_runtime_db_path()
     uri = f"file:{path.as_posix()}?mode=ro"
     conn = sqlite3.connect(uri, uri=True, timeout=busy_timeout_ms / 1000.0)
@@ -201,6 +249,11 @@ def build_readiness_snapshot(
     else:
         snapshot.display_warning_total = 0
 
+    if snapshot.display_warning_total > 0 and snapshot.overall_score.upper() == "GREEN":
+        snapshot.overall_score = "YELLOW"
+    if snapshot.display_warning_total > 0 and snapshot.go_status.upper() == "GO":
+        snapshot.go_status = "GO WITH WARNINGS"
+
     if not summary_path.exists() or not plan_path.exists():
         snapshot.refresh_hint = "Run audit to refresh reports."
     elif snapshot.reports_stale:
@@ -271,13 +324,14 @@ def parse_readiness_from_summary(summary_path: Path | None = None) -> ReadinessS
 
 
 def list_pos_sales_missing_branch(
-    conn: sqlite3.Connection,
+    conn: Any,
     *,
     role: str,
     company_key: str | None = None,
 ) -> list[dict[str, Any]]:
     scope_sql, scope_params = _company_scope_clause(role, company_key, "ps.company_key")
-    rows = conn.execute(
+    rows = _portable_query(
+        conn,
         f"""
         SELECT ps.id, ps.company_key, ps.receipt_number, ps.sale_date, ps.sale_datetime,
                ps.cashier, ps.grand_total, ps.branch_id, c.name AS company_name
@@ -291,14 +345,17 @@ def list_pos_sales_missing_branch(
     ).fetchall()
     results: list[dict[str, Any]] = []
     for row in rows:
-        item = dict(row)
+        item = _row_dict(row)
         item["suggested_branch_id"] = _infer_single_active_branch(conn, item["company_key"])
         results.append(item)
     return results
 
 
-def _infer_single_active_branch(conn: sqlite3.Connection, company_key: str) -> str | None:
-    branches = conn.execute(
+def _infer_single_active_branch(conn: Any, company_key: str) -> str | None:
+    from database import row_get
+
+    branches = _portable_query(
+        conn,
         """
         SELECT branch_id FROM branches
         WHERE company_key = ? AND COALESCE(is_active, 1) = 1
@@ -307,17 +364,19 @@ def _infer_single_active_branch(conn: sqlite3.Connection, company_key: str) -> s
         (company_key,),
     ).fetchall()
     if len(branches) == 1:
-        return str(branches[0][0])
+        return str(row_get(branches[0], "branch_id", row_get(branches[0], 0)))
     return None
 
 
-def _table_has_column(conn: sqlite3.Connection, table_name: str, column_name: str) -> bool:
-    columns = {row[1] for row in conn.execute(f"PRAGMA table_info({table_name})").fetchall()}
+def _table_has_column(conn: Any, table_name: str, column_name: str) -> bool:
+    from database import get_cached_table_column_names
+
+    columns = get_cached_table_column_names(conn, table_name)
     return column_name in columns
 
 
 def assign_pos_sale_branch_id(
-    conn: sqlite3.Connection,
+    conn: Any,
     *,
     company_key: str,
     sale_id: int,
@@ -330,7 +389,8 @@ def assign_pos_sale_branch_id(
     normalized_branch = str(branch_id or "").strip()
     if not normalized_branch:
         return {"ok": False, "reason": "Target branch is required."}
-    branch_row = conn.execute(
+    branch_row = _portable_query(
+        conn,
         """
         SELECT branch_id FROM branches
         WHERE company_key = ? AND branch_id = ? AND COALESCE(is_active, 1) = 1
@@ -339,24 +399,28 @@ def assign_pos_sale_branch_id(
     ).fetchone()
     if not branch_row:
         return {"ok": False, "reason": "Branch not found or inactive for this company."}
-    sale_row = conn.execute(
+    sale_row = _portable_query(
+        conn,
         """
-        SELECT id, branch_id, receipt_number FROM pos_sales
+        SELECT id, branch_id, receipt_number, sale_date, sale_datetime, cashier, grand_total
+        FROM pos_sales
         WHERE id = ? AND company_key = ?
         """,
         (sale_id, company_key),
     ).fetchone()
     if not sale_row:
         return {"ok": False, "reason": "POS sale not found."}
-    before_branch = sale_row["branch_id"] if isinstance(sale_row, sqlite3.Row) else sale_row[1]
+    sale = _row_dict(sale_row)
+    before_branch = sale.get("branch_id")
     if before_branch is not None and str(before_branch).strip():
         return {"ok": False, "reason": "POS sale already has a branch_id assigned."}
-    receipt_number = sale_row["receipt_number"] if isinstance(sale_row, sqlite3.Row) else sale_row[2]
+    receipt_number = sale.get("receipt_number")
     from database import log_audit_action
 
     try:
-        conn.execute("BEGIN")
-        cursor = conn.execute(
+        _begin_transaction(conn)
+        cursor = _portable_write(
+            conn,
             """
             UPDATE pos_sales SET branch_id = ?
             WHERE id = ? AND company_key = ?
@@ -365,10 +429,11 @@ def assign_pos_sale_branch_id(
             (normalized_branch, sale_id, company_key),
         )
         if cursor.rowcount != 1:
-            conn.execute("ROLLBACK")
+            _rollback_transaction(conn)
             return {"ok": False, "reason": "POS sale update did not affect exactly one row."}
         if _table_has_column(conn, "pos_sale_lines", "branch_id"):
-            conn.execute(
+            _portable_write(
+                conn,
                 """
                 UPDATE pos_sale_lines SET branch_id = ?
                 WHERE pos_sale_id = ? AND company_key = ?
@@ -387,21 +452,40 @@ def assign_pos_sale_branch_id(
             document_ref=str(receipt_number),
             before_after_summary=f"branch_id: '' -> {normalized_branch}",
         )
-        conn.execute("COMMIT")
-        return {"ok": True, "sale_id": sale_id, "branch_id": normalized_branch}
-    except sqlite3.Error as exc:
-        conn.execute("ROLLBACK")
+        _commit_transaction(conn)
+        return {
+            "ok": True,
+            "sale_id": sale_id,
+            "branch_id": normalized_branch,
+            "before": {
+                "branch_id": before_branch or "",
+                "receipt_number": receipt_number,
+                "sale_date": sale.get("sale_datetime") or sale.get("sale_date"),
+                "cashier": sale.get("cashier"),
+                "grand_total": sale.get("grand_total"),
+            },
+            "after": {
+                "branch_id": normalized_branch,
+                "receipt_number": receipt_number,
+                "sale_date": sale.get("sale_datetime") or sale.get("sale_date"),
+                "cashier": sale.get("cashier"),
+                "grand_total": sale.get("grand_total"),
+            },
+        }
+    except Exception as exc:
+        _rollback_transaction(conn)
         return {"ok": False, "reason": str(exc)}
 
 
 def list_branches_missing_manager(
-    conn: sqlite3.Connection,
+    conn: Any,
     *,
     role: str,
     company_key: str | None = None,
 ) -> list[dict[str, Any]]:
     scope_sql, scope_params = _company_scope_clause(role, company_key, "b.company_key")
-    rows = conn.execute(
+    rows = _portable_query(
+        conn,
         f"""
         SELECT b.branch_id, b.company_key, b.branch_name, b.branch_code,
                b.branch_manager, b.manager_user_id, c.name AS company_name
@@ -413,11 +497,127 @@ def list_branches_missing_manager(
         """,
         scope_params,
     ).fetchall()
-    return [dict(row) for row in rows]
+    return [_row_dict(row) for row in rows]
+
+
+def assign_branch_manager_user_id(
+    conn: Any,
+    *,
+    company_key: str,
+    branch_id: str,
+    manager_user_id: str,
+    actor_role: str,
+    confirmed: bool,
+) -> dict[str, Any]:
+    if not confirmed:
+        return {"ok": False, "reason": "Confirmation required."}
+    normalized_company_key = str(company_key or "").strip()
+    normalized_branch_id = str(branch_id or "").strip()
+    normalized_manager_user_id = str(manager_user_id or "").strip()
+    if not normalized_company_key or not normalized_branch_id or not normalized_manager_user_id:
+        return {"ok": False, "reason": "Company, branch, and manager user are required."}
+
+    branch_row = _portable_query(
+        conn,
+        """
+        SELECT branch_id, branch_name, branch_manager, manager_user_id
+        FROM branches
+        WHERE company_key = ? AND branch_id = ?
+        """,
+        (normalized_company_key, normalized_branch_id),
+    ).fetchone()
+    if not branch_row:
+        return {"ok": False, "reason": "Branch not found for this company."}
+    branch = _row_dict(branch_row)
+    before_manager_user_id = branch.get("manager_user_id")
+    if before_manager_user_id is not None and str(before_manager_user_id).strip():
+        return {"ok": False, "reason": "Branch already has a manager_user_id assigned."}
+
+    user_row = _portable_query(
+        conn,
+        """
+        SELECT user_id, full_name, role, status, branch_id
+        FROM users
+        WHERE company_key = ? AND user_id = ?
+        """,
+        (normalized_company_key, normalized_manager_user_id),
+    ).fetchone()
+    if not user_row:
+        return {"ok": False, "reason": "Active manager user not found in this company."}
+    user = _row_dict(user_row)
+    if str(user.get("status") or "Active").strip() != "Active":
+        return {"ok": False, "reason": "Selected manager user is not active."}
+
+    from database import PRIVILEGED_COMPANY_USER_ROLES, log_audit_action
+
+    if str(user.get("role") or "").strip() in PRIVILEGED_COMPANY_USER_ROLES:
+        return {"ok": False, "reason": "Privileged company roles cannot be assigned as branch managers."}
+    existing_user_branch = str(user.get("branch_id") or "").strip()
+    if existing_user_branch and existing_user_branch != normalized_branch_id:
+        return {"ok": False, "reason": "Manager must be unassigned or already assigned to this branch."}
+
+    manager_name = str(user.get("full_name") or "Branch Manager").strip() or "Branch Manager"
+    try:
+        _begin_transaction(conn)
+        cursor = _portable_write(
+            conn,
+            """
+            UPDATE branches
+            SET manager_user_id = ?, branch_manager = ?
+            WHERE company_key = ? AND branch_id = ?
+              AND (manager_user_id IS NULL OR TRIM(manager_user_id) = '')
+            """,
+            (
+                normalized_manager_user_id,
+                manager_name,
+                normalized_company_key,
+                normalized_branch_id,
+            ),
+        )
+        if cursor.rowcount != 1:
+            _rollback_transaction(conn)
+            return {"ok": False, "reason": "Branch manager update did not affect exactly one row."}
+        log_audit_action(
+            conn,
+            normalized_company_key,
+            actor_role,
+            "Migration cleanup: branch manager_user_id assigned",
+            "Migration Cleanup",
+            details=f"branch_id={normalized_branch_id} manager_user_id={normalized_manager_user_id}",
+            branch_id=normalized_branch_id,
+            action_type="data_cleanup",
+            document_ref=normalized_branch_id,
+            before_after_summary=(
+                f"manager_user_id: {before_manager_user_id!r} -> {normalized_manager_user_id!r}; "
+                f"branch_manager: {branch.get('branch_manager')!r} -> {manager_name!r}"
+            ),
+        )
+        _commit_transaction(conn)
+        return {
+            "ok": True,
+            "company_key": normalized_company_key,
+            "branch_id": normalized_branch_id,
+            "manager_user_id": normalized_manager_user_id,
+            "before": {
+                "branch_manager": branch.get("branch_manager") or "",
+                "manager_user_id": before_manager_user_id,
+                "user_role": user.get("role"),
+                "user_branch_id": user.get("branch_id"),
+            },
+            "after": {
+                "branch_manager": manager_name,
+                "manager_user_id": normalized_manager_user_id,
+                "user_role": user.get("role"),
+                "user_branch_id": user.get("branch_id"),
+            },
+        }
+    except Exception as exc:
+        _rollback_transaction(conn)
+        return {"ok": False, "reason": str(exc)}
 
 
 def list_payment_reference_candidates(
-    conn: sqlite3.Connection,
+    conn: Any,
     plan: dict[str, Any] | None = None,
     *,
     role: str,
@@ -433,10 +633,11 @@ def list_payment_reference_candidates(
         if role != "Dev" and company_key and payment_company != company_key:
             continue
         payment_id = int(candidate["id"])
-        row = conn.execute(
+        row = _portable_query(
+            conn,
             """
             SELECT p.id, p.company_key, p.payment_type, p.amount, p.customer_id, p.reference,
-                   p.invoice_id, p.bill_id, c.name AS company_name
+                   p.invoice_id, p.bill_id, p.supplier_id, p.posted_entry_id, c.name AS company_name
             FROM payments p
             LEFT JOIN companies c ON c.key = p.company_key
             WHERE p.id = ? AND p.company_key = ?
@@ -445,8 +646,16 @@ def list_payment_reference_candidates(
         ).fetchone()
         if not row:
             continue
-        item = dict(row)
+        item = _row_dict(row)
         item["proposed_values"] = candidate.get("proposed_values") or {}
+        item["current_values"] = {
+            "customer_id": item.get("customer_id"),
+            "supplier_id": item.get("supplier_id"),
+            "invoice_id": item.get("invoice_id"),
+            "bill_id": item.get("bill_id"),
+            "reference": item.get("reference") or "",
+            "posted_entry_id": item.get("posted_entry_id"),
+        }
         item["still_needs_fix"] = payment_still_needs_reference_fix(item)
         results.append(item)
     return results
@@ -460,7 +669,7 @@ def payment_still_needs_reference_fix(payment_row: dict[str, Any]) -> bool:
 
 
 def apply_payment_reference_fix(
-    conn: sqlite3.Connection,
+    conn: Any,
     *,
     company_key: str,
     payment_id: int,
@@ -481,7 +690,8 @@ def apply_payment_reference_fix(
     if customer_id is None:
         return {"ok": False, "reason": "customer_id is required."}
 
-    row = conn.execute(
+    row = _portable_query(
+        conn,
         """
         SELECT id, company_key, customer_id, reference, invoice_id, bill_id, payment_type, amount
         FROM payments WHERE id = ? AND company_key = ?
@@ -490,7 +700,7 @@ def apply_payment_reference_fix(
     ).fetchone()
     if not row:
         return {"ok": False, "reason": "Payment not found."}
-    payment = dict(row)
+    payment = _row_dict(row)
     if not payment_still_needs_reference_fix(payment):
         return {"ok": False, "reason": "Payment no longer matches expected bad state."}
 
@@ -512,8 +722,9 @@ def apply_payment_reference_fix(
     before_customer = payment.get("customer_id")
     before_reference = payment.get("reference")
     try:
-        conn.execute("BEGIN")
-        cursor = conn.execute(
+        _begin_transaction(conn)
+        cursor = _portable_write(
+            conn,
             """
             UPDATE payments
             SET customer_id = ?, reference = ?
@@ -524,7 +735,7 @@ def apply_payment_reference_fix(
             (customer_id, safe_reference, payment_id, company_key),
         )
         if cursor.rowcount != 1:
-            conn.execute("ROLLBACK")
+            _rollback_transaction(conn)
             return {"ok": False, "reason": "Payment update did not affect exactly one row."}
         log_audit_action(
             conn,
@@ -540,16 +751,32 @@ def apply_payment_reference_fix(
                 f"reference: {before_reference!r} -> {safe_reference!r}"
             ),
         )
-        conn.execute("COMMIT")
+        _commit_transaction(conn)
         return {
             "ok": True,
             "payment_id": payment_id,
             "backup_path": backup_path,
             "customer_id": customer_id,
             "reference": safe_reference,
+            "before": {
+                "customer_id": before_customer,
+                "reference": before_reference or "",
+                "invoice_id": payment.get("invoice_id"),
+                "bill_id": payment.get("bill_id"),
+                "payment_type": payment.get("payment_type"),
+                "amount": payment.get("amount"),
+            },
+            "after": {
+                "customer_id": customer_id,
+                "reference": safe_reference,
+                "invoice_id": payment.get("invoice_id"),
+                "bill_id": payment.get("bill_id"),
+                "payment_type": payment.get("payment_type"),
+                "amount": payment.get("amount"),
+            },
         }
-    except sqlite3.Error as exc:
-        conn.execute("ROLLBACK")
+    except Exception as exc:
+        _rollback_transaction(conn)
         return {"ok": False, "reason": str(exc)}
 
 

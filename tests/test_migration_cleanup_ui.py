@@ -169,6 +169,69 @@ class MigrationCleanupUITests(ERPIsolatedTestCase):
         self.assertEqual(user["company_key"], self.company_key)
         self.assertEqual(user["branch_id"], branch_id)
 
+    def test_cleanup_manager_link_preserves_existing_user_state(self):
+        branch_id = f"{self.company_key}-cleanup-mgr"
+        self._create_branch(branch_id, "Cleanup Mgr Branch")
+        user_id = "user-cleanup-mgr-001"
+        self.conn.execute(
+            """
+            INSERT INTO users (company_key, user_id, full_name, role, login_key, status, branch_id)
+            VALUES (?, ?, 'Cleanup Manager', 'Staff', 'cleanup.mgr.login', 'Active', NULL)
+            """,
+            (self.company_key, user_id),
+        )
+        self.commit()
+        result = self.cleanup.assign_branch_manager_user_id(
+            self.conn,
+            company_key=self.company_key,
+            branch_id=branch_id,
+            manager_user_id=user_id,
+            actor_role="Master Admin",
+            confirmed=True,
+        )
+        self.assertTrue(result["ok"])
+        branch = self.conn.execute(
+            "SELECT branch_manager, manager_user_id FROM branches WHERE branch_id = ?",
+            (branch_id,),
+        ).fetchone()
+        self.assertEqual(branch["manager_user_id"], user_id)
+        self.assertEqual(branch["branch_manager"], "Cleanup Manager")
+        user = self.conn.execute(
+            "SELECT role, branch_id FROM users WHERE user_id = ?",
+            (user_id,),
+        ).fetchone()
+        self.assertEqual(user["role"], "Staff")
+        self.assertIsNone(user["branch_id"])
+        self.assertEqual(result["before"]["user_role"], "Staff")
+        self.assertEqual(result["after"]["user_role"], "Staff")
+
+    def test_cleanup_manager_link_requires_active_user(self):
+        branch_id = f"{self.company_key}-inactive-mgr"
+        self._create_branch(branch_id, "Inactive Mgr Branch")
+        user_id = "user-inactive-mgr-001"
+        self.conn.execute(
+            """
+            INSERT INTO users (company_key, user_id, full_name, role, login_key, status, branch_id)
+            VALUES (?, ?, 'Inactive Manager', 'Staff', 'inactive.mgr.login', 'Inactive', NULL)
+            """,
+            (self.company_key, user_id),
+        )
+        self.commit()
+        result = self.cleanup.assign_branch_manager_user_id(
+            self.conn,
+            company_key=self.company_key,
+            branch_id=branch_id,
+            manager_user_id=user_id,
+            actor_role="Master Admin",
+            confirmed=True,
+        )
+        self.assertFalse(result["ok"])
+        branch = self.conn.execute(
+            "SELECT manager_user_id FROM branches WHERE branch_id = ?",
+            (branch_id,),
+        ).fetchone()
+        self.assertIsNone(branch["manager_user_id"])
+
     def test_payment_fix_refuses_without_confirmation(self):
         customer_id = self.create_customer("Pay Customer")
         payment_id = self.conn.execute(
@@ -239,6 +302,9 @@ class MigrationCleanupUITests(ERPIsolatedTestCase):
         self.assertEqual(after["amount"], before["amount"])
         self.assertEqual(after["method"], before["method"])
         self.assertEqual(after["payment_type"], before["payment_type"])
+        self.assertEqual(result["before"]["reference"], "")
+        self.assertEqual(result["after"]["reference"], "Linked receipt")
+        self.assertEqual(result["after"]["customer_id"], customer_id)
 
     def test_audit_log_entry_created_for_pos_assignment(self):
         branch_id = f"{self.company_key}-audit"

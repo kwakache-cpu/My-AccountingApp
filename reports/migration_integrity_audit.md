@@ -1,6 +1,6 @@
 # Migration Integrity Audit (Detailed)
 
-**Audited at:** 2026-06-01 19:46:22 UTC
+**Audited at:** 2026-06-25 13:02:17 UTC
 **Database:** `D:\Emma\My AccountingApp\data\eka_enterprise_v3.db`
 **Overall score:** YELLOW
 **Go/No-Go:** GO WITH WARNINGS
@@ -148,7 +148,7 @@ Note: Expected when sales exist but revenue journal not posted.
 
 - `accounting_periods` (0 rows)
 - `accounts_payable` (0 rows)
-- `audit_logs` (96 rows)
+- `audit_logs` (101 rows)
 - `bank_accounts` (0 rows)
 - `bill_lines` (0 rows)
 - `bills` (0 rows)
@@ -192,7 +192,7 @@ Note: Expected when sales exist but revenue journal not posted.
 - `subscription_plan_settings` (3 rows)
 - `supplier_transactions` (0 rows)
 - `suppliers` (4 rows)
-- `system_logs` (114 rows)
+- `system_logs` (123 rows)
 - `system_settings` (1 rows)
 - `transactions` (0 rows)
 - `users` (3 rows)

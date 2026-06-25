@@ -9804,7 +9804,7 @@ def log_audit_action(
     """Logs security events to the audit trail without forcing caller transactions to commit early."""
     try:
         was_in_transaction = bool(getattr(conn, "in_transaction", False))
-        columns = {row[1] for row in conn.execute("PRAGMA table_info(audit_logs)").fetchall()}
+        columns = get_cached_table_column_names(conn, "audit_logs")
         event_id = f"AUD-{datetime.utcnow().strftime('%Y%m%d%H%M%S%f')}"
         if {"action_type", "document_ref", "before_after_summary", "event_id"}.issubset(columns):
             execute_portable_write(

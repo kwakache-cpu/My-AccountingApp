@@ -10707,6 +10707,20 @@ def _render_migration_cleanup_review(role, session_company_key):
             )
         return build_user_safe_error(exc, role)
 
+    def _regenerate_reports_after_cleanup_action():
+        with st.spinner("Regenerating migration reports after cleanup…"):
+            refresh_result = migration_cleanup_service.regenerate_migration_integrity_reports()
+        if refresh_result.get("ok"):
+            st.success("Migration reports regenerated after cleanup.")
+        else:
+            st.warning("Cleanup saved, but migration report regeneration failed. Re-run the audit manually.")
+            audit_result = refresh_result.get("audit_result") or {}
+            plan_result = refresh_result.get("plan_result") or {}
+            if audit_result.get("stderr"):
+                st.code(audit_result["stderr"][-2000:])
+            if plan_result.get("stderr"):
+                st.code(plan_result["stderr"][-2000:])
+
     with tab_pos:
         st.markdown(
             "Assign `branch_id` on POS sales only. Receipt numbers and journals are not modified."
@@ -10720,7 +10734,8 @@ def _render_migration_cleanup_review(role, session_company_key):
                 for sale in sales:
                     ck = sale["company_key"]
                     if ck not in branch_cache:
-                        branch_cache[ck] = conn.execute(
+                        branch_cache[ck] = execute_portable_query(
+                            conn,
                             """
                             SELECT branch_id, branch_name, branch_code
                             FROM branches
@@ -10729,23 +10744,25 @@ def _render_migration_cleanup_review(role, session_company_key):
                             """,
                             (ck,),
                         ).fetchall()
-        except sqlite3.OperationalError as exc:
+        except Exception as exc:
             st.warning(_readonly_db_unavailable_message(exc))
             sales = []
             branch_cache = {}
         if not sales:
             st.success("No POS sales missing branch_id in scope.")
+        else:
+            st.dataframe(pd.DataFrame(sales), use_container_width=True, hide_index=True)
         for sale in sales:
             sale_id = int(sale["id"])
             ck = sale["company_key"]
             branches = branch_cache.get(ck, [])
             branch_labels = [
-                f"{b[1]} ({b[2] or b[0]})" if not isinstance(b, sqlite3.Row) else
-                f"{b['branch_name']} ({b['branch_code'] or b['branch_id']})"
+                f"{row_get(b, 'branch_name', row_get(b, 1))} "
+                f"({row_get(b, 'branch_code', row_get(b, 2)) or row_get(b, 'branch_id', row_get(b, 0))})"
                 for b in branches
             ]
             branch_ids = [
-                b[0] if not isinstance(b, sqlite3.Row) else b["branch_id"] for b in branches
+                row_get(b, "branch_id", row_get(b, 0)) for b in branches
             ]
             suggested = sale.get("suggested_branch_id")
             default_index = branch_ids.index(suggested) if suggested in branch_ids else 0
@@ -10769,6 +10786,21 @@ def _render_migration_cleanup_review(role, session_company_key):
                         key=f"mig_pos_branch_{sale_id}",
                     )
                     target_branch = branch_ids[branch_labels.index(selected_label)]
+                    st.markdown("**Before / after preview**")
+                    st.dataframe(
+                        pd.DataFrame(
+                            [
+                                {"Field": "branch_id", "Before": sale.get("branch_id") or "", "After": target_branch},
+                                {
+                                    "Field": "receipt_number",
+                                    "Before": sale.get("receipt_number"),
+                                    "After": sale.get("receipt_number"),
+                                },
+                            ]
+                        ),
+                        use_container_width=True,
+                        hide_index=True,
+                    )
                     confirm = st.checkbox(
                         "I confirm assigning this branch to the POS sale",
                         key=f"mig_pos_confirm_{sale_id}",
@@ -10789,16 +10821,17 @@ def _render_migration_cleanup_review(role, session_company_key):
                                 )
                                 if result.get("ok"):
                                     st.success(f"Assigned branch {target_branch} to sale #{sale_id}.")
+                                    _regenerate_reports_after_cleanup_action()
                                     st.rerun()
                                 else:
                                     st.error(result.get("reason", "Update failed."))
-                            except sqlite3.OperationalError as exc:
+                            except Exception as exc:
                                 st.error(_readonly_db_unavailable_message(exc))
                             finally:
                                 write_conn.close()
 
     with tab_mgr:
-        st.markdown("Link `manager_user_id` using existing branch manager assignment rules.")
+        st.markdown("Link `manager_user_id` to an existing active user. User roles and permissions are not changed here.")
         try:
             with migration_cleanup_service.readonly_connection() as conn:
                 branches_missing = migration_cleanup_service.list_branches_missing_manager(
@@ -10810,12 +10843,14 @@ def _render_migration_cleanup_review(role, session_company_key):
                     )
                     for b in branches_missing
                 }
-        except sqlite3.OperationalError as exc:
+        except Exception as exc:
             st.warning(_readonly_db_unavailable_message(exc))
             branches_missing = []
             manager_options_cache = {}
         if not branches_missing:
             st.success("No branches missing manager_user_id in scope.")
+        else:
+            st.dataframe(pd.DataFrame(branches_missing), use_container_width=True, hide_index=True)
         for branch in branches_missing:
             bid = branch["branch_id"]
             ck = branch["company_key"]
@@ -10846,10 +10881,31 @@ def _render_migration_cleanup_review(role, session_company_key):
                         key=f"mig_mgr_select_{bid}",
                     )
                     manager_user_id = eligible[labels.index(selected)]["user_id"]
-                    promote = st.checkbox(
-                        "Promote to Branch Manager role",
-                        value=True,
-                        key=f"mig_mgr_promote_{bid}",
+                    selected_user = eligible[labels.index(selected)]
+                    st.caption("Migration cleanup links the branch only; use Staff Management for any role changes.")
+                    st.markdown("**Before / after preview**")
+                    st.dataframe(
+                        pd.DataFrame(
+                            [
+                                {
+                                    "Field": "manager_user_id",
+                                    "Before": branch.get("manager_user_id") or "",
+                                    "After": manager_user_id,
+                                },
+                                {
+                                    "Field": "branch_manager",
+                                    "Before": branch.get("branch_manager") or "",
+                                    "After": selected_user.get("full_name") or "Branch Manager",
+                                },
+                                {
+                                    "Field": "selected_user_role",
+                                    "Before": selected_user.get("role"),
+                                    "After": selected_user.get("role"),
+                                },
+                            ]
+                        ),
+                        use_container_width=True,
+                        hide_index=True,
                     )
                     confirm = st.checkbox(
                         "I confirm assigning this branch manager",
@@ -10864,30 +10920,21 @@ def _render_migration_cleanup_review(role, session_company_key):
                                 st.error("Could not open database for update.")
                             else:
                                 try:
-                                    result = assign_branch_manager(
+                                    result = migration_cleanup_service.assign_branch_manager_user_id(
                                         write_conn,
-                                        ck,
-                                        bid,
-                                        manager_user_id,
-                                        promote_to_branch_manager=promote,
+                                        company_key=ck,
+                                        branch_id=bid,
+                                        manager_user_id=manager_user_id,
+                                        actor_role=role,
+                                        confirmed=confirm,
                                     )
                                     if result.get("ok"):
-                                        log_audit_action(
-                                            write_conn,
-                                            ck,
-                                            role,
-                                            "Migration cleanup: branch manager assigned",
-                                            "Migration Cleanup",
-                                            details=f"branch_id={bid} manager_user_id={manager_user_id}",
-                                            branch_id=bid,
-                                            action_type="data_cleanup",
-                                        )
-                                        write_conn.commit()
                                         st.success("Branch manager linked.")
+                                        _regenerate_reports_after_cleanup_action()
                                         st.rerun()
                                     else:
                                         st.error(result.get("reason", "Assignment failed."))
-                                except sqlite3.OperationalError as exc:
+                                except Exception as exc:
                                     st.error(_readonly_db_unavailable_message(exc))
                                 finally:
                                     write_conn.close()
@@ -10901,11 +10948,13 @@ def _render_migration_cleanup_review(role, session_company_key):
                 payments = migration_cleanup_service.list_payment_reference_candidates(
                     conn, plan, role=role, company_key=scope_key
                 )
-        except sqlite3.OperationalError as exc:
+        except Exception as exc:
             st.warning(_readonly_db_unavailable_message(exc))
             payments = []
         if not payments:
             st.info("No auto-fix-safe payment candidates in the current plan.")
+        else:
+            st.dataframe(pd.DataFrame(payments), use_container_width=True, hide_index=True)
         for payment in payments:
             pid = int(payment["id"])
             ck = payment["company_key"]
@@ -10920,6 +10969,35 @@ def _render_migration_cleanup_review(role, session_company_key):
                 st.write(
                     f"Proposed customer_id: {proposed.get('customer_id')} | "
                     f"reference: {proposed.get('reference')!r}"
+                )
+                st.markdown("**Before / after preview**")
+                st.dataframe(
+                    pd.DataFrame(
+                        [
+                            {
+                                "Field": "customer_id",
+                                "Before": payment.get("customer_id"),
+                                "After": proposed.get("customer_id"),
+                            },
+                            {
+                                "Field": "reference",
+                                "Before": payment.get("reference") or "",
+                                "After": proposed.get("reference") or "",
+                            },
+                            {
+                                "Field": "invoice_id",
+                                "Before": payment.get("invoice_id"),
+                                "After": payment.get("invoice_id"),
+                            },
+                            {
+                                "Field": "bill_id",
+                                "Before": payment.get("bill_id"),
+                                "After": payment.get("bill_id"),
+                            },
+                        ]
+                    ),
+                    use_container_width=True,
+                    hide_index=True,
                 )
                 if not payment.get("still_needs_fix"):
                     st.warning("Payment no longer matches expected bad state.")
@@ -10954,10 +11032,11 @@ def _render_migration_cleanup_review(role, session_company_key):
                                     st.success(
                                         f"Payment updated. Backup: {result.get('backup_path') or 'n/a'}"
                                     )
+                                    _regenerate_reports_after_cleanup_action()
                                     st.rerun()
                                 else:
                                     st.error(result.get("reason", "Apply failed."))
-                            except sqlite3.OperationalError as exc:
+                            except Exception as exc:
                                 st.error(_readonly_db_unavailable_message(exc))
                             finally:
                                 write_conn.close()

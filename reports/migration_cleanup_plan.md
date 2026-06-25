@@ -1,6 +1,6 @@
 # Migration Data Cleanup Plan
 
-**Generated at:** 2026-06-01 11:29:02 UTC
+**Generated at:** 2026-06-25 13:02:17 UTC
 **Database:** `D:\Emma\My AccountingApp\data\eka_enterprise_v3.db`
 **Mode:** read-only analysis (no data modified)
 

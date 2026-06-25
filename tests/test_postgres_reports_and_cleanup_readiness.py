@@ -85,6 +85,31 @@ class PostgresReportsAndCleanupReadinessTests(ERPIsolatedTestCase):
         snapshot = self.cleanup.build_readiness_snapshot(summary_path, plan_path)
         self.assertEqual(snapshot.go_status, go_status)
 
+    def test_green_readiness_requires_zero_cleanup_count(self):
+        summary_path = self.data_dir / "migration_integrity_summary.md"
+        plan_path = self.data_dir / "migration_cleanup_plan.json"
+        summary_path.write_text(
+            "\n".join(
+                [
+                    "# Migration Integrity Summary",
+                    "",
+                    "**Overall readiness score:** **GREEN**",
+                    "**Recommendation:** **GO**",
+                    "",
+                    "**Audited at:** 2026-06-01 19:46:22 UTC",
+                    "",
+                    "## Top Warnings",
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        self._write_plan(plan_path, generated_at="2026-06-01 19:46:22 UTC")
+        snapshot = self.cleanup.build_readiness_snapshot(summary_path, plan_path)
+        self.assertEqual(snapshot.display_warning_total, 4)
+        self.assertEqual(snapshot.overall_score, "YELLOW")
+        self.assertEqual(snapshot.go_status, "GO WITH WARNINGS")
+
     def test_summarize_cleanup_classifications(self):
         plan = {
             "pos_missing_branch_id": [{"manual_required": True}],
