@@ -33,11 +33,43 @@ class PostgresFinalCertificationTests(ERPIsolatedTestCase):
 
     def test_journal_writer_has_transaction_and_source_sync_contract(self):
         source = inspect.getsource(self.engine.post_journal_entry)
-        self.assertIn("execute_write_transaction", source)
+        self.assertIn("execute_db_write_transaction", source)
+        self.assertNotIn("execute_write_transaction", source)
         self.assertIn("ensure_insert_sql_returning", source)
         self.assertIn("get_inserted_id", source)
         self.assertIn("INSERT INTO journal_lines", source)
         self.assertIn("_sync_source_document_posting", source)
+
+    def test_phase_5b16b_transaction_callers_use_backend_aware_wrapper(self):
+        branch_write_source = inspect.getsource(self.modules._run_branch_db_write)
+        journal_source = inspect.getsource(self.engine.post_journal_entry)
+        self.assertIn("execute_db_write_transaction", branch_write_source)
+        self.assertIn("execute_db_write_transaction", journal_source)
+        self.assertNotIn("execute_write_transaction(", branch_write_source)
+        self.assertNotIn("execute_write_transaction(", journal_source)
+
+    def test_phase_5b16b_insert_ignore_paths_use_portable_helper(self):
+        financials = importlib.import_module("financials")
+        for function_name in ("show_invoice_manager", "show_customers_page", "show_suppliers_page"):
+            source = inspect.getsource(getattr(financials, function_name))
+            self.assertIn("db_insert_ignore_sql", source)
+            self.assertIn("execute_portable_write", source)
+            self.assertNotIn("INSERT OR IGNORE", source)
+
+    def test_phase_5b16b_critical_raw_writes_use_portable_helper(self):
+        critical_sources = {
+            "Invoice line save": inspect.getsource(self.modules.save_invoice_lines),
+            "Invoice stock effects": inspect.getsource(self.modules.apply_invoice_stock_effects),
+            "POS checkout": inspect.getsource(self.modules.show_pos),
+            "Payroll posting": inspect.getsource(self.modules.show_payroll),
+            "Depreciation posting": inspect.getsource(self.modules.run_straight_line_depreciation),
+        }
+        for workflow, source in critical_sources.items():
+            self.assertIn(
+                "execute_portable_write",
+                source,
+                msg=f"{workflow} should route critical DML through execute_portable_write().",
+            )
 
     def test_payroll_posting_links_source_document_to_journal(self):
         payroll_cursor = self.conn.execute(

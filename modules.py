@@ -742,10 +742,10 @@ from database import (
     dataframe_from_portable_rows,
     ensure_company_trial_subscription,
     ensure_branch_licensing_schema_integrity,
+    execute_db_write_transaction,
     execute_portable_query,
     execute_portable_write,
     execute_timed_portable_query,
-    execute_write_transaction,
     fetch_branch_manager_candidates,
     fetch_branch_manager_select_options,
     get_branch_enabled_modules,
@@ -1183,7 +1183,7 @@ def _run_branch_db_write(operation_name, callback, *, release_conn=None):
         ensure_branch_licensing_schema_integrity(conn)
         return callback(conn)
 
-    return execute_write_transaction(_operation, operation_name=operation_name)
+    return execute_db_write_transaction(_operation, operation_name=operation_name)
 
 
 def _safe_select_index(options, value, default_value=None):
@@ -4170,7 +4170,8 @@ def run_straight_line_depreciation(company_key, as_of_date=None, conn=None, crea
             accumulated += amount
             opening_book = float(asset["opening_book_value"] or cost)
             book_value = max(opening_book - accumulated, residual_value)
-            conn.execute(
+            execute_portable_write(
+                conn,
                 """
                 UPDATE fixed_assets
                 SET accumulated_depreciation = ?,
@@ -4386,9 +4387,10 @@ def render_invoice_line_editor(company_key, editor_key_prefix, conn):
 
 
 def save_invoice_lines(conn, invoice_id, invoice_items):
-    conn.execute("DELETE FROM invoice_lines WHERE invoice_id = ?", (int(invoice_id),))
+    execute_portable_write(conn, "DELETE FROM invoice_lines WHERE invoice_id = ?", (int(invoice_id),))
     for item in invoice_items:
-        conn.execute(
+        execute_portable_write(
+            conn,
             """
             INSERT INTO invoice_lines (
                 invoice_id, inventory_item_id, item_name, quantity, unit_price, line_total, cost_price
@@ -4452,11 +4454,13 @@ def apply_invoice_stock_effects(
             unit_cost = float(item.get("cost_price") or 0.0)
         total_cost = round(quantity_sold * unit_cost, 2)
         new_qty = round(available_qty - quantity_sold, 4)
-        conn.execute(
+        execute_portable_write(
+            conn,
             "UPDATE inventory SET qty = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND company_key = ?",
             (new_qty, int(inventory_row["id"]), company_key),
         )
-        conn.execute(
+        execute_portable_write(
+            conn,
             """
             INSERT INTO stock_movements (
                 company_key, branch_id, inventory_item_id, item_name, movement_type,
@@ -12237,7 +12241,8 @@ def show_pos(company_key, company_name, role):
                                 st.warning(f"Insufficient stock for {sale_line['name']}.")
                                 conn.close()
                                 return
-                            conn.execute(
+                            execute_portable_write(
+                                conn,
                                 "UPDATE inventory SET qty = qty - ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND company_key = ?",
                                 (sale_line["qty"], int(sale_line["inventory_item_id"]), company_key),
                             )
@@ -14552,7 +14557,8 @@ def show_payroll(company_key, role):
                         ),
                     )
                     payroll_id = get_inserted_id(payroll_cursor)
-                    conn.execute(
+                    execute_portable_write(
+                        conn,
                         """
                         INSERT INTO payroll_records
                             (company_key, period_start, period_end, employee_name, gross_pay, deductions, net_pay, status)
@@ -15244,7 +15250,8 @@ def show_fixed_assets(company_key, role):
                                     branch_id=st.session_state.get("active_branch_id"),
                                     conn=conn,
                                 )
-                                conn.execute(
+                                execute_portable_write(
+                                    conn,
                                     "UPDATE fixed_assets SET status = 'Reversed' WHERE id = ? AND company_key = ?",
                                     (int(reversal_asset_id), company_key),
                                 )

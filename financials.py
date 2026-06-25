@@ -11,9 +11,11 @@ from security_utils import build_user_safe_error, sanitize_error_message
 
 from database import (
     dataframe_from_portable_rows,
+    db_insert_ignore_sql,
     db_table_exists,
     ensure_insert_sql_returning,
     execute_portable_query,
+    execute_portable_write,
     fetch_scalar,
     get_active_db_backend,
     get_connection,
@@ -594,7 +596,14 @@ def show_invoice_manager(company_key, role):
             phone = st.text_input("Phone")
             if st.form_submit_button("Save Customer") and name:
                 conn = get_connection()
-                conn.execute("INSERT OR IGNORE INTO customers (company_key, name, email, phone, currency) VALUES (?, ?, ?, ?, 'GHS')", (company_key, name, email, phone))
+                execute_portable_write(
+                    conn,
+                    db_insert_ignore_sql(
+                        "customers",
+                        ("company_key", "name", "email", "phone", "currency"),
+                    ),
+                    (company_key, name, email, phone, "GHS"),
+                )
                 conn.commit()
                 conn.close()
                 st.rerun()
@@ -615,7 +624,14 @@ def show_invoice_manager(company_key, role):
             phone = st.text_input("Phone", key=f"supplier_phone_{company_key}")
             if st.form_submit_button("Save Supplier") and name:
                 conn = get_connection()
-                conn.execute("INSERT OR IGNORE INTO suppliers (company_key, name, email, phone, currency) VALUES (?, ?, ?, ?, 'GHS')", (company_key, name, email, phone))
+                execute_portable_write(
+                    conn,
+                    db_insert_ignore_sql(
+                        "suppliers",
+                        ("company_key", "name", "email", "phone", "currency"),
+                    ),
+                    (company_key, name, email, phone, "GHS"),
+                )
                 conn.commit()
                 conn.close()
                 st.rerun()
@@ -967,9 +983,13 @@ def show_customers_page(company_key, role):
             if not require_permission(role, "create_customer", action_label="create customers", company_key=company_key):
                 return
             conn = get_connection()
-            conn.execute(
-                "INSERT OR IGNORE INTO customers (company_key, name, email, phone, currency) VALUES (?, ?, ?, ?, 'GHS')",
-                (company_key, name, email, phone),
+            execute_portable_write(
+                conn,
+                db_insert_ignore_sql(
+                    "customers",
+                    ("company_key", "name", "email", "phone", "currency"),
+                ),
+                (company_key, name, email, phone, "GHS"),
             )
             conn.commit()
             conn.close()
@@ -1006,9 +1026,13 @@ def show_suppliers_page(company_key, role):
             if not require_permission(role, "create_supplier", action_label="create suppliers", company_key=company_key):
                 return
             conn = get_connection()
-            conn.execute(
-                "INSERT OR IGNORE INTO suppliers (company_key, name, email, phone, currency) VALUES (?, ?, ?, ?, 'GHS')",
-                (company_key, name.strip(), email, phone),
+            execute_portable_write(
+                conn,
+                db_insert_ignore_sql(
+                    "suppliers",
+                    ("company_key", "name", "email", "phone", "currency"),
+                ),
+                (company_key, name.strip(), email, phone, "GHS"),
             )
             conn.commit()
             conn.close()

@@ -5496,7 +5496,7 @@ def _log_migration_event(
 def _record_schema_version(conn, version, description):
     execute_portable_write(
         conn,
-        "INSERT OR IGNORE INTO schema_version (version, description) VALUES (?, ?)",
+        db_insert_ignore_sql("schema_version", ("version", "description"), conflict_columns=("version",)),
         (version, description),
     )
 
@@ -5650,14 +5650,14 @@ def seed_branch_type_catalog(conn):
         return 0
     inserted = 0
     for branch_type_key, branch_type_name, description in BRANCH_TYPE_CATALOG_SEEDS:
-        cursor = conn.execute(
-            """
-            INSERT OR IGNORE INTO branch_type_catalog (
-                branch_type_key, branch_type_name, description, is_active
-            )
-            VALUES (?, ?, ?, 1)
-            """,
-            (branch_type_key, branch_type_name, description),
+        cursor = execute_portable_write(
+            conn,
+            db_insert_ignore_sql(
+                "branch_type_catalog",
+                ("branch_type_key", "branch_type_name", "description", "is_active"),
+                conflict_columns=("branch_type_key",),
+            ),
+            (branch_type_key, branch_type_name, description, 1),
         )
         inserted += int(cursor.rowcount or 0)
     return inserted
@@ -5673,14 +5673,14 @@ def seed_branch_type_module_defaults(conn):
     templates["subsidiary_main"] = BRANCH_MAIN_OPERATING_MODULE_KEYS
     for branch_type_key, module_keys in templates.items():
         for module_key in module_keys:
-            cursor = conn.execute(
-                """
-                INSERT OR IGNORE INTO branch_type_module_defaults (
-                    branch_type_key, module_key, is_enabled
-                )
-                VALUES (?, ?, 1)
-                """,
-                (branch_type_key, module_key),
+            cursor = execute_portable_write(
+                conn,
+                db_insert_ignore_sql(
+                    "branch_type_module_defaults",
+                    ("branch_type_key", "module_key", "is_enabled"),
+                    conflict_columns=("branch_type_key", "module_key"),
+                ),
+                (branch_type_key, module_key, 1),
             )
             inserted += int(cursor.rowcount or 0)
     return inserted
@@ -5733,13 +5733,13 @@ def ensure_branch_module_grants_for_branch(conn, company_key, branch_id, branch_
 
     inserted = 0
     for module_key, is_enabled in default_rows:
-        cursor = conn.execute(
-            """
-            INSERT OR IGNORE INTO branch_module_grants (
-                company_key, branch_id, module_key, is_enabled
-            )
-            VALUES (?, ?, ?, ?)
-            """,
+        cursor = execute_portable_write(
+            conn,
+            db_insert_ignore_sql(
+                "branch_module_grants",
+                ("company_key", "branch_id", "module_key", "is_enabled"),
+                conflict_columns=("company_key", "branch_id", "module_key"),
+            ),
             (
                 normalized_company_key,
                 normalized_branch_id,
@@ -6297,18 +6297,19 @@ def create_company_branch(
     if create_default_bookkeeper_user and bookkeeper_password_hash:
         cursor = execute_portable_write(
             conn,
-            """
-            INSERT OR IGNORE INTO users (
-                company_key, branch_id, full_name, login_key, password_hash, role, status
-            )
-            VALUES (?, ?, ?, ?, ?, 'Branch_Bookkeeper', 'Active')
-            """,
+            db_insert_ignore_sql(
+                "users",
+                ("company_key", "branch_id", "full_name", "login_key", "password_hash", "role", "status"),
+                conflict_columns=("login_key",),
+            ),
             (
                 normalized_company_key,
                 branch_id,
                 str(branch_manager or "Branch Manager"),
                 resolved_access_key,
                 bookkeeper_password_hash,
+                "Branch_Bookkeeper",
+                "Active",
             ),
         )
         bookkeeper_created = int(cursor.rowcount or 0) > 0
@@ -7432,8 +7433,14 @@ def ensure_schema_integrity(conn):
             cursor.execute("ALTER TABLE system_settings ADD COLUMN display_currency TEXT DEFAULT 'GHS'")
         if "exchange_rate" not in existing_system_columns:
             cursor.execute("ALTER TABLE system_settings ADD COLUMN exchange_rate REAL DEFAULT 1.0")
-    cursor.execute(
-        "INSERT OR IGNORE INTO system_settings (id, master_price_per_month, base_currency, display_currency, exchange_rate) VALUES (1, 500, 'GHS', 'GHS', 1.0)"
+    execute_portable_write(
+        conn,
+        db_insert_ignore_sql(
+            "system_settings",
+            ("id", "master_price_per_month", "base_currency", "display_currency", "exchange_rate"),
+            conflict_columns=("id",),
+        ),
+        (1, 500, "GHS", "GHS", 1.0),
     )
     # Additive ERP migrations live here so upgrades stay idempotent and non-destructive.
     run_foundation_migrations(conn, logger=logger)
@@ -7937,8 +7944,14 @@ def ensure_schema_integrity(conn):
             cursor.execute("ALTER TABLE system_settings ADD COLUMN display_currency TEXT DEFAULT 'GHS'")
         if "exchange_rate" not in existing_system_columns:
             cursor.execute("ALTER TABLE system_settings ADD COLUMN exchange_rate REAL DEFAULT 1.0")
-    cursor.execute(
-        "INSERT OR IGNORE INTO system_settings (id, master_price_per_month, base_currency, display_currency, exchange_rate) VALUES (1, 500, 'GHS', 'GHS', 1.0)"
+    execute_portable_write(
+        conn,
+        db_insert_ignore_sql(
+            "system_settings",
+            ("id", "master_price_per_month", "base_currency", "display_currency", "exchange_rate"),
+            conflict_columns=("id",),
+        ),
+        (1, 500, "GHS", "GHS", 1.0),
     )
     ensure_cashier_closings_schema(conn)
     ensure_pos_sales_schema(conn)
@@ -9037,7 +9050,11 @@ def _deploy_full_schema(conn):
         for column_name, column_def in maintenance_column_defs.items():
             if column_name not in maintenance_columns:
                 cursor.execute(f"ALTER TABLE maintenance_settings ADD COLUMN {column_name} {column_def}")
-        cursor.execute("INSERT OR IGNORE INTO maintenance_settings (id, is_active) VALUES (1, 0)")
+        execute_portable_write(
+            conn,
+            db_insert_ignore_sql("maintenance_settings", ("id", "is_active"), conflict_columns=("id",)),
+            (1, 0),
+        )
 
         # --- TABLE 8: PENDING APPROVALS QUEUE ---
         cursor.execute("""
@@ -9209,8 +9226,10 @@ def _deploy_full_schema(conn):
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
-        cursor.execute(
-            "INSERT OR IGNORE INTO system_settings (id, master_price_per_month) VALUES (1, 500)"
+        execute_portable_write(
+            conn,
+            db_insert_ignore_sql("system_settings", ("id", "master_price_per_month"), conflict_columns=("id",)),
+            (1, 500),
         )
 
         logger.info("E.K.A CLOUD DATABASE: Full Architectural Sync Complete.")
