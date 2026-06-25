@@ -38,6 +38,42 @@ PLAN_WARNING_KEYS = (
     "invalid_expiry_dates",
 )
 
+SUMMARY_TO_PLAN_WARNING_KEYS = {
+    "sales_without_branch_id": "pos_missing_branch_id",
+    "missing_manager_user_id": "missing_manager_user_id",
+    "payments_without_source_reference": "payments_without_reference",
+    "invalid_expiry_dates": "invalid_expiry_dates",
+}
+
+CLEANUP_ITEM_CLASSIFICATION = {
+    "pos_missing_branch_id": {
+        "title": "POS sales missing branch_id",
+        "classification": "manual_review",
+        "summary_key": "sales_without_branch_id",
+        "notes": "Assign branch manually when multiple active branches exist.",
+    },
+    "missing_manager_user_id": {
+        "title": "Branches missing manager_user_id",
+        "classification": "warning",
+        "summary_key": "missing_manager_user_id",
+        "notes": "Link an eligible manager user; does not block PostgreSQL runtime reads.",
+    },
+    "payments_without_reference": {
+        "title": "Payments without source reference",
+        "classification": "manual_review",
+        "summary_key": "payments_without_source_reference",
+        "notes": "Use guarded payment reference apply only after operator confirmation.",
+    },
+    "invalid_expiry_dates": {
+        "title": "Invalid inventory expiry dates",
+        "classification": "warning",
+        "summary_key": "invalid_expiry_dates",
+        "notes": "Review inventory expiry values; informational for migration readiness.",
+    },
+}
+
+MIGRATION_REPORT_TIMESTAMP_ENV = "EKA_MIGRATION_REPORT_TIMESTAMP"
+
 
 @dataclass
 class ReadinessSnapshot:
@@ -53,6 +89,10 @@ class ReadinessSnapshot:
     summary_path: str = ""
     audit_path: str = ""
     plan_path: str = ""
+    audit_timestamp: str = ""
+    plan_timestamp: str = ""
+    report_timestamp: str = ""
+    cleanup_classifications: list[dict[str, Any]] = field(default_factory=list)
 
 
 def can_access_migration_cleanup(role: str | None) -> bool:
@@ -99,6 +139,39 @@ def count_plan_warning_items(plan: dict[str, Any] | None) -> dict[str, int]:
     return counts
 
 
+def parse_timestamp_from_summary_text(text: str) -> str:
+    match = re.search(r"\*\*Audited at:\*\*\s*([^\n]+)", text or "")
+    return match.group(1).strip() if match else ""
+
+
+def parse_timestamp_from_plan(plan: dict[str, Any] | None) -> str:
+    return str((plan or {}).get("generated_at") or "").strip()
+
+
+def summarize_cleanup_classifications(plan: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+    plan = plan or {}
+    rows: list[dict[str, Any]] = []
+    for plan_key in PLAN_WARNING_KEYS:
+        items = plan.get(plan_key) or []
+        if not items:
+            continue
+        meta = CLEANUP_ITEM_CLASSIFICATION.get(plan_key, {})
+        manual_count = sum(1 for item in items if item.get("manual_required"))
+        auto_safe_count = sum(1 for item in items if item.get("auto_fix_safe"))
+        rows.append(
+            {
+                "item_key": plan_key,
+                "title": meta.get("title", plan_key),
+                "classification": meta.get("classification", "warning"),
+                "count": len(items),
+                "manual_required_count": manual_count,
+                "auto_fix_safe_count": auto_safe_count,
+                "notes": meta.get("notes", ""),
+            }
+        )
+    return rows
+
+
 def build_readiness_snapshot(
     summary_path: Path | None = None,
     plan_path: Path | None = None,
@@ -111,6 +184,16 @@ def build_readiness_snapshot(
     snapshot.plan_item_counts = count_plan_warning_items(plan)
     snapshot.plan_warning_total = sum(snapshot.plan_item_counts.values())
     snapshot.summary_warning_total = sum((snapshot.warning_counts or {}).values())
+    snapshot.cleanup_classifications = summarize_cleanup_classifications(plan)
+    if summary_path.exists():
+        snapshot.audit_timestamp = parse_timestamp_from_summary_text(summary_path.read_text(encoding="utf-8"))
+    snapshot.plan_timestamp = parse_timestamp_from_plan(plan)
+    if snapshot.audit_timestamp and snapshot.plan_timestamp:
+        snapshot.report_timestamp = snapshot.audit_timestamp
+        snapshot.reports_stale = snapshot.audit_timestamp != snapshot.plan_timestamp
+    elif not summary_path.exists() or not plan_path.exists():
+        snapshot.reports_stale = True
+
     if plan_path.exists():
         snapshot.display_warning_total = snapshot.plan_warning_total
     elif snapshot.summary_warning_total:
@@ -118,14 +201,12 @@ def build_readiness_snapshot(
     else:
         snapshot.display_warning_total = 0
 
-    summary_mtime = summary_path.stat().st_mtime if summary_path.exists() else 0
-    plan_mtime = plan_path.stat().st_mtime if plan_path.exists() else 0
     if not summary_path.exists() or not plan_path.exists():
-        snapshot.reports_stale = True
         snapshot.refresh_hint = "Run audit to refresh reports."
-    elif plan_mtime and summary_mtime and abs(plan_mtime - summary_mtime) > 120:
-        snapshot.reports_stale = True
-        snapshot.refresh_hint = "Audit summary and cleanup plan timestamps differ; re-run audit."
+    elif snapshot.reports_stale:
+        snapshot.refresh_hint = (
+            "Audit summary and cleanup plan timestamps differ; re-run audit to regenerate both with one timestamp."
+        )
     elif (
         snapshot.go_status.upper().startswith("GO WITH")
         and snapshot.display_warning_total == 0
@@ -136,6 +217,10 @@ def build_readiness_snapshot(
     elif snapshot.go_status.upper().startswith("GO WITH") and snapshot.display_warning_total == 0:
         snapshot.refresh_hint = (
             "Go/No-Go is from the last audit file; cleanup items may already be resolved."
+        )
+    elif snapshot.display_warning_total > 0:
+        snapshot.refresh_hint = (
+            "Cleanup items remain. Resolve manual-review items or accept warnings before PostgreSQL cutover."
         )
     return snapshot
 
@@ -468,18 +553,20 @@ def apply_payment_reference_fix(
         return {"ok": False, "reason": str(exc)}
 
 
-def run_readonly_audit_subprocess(db_path: Path | None = None) -> dict[str, Any]:
+def run_readonly_audit_subprocess(db_path: Path | None = None, env: dict[str, str] | None = None) -> dict[str, Any]:
     if not AUDIT_SCRIPT.exists():
         return {"ok": False, "reason": f"Audit script not found: {AUDIT_SCRIPT}"}
-    env = os.environ.copy()
+    run_env = os.environ.copy()
+    if env:
+        run_env.update(env)
     if db_path:
-        env["EKA_AUDIT_DB_PATH"] = str(db_path)
+        run_env["EKA_AUDIT_DB_PATH"] = str(db_path)
     result = subprocess.run(
         [sys.executable, str(AUDIT_SCRIPT)],
         cwd=str(REPO_ROOT),
         capture_output=True,
         text=True,
-        env=env,
+        env=run_env,
         timeout=120,
         check=False,
     )
@@ -491,18 +578,20 @@ def run_readonly_audit_subprocess(db_path: Path | None = None) -> dict[str, Any]
     }
 
 
-def run_readonly_plan_subprocess(db_path: Path | None = None) -> dict[str, Any]:
+def run_readonly_plan_subprocess(db_path: Path | None = None, env: dict[str, str] | None = None) -> dict[str, Any]:
     if not PLAN_SCRIPT.exists():
         return {"ok": False, "reason": f"Plan script not found: {PLAN_SCRIPT}"}
-    env = os.environ.copy()
+    run_env = os.environ.copy()
+    if env:
+        run_env.update(env)
     if db_path:
-        env["EKA_AUDIT_DB_PATH"] = str(db_path)
+        run_env["EKA_AUDIT_DB_PATH"] = str(db_path)
     result = subprocess.run(
         [sys.executable, str(PLAN_SCRIPT)],
         cwd=str(REPO_ROOT),
         capture_output=True,
         text=True,
-        env=env,
+        env=run_env,
         timeout=120,
         check=False,
     )
@@ -511,4 +600,21 @@ def run_readonly_plan_subprocess(db_path: Path | None = None) -> dict[str, Any]:
         "returncode": result.returncode,
         "stdout": result.stdout,
         "stderr": result.stderr,
+    }
+
+
+def regenerate_migration_integrity_reports(db_path: Path | None = None) -> dict[str, Any]:
+    """Run audit + cleanup plan with one shared UTC timestamp embedded in both reports."""
+    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    env = {MIGRATION_REPORT_TIMESTAMP_ENV: timestamp}
+    audit_result = run_readonly_audit_subprocess(db_path=db_path, env=env)
+    plan_result = run_readonly_plan_subprocess(db_path=db_path, env=env)
+    snapshot = build_readiness_snapshot()
+    return {
+        "ok": bool(audit_result.get("ok") and plan_result.get("ok")),
+        "report_timestamp": timestamp,
+        "audit_result": audit_result,
+        "plan_result": plan_result,
+        "reports_aligned": bool(snapshot.audit_timestamp and snapshot.audit_timestamp == snapshot.plan_timestamp),
+        "readiness": snapshot,
     }

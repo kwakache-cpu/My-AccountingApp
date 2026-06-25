@@ -8317,15 +8317,26 @@ def show_company_registration_module():
 
     conn = get_connection()
     try:
-        rows = conn.execute(
-            "SELECT name, contact_email, status, subscription_expiry FROM companies ORDER BY created_at DESC"
+        rows = execute_portable_query(
+            conn,
+            "SELECT name, contact_email, status, subscription_expiry FROM companies ORDER BY created_at DESC",
         ).fetchall()
     finally:
         conn.close()
 
     if rows:
         st.dataframe(
-            format_currency_dataframe(pd.DataFrame(rows, columns=["Company Name", "Contact Email", "Status", "Subscription Expiry"])),
+            format_currency_dataframe(
+                dataframe_from_portable_rows(
+                    rows,
+                    {
+                        "name": "Company Name",
+                        "contact_email": "Contact Email",
+                        "status": "Status",
+                        "subscription_expiry": "Subscription Expiry",
+                    },
+                )
+            ),
             use_container_width=True,
         )
     else:
@@ -8403,8 +8414,9 @@ def show_license_renewal_module():
     st.subheader("Renew License")
     conn = get_connection()
     try:
-        companies = conn.execute(
-            "SELECT id, company_name, status, subscription_expiry FROM companies ORDER BY company_name"
+        companies = execute_portable_query(
+            conn,
+            "SELECT id, company_name, status, subscription_expiry FROM companies ORDER BY company_name",
         ).fetchall()
     finally:
         conn.close()
@@ -8413,7 +8425,15 @@ def show_license_renewal_module():
         st.info("No companies are available for renewal yet.")
         return
 
-    companies_df = pd.DataFrame(companies, columns=["ID", "Company Name", "Status", "Subscription Expiry"])
+    companies_df = dataframe_from_portable_rows(
+        companies,
+        {
+            "id": "ID",
+            "company_name": "Company Name",
+            "status": "Status",
+            "subscription_expiry": "Subscription Expiry",
+        },
+    )
     st.dataframe(format_currency_dataframe(companies_df), use_container_width=True)
 
     selected_name = st.selectbox("Select Company", companies_df["Company Name"].tolist())
@@ -8470,9 +8490,20 @@ def show_sales_invoices_page(conn, demo_on):
             st.success("Invoice saved.")
             st.rerun()
 
-    rows = conn.execute("SELECT customer_name, amount, status, date FROM sales_invoices ORDER BY date DESC, id DESC").fetchall()
+    rows = execute_portable_query(
+        conn,
+        "SELECT customer_name, amount, status, date FROM sales_invoices ORDER BY date DESC, id DESC",
+    ).fetchall()
     if rows:
-        df = pd.DataFrame(rows, columns=["Customer Name", "Amount", "Status", "Date"])
+        df = dataframe_from_portable_rows(
+            rows,
+            {
+                "customer_name": "Customer Name",
+                "amount": "Amount",
+                "status": "Status",
+                "date": "Date",
+            },
+        )
         st.dataframe(format_currency_dataframe(df), use_container_width=True)
     else:
         st.caption("No invoices yet.")
@@ -8592,18 +8623,30 @@ def show_accounts_payable_page(conn, demo_on):
                 st.success("Bill created without ledger impact. Move Posting State to Posted when it is approved.")
             st.rerun()
 
-    rows = conn.execute(
+    rows = execute_portable_query(
+        conn,
         """
         SELECT b.bill_number, b.bill_date, s.id AS supplier_id, s.name AS supplier_name, b.description, b.amount, b.status
         FROM bills b
         JOIN suppliers s ON s.id = b.supplier_id
         WHERE b.company_key = ?
-        ORDER BY date(b.bill_date) DESC, b.id DESC
+        ORDER BY CAST(b.bill_date AS date) DESC, b.id DESC
         """,
         (company_key,),
     ).fetchall()
     if rows:
-        df = pd.DataFrame(rows, columns=["Bill Number", "Date", "Supplier ID", "Supplier Name", "Description", "Amount", "Status"])
+        df = dataframe_from_portable_rows(
+            rows,
+            {
+                "bill_number": "Bill Number",
+                "bill_date": "Date",
+                "supplier_id": "Supplier ID",
+                "supplier_name": "Supplier Name",
+                "description": "Description",
+                "amount": "Amount",
+                "status": "Status",
+            },
+        )
         df["Supplier Balance"] = df["Supplier ID"].map(lambda supplier_id: get_supplier_balance(company_key, int(supplier_id), conn=conn))
         df = df.drop(columns=["Supplier ID"])
         st.dataframe(format_currency_dataframe(df), use_container_width=True)
@@ -10584,9 +10627,16 @@ def _render_migration_cleanup_review(role, session_company_key):
     with col1:
         st.metric("Readiness", readiness.overall_score)
     with col2:
-        st.metric("Go / No-Go", readiness.go_status)
-    with col3:
         st.metric("Cleanup items", readiness.display_warning_total)
+    with col3:
+        aligned = "Yes" if readiness.audit_timestamp and readiness.audit_timestamp == readiness.plan_timestamp else "No"
+        st.metric("Reports aligned", aligned)
+    st.markdown(f"**Go / No-Go:** {readiness.go_status}")
+    if readiness.audit_timestamp or readiness.plan_timestamp:
+        st.caption(
+            f"Audit timestamp: `{readiness.audit_timestamp or 'missing'}` | "
+            f"Cleanup plan timestamp: `{readiness.plan_timestamp or 'missing'}`"
+        )
     st.markdown(
         f"- Summary: `{readiness.summary_path}`\n"
         f"- Audit: `{readiness.audit_path}`\n"
@@ -10596,21 +10646,42 @@ def _render_migration_cleanup_review(role, session_company_key):
         st.caption(f"Plan breakdown: {readiness.plan_item_counts}")
     if readiness.summary_warning_total and readiness.summary_warning_total != readiness.display_warning_total:
         st.caption(f"Audit summary warnings: {readiness.warning_counts}")
+    if readiness.cleanup_classifications:
+        st.markdown("**Cleanup item classification**")
+        classification_df = pd.DataFrame(readiness.cleanup_classifications)
+        if not classification_df.empty:
+            classification_df = classification_df.rename(
+                columns={
+                    "item_key": "Item",
+                    "title": "Description",
+                    "classification": "Classification",
+                    "count": "Count",
+                    "manual_required_count": "Manual review rows",
+                    "auto_fix_safe_count": "Auto-fix safe rows",
+                    "notes": "Notes",
+                }
+            )
+            st.dataframe(classification_df, use_container_width=True, hide_index=True)
     if readiness.reports_stale and readiness.refresh_hint:
         st.warning(readiness.refresh_hint)
     elif readiness.refresh_hint:
         st.info(readiness.refresh_hint)
 
     if st.button("Re-run Migration Integrity Audit (read-only)", key="migration_rerun_audit"):
-        with st.spinner("Running integrity audit…"):
-            audit_result = migration_cleanup_service.run_readonly_audit_subprocess()
-            plan_result = migration_cleanup_service.run_readonly_plan_subprocess()
-        if audit_result.get("ok") and plan_result.get("ok"):
-            st.success("Audit and cleanup plan regenerated.")
+        with st.spinner("Running integrity audit and cleanup plan…"):
+            refresh_result = migration_cleanup_service.regenerate_migration_integrity_reports()
+        if refresh_result.get("ok"):
+            st.success(
+                "Audit and cleanup plan regenerated with shared timestamp "
+                f"`{refresh_result.get('report_timestamp', '')}`."
+            )
+            audit_result = refresh_result.get("audit_result") or {}
             if audit_result.get("stdout"):
                 st.code(audit_result["stdout"][-2000:])
         else:
             st.error("Audit/plan script failed.")
+            audit_result = refresh_result.get("audit_result") or {}
+            plan_result = refresh_result.get("plan_result") or {}
             if audit_result.get("stderr"):
                 st.code(audit_result["stderr"])
             if plan_result.get("stderr"):
