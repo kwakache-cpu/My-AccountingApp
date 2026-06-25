@@ -781,6 +781,8 @@ from database import (
     row_get,
     row_to_dict,
     rows_to_dicts,
+    sql_date_equals,
+    sql_date_on_or_after,
     upsert_subscription_plan_setting,
     log_audit_action as database_log_audit_action,
 )
@@ -15575,6 +15577,13 @@ def _dashboard_stock_movement_branch_sql(conn, branch_id):
     return "", []
 
 
+def _dashboard_pos_tables_ready(conn):
+    try:
+        return db_table_exists(conn, "pos_sales")
+    except Exception:
+        return False
+
+
 def _dashboard_branch_ledger_balance(conn, company_key, branch_id, account_name_patterns):
     if not branch_id:
         return 0.0
@@ -15637,28 +15646,28 @@ def _fetch_dashboard_kpi_snapshot(conn, company_key, branch_id=None):
 
     month_sales = float(get_month_sales_total(company_key, year_month=month_key, branch_id=branch_id, conn=conn) or 0.0)
     today_sales = 0.0
-    try:
-        ensure_pos_sales_schema(conn)
-        pos_today_sql = f"""
-            SELECT COALESCE(SUM(grand_total), 0) AS total
-            FROM pos_sales
-            WHERE company_key = ?
-              AND date(sale_date) = date(?)
-              {branch_sql}
-        """
-        pos_today_params = [company_key, today.isoformat(), *branch_params]
-        pos_today_row = _portable_fetchone(conn, pos_today_sql, tuple(pos_today_params))
-        today_sales = float(row_get(pos_today_row, "total", 0) or 0.0) if pos_today_row else 0.0
-    except Exception:
-        today_sales = 0.0
+    if _dashboard_pos_tables_ready(conn):
+        try:
+            pos_today_sql = f"""
+                SELECT COALESCE(SUM(grand_total), 0) AS total
+                FROM pos_sales
+                WHERE company_key = ?
+                  AND {sql_date_equals("sale_date")}
+                  {branch_sql}
+            """
+            pos_today_params = [company_key, today.isoformat(), *branch_params]
+            pos_today_row = _portable_fetchone(conn, pos_today_sql, tuple(pos_today_params))
+            today_sales = float(row_get(pos_today_row, "total", 0) or 0.0) if pos_today_row else 0.0
+        except Exception:
+            today_sales = 0.0
     if today_sales <= 0:
-        journal_today_sql = """
+        journal_today_sql = f"""
             SELECT COALESCE(SUM(jl.credit), 0) AS sales_total
             FROM journal_entries je
             JOIN journal_lines jl ON jl.entry_id = je.id
             JOIN chart_of_accounts c ON c.id = jl.account_id
             WHERE je.company_key = ?
-              AND date(je.date) = date(?)
+              AND {sql_date_equals("je.date")}
               AND lower(COALESCE(NULLIF(c.name, ''), NULLIF(c.account_name, ''), '')) LIKE lower(?)
               AND COALESCE(je.is_voided, 0) = 0
               AND COALESCE(je.approval_status, 'Posted') = 'Posted'
@@ -15767,15 +15776,18 @@ def _fetch_dashboard_sales_analytics(conn, company_key, branch_id=None):
         "has_pos_data": False,
     }
     try:
-        ensure_pos_sales_schema(conn)
+        if not _dashboard_pos_tables_ready(conn):
+            return analytics
         window_start = (datetime.now().date() - timedelta(days=29)).isoformat()
+        sale_date_filter = sql_date_on_or_after("sale_date")
+        joined_sale_date_filter = sql_date_on_or_after("ps.sale_date")
         daily_rows = _portable_fetchall(
             conn,
             f"""
             SELECT sale_date AS sale_day, COALESCE(SUM(grand_total), 0) AS sales_total
             FROM pos_sales ps
             WHERE company_key = ?
-              AND date(sale_date) >= date(?)
+              AND {sale_date_filter}
               {branch_sql}
             GROUP BY sale_date
             ORDER BY sale_date
@@ -15794,7 +15806,7 @@ def _fetch_dashboard_sales_analytics(conn, company_key, branch_id=None):
             FROM pos_sale_lines psl
             JOIN pos_sales ps ON ps.id = psl.pos_sale_id AND ps.company_key = psl.company_key
             WHERE ps.company_key = ?
-              AND date(ps.sale_date) >= date(?)
+              AND {joined_sale_date_filter}
               {branch_sql}
             GROUP BY psl.item_name
             ORDER BY qty_sold DESC, revenue DESC
@@ -15818,7 +15830,7 @@ def _fetch_dashboard_sales_analytics(conn, company_key, branch_id=None):
                    COUNT(*) AS sale_count
             FROM pos_sales ps
             WHERE company_key = ?
-              AND date(sale_date) >= date(?)
+              AND {sale_date_filter}
               {branch_sql}
             GROUP BY COALESCE(NULLIF(payment_method, ''), 'Unknown')
             ORDER BY sales_total DESC
@@ -15840,7 +15852,7 @@ def _fetch_dashboard_sales_analytics(conn, company_key, branch_id=None):
                    COALESCE(SUM(grand_total), 0) AS sales_total
             FROM pos_sales ps
             WHERE company_key = ?
-              AND date(sale_date) >= date(?)
+              AND {sale_date_filter}
               {branch_sql}
             GROUP BY COALESCE(NULLIF(cashier, ''), 'Unknown')
             ORDER BY sales_total DESC
@@ -15859,7 +15871,7 @@ def _fetch_dashboard_sales_analytics(conn, company_key, branch_id=None):
                    COALESCE(SUM(grand_total), 0) AS sales_total
             FROM pos_sales
             WHERE company_key = ?
-              AND date(sale_date) >= date(?)
+              AND {sale_date_filter}
               {branch_filter_sql}
             GROUP BY COALESCE(NULLIF(branch_id, ''), 'Unassigned')
             ORDER BY sales_total DESC
@@ -15897,48 +15909,49 @@ def _fetch_dashboard_inventory_insights(conn, company_key, branch_id=None):
         "movement_trend": [],
     }
     try:
-        ensure_pos_sales_schema(conn)
-        fast_rows = _portable_fetchall(
-            conn,
-            f"""
+        if _dashboard_pos_tables_ready(conn):
+            joined_sale_date_filter = sql_date_on_or_after("ps.sale_date")
+            fast_rows = _portable_fetchall(
+                conn,
+                f"""
             SELECT psl.item_name AS item_name, COALESCE(SUM(psl.qty_sold), 0) AS qty_sold
             FROM pos_sale_lines psl
             JOIN pos_sales ps ON ps.id = psl.pos_sale_id AND ps.company_key = psl.company_key
-            WHERE ps.company_key = ? AND date(ps.sale_date) >= date(?)
+            WHERE ps.company_key = ? AND {joined_sale_date_filter}
               {branch_sql}
             GROUP BY psl.item_name
             HAVING qty_sold > 0
             ORDER BY qty_sold DESC
             LIMIT 8
             """,
-            tuple([company_key, window_start, *branch_params]),
-        )
-        insights["fast_moving"] = [
-            {"item_name": str(row_get(row, "item_name")), "qty_sold": float(row_get(row, "qty_sold", 0) or 0.0)} for row in fast_rows
-        ]
-        profitable_rows = _portable_fetchall(
-            conn,
-            f"""
+                tuple([company_key, window_start, *branch_params]),
+            )
+            insights["fast_moving"] = [
+                {"item_name": str(row_get(row, "item_name")), "qty_sold": float(row_get(row, "qty_sold", 0) or 0.0)} for row in fast_rows
+            ]
+            profitable_rows = _portable_fetchall(
+                conn,
+                f"""
             SELECT psl.item_name AS item_name,
                    COALESCE(SUM(psl.line_total), 0) AS revenue,
                    COALESCE(SUM(psl.qty_sold * COALESCE(psl.cost_price, 0)), 0) AS cost_total
             FROM pos_sale_lines psl
             JOIN pos_sales ps ON ps.id = psl.pos_sale_id AND ps.company_key = psl.company_key
-            WHERE ps.company_key = ? AND date(ps.sale_date) >= date(?)
+            WHERE ps.company_key = ? AND {joined_sale_date_filter}
               {branch_sql}
             GROUP BY psl.item_name
             ORDER BY (revenue - cost_total) DESC
             LIMIT 8
             """,
-            tuple([company_key, window_start, *branch_params]),
-        )
-        insights["most_profitable"] = [
-            {
-                "item_name": str(row_get(row, "item_name")),
-                "profit": round(float(row_get(row, "revenue", 0) or 0.0) - float(row_get(row, "cost_total", 0) or 0.0), 2),
-            }
-            for row in profitable_rows
-        ]
+                tuple([company_key, window_start, *branch_params]),
+            )
+            insights["most_profitable"] = [
+                {
+                    "item_name": str(row_get(row, "item_name")),
+                    "profit": round(float(row_get(row, "revenue", 0) or 0.0) - float(row_get(row, "cost_total", 0) or 0.0), 2),
+                }
+                for row in profitable_rows
+            ]
     except Exception:
         pass
 
@@ -15953,22 +15966,24 @@ def _fetch_dashboard_inventory_insights(conn, company_key, branch_id=None):
         tuple([company_key, *inv_branch_params]),
     )
     sold_names = set()
-    try:
-        sold_rows = _portable_fetchall(
-            conn,
-            f"""
+    if _dashboard_pos_tables_ready(conn):
+        try:
+            joined_sale_date_filter = sql_date_on_or_after("ps.sale_date")
+            sold_rows = _portable_fetchall(
+                conn,
+                f"""
             SELECT DISTINCT psl.item_name
             FROM pos_sale_lines psl
             JOIN pos_sales ps ON ps.id = psl.pos_sale_id AND ps.company_key = psl.company_key
             WHERE ps.company_key = ?
-              AND date(ps.sale_date) >= date(?)
+              AND {joined_sale_date_filter}
               {branch_sql}
             """,
-            tuple([company_key, (datetime.now().date() - timedelta(days=90)).isoformat(), *branch_params]),
-        )
-        sold_names = {str(row_get(row, "item_name")) for row in sold_rows}
-    except Exception:
-        pass
+                tuple([company_key, (datetime.now().date() - timedelta(days=90)).isoformat(), *branch_params]),
+            )
+            sold_names = {str(row_get(row, "item_name")) for row in sold_rows}
+        except Exception:
+            pass
 
     dead_stock_rows = []
     for row in inventory_rows:

@@ -1506,6 +1506,32 @@ def sql_year_month_equals(column_sql, backend=None):
     return f"strftime('%Y-%m', {column_expr}) = ?"
 
 
+def sql_cast_as_date(column_sql):
+    """Return a portable date-cast expression for text/timestamp date columns."""
+    column_expr = str(column_sql or "").strip() or "date"
+    return f"CAST({column_expr} AS date)"
+
+
+def sql_date_equals(column_sql):
+    """Return a portable date-equality predicate using one `?` parameter."""
+    return f"{sql_cast_as_date(column_sql)} = CAST(? AS date)"
+
+
+def sql_date_on_or_after(column_sql):
+    """Return a portable on-or-after date predicate using one `?` parameter."""
+    return f"{sql_cast_as_date(column_sql)} >= CAST(? AS date)"
+
+
+def sql_group_concat(column_sql, separator=",", backend=None):
+    """Return a portable grouped string aggregation expression."""
+    backend = _normalize_db_backend(backend or get_active_db_backend())
+    column_expr = str(column_sql or "").strip() or "id"
+    if backend == "postgres":
+        escaped_separator = str(separator or ",").replace("'", "''")
+        return f"string_agg(CAST({column_expr} AS text), '{escaped_separator}')"
+    return f"GROUP_CONCAT({column_expr})"
+
+
 class CompatibleRow(dict):
     """Dict-like row that also preserves positional access for legacy callers."""
 
@@ -8424,7 +8450,15 @@ class PostgresManagedConnection:
     def _execute_prepared(self, sql, params=(), backend=None):
         executable_sql = prepare_postgres_executable_sql(sql, backend=backend or "postgres")
         cursor = self._conn.cursor()
-        cursor.execute(executable_sql, params or ())
+        try:
+            cursor.execute(executable_sql, params or ())
+        except Exception:
+            try:
+                self._conn.rollback()
+            except Exception:
+                logger.debug("PostgreSQL rollback after query failure skipped.", exc_info=True)
+            self.in_transaction = False
+            raise
         return PortableCursorResult(cursor) if getattr(cursor, "description", None) else cursor
 
     def execute(self, sql, params=()):
