@@ -77,6 +77,8 @@ class PostgresRuntimeFinalBlockersTests(ERPIsolatedTestCase):
             fake.params.append(params)
             if "FROM customers" in statement:
                 return _DescribedCursor(rows=fake.rows, columns=fake.columns)
+            if "GROUP BY je.customer_id" in statement:
+                return _DescribedCursor(rows=[(1, 25.0)], columns=("customer_id", "balance"))
             row = balance_responses.pop(0)
             return _DescribedCursor(row=row, columns=("balance",))
 

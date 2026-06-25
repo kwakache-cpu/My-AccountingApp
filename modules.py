@@ -8,6 +8,7 @@ import string
 import hashlib
 import hmac
 import sqlite3
+import time
 import base64
 import uuid
 from datetime import datetime, timedelta
@@ -738,10 +739,12 @@ from database import (
     create_company_branch,
     create_company_record,
     db_table_exists,
+    dataframe_from_portable_rows,
     ensure_company_trial_subscription,
     ensure_branch_licensing_schema_integrity,
     execute_portable_query,
     execute_portable_write,
+    execute_timed_portable_query,
     execute_write_transaction,
     fetch_branch_manager_candidates,
     fetch_branch_manager_select_options,
@@ -751,6 +754,7 @@ from database import (
     list_branch_users,
     list_company_branches_with_grants,
     list_company_staff_for_assignment,
+    record_postgres_query_timing,
     repair_branch_module_grants,
     refresh_branch_module_grants_for_type_change,
     update_branch_user_status,
@@ -763,10 +767,12 @@ from database import (
     fetch_scalar,
     force_backup_after_company_creation,
     get_firebase_service_account_info,
+    get_cached_table_column_names,
     get_connection,
     get_inserted_id,
     ensure_insert_sql_returning,
     get_database_health_snapshot,
+    get_postgres_query_timings,
     get_postgres_readiness_diagnostics,
     get_persistence_diagnostics,
     get_schema_manifest_diagnostics,
@@ -8357,20 +8363,40 @@ def show_system_health_module():
 
     conn = get_connection()
     try:
-        logs = conn.execute(
-            "SELECT timestamp, level, module_name, message FROM system_logs ORDER BY id DESC LIMIT 50"
+        logs = execute_timed_portable_query(
+            conn,
+            "SELECT timestamp, level, module_name, message FROM system_logs ORDER BY id DESC LIMIT 50",
+            label="system_health.logs",
         ).fetchall()
     finally:
         conn.close()
 
     if logs:
-        logs_df = pd.DataFrame(logs, columns=["Timestamp", "Level", "Module", "Message"])
+        logs_df = dataframe_from_portable_rows(
+            logs,
+            {
+                "timestamp": "Timestamp",
+                "level": "Level",
+                "module_name": "Module",
+                "message": "Message",
+            },
+        )
         st.dataframe(format_currency_dataframe(logs_df), use_container_width=True)
         excel_bin = get_excel_bin(logs_df)
         if excel_bin:
             st.download_button("Export Logs", data=excel_bin, file_name="eka_gatekeeper_logs.xlsx")
     else:
         st.caption("System logs will appear here after activity begins.")
+
+    if is_postgres_backend():
+        timing_rows = get_postgres_query_timings(limit=15)
+        if timing_rows:
+            st.subheader("PostgreSQL Read Timings (Recent)")
+            st.dataframe(
+                pd.DataFrame(timing_rows),
+                use_container_width=True,
+                hide_index=True,
+            )
 
 
 def show_license_renewal_module():
@@ -15619,7 +15645,7 @@ def _fetch_dashboard_kpi_snapshot(conn, company_key, branch_id=None):
     branch_sql, branch_params = _dashboard_pos_branch_sql(branch_id)
     inv_branch_sql, inv_branch_params = "", []
     try:
-        inventory_columns = {column["name"] for column in list_columns(conn, "inventory")}
+        inventory_columns = get_cached_table_column_names(conn, "inventory")
         if branch_id and "branch_id" in inventory_columns:
             inv_branch_sql = " AND COALESCE(branch_id, '') = ? "
             inv_branch_params = [str(branch_id)]
@@ -15894,7 +15920,7 @@ def _fetch_dashboard_inventory_insights(conn, company_key, branch_id=None):
     branch_sql, branch_params = _dashboard_pos_branch_sql(branch_id, alias="ps")
     inv_branch_sql, inv_branch_params = "", []
     try:
-        inventory_columns = {column["name"] for column in list_columns(conn, "inventory")}
+        inventory_columns = get_cached_table_column_names(conn, "inventory")
         if branch_id and "branch_id" in inventory_columns:
             inv_branch_sql = " AND COALESCE(branch_id, '') = ? "
             inv_branch_params = [str(branch_id)]
@@ -16086,9 +16112,20 @@ def _cached_dashboard_analytics_bundle(company_key, branch_id_key, period_key):
     conn = get_connection()
     try:
         branch_id = branch_id_key or None
-        kpis = _fetch_dashboard_kpi_snapshot(conn, company_key, branch_id=branch_id)
-        sales = _fetch_dashboard_sales_analytics(conn, company_key, branch_id=branch_id)
-        inventory = _fetch_dashboard_inventory_insights(conn, company_key, branch_id=branch_id)
+        if is_postgres_backend():
+            started = time.perf_counter()
+            kpis = _fetch_dashboard_kpi_snapshot(conn, company_key, branch_id=branch_id)
+            record_postgres_query_timing("dashboard.kpis", time.perf_counter() - started)
+            started = time.perf_counter()
+            sales = _fetch_dashboard_sales_analytics(conn, company_key, branch_id=branch_id)
+            record_postgres_query_timing("dashboard.sales", time.perf_counter() - started)
+            started = time.perf_counter()
+            inventory = _fetch_dashboard_inventory_insights(conn, company_key, branch_id=branch_id)
+            record_postgres_query_timing("dashboard.inventory", time.perf_counter() - started)
+        else:
+            kpis = _fetch_dashboard_kpi_snapshot(conn, company_key, branch_id=branch_id)
+            sales = _fetch_dashboard_sales_analytics(conn, company_key, branch_id=branch_id)
+            inventory = _fetch_dashboard_inventory_insights(conn, company_key, branch_id=branch_id)
         return {
             "kpis": kpis,
             "sales": sales,
@@ -16467,7 +16504,7 @@ def show_dashboard(company_key, company_name, role):
                 """
                 low_stock_params = [company_key]
                 try:
-                    inventory_columns = {column["name"] for column in list_columns(conn, "inventory")}
+                    inventory_columns = get_cached_table_column_names(conn, "inventory")
                     if active_branch_id and "branch_id" in inventory_columns:
                         low_stock_sql += " AND COALESCE(branch_id, '') = ?"
                         low_stock_params.append(str(active_branch_id))
@@ -16730,57 +16767,47 @@ def _record_supplier_ledger_transaction(conn, company_key, supplier_id, transact
 # ==========================================
 # SYSTEM AUDIT TRAIL
 # ==========================================
-def show_audit_trail(company_key, role="User", branch_id=None):
-    st.header("🔍 System Audit Trail")
-    if not require_permission(
-        role,
-        "view_audit_trail",
-        action_label="view the audit trail",
-        company_key=company_key,
-        branch_id=branch_id,
-    ):
-        return
-    try:
-        conn = get_connection()
-        audit_columns = {column["name"] for column in list_columns(conn, "audit_logs")}
-        action_type_expr = "COALESCE(NULLIF(action_type, ''), 'legacy')" if "action_type" in audit_columns else "'legacy'"
-        document_ref_expr = "COALESCE(document_ref, '')" if "document_ref" in audit_columns else "''"
-        if company_key == "ADMIN" or company_key == "DEMO":
+AUDIT_TRAIL_DISPLAY_COLUMNS = {
+    "timestamp": "Timestamp",
+    "company_key": "Company",
+    "branch_id": "Branch",
+    "user_role": "User",
+    "action": "Action",
+    "module_name": "Module",
+    "action_type": "Action Type",
+    "document_ref": "Reference",
+    "details": "Details",
+}
+
+
+def _build_audit_trail_query(company_key, role, branch_id=None, audit_columns=None):
+    audit_columns = audit_columns or set()
+    action_type_expr = "COALESCE(NULLIF(action_type, ''), 'legacy')" if "action_type" in audit_columns else "'legacy'"
+    document_ref_expr = "COALESCE(document_ref, '')" if "document_ref" in audit_columns else "''"
+    if company_key == "ADMIN" or company_key == "DEMO":
+        query = f"""
+            SELECT timestamp, company_key, branch_id, user_role, action, module_name,
+                   {action_type_expr} AS action_type,
+                   {document_ref_expr} AS document_ref,
+                   details
+            FROM audit_logs
+            ORDER BY timestamp DESC
+            LIMIT 100
+        """
+        params = ()
+    elif role == "Master Admin":
+        if branch_id:
             query = f"""
                 SELECT timestamp, company_key, branch_id, user_role, action, module_name,
                        {action_type_expr} AS action_type,
                        {document_ref_expr} AS document_ref,
                        details
                 FROM audit_logs
+                WHERE company_key = ? AND branch_id = ?
                 ORDER BY timestamp DESC
                 LIMIT 100
             """
-            params = ()
-        elif role == "Master Admin":
-            if branch_id:
-                query = f"""
-                    SELECT timestamp, company_key, branch_id, user_role, action, module_name,
-                           {action_type_expr} AS action_type,
-                           {document_ref_expr} AS document_ref,
-                           details
-                    FROM audit_logs
-                    WHERE company_key = ? AND branch_id = ?
-                    ORDER BY timestamp DESC
-                    LIMIT 100
-                """
-                params = (company_key, branch_id)
-            else:
-                query = f"""
-                    SELECT timestamp, company_key, branch_id, user_role, action, module_name,
-                           {action_type_expr} AS action_type,
-                           {document_ref_expr} AS document_ref,
-                           details
-                    FROM audit_logs
-                    WHERE company_key = ?
-                    ORDER BY timestamp DESC
-                    LIMIT 100
-                """
-                params = (company_key,)
+            params = (company_key, branch_id)
         else:
             query = f"""
                 SELECT timestamp, company_key, branch_id, user_role, action, module_name,
@@ -16793,19 +16820,57 @@ def show_audit_trail(company_key, role="User", branch_id=None):
                 LIMIT 100
             """
             params = (company_key,)
+    else:
+        query = f"""
+            SELECT timestamp, company_key, branch_id, user_role, action, module_name,
+                   {action_type_expr} AS action_type,
+                   {document_ref_expr} AS document_ref,
+                   details
+            FROM audit_logs
+            WHERE company_key = ?
+            ORDER BY timestamp DESC
+            LIMIT 100
+        """
+        params = (company_key,)
+    return query, params
 
-        data = conn.execute(query, params).fetchall()
-        conn.close()
 
-        if data:
-            df = pd.DataFrame(
-                data,
-                columns=["Timestamp", "Company", "Branch", "User", "Action", "Module", "Action Type", "Reference", "Details"],
-            )
-            if "Details" in df.columns:
-                extracted_amount = df["Details"].astype(str).str.extract(r"amount=([0-9]+(?:\.[0-9]+)?)", expand=False)
-                df["Amount"] = pd.to_numeric(extracted_amount, errors="coerce")
-                df["Source"] = df["Module"]
+def _fetch_audit_trail_rows(conn, company_key, role="User", branch_id=None):
+    audit_columns = get_cached_table_column_names(conn, "audit_logs")
+    query, params = _build_audit_trail_query(company_key, role, branch_id=branch_id, audit_columns=audit_columns)
+    return execute_timed_portable_query(conn, query, params, label="audit_trail.load").fetchall()
+
+
+def _audit_trail_dataframe(rows):
+    df = dataframe_from_portable_rows(rows, AUDIT_TRAIL_DISPLAY_COLUMNS)
+    if df.empty:
+        return df
+    if "Details" in df.columns:
+        extracted_amount = df["Details"].astype(str).str.extract(r"amount=([0-9]+(?:\.[0-9]+)?)", expand=False)
+        df["Amount"] = pd.to_numeric(extracted_amount, errors="coerce")
+        df["Source"] = df["Module"]
+    return df
+
+
+def show_audit_trail(company_key, role="User", branch_id=None):
+    st.header("🔍 System Audit Trail")
+    if not require_permission(
+        role,
+        "view_audit_trail",
+        action_label="view the audit trail",
+        company_key=company_key,
+        branch_id=branch_id,
+    ):
+        return
+    try:
+        conn = get_connection()
+        try:
+            rows = _fetch_audit_trail_rows(conn, company_key, role=role, branch_id=branch_id)
+        finally:
+            conn.close()
+
+        if rows:
+            df = _audit_trail_dataframe(rows)
             st.dataframe(format_currency_dataframe(df), use_container_width=True)
             excel_bin = get_excel_bin(df)
             if excel_bin:

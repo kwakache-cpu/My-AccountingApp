@@ -5,6 +5,7 @@ import time
 from database import (
     DB_PATH,
     create_company_record,
+    dataframe_from_portable_rows,
     ensure_schema,
     execute_portable_query,
     execute_portable_write,
@@ -3287,13 +3288,22 @@ else:
                 st.markdown("---")
                 st.subheader("Global Forensic Trail")
                 try:
-                    trail_data = conn.execute(
+                    trail_rows = execute_portable_query(
+                        conn,
                         """SELECT timestamp, company_key, user_role, action, module_name
-                           FROM audit_logs ORDER BY timestamp DESC LIMIT 50"""
+                           FROM audit_logs ORDER BY timestamp DESC LIMIT 50""",
                     ).fetchall()
-                    
-                    if trail_data:
-                        trail_df = pd.DataFrame(trail_data, columns=['Timestamp', 'Company Key', 'User Role', 'Action', 'Module'])
+                    trail_df = dataframe_from_portable_rows(
+                        trail_rows,
+                        {
+                            "timestamp": "Timestamp",
+                            "company_key": "Company Key",
+                            "user_role": "User Role",
+                            "action": "Action",
+                            "module_name": "Module",
+                        },
+                    )
+                    if not trail_df.empty:
                         st.dataframe(trail_df, width='stretch')
                     else:
                         st.info("No audit activity found.")
