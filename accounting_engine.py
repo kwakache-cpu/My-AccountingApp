@@ -9,8 +9,8 @@ import pandas as pd
 
 from database import (
     db_table_exists,
+    execute_db_write_transaction,
     execute_portable_query,
-    execute_write_transaction,
     ensure_insert_sql_returning,
     fetch_scalar,
     get_active_db_backend,
@@ -1201,7 +1201,7 @@ def post_journal_entry(
             operation_name = "payroll_posting"
         elif str(source_type or source_module or "").strip().lower().find("depreciation") >= 0:
             operation_name = "depreciation_run"
-        return execute_write_transaction(
+        return execute_db_write_transaction(
             lambda tx_conn: post_journal_entry(
                 company_key=company_key,
                 date=date,

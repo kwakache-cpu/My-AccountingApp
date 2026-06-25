@@ -23,7 +23,8 @@ def _ensure_column(conn, table_name, column_name, column_def):
 
 
 def _ensure_setting_defaults(conn, defaults):
-    conn.execute("INSERT OR IGNORE INTO system_settings (id) VALUES (1)")
+    if not conn.execute("SELECT 1 FROM system_settings WHERE id = ?", (1,)).fetchone():
+        conn.execute("INSERT INTO system_settings (id) VALUES (?)", (1,))
     for column_name, default_sql in defaults.items():
         if _ensure_column(conn, "system_settings", column_name, default_sql):
             continue
@@ -58,10 +59,11 @@ def _migration_applied(conn, migration_id):
 
 
 def _record_migration(conn, migration_id, description):
-    conn.execute(
-        "INSERT OR IGNORE INTO migration_history (migration_id, description) VALUES (?, ?)",
-        (migration_id, description),
-    )
+    if not conn.execute("SELECT 1 FROM migration_history WHERE migration_id = ?", (migration_id,)).fetchone():
+        conn.execute(
+            "INSERT INTO migration_history (migration_id, description) VALUES (?, ?)",
+            (migration_id, description),
+        )
 
 
 def _apply_migration(conn, migration_id, description, migration_fn, logger=None):
