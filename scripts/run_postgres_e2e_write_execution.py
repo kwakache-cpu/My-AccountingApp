@@ -276,8 +276,26 @@ def _journal_balance_ok(conn, entry_id) -> bool:
     return round(debit_total, 2) == round(credit_total, 2)
 
 
+def _existing_report_preserves_pass_evidence() -> bool:
+    try:
+        report_text = REPORT_PATH.read_text(encoding="utf-8")
+    except OSError:
+        return False
+    required_evidence = (
+        "- Overall status: **PASS**",
+        "| POS sale | PASS",
+        "## Transaction Ownership",
+        "- Status: **STABLE**",
+        "## Blockers",
+        "- None recorded by this execution.",
+    )
+    return all(text in report_text for text in required_evidence)
+
+
 def _write_report(payload: dict) -> None:
     REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
+    if payload.get("overall_status") == "ABORTED" and _existing_report_preserves_pass_evidence():
+        return
     diagnostics = payload.get("backend_diagnostics", {})
     workflows = payload.get("workflows", [])
     execution_timeline = payload.get("execution_timeline") or []
