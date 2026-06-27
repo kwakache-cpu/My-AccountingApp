@@ -455,6 +455,10 @@ class PostgresE2EWriteExecutionGuardTests(ERPIsolatedTestCase):
             "PostgreSQL `txid_current()`",
             "Asset depreciation certification uses E2E-local journal",
             "Production Readiness Recommendation",
-            "ABORTED",
         ):
             self.assertIn(required_text, report)
+        self.assertTrue("ABORTED" in report or "- Overall status: **PASS**" in report)
+        if "- Overall status: **PASS**" in report:
+            self.assertIn("| POS sale | PASS", report)
+            self.assertIn("- Status: **STABLE**", report)
+            self.assertIn("- None recorded by this execution.", report)
