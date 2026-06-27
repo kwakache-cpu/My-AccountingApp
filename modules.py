@@ -5408,8 +5408,17 @@ def _persist_pos_sale(conn, company_key, branch_id, sale_reference, receipt_data
     return pos_sale_id
 
 
-def fetch_pos_sales_for_correction(conn, company_key, start_date=None, end_date=None, cashier=None, branch_id=None):
-    """Return historical POS sales using controlled date/cashier/branch filters."""
+def fetch_pos_sales_for_correction(
+    conn,
+    company_key,
+    start_date=None,
+    end_date=None,
+    cashier=None,
+    branch_id=None,
+    responsible_user=None,
+    sale_reference=None,
+):
+    """Return historical POS sales using controlled date/user/reference/branch filters."""
     ensure_pos_sales_schema(conn)
     query = """
         SELECT id, company_key, branch_id, sale_reference, receipt_number, sale_date,
@@ -5425,14 +5434,43 @@ def fetch_pos_sales_for_correction(conn, company_key, start_date=None, end_date=
     if end_date:
         query += " AND sale_date <= ?"
         params.append(pd.to_datetime(end_date).date().isoformat())
-    if cashier:
+    user_filter = str(cashier or responsible_user or "").strip()
+    if user_filter:
         query += " AND COALESCE(cashier, '') = ?"
-        params.append(str(cashier).strip())
+        params.append(user_filter)
+    if sale_reference:
+        query += " AND (lower(COALESCE(sale_reference, '')) LIKE ? OR lower(COALESCE(receipt_number, '')) LIKE ?)"
+        reference_filter = f"%{str(sale_reference).strip().lower()}%"
+        params.extend([reference_filter, reference_filter])
     if branch_id:
         query += " AND COALESCE(branch_id, '') = ?"
         params.append(str(branch_id).strip())
     query += " ORDER BY sale_date DESC, id DESC"
     return [dict(row) for row in execute_portable_query(conn, query, tuple(params)).fetchall()]
+
+
+def get_operational_date_control_status(company_key, entry_date, actor_role=None, conn=None):
+    """Return non-mutating date-control guidance for posting/correction UI surfaces."""
+    entry_date_iso = pd.to_datetime(entry_date).date().isoformat()
+    entry_date_obj = pd.to_datetime(entry_date_iso).date()
+    today = datetime.now().date()
+    locked = is_period_locked(company_key, entry_date_iso, conn=conn)
+    can_override_locked_period = user_has_permission(actor_role, "reopen_period")
+    warnings = []
+    if entry_date_obj > today:
+        warnings.append("Future-dated transaction: verify this is intentional before posting or correcting.")
+    if locked and not can_override_locked_period:
+        warnings.append("Selected accounting period is locked. Normal posting/correction is blocked.")
+    elif locked and can_override_locked_period:
+        warnings.append("Selected accounting period is locked. Override requires documented reason and audit trail.")
+    return {
+        "date": entry_date_iso,
+        "is_future_date": entry_date_obj > today,
+        "period_locked": locked,
+        "can_override_locked_period": can_override_locked_period,
+        "posting_blocked": bool(locked and not can_override_locked_period),
+        "warnings": warnings,
+    }
 
 
 def controlled_correct_pos_sale_metadata(
@@ -5445,6 +5483,7 @@ def controlled_correct_pos_sale_metadata(
     reason=None,
     new_sale_date=None,
     new_cashier=None,
+    new_responsible_user=None,
     branch_id=None,
 ):
     """
@@ -5486,8 +5525,21 @@ def controlled_correct_pos_sale_metadata(
         "cashier": str(sale.get("cashier") or ""),
     }
     new_values = dict(old_values)
+    locked_period_override = False
     if new_sale_date is not None:
         corrected_date = pd.to_datetime(new_sale_date).date().isoformat()
+        date_control = get_operational_date_control_status(company_key, corrected_date, actor_role=actor_role, conn=conn)
+        if date_control["posting_blocked"]:
+            _record_permission_security_event(
+                actor_role,
+                "reopen_period",
+                action_label="correct POS sale date in a locked accounting period",
+                company_key=company_key,
+                conn=conn,
+                branch_id=branch_id,
+            )
+            raise PermissionError("The selected accounting period is locked; this role cannot override it.")
+        locked_period_override = bool(date_control["period_locked"] and date_control["can_override_locked_period"])
         old_datetime = str(sale.get("sale_datetime") or "")
         time_part = "00:00:00"
         if " " in old_datetime:
@@ -5496,10 +5548,12 @@ def controlled_correct_pos_sale_metadata(
             time_part = old_datetime.split("T", 1)[1] or time_part
         new_values["sale_date"] = corrected_date
         new_values["sale_datetime"] = f"{corrected_date} {time_part}"
+    if new_responsible_user is not None and new_cashier is None:
+        new_cashier = new_responsible_user
     if new_cashier is not None:
         normalized_cashier = str(new_cashier or "").strip()
         if not normalized_cashier:
-            raise ValueError("Corrected cashier/salesman cannot be blank.")
+            raise ValueError("Corrected cashier/responsible user cannot be blank.")
         new_values["cashier"] = normalized_cashier
 
     changed_fields = {
@@ -5555,6 +5609,8 @@ def controlled_correct_pos_sale_metadata(
         "sale_reference": sale.get("sale_reference") or sale.get("receipt_number"),
         "changed_fields": changed_fields,
         "reason": normalized_reason,
+        "locked_period_override": locked_period_override,
+        "responsible_user_field": "cashier",
     }
     log_audit_action(
         conn,
@@ -5577,6 +5633,155 @@ def controlled_correct_pos_sale_metadata(
         "old_values": old_values,
         "new_values": new_values,
     }
+
+
+def _render_pos_historical_sales_control(company_key, role, active_branch_id=None):
+    can_correct_sales = user_has_permission(role, "correct_pos_sales")
+    with st.expander("Controlled Historical Sales Correction", expanded=False):
+        st.warning(
+            "Controlled correction only: this workflow does not delete sales or edit sale totals/line items. "
+            "Date and cashier/responsible-user changes require permission, a reason, and audit old/new values."
+        )
+        filter_cols = st.columns(4)
+        with filter_cols[0]:
+            start_date = st.date_input(
+                "From Date",
+                value=datetime.now().date().replace(day=1),
+                key=f"pos_history_start_{company_key}",
+            )
+        with filter_cols[1]:
+            end_date = st.date_input(
+                "To Date",
+                value=datetime.now().date(),
+                key=f"pos_history_end_{company_key}",
+            )
+        with filter_cols[2]:
+            user_filter = st.text_input(
+                "Cashier / Responsible User",
+                key=f"pos_history_user_{company_key}",
+                placeholder="Leave blank for all allowed users",
+            ).strip()
+        with filter_cols[3]:
+            reference_filter = st.text_input(
+                "Sale / Receipt Reference",
+                key=f"pos_history_ref_{company_key}",
+                placeholder="Receipt or sale ref",
+            ).strip()
+
+        lookup_conn = None
+        history_rows = []
+        try:
+            lookup_conn = get_connection()
+            history_rows = fetch_pos_sales_for_correction(
+                lookup_conn,
+                company_key,
+                start_date=start_date,
+                end_date=end_date,
+                responsible_user=user_filter or None,
+                sale_reference=reference_filter or None,
+                branch_id=str(active_branch_id) if active_branch_id else None,
+            )
+        except Exception as exc:
+            st.warning(build_user_safe_error(exc, role))
+        finally:
+            if lookup_conn:
+                lookup_conn.close()
+
+        if not history_rows:
+            st.info("No historical POS sales matched those filters. Adjust the date, user, branch, or reference search.")
+            return
+
+        st.dataframe(
+            pd.DataFrame(
+                [
+                    {
+                        "ID": row["id"],
+                        "Date": row.get("sale_date") or "",
+                        "Receipt": row.get("receipt_number") or row.get("sale_reference") or "",
+                        "Cashier / Responsible User": row.get("cashier") or "",
+                        "Payment": row.get("payment_method") or "",
+                        "Total": float(row.get("grand_total") or 0.0),
+                        "Branch": row.get("branch_id") or "",
+                    }
+                    for row in history_rows
+                ]
+            ),
+            use_container_width=True,
+        )
+        if not can_correct_sales:
+            st.caption("Your role can view matched sales, but cannot perform historical POS corrections.")
+            return
+
+        sale_options = {
+            f"{row.get('receipt_number') or row.get('sale_reference') or row['id']} | {row.get('sale_date') or ''} | {row.get('cashier') or 'Unassigned'}": row
+            for row in history_rows
+        }
+        selected_label = st.selectbox(
+            "Sale to Correct",
+            list(sale_options.keys()),
+            key=f"pos_history_correct_sale_{company_key}",
+        )
+        selected_sale = sale_options[selected_label]
+        with st.form(f"pos_history_correction_form_{company_key}"):
+            st.caption(
+                "Allowed changes: sale date and cashier/responsible user only. "
+                "Use returns, reversal, or reposting workflows for totals, line items, inventory, or accounting amount corrections."
+            )
+            correction_cols = st.columns(2)
+            with correction_cols[0]:
+                corrected_date = st.date_input(
+                    "Corrected Sale Date",
+                    value=pd.to_datetime(selected_sale.get("sale_date") or datetime.now().date()).date(),
+                    key=f"pos_history_correct_date_{company_key}",
+                )
+                date_control = get_operational_date_control_status(
+                    company_key,
+                    corrected_date,
+                    actor_role=role,
+                    conn=None,
+                )
+                for warning in date_control["warnings"]:
+                    st.warning(warning)
+            with correction_cols[1]:
+                corrected_user = st.text_input(
+                    "Corrected Cashier / Responsible User",
+                    value=str(selected_sale.get("cashier") or ""),
+                    key=f"pos_history_correct_user_{company_key}",
+                ).strip()
+            correction_reason = st.text_area(
+                "Correction Reason (required)",
+                key=f"pos_history_correct_reason_{company_key}",
+                placeholder="Explain why this controlled correction is required.",
+            ).strip()
+            submitted = st.form_submit_button("Submit Controlled Correction")
+            if submitted:
+                correction_conn = None
+                try:
+                    correction_conn = get_connection()
+                    result = controlled_correct_pos_sale_metadata(
+                        correction_conn,
+                        company_key=company_key,
+                        sale_id=int(selected_sale["id"]),
+                        actor_role=role,
+                        actor_name=role,
+                        reason=correction_reason,
+                        new_sale_date=corrected_date,
+                        new_responsible_user=corrected_user,
+                        branch_id=str(active_branch_id) if active_branch_id else None,
+                    )
+                    correction_conn.commit()
+                    st.success(
+                        "Controlled correction saved and audit logged: "
+                        f"{', '.join(sorted(result['changed_fields']))}."
+                    )
+                    st.rerun()
+                except Exception as exc:
+                    if correction_conn:
+                        correction_conn.rollback()
+                    st.error(build_user_safe_error(exc, role))
+                finally:
+                    if correction_conn:
+                        correction_conn.close()
 
 
 def _lookup_pos_sale_for_return(conn, company_key, sale_reference, branch_id=None):
@@ -13088,6 +13293,8 @@ def show_pos(company_key, company_name, role):
             finally:
                 if summary_conn:
                     summary_conn.close()
+
+            _render_pos_historical_sales_control(company_key, role, active_branch_id)
 
             section_header("Receipt Actions")
             with card_container():
