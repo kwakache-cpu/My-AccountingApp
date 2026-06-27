@@ -2637,7 +2637,8 @@ def get_recovery_source_diagnostics():
         "bucket_name": bucket_name,
         "object_name": object_name,
         "project_id_present": bool(project_id),
-        "service_account_info": service_account_info,
+        "service_account_project_id": project_id or None,
+        "service_account_client_email_present": bool((service_account_info or {}).get("client_email")),
         "database_url": database_url,
     }
     return diagnostics

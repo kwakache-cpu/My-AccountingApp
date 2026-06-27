@@ -443,6 +443,7 @@ PERMISSION_ALIASES = {
     "company_lifecycle": {"manage_company"},
     "period_control": {"close_period", "reopen_period", "lock_period"},
     "post_journal": {"post_accounting_document"},
+    "correct_pos_sales": {"void_or_reverse_document"},
     "system_configuration": {"manage_company", "manage_integrations"},
     "payroll": {"view_payroll", "manage_payroll"},
     "fixed_assets": {"view_fixed_assets", "manage_fixed_assets"},
@@ -5405,6 +5406,177 @@ def _persist_pos_sale(conn, company_key, branch_id, sale_reference, receipt_data
             ),
         )
     return pos_sale_id
+
+
+def fetch_pos_sales_for_correction(conn, company_key, start_date=None, end_date=None, cashier=None, branch_id=None):
+    """Return historical POS sales using controlled date/cashier/branch filters."""
+    ensure_pos_sales_schema(conn)
+    query = """
+        SELECT id, company_key, branch_id, sale_reference, receipt_number, sale_date,
+               sale_datetime, cashier, payment_method, customer_id, grand_total,
+               posted_entry_id, cogs_posted_entry_id, created_at
+        FROM pos_sales
+        WHERE company_key = ?
+    """
+    params = [company_key]
+    if start_date:
+        query += " AND sale_date >= ?"
+        params.append(pd.to_datetime(start_date).date().isoformat())
+    if end_date:
+        query += " AND sale_date <= ?"
+        params.append(pd.to_datetime(end_date).date().isoformat())
+    if cashier:
+        query += " AND COALESCE(cashier, '') = ?"
+        params.append(str(cashier).strip())
+    if branch_id:
+        query += " AND COALESCE(branch_id, '') = ?"
+        params.append(str(branch_id).strip())
+    query += " ORDER BY sale_date DESC, id DESC"
+    return [dict(row) for row in execute_portable_query(conn, query, tuple(params)).fetchall()]
+
+
+def controlled_correct_pos_sale_metadata(
+    conn,
+    *,
+    company_key,
+    sale_id,
+    actor_role,
+    actor_name=None,
+    reason=None,
+    new_sale_date=None,
+    new_cashier=None,
+    branch_id=None,
+):
+    """
+    Controlled POS correction for operational metadata only.
+
+    This never deletes sale/accounting history. It requires correction permission,
+    records old/new values in audit, and updates linked journal dates when the sale
+    date is corrected so reports remain date-consistent.
+    """
+    if not user_has_permission(actor_role, "correct_pos_sales"):
+        _record_permission_security_event(
+            actor_role,
+            "correct_pos_sales",
+            action_label="correct POS sale metadata",
+            company_key=company_key,
+            conn=conn,
+            branch_id=branch_id,
+        )
+        raise PermissionError("This role cannot correct historical POS sales.")
+    normalized_reason = str(reason or "").strip()
+    if not normalized_reason:
+        raise ValueError("A correction reason is required.")
+
+    ensure_pos_sales_schema(conn)
+    params = [company_key, int(sale_id)]
+    query = "SELECT * FROM pos_sales WHERE company_key = ? AND id = ?"
+    if branch_id:
+        query += " AND COALESCE(branch_id, '') = ?"
+        params.append(str(branch_id).strip())
+    query += " LIMIT 1"
+    sale_row = execute_portable_query(conn, query, tuple(params)).fetchone()
+    if not sale_row:
+        raise ValueError("POS sale was not found for the supplied company/branch.")
+    sale = dict(sale_row)
+
+    old_values = {
+        "sale_date": str(sale.get("sale_date") or ""),
+        "sale_datetime": str(sale.get("sale_datetime") or ""),
+        "cashier": str(sale.get("cashier") or ""),
+    }
+    new_values = dict(old_values)
+    if new_sale_date is not None:
+        corrected_date = pd.to_datetime(new_sale_date).date().isoformat()
+        old_datetime = str(sale.get("sale_datetime") or "")
+        time_part = "00:00:00"
+        if " " in old_datetime:
+            time_part = old_datetime.split(" ", 1)[1] or time_part
+        elif "T" in old_datetime:
+            time_part = old_datetime.split("T", 1)[1] or time_part
+        new_values["sale_date"] = corrected_date
+        new_values["sale_datetime"] = f"{corrected_date} {time_part}"
+    if new_cashier is not None:
+        normalized_cashier = str(new_cashier or "").strip()
+        if not normalized_cashier:
+            raise ValueError("Corrected cashier/salesman cannot be blank.")
+        new_values["cashier"] = normalized_cashier
+
+    changed_fields = {
+        field: {"old": old_values[field], "new": new_values[field]}
+        for field in ("sale_date", "sale_datetime", "cashier")
+        if old_values[field] != new_values[field]
+    }
+    if not changed_fields:
+        raise ValueError("No controlled POS correction changes were supplied.")
+
+    execute_portable_write(
+        conn,
+        """
+        UPDATE pos_sales
+        SET sale_date = ?, sale_datetime = ?, cashier = ?
+        WHERE company_key = ? AND id = ?
+        """,
+        (
+            new_values["sale_date"],
+            new_values["sale_datetime"],
+            new_values["cashier"],
+            company_key,
+            int(sale_id),
+        ),
+    )
+    if "sale_date" in changed_fields:
+        journal_ids = [
+            int(value)
+            for value in (sale.get("posted_entry_id"), sale.get("cogs_posted_entry_id"))
+            if value not in (None, "")
+        ]
+        if journal_ids:
+            placeholders = ", ".join("?" for _ in journal_ids)
+            execute_portable_write(
+                conn,
+                f"UPDATE journal_entries SET date = ? WHERE company_key = ? AND id IN ({placeholders})",
+                (new_values["sale_date"], company_key, *journal_ids),
+            )
+        execute_portable_write(
+            conn,
+            """
+            UPDATE journal_entries
+            SET date = ?
+            WHERE company_key = ?
+              AND lower(COALESCE(source_table, '')) = 'pos_sales'
+              AND source_id = ?
+            """,
+            (new_values["sale_date"], company_key, int(sale_id)),
+        )
+
+    audit_payload = {
+        "sale_id": int(sale_id),
+        "sale_reference": sale.get("sale_reference") or sale.get("receipt_number"),
+        "changed_fields": changed_fields,
+        "reason": normalized_reason,
+    }
+    log_audit_action(
+        conn,
+        company_key,
+        actor_name or actor_role,
+        "Controlled POS Sale Correction",
+        "POS",
+        details=(
+            f"Controlled POS correction for sale {audit_payload['sale_reference']}: "
+            f"{', '.join(sorted(changed_fields))}; reason={normalized_reason}"
+        ),
+        branch_id=sale.get("branch_id") or branch_id,
+        action_type="correction",
+        document_ref=str(sale.get("sale_reference") or sale.get("receipt_number") or sale_id),
+        before_after_summary=json.dumps(audit_payload, sort_keys=True),
+    )
+    return {
+        "sale_id": int(sale_id),
+        "changed_fields": changed_fields,
+        "old_values": old_values,
+        "new_values": new_values,
+    }
 
 
 def _lookup_pos_sale_for_return(conn, company_key, sale_reference, branch_id=None):
