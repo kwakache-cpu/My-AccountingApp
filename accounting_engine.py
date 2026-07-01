@@ -20,7 +20,10 @@ from database import (
     list_tables,
     log_audit_action as database_log_audit_action,
     row_get,
+    row_to_dict,
     rows_to_dicts,
+    sql_cast_as_date,
+    sql_date_on_or_after,
     sql_date_on_or_before,
     sql_group_concat,
     sql_year_month_equals,
@@ -1878,10 +1881,10 @@ def _journal_dataframe(company_key, start_date=None, end_date=None, branch_id=No
         query = _journal_base_query()
         params = [company_key]
         if start_date:
-            query += " AND date(je.date) >= date(?)"
+            query += f" AND {sql_date_on_or_after('je.date')}"
             params.append(_resolve_date(start_date))
         if end_date:
-            query += " AND date(je.date) <= date(?)"
+            query += f" AND {sql_date_on_or_before('je.date')}"
             params.append(_resolve_date(end_date))
         if branch_id:
             query += " AND je.branch_id = ?"
@@ -1889,7 +1892,7 @@ def _journal_dataframe(company_key, start_date=None, end_date=None, branch_id=No
         if account_id:
             query += " AND c.id = ?"
             params.append(int(account_id))
-        query += " ORDER BY date(je.date), je.id, jl.id"
+        query += f" ORDER BY {sql_cast_as_date('je.date')}, je.id, jl.id"
         rows = execute_portable_query(conn, query, tuple(params)).fetchall()
         return pd.DataFrame(rows_to_dicts(rows))
     finally:
@@ -1913,10 +1916,10 @@ def get_account_total(company_key, account_name_like, start_date=None, end_date=
         """
         params = [company_key, f"{str(account_name_like or '').strip()}%"]
         if start_date:
-            query += " AND date(je.date) >= date(?)"
+            query += f" AND {sql_date_on_or_after('je.date')}"
             params.append(_resolve_date(start_date))
         if end_date:
-            query += " AND date(je.date) <= date(?)"
+            query += f" AND {sql_date_on_or_before('je.date')}"
             params.append(_resolve_date(end_date))
         if branch_id:
             query += " AND je.branch_id = ?"
@@ -1965,7 +1968,8 @@ def get_recent_accounting_activity(company_key, branch_id=None, limit=10, conn=N
     owns_connection = conn is None
     conn = conn or get_connection()
     try:
-        query = """
+        date_order = sql_cast_as_date("je.date")
+        query = f"""
             SELECT
                 je.date,
                 COALESCE(je.document_type, je.source_type, je.source_table, je.source_module, 'Journal') AS activity_type,
@@ -1978,7 +1982,7 @@ def get_recent_accounting_activity(company_key, branch_id=None, limit=10, conn=N
               AND COALESCE(je.is_voided, 0) = 0
               AND COALESCE(je.approval_status, 'Posted') = 'Posted'
             GROUP BY je.id, je.date, activity_type, je.description, je.reference
-            ORDER BY date(je.date) DESC, je.id DESC
+            ORDER BY {date_order} DESC, je.id DESC
             LIMIT ?
         """
         params = [company_key, int(limit)]
@@ -1989,7 +1993,7 @@ def get_recent_accounting_activity(company_key, branch_id=None, limit=10, conn=N
                 1,
             )
             params = [company_key, branch_id, int(limit)]
-        return [dict(row) for row in conn.execute(query, tuple(params)).fetchall()]
+        return [row_to_dict(row) for row in execute_portable_query(conn, query, tuple(params)).fetchall()]
     finally:
         if owns_connection and conn:
             conn.close()

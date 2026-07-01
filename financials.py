@@ -4,6 +4,7 @@ import logging
 import os
 import sqlite3
 import sys
+import time
 
 import pandas as pd
 import streamlit as st
@@ -1779,6 +1780,57 @@ def _financial_report_runtime_diagnostics(company_key, start_date=None, end_date
     }
     conn = get_connection()
     try:
+        table_specs = {
+            "companies": ("SELECT COUNT(*) AS row_count FROM companies", []),
+            "journal_entries_all": (
+                """
+                SELECT COUNT(*) AS row_count
+                FROM journal_entries
+                WHERE company_key = ?
+                  AND COALESCE(is_voided, 0) = 0
+                  AND COALESCE(approval_status, 'Posted') = 'Posted'
+                """,
+                [company_key],
+            ),
+            "journal_lines_all": (
+                """
+                SELECT COUNT(*) AS row_count
+                FROM journal_lines jl
+                JOIN journal_entries je ON je.id = jl.entry_id
+                WHERE je.company_key = ?
+                  AND COALESCE(je.is_voided, 0) = 0
+                  AND COALESCE(je.approval_status, 'Posted') = 'Posted'
+                """,
+                [company_key],
+            ),
+            "pos_sales": (
+                "SELECT COUNT(*) AS row_count FROM pos_sales WHERE company_key = ?",
+                [company_key],
+            ),
+            "invoices": (
+                "SELECT COUNT(*) AS row_count FROM invoices WHERE company_key = ?",
+                [company_key],
+            ),
+            "bills": (
+                "SELECT COUNT(*) AS row_count FROM bills WHERE company_key = ?",
+                [company_key],
+            ),
+            "payments": (
+                "SELECT COUNT(*) AS row_count FROM payments WHERE company_key = ?",
+                [company_key],
+            ),
+            "inventory": (
+                "SELECT COUNT(*) AS row_count FROM inventory WHERE company_key = ?",
+                [company_key],
+            ),
+        }
+        for table_name, (query, params) in table_specs.items():
+            physical_table = table_name.replace("_all", "")
+            if not db_table_exists(conn, physical_table):
+                diagnostics[f"{table_name}_rows"] = 0
+                continue
+            diagnostics[f"{table_name}_rows"] = int(fetch_scalar(conn, query, tuple(params), default=0) or 0)
+
         for table_name in ("journal_entries", "journal_lines", "chart_of_accounts", "customers", "suppliers"):
             if not db_table_exists(conn, table_name):
                 diagnostics[f"{table_name}_rows"] = 0
@@ -1836,7 +1888,8 @@ def _financial_report_runtime_diagnostics(company_key, start_date=None, end_date
 
 def get_trial_balance(company_key, start_date=None, end_date=None, account_name=None):
     try:
-        balances = get_ledger_balances(company_key, start_date, end_date, account_name)
+        # Cumulative trial balance as of end_date; period movement belongs on income statement.
+        balances = get_ledger_balances(company_key, start_date=None, end_date=end_date, account_name=account_name)
         if not balances:
             return pd.DataFrame(columns=["Account Code", "Account", "Type", "Debit (GHS)", "Credit (GHS)", "Balance (GHS)", "Balanced"])
         rows = []
@@ -1867,32 +1920,32 @@ def get_trial_balance(company_key, start_date=None, end_date=None, account_name=
 
 def get_income_statement(company_key, start_date=None, end_date=None, account_name=None):
     try:
-        tb = get_trial_balance(company_key, start_date, end_date, account_name)
-        if tb.empty:
+        balances = get_ledger_balances(company_key, start_date=start_date, end_date=end_date, account_name=account_name)
+        if not balances:
             return pd.DataFrame(columns=["Category", "Account Code", "Account", "Amount (GHS)"])
         rows = []
         gross_revenue = 0.0
         sales_returns = 0.0
         cost_of_sales = 0.0
         operating_expenses = 0.0
-        for _, row in tb.iterrows():
-            account_type = str(row.get("Type", "")).title()
-            account = str(row.get("Account", "") or "").strip()
+        for account_name_key, payload in balances.items():
+            account_type = str(payload.get("account_type", "")).title()
+            account = str(account_name_key or "").strip()
             normalized_account = account.lower()
             if account_type == "Income":
-                amount = float(row.get("Credit (GHS)", 0.0) - row.get("Debit (GHS)", 0.0))
+                amount = float(payload.get("credit", 0.0) - payload.get("debit", 0.0))
                 gross_revenue += amount
                 rows.append(
                     {
                         "Category": "Revenue",
-                        "Account Code": row.get("Account Code", ""),
+                        "Account Code": payload.get("account_code", ""),
                         "Account": account,
                         "Amount (GHS)": amount,
                     }
                 )
             elif account_type == "Expense":
-                amount = float(row.get("Debit (GHS)", 0.0) - row.get("Credit (GHS)", 0.0))
-                category = _account_bucket(row.get("Account Code", ""), row.get("Account", ""), account_type)
+                amount = float(payload.get("debit", 0.0) - payload.get("credit", 0.0))
+                category = _account_bucket(payload.get("account_code", ""), account, account_type)
                 if normalized_account == "sales returns and refunds":
                     sales_returns += amount
                     amount = -amount
@@ -1904,7 +1957,7 @@ def get_income_statement(company_key, start_date=None, end_date=None, account_na
                 rows.append(
                     {
                         "Category": category,
-                        "Account Code": row.get("Account Code", ""),
+                        "Account Code": payload.get("account_code", ""),
                         "Account": account,
                         "Amount (GHS)": amount,
                     }
@@ -1942,7 +1995,7 @@ def get_income_statement(company_key, start_date=None, end_date=None, account_na
 
 def get_balance_sheet(company_key, start_date=None, end_date=None, account_name=None):
     try:
-        tb = get_trial_balance(company_key, start_date, end_date, account_name)
+        tb = get_trial_balance(company_key, start_date=None, end_date=end_date, account_name=account_name)
         if tb.empty:
             return pd.DataFrame(columns=["Category", "Account Code", "Account", "Amount (GHS)"])
         rows = []
@@ -2036,7 +2089,41 @@ def _convert_money_frame(dataframe):
     return df.rename(columns=renamed_columns)
 
 
+def _financial_report_cache_date(value):
+    if value is None:
+        return "none"
+    if hasattr(value, "isoformat"):
+        return value.isoformat()
+    return str(value)
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def _cached_trial_balance_report(company_key, start_key, end_key, account_key):
+    start_date = None if start_key in (None, "none") else datetime.fromisoformat(start_key).date()
+    end_date = None if end_key in (None, "none") else datetime.fromisoformat(end_key).date()
+    account_name = None if account_key in (None, "none", "") else account_key
+    return get_trial_balance(company_key, start_date=start_date, end_date=end_date, account_name=account_name)
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def _cached_income_statement_report(company_key, start_key, end_key, account_key):
+    start_date = None if start_key in (None, "none") else datetime.fromisoformat(start_key).date()
+    end_date = None if end_key in (None, "none") else datetime.fromisoformat(end_key).date()
+    account_name = None if account_key in (None, "none", "") else account_key
+    return get_income_statement(company_key, start_date=start_date, end_date=end_date, account_name=account_name)
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def _cached_balance_sheet_report(company_key, start_key, end_key, account_key):
+    start_date = None if start_key in (None, "none") else datetime.fromisoformat(start_key).date()
+    end_date = None if end_key in (None, "none") else datetime.fromisoformat(end_key).date()
+    account_name = None if account_key in (None, "none", "") else account_key
+    return get_balance_sheet(company_key, start_date=start_date, end_date=end_date, account_name=account_name)
+
+
 def show_financial_reports(company_key, role=None):
+    reports_started = time.perf_counter()
+    eka_modules = importlib.import_module("modules")
     eka_modules.render_ui_standard_styles()
     eka_modules.page_header("📊 Financial Reports", "View financial statements, trial balance, and cash flow analysis")
     effective_role = role or st.session_state.get("user", {}).get("role", "System")
@@ -2100,16 +2187,19 @@ def show_financial_reports(company_key, role=None):
         cash_flow_df = pd.DataFrame(columns=["Section", "Line Item", "Amount (GHS)"])
         equity_df = pd.DataFrame(columns=["Account Code", "Line Item", "Amount (GHS)"])
     else:
+        start_key = _financial_report_cache_date(start_date)
+        end_key = _financial_report_cache_date(end_date)
+        account_key = _financial_report_cache_date(account_name)
         try:
-            trial_balance_df = get_trial_balance(company_key, start_date, end_date, account_name)
+            trial_balance_df = _cached_trial_balance_report(company_key, start_key, end_key, account_key)
         except Exception:
             trial_balance_df = pd.DataFrame(columns=["Account Code", "Account", "Type", "Debit (GHS)", "Credit (GHS)", "Balance (GHS)", "Balanced"])
         try:
-            income_statement_df = get_income_statement(company_key, start_date, end_date, account_name)
+            income_statement_df = _cached_income_statement_report(company_key, start_key, end_key, account_key)
         except Exception:
             income_statement_df = pd.DataFrame(columns=["Category", "Account Code", "Account", "Amount (GHS)"])
         try:
-            balance_sheet_df = get_balance_sheet(company_key, start_date, end_date, account_name)
+            balance_sheet_df = _cached_balance_sheet_report(company_key, start_key, end_key, account_key)
         except Exception:
             balance_sheet_df = pd.DataFrame(columns=["Category", "Account Code", "Account", "Amount (GHS)"])
         try:
@@ -2206,24 +2296,53 @@ def show_financial_reports(company_key, role=None):
         ("Depreciation Schedule", depreciation_df),
     ]
     reports_empty = all(_safe_dataframe(df, []).empty for _, df in report_defs)
-    if reports_empty:
-        diagnostics = _financial_report_runtime_diagnostics(
-            company_key,
-            start_date=start_date,
-            end_date=end_date,
-            branch_id=st.session_state.get("active_branch_id"),
+    if eka_modules.can_view_runtime_admin_diagnostics(effective_role):
+        eka_modules.render_backend_activation_diagnostics_panel(
+            effective_role,
+            expanded=reports_empty and get_active_db_backend() != "postgres",
         )
+        with st.expander("LV-001 Live Validation Diagnostics (Admin Only)", expanded=reports_empty):
+            lv001 = eka_modules.get_live_validation_lv001_diagnostics(
+                company_key,
+                branch_id=st.session_state.get("active_branch_id"),
+                start_date=start_date,
+                end_date=end_date,
+            )
+            st.dataframe(
+                pd.DataFrame(
+                    [{key: value for key, value in lv001.items() if key != "postgres_query_timings"}]
+                ),
+                use_container_width=True,
+                hide_index=True,
+            )
+            if lv001.get("postgres_query_timings"):
+                st.markdown("**PostgreSQL Read Timings (Recent)**")
+                st.dataframe(pd.DataFrame(lv001["postgres_query_timings"]), use_container_width=True, hide_index=True)
+    if reports_empty:
         st.warning(
             "No financial report rows were returned for the current filters. "
-            "Use the diagnostics below to confirm company scope, date range, and PostgreSQL row counts."
+            "Trial Balance and Balance Sheet use cumulative balances through End Date; "
+            "Income Statement uses Start Date through End Date. "
+            "Open LV-001 diagnostics to confirm company scope, row counts, and query timing."
         )
-        st.dataframe(pd.DataFrame([diagnostics]), use_container_width=True, hide_index=True)
 
     for tab, (label, df) in zip(tabs, report_defs):
         with tab:
             display_df = _ifrs_account_display(_convert_money_frame(_safe_dataframe(df, [])))
             _display_table_with_rate(display_df)
             _csv_button(label, display_df, f"{label}_ifrs_safe_{company_key}")
+    eka_modules.record_lv002b_operation(
+        "financial_reports.load",
+        (time.perf_counter() - reports_started) * 1000.0,
+        surface="financial_reports",
+    )
+    eka_modules.record_lv003_hot_path_call(
+        "financials.show_financial_reports",
+        (time.perf_counter() - reports_started) * 1000.0,
+        required=True,
+        recommendation="keep",
+        surface="financial_reports",
+    )
 
 
 def show_reports(company_key, role=None):

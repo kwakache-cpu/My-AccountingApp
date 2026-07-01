@@ -43,6 +43,7 @@ from accounting_engine import (
     get_recent_accounting_activity,
 )
 from enterprise_services import (
+    build_operations_console_full_audit,
     build_operations_console_snapshot,
     get_ai_service_status,
     get_service_ownership_map,
@@ -605,9 +606,27 @@ def _clear_session():
         "login_attempts",
         "last_activity",
         "login_key",
+        "database_startup_status",
+        "session_startup_backend_diagnostics",
+        "lv002b_operation_events",
+        "lv002b_surface_timings",
+        "lv003_current_rerun",
+        "lv003_rerun_history",
+        "lv003_last_rerun_summary",
+        "dev_gatekeeper_ops_snapshot_fast",
+        "dev_gatekeeper_billing_snapshot",
+        "_sidebar_nav_styles_rendered",
+        "_currency_db_sync_key",
     ]
     for k in keys:
         st.session_state.pop(k, None)
+    for key in list(st.session_state.keys()):
+        if isinstance(key, str) and (
+            key.startswith("lv003_page_access:")
+            or key.startswith("session_subscription_status:")
+        ):
+            st.session_state.pop(key, None)
+    st.session_state["_clear_streamlit_caches"] = True
     logger.info("Session cleared for UI. Cleared keys: %s", ",".join(keys))
 
 
@@ -1110,6 +1129,7 @@ def login_ui():
             )
             
             if st.button("Access Cloud Modules", key="v3_final_auth_submit_btn"):
+                login_started = time.perf_counter()
                 try:
                     conn = get_connection()
                     
@@ -1125,6 +1145,16 @@ def login_ui():
                         except Exception:
                             pass
                         _init_session(user_obj)
+                        try:
+                            import modules as eka_modules_perf
+
+                            eka_modules_perf.record_lv002b_operation(
+                                "auth.login",
+                                (time.perf_counter() - login_started) * 1000.0,
+                                surface="login",
+                            )
+                        except Exception:
+                            pass
                         st.rerun()
                     
                     auth_result = authenticate_access_key_read_path(conn, access_key)
@@ -1163,6 +1193,16 @@ def login_ui():
                         except Exception:
                             pass
                         _init_session(user_obj)
+                        try:
+                            import modules as eka_modules_perf
+
+                            eka_modules_perf.record_lv002b_operation(
+                                "auth.login",
+                                (time.perf_counter() - login_started) * 1000.0,
+                                surface="login",
+                            )
+                        except Exception:
+                            pass
                         st.rerun()
 
                     # Failed login attempt
@@ -1807,12 +1847,24 @@ def _show_admin_recovery_panel():
 
 
 def main():
-    st.cache_data.clear()
-    st.cache_resource.clear()
+    eka_modules.begin_lv003_hot_path_rerun(
+        active_page=st.session_state.get("active_page") or st.session_state.get("page"),
+    )
+    if st.session_state.pop("_clear_streamlit_caches", False):
+        st.cache_data.clear()
+        st.cache_resource.clear()
+        try:
+            from database import clear_diagnostics_ttl_cache
+
+            clear_diagnostics_ttl_cache()
+        except Exception:
+            logger.exception("Failed to clear diagnostics TTL cache during logout/cache reset")
+
+    startup_main_started = time.perf_counter()
     # SQLite continuity on ephemeral hosting is temporary; managed persistent DB remains the target architecture.
-    startup_backend = get_startup_backend_diagnostics()
+    startup_backend = eka_modules.get_session_startup_backend_diagnostics()
     if should_run_sqlite_startup():
-        ensure_schema()
+        eka_modules.timed_lv003_hot_path("database.ensure_schema", ensure_schema, required=True, surface="startup")
     else:
         if startup_backend.get("runtime_cutover_guard_ok"):
             logger.info(
@@ -1829,7 +1881,30 @@ def main():
                 startup_backend.get("active_backend"),
                 startup_backend.get("message"),
             )
-    startup_status = startup_database()
+    if "database_startup_status" not in st.session_state:
+        st.session_state["database_startup_status"] = eka_modules.timed_lv003_hot_path(
+            "database.startup_database",
+            startup_database,
+            required=True,
+            recommendation="cache",
+            surface="startup",
+        )
+    startup_status = st.session_state["database_startup_status"]
+    try:
+        eka_modules.record_lv002b_operation(
+            "app.startup_main",
+            (time.perf_counter() - startup_main_started) * 1000.0,
+            surface="startup",
+        )
+        eka_modules.record_lv003_hot_path_call(
+            "app.startup_main",
+            (time.perf_counter() - startup_main_started) * 1000.0,
+            required=True,
+            recommendation="keep",
+            surface="startup",
+        )
+    except Exception:
+        pass
     startup_mode = str(startup_status.get("startup_mode", startup_status.get("stage", ""))) if isinstance(startup_status, dict) else ""
     bootstrap_needed = (
         bool(startup_status.get("bootstrap_needed"))
@@ -1871,7 +1946,8 @@ def main():
         st.stop()
     if bootstrap_needed:
         st.info("No company has been created yet. Complete initial company setup to activate this ERP.")
-    _verify_cloud_vault_handshake()
+    if "cloud_vault_status" not in st.session_state:
+        _verify_cloud_vault_handshake()
     if "base_currency" not in st.session_state:
         st.session_state.base_currency = "GHS"
     if "exchange_rate" not in st.session_state:
@@ -1885,20 +1961,32 @@ def main():
     if abs(float(st.session_state.get("exchange_rate", 1.0)) - float(expected_rate)) > 0.000001:
         st.session_state.exchange_rate = expected_rate
 
-    settings_conn = None
-    try:
-        settings_conn = get_connection()
-        if settings_conn:
-            settings_conn.execute(
-                "UPDATE system_settings SET base_currency = ?, display_currency = ?, exchange_rate = ?, updated_at = CURRENT_TIMESTAMP WHERE id = 1",
-                ("GHS", selected_base_currency, st.session_state.exchange_rate),
-            )
-            settings_conn.commit()
-    except Exception as session_sync_error:
-        logger.warning("Currency session sync failed: %s", sanitize_error_message(session_sync_error))
-    finally:
-        if settings_conn:
-            settings_conn.close()
+    currency_sync_key = f"{selected_base_currency}:{expected_rate}"
+    if st.session_state.get("_currency_db_sync_key") != currency_sync_key:
+        settings_conn = None
+        try:
+            settings_conn = get_connection()
+            if settings_conn:
+                settings_conn.execute(
+                    "UPDATE system_settings SET base_currency = ?, display_currency = ?, exchange_rate = ?, updated_at = CURRENT_TIMESTAMP WHERE id = 1",
+                    ("GHS", selected_base_currency, st.session_state.exchange_rate),
+                )
+                settings_conn.commit()
+                st.session_state["_currency_db_sync_key"] = currency_sync_key
+        except Exception as session_sync_error:
+            logger.warning("Currency session sync failed: %s", sanitize_error_message(session_sync_error))
+        finally:
+            if settings_conn:
+                settings_conn.close()
+    else:
+        eka_modules.record_lv003_hot_path_call(
+            "app.currency_session_sync",
+            0.0,
+            from_cache=True,
+            required=False,
+            recommendation="cache",
+            surface="main",
+        )
 
 
 SIDEBAR_NAV_GROUPS = [
@@ -2029,7 +2117,28 @@ def _page_permission(page_name):
 
 def _user_can_access_page(user, page_name):
     company_key = user.get("key") if user else None
-    return eka_modules.user_can_access_page(user, page_name, company_key=company_key)
+    cache_key = f"lv003_page_access:{company_key}:{user.get('role') if user else ''}:{page_name}"
+    if cache_key in st.session_state:
+        eka_modules.record_lv003_hot_path_call(
+            "modules.user_can_access_page",
+            0.0,
+            from_cache=True,
+            required=True,
+            recommendation="cache",
+            surface="sidebar",
+        )
+        return st.session_state[cache_key]
+    started = time.perf_counter()
+    allowed = eka_modules.user_can_access_page(user, page_name, company_key=company_key)
+    eka_modules.record_lv003_hot_path_call(
+        "modules.user_can_access_page",
+        (time.perf_counter() - started) * 1000.0,
+        required=True,
+        recommendation="cache",
+        surface="sidebar",
+    )
+    st.session_state[cache_key] = allowed
+    return allowed
 
 
 def _normalize_page_state(page_name):
@@ -2152,6 +2261,7 @@ def _render_sidebar_navigation(user, current_page):
 
 
 def _render_primary_sidebar(user, include_settings=True):
+    sidebar_started = time.perf_counter()
     eka_modules.enforce_branch_session_lock(user)
     st.sidebar.markdown(
         f"""
@@ -2218,7 +2328,18 @@ def _render_primary_sidebar(user, include_settings=True):
         eka_modules.render_branch_session_diagnostics(user=user)
 
     current_page = _ensure_valid_page()
-    _render_sidebar_nav_styles()
+    if not st.session_state.get("_sidebar_nav_styles_rendered"):
+        _render_sidebar_nav_styles()
+        st.session_state["_sidebar_nav_styles_rendered"] = True
+    else:
+        eka_modules.record_lv003_hot_path_call(
+            "app.sidebar_nav_styles",
+            0.0,
+            from_cache=True,
+            required=False,
+            recommendation="cache",
+            surface="sidebar",
+        )
     _render_sidebar_navigation(user, current_page)
 
     if False and user['role'] == "Demo":
@@ -2352,11 +2473,19 @@ def _render_primary_sidebar(user, include_settings=True):
         sidebar_reply = accounting_ai_response(st.session_state.page, st.session_state[fallback_history_key])
         st.session_state[fallback_history_key].append({"role": "assistant", "content": sidebar_reply})
         st.rerun()
+    eka_modules.record_lv003_hot_path_call(
+        "app.sidebar_build",
+        (time.perf_counter() - sidebar_started) * 1000.0,
+        required=True,
+        recommendation="keep",
+        surface="sidebar",
+    )
 
 
 def _render_primary_page(user):
     eka_modules.enforce_branch_session_lock(user)
     current_page = _ensure_valid_page()
+    dispatch_started = time.perf_counter()
     if not _user_can_access_page(user, current_page):
         fallback_page = "Dashboard" if _user_can_access_page(user, "Dashboard") else None
         if fallback_page and current_page != fallback_page:
@@ -2446,6 +2575,13 @@ def _render_primary_page(user):
     else:
         _set_active_page("Dashboard")
         st.rerun()
+    eka_modules.record_lv003_hot_path_call(
+        f"app.page_dispatch.{current_page}",
+        (time.perf_counter() - dispatch_started) * 1000.0,
+        required=True,
+        recommendation="keep",
+        surface="page_dispatch",
+    )
 
 
 # Main application flow
@@ -2453,14 +2589,22 @@ main()
 if not st.session_state.auth or not check_session_timeout():
     login_ui()
 else:
+    session_started = time.perf_counter()
     check_session_lock()  # Check for session revocation
     
     update_activity()  # Update activity on each interaction
     u = st.session_state.user
     subscription_status = (
-        get_company_subscription_snapshot(st.session_state.company_id)
+        eka_modules.get_session_company_subscription_status(st.session_state.company_id)
         if st.session_state.get("company_id") and u.get("role") not in {"Dev", "Demo"}
         else {"ok": True, "access_allowed": True, "renewal_required": False, "days_left": None}
+    )
+    eka_modules.record_lv003_hot_path_call(
+        "app.authentication_session_restore",
+        (time.perf_counter() - session_started) * 1000.0,
+        required=True,
+        recommendation="keep",
+        surface="auth",
     )
     if subscription_status.get("ok") and not subscription_status.get("renewal_required"):
         if subscription_status.get("days_left") is not None and int(subscription_status.get("days_left") or 0) <= 7:
@@ -2488,7 +2632,26 @@ else:
                     total_companies = row_get(total_companies_row, "company_count", row_get(total_companies_row, 0, 0))
                 except Exception:
                     total_companies = 0
-                billing_snapshot = get_subscription_billing_admin_snapshot()
+                billing_snapshot_key = "dev_gatekeeper_billing_snapshot"
+                if billing_snapshot_key not in st.session_state:
+                    billing_snapshot = eka_modules.timed_lv003_hot_path(
+                        "modules.get_subscription_billing_admin_snapshot",
+                        get_subscription_billing_admin_snapshot,
+                        required=False,
+                        recommendation="defer",
+                        surface="system_health",
+                    )
+                    st.session_state[billing_snapshot_key] = billing_snapshot
+                else:
+                    billing_snapshot = st.session_state[billing_snapshot_key]
+                    eka_modules.record_lv003_hot_path_call(
+                        "modules.get_subscription_billing_admin_snapshot",
+                        0.0,
+                        from_cache=True,
+                        required=False,
+                        recommendation="defer",
+                        surface="system_health",
+                    )
                 active_subscriptions = int(billing_snapshot.get("active_subscriptions") or 0)
                 monthly_revenue = float(billing_snapshot.get("total_verified_revenue") or 0.0)
                 
@@ -2508,8 +2671,95 @@ else:
                 st.markdown("---")
                 st.subheader("System Health")
                 st.caption(st.session_state.get("cloud_vault_status", "Cloud Vault: Local Mode"))
+                st.caption(
+                    "Fast mode excludes subscription/deep backup checks. "
+                    "Use Run full health audit for subscription billing and cloud backup verification."
+                )
+                ops_snapshot_key = "dev_gatekeeper_ops_snapshot_fast"
+                refresh_health_col1, refresh_health_col2 = st.columns([1, 2])
+                with refresh_health_col1:
+                    refresh_health = st.button(
+                        "Refresh fast health snapshot",
+                        key="dev_gatekeeper_refresh_fast_health",
+                    )
                 try:
-                    operations_snapshot = build_operations_console_snapshot(conn=conn)
+                    if refresh_health or ops_snapshot_key not in st.session_state:
+                        fast_started = time.perf_counter()
+                        ops_snapshot = build_operations_console_snapshot(conn=conn, audit_mode="fast")
+                        fast_snapshot_ms = round((time.perf_counter() - fast_started) * 1000.0, 2)
+                        st.session_state[ops_snapshot_key] = ops_snapshot
+                        st.session_state["dev_gatekeeper_ops_snapshot_fast_ms"] = fast_snapshot_ms
+                        try:
+                            eka_modules.record_lv002b_operation(
+                                "dev_gatekeeper.operations_snapshot.fast",
+                                fast_snapshot_ms,
+                                surface="system_health",
+                                metadata={"audit_mode": "fast", "refresh": bool(refresh_health)},
+                            )
+                        except Exception:
+                            pass
+                    else:
+                        ops_snapshot = st.session_state.get(ops_snapshot_key) or {}
+                        fast_snapshot_ms = st.session_state.get("dev_gatekeeper_ops_snapshot_fast_ms", 0.0)
+                        eka_modules.record_lv003_hot_path_call(
+                            "enterprise_services.build_operations_console_snapshot",
+                            0.0,
+                            from_cache=True,
+                            required=False,
+                            recommendation="defer",
+                            surface="system_health",
+                            metadata={"audit_mode": "fast"},
+                        )
+                    operations_snapshot = st.session_state.get(ops_snapshot_key) or {}
+                    st.caption(
+                        "Fast snapshot load: {ms} ms | Mode: {mode} | Total measured steps: {total} ms".format(
+                            ms=fast_snapshot_ms,
+                            mode=operations_snapshot.get("audit_mode", "fast"),
+                            total=operations_snapshot.get("total_elapsed_ms", 0),
+                        )
+                    )
+                    top_slow_steps = operations_snapshot.get("top_slow_steps") or []
+                    if top_slow_steps:
+                        st.caption(
+                            "Slowest snapshot steps: "
+                            + ", ".join(
+                                "{step}={elapsed}ms".format(step=item["step"], elapsed=item["elapsed_ms"])
+                                for item in top_slow_steps[:3]
+                            )
+                        )
+                    full_audit_result = st.session_state.get("dev_gatekeeper_full_audit_result")
+                    full_audit_at = st.session_state.get("dev_gatekeeper_full_audit_at")
+                    full_audit_ms = st.session_state.get("dev_gatekeeper_full_audit_ms")
+                    if full_audit_at:
+                        st.caption(
+                            "Last full audit: {at} ({ms} ms)".format(
+                                at=full_audit_at,
+                                ms=full_audit_ms if full_audit_ms is not None else "unknown",
+                            )
+                        )
+                    else:
+                        if eka_modules.can_view_runtime_admin_diagnostics(u.get("role")):
+                            st.warning(
+                                "Full health audit has not been run in this session. "
+                                "Cloud backup download verification and deep schema/export scans require full audit."
+                            )
+                    if st.button("Run full health audit", key="dev_gatekeeper_full_health_audit"):
+                        audit_started = time.perf_counter()
+                        full_audit_result = build_operations_console_full_audit(conn=conn)
+                        full_audit_ms = round((time.perf_counter() - audit_started) * 1000.0, 2)
+                        st.session_state["dev_gatekeeper_full_audit_result"] = full_audit_result
+                        st.session_state["dev_gatekeeper_full_audit_at"] = datetime.now().isoformat(timespec="seconds")
+                        st.session_state["dev_gatekeeper_full_audit_ms"] = full_audit_ms
+                        try:
+                            eka_modules.record_lv002b_operation(
+                                "dev_gatekeeper.operations_snapshot.full",
+                                full_audit_ms,
+                                surface="system_health",
+                                metadata={"audit_mode": "full"},
+                            )
+                        except Exception:
+                            pass
+                        st.rerun()
                     persistence_diag = operations_snapshot["persistence"]
                     st.caption(
                         "Canonical DB: {path} | Local Valid: {valid} | Company Count: {count}".format(
@@ -2591,14 +2841,32 @@ else:
                         )
                         if postgres_diag.get("sqlite_concurrency_warning"):
                             st.warning(postgres_diag["sqlite_concurrency_warning"])
-                        st.caption(
-                            "PostgreSQL readiness score: {score}/100 | Blockers: {blockers}".format(
-                                score=postgres_diag.get("readiness_score", 0),
-                                blockers=sum(item.get("count", 0) for item in postgres_diag.get("blockers", [])),
+                        readiness_mode = postgres_diag.get("readiness_mode") or "code_portability_audit"
+                        if postgres_diag.get("active_backend") == "postgres":
+                            missing_evidence = postgres_diag.get("runtime_cutover_missing_evidence") or []
+                            st.caption(
+                                "PostgreSQL readiness ({mode}): {score}/100 | Missing cutover evidence: {missing}".format(
+                                    mode=readiness_mode,
+                                    score=postgres_diag.get("readiness_score", 0),
+                                    missing=len(missing_evidence),
+                                )
                             )
-                        )
-                        if postgres_diag.get("switch_blocked"):
-                            st.info("PostgreSQL switch is not enabled yet. Review readiness blockers before changing runtime backend.")
+                            if postgres_diag.get("switch_blocked"):
+                                st.warning(
+                                    "PostgreSQL runtime is active, but cutover guard has open items. "
+                                    "Review LV-002 diagnostics for missing report markers or environment approval."
+                                )
+                        else:
+                            st.caption(
+                                "PostgreSQL readiness score: {score}/100 | Code portability blockers: {blockers}".format(
+                                    score=postgres_diag.get("readiness_score", 0),
+                                    blockers=sum(item.get("count", 0) for item in postgres_diag.get("blockers", [])),
+                                )
+                            )
+                            if postgres_diag.get("switch_blocked"):
+                                st.info("PostgreSQL switch is not enabled yet. Review readiness blockers before changing runtime backend.")
+                    eka_modules.render_backend_activation_diagnostics_panel(u["role"], expanded=False)
+                    eka_modules.render_lv002_postgres_performance_panel(u["role"], expanded=False)
                     sqlite_diag = get_sqlite_concurrency_diagnostics()
                     if sqlite_diag.get("sqlite_active"):
                         st.warning(
@@ -2645,6 +2913,10 @@ else:
                         )
                     paystack_diag = operations_snapshot["paystack"]
                     subscription_billing_diag = operations_snapshot.get("subscription_billing") or {}
+                    subscription_billing_fast_skipped = bool(
+                        subscription_billing_diag.get("fast_snapshot")
+                        and not subscription_billing_diag.get("checked", True)
+                    )
                     st.markdown("---")
                     st.caption("Paystack Live Payment Configuration")
                     st.caption(
@@ -2694,104 +2966,134 @@ else:
                                 st.warning(sanitize_error_message(paystack_health_result.get("error") or "Paystack health test failed."))
                     st.markdown("---")
                     st.caption("Subscription Billing Health")
-                    billing_diag = subscription_billing_diag.get("billing", {})
-                    billing_paystack_diag = subscription_billing_diag.get("paystack", paystack_diag)
-                    st.caption(
-                        "Paystack ready: {paystack_ready} | Subscription table: {subscription_table} | Payment table: {payment_table}".format(
-                            paystack_ready="Yes"
-                            if (
-                                billing_paystack_diag.get("secret_key_present")
-                                and billing_paystack_diag.get("public_key_present")
-                                and billing_paystack_diag.get("callback_url_configured")
-                            )
-                            else "No",
-                            subscription_table="Yes" if billing_diag.get("subscription_table_present") else "No",
-                            payment_table="Yes" if billing_diag.get("payment_table_present") else "No",
-                        )
-                    )
-                    st.caption(
-                        "Active: {active} | Trial: {trial} | Expired: {expired} | Failed Payments: {failed}".format(
-                            active=int(billing_diag.get("active_count") or 0),
-                            trial=int(billing_diag.get("trial_count") or 0),
-                            expired=int(billing_diag.get("expired_count") or 0),
-                            failed=int(billing_diag.get("failed_payment_count") or 0),
-                        )
-                    )
-                    pricing_diag = billing_diag.get("plan_pricing", {})
-                    active_plan_prices = pricing_diag.get("active_plan_prices") or []
-                    for plan_price in active_plan_prices:
-                        amount_value = plan_price.get("configured_amount")
-                        duration_months = int(plan_price.get("duration_months") or 0)
-                        duration_days = int(plan_price.get("duration_days") or 0)
-                        duration_label = (
-                            f"{duration_months} month(s)"
-                            if duration_months > 0
-                            else f"{duration_days} day(s)"
-                        )
-                        amount_label = (
-                            f"{plan_price.get('currency') or 'GHS'} {float(amount_value):,.2f}"
-                            if amount_value not in (None, "")
-                            else "Missing"
+                    if subscription_billing_fast_skipped:
+                        st.info(
+                            "Subscription billing deep validation is not checked in fast mode. "
+                            "Run full health audit for subscription table diagnostics and payment history."
                         )
                         st.caption(
-                            "Plan Price - {plan}: {amount} | Duration: {duration} | Configured: {configured}".format(
-                                plan=plan_price.get("plan_name") or "Unknown",
-                                amount=amount_label,
-                                duration=duration_label,
-                                configured="Yes" if plan_price.get("configured") else "No",
+                            "Cached admin summary — Active: {active} | Trial: {trial} | Verified revenue: {revenue}".format(
+                                active=int(billing_snapshot.get("active_subscriptions") or 0),
+                                trial=int(billing_snapshot.get("trial_subscriptions") or 0),
+                                revenue=format_currency(float(billing_snapshot.get("total_verified_revenue") or 0.0)),
                             )
                         )
-                    for missing_warning in pricing_diag.get("missing_price_warnings") or []:
-                        st.warning(missing_warning)
-                    latest_successful_payment = billing_diag.get("latest_successful_payment") or {}
-                    if latest_successful_payment:
+                    else:
+                        billing_diag = subscription_billing_diag.get("billing", {})
+                        billing_paystack_diag = subscription_billing_diag.get("paystack", paystack_diag)
                         st.caption(
-                            "Latest successful payment: {reference} | Company: {company_key} | Plan: {plan_name} | Verified: {verified_at}".format(
-                                reference=latest_successful_payment.get("reference") or "unknown",
-                                company_key=latest_successful_payment.get("company_key") or "unknown",
-                                plan_name=latest_successful_payment.get("plan_name") or "unknown",
-                                verified_at=latest_successful_payment.get("verified_at") or "unknown",
+                            "Paystack ready: {paystack_ready} | Subscription table: {subscription_table} | Payment table: {payment_table}".format(
+                                paystack_ready="Yes"
+                                if (
+                                    billing_paystack_diag.get("secret_key_present")
+                                    and billing_paystack_diag.get("public_key_present")
+                                    and billing_paystack_diag.get("callback_url_configured")
+                                )
+                                else "No",
+                                subscription_table="Yes" if billing_diag.get("subscription_table_present") else "No",
+                                payment_table="Yes" if billing_diag.get("payment_table_present") else "No",
                             )
                         )
-                    schema_diag = operations_snapshot["schema"]
+                        st.caption(
+                            "Active: {active} | Trial: {trial} | Expired: {expired} | Failed Payments: {failed}".format(
+                                active=int(billing_diag.get("active_count") or 0),
+                                trial=int(billing_diag.get("trial_count") or 0),
+                                expired=int(billing_diag.get("expired_count") or 0),
+                                failed=int(billing_diag.get("failed_payment_count") or 0),
+                            )
+                        )
+                        pricing_diag = billing_diag.get("plan_pricing", {})
+                        active_plan_prices = pricing_diag.get("active_plan_prices") or []
+                        for plan_price in active_plan_prices:
+                            amount_value = plan_price.get("configured_amount")
+                            duration_months = int(plan_price.get("duration_months") or 0)
+                            duration_days = int(plan_price.get("duration_days") or 0)
+                            duration_label = (
+                                f"{duration_months} month(s)"
+                                if duration_months > 0
+                                else f"{duration_days} day(s)"
+                            )
+                            amount_label = (
+                                f"{plan_price.get('currency') or 'GHS'} {float(amount_value):,.2f}"
+                                if amount_value not in (None, "")
+                                else "Missing"
+                            )
+                            st.caption(
+                                "Plan Price - {plan}: {amount} | Duration: {duration} | Configured: {configured}".format(
+                                    plan=plan_price.get("plan_name") or "Unknown",
+                                    amount=amount_label,
+                                    duration=duration_label,
+                                    configured="Yes" if plan_price.get("configured") else "No",
+                                )
+                            )
+                        for missing_warning in pricing_diag.get("missing_price_warnings") or []:
+                            st.warning(missing_warning)
+                        latest_successful_payment = billing_diag.get("latest_successful_payment") or {}
+                        if latest_successful_payment:
+                            st.caption(
+                                "Latest successful payment: {reference} | Company: {company_key} | Plan: {plan_name} | Verified: {verified_at}".format(
+                                    reference=latest_successful_payment.get("reference") or "unknown",
+                                    company_key=latest_successful_payment.get("company_key") or "unknown",
+                                    plan_name=latest_successful_payment.get("plan_name") or "unknown",
+                                    verified_at=latest_successful_payment.get("verified_at") or "unknown",
+                                )
+                            )
+                    schema_diag = operations_snapshot.get("schema") or {}
                     st.markdown("---")
                     st.caption("Schema Manifest Health")
-                    st.caption(
-                        "Manifest Version: {version} | Source Tables: {source_present}/{source_total} | Compatibility Tables: {compat_present}/{compat_total}".format(
-                            version=schema_diag.get("manifest_version"),
-                            source_present=len(schema_diag.get("categories", {}).get("source_of_truth", {}).get("present", [])),
-                            source_total=schema_diag.get("categories", {}).get("source_of_truth", {}).get("total", 0),
-                            compat_present=len(schema_diag.get("categories", {}).get("compatibility_detail", {}).get("present", [])),
-                            compat_total=schema_diag.get("categories", {}).get("compatibility_detail", {}).get("total", 0),
-                        )
-                    )
-                    if schema_diag.get("ok"):
-                        st.success("Schema manifest check passed for required source-of-truth tables and columns.")
-                    else:
-                        st.warning("Schema manifest check needs attention.")
-                    if schema_diag.get("missing_source_of_truth_tables"):
-                        st.error(
-                            "Missing required production tables: "
-                            + ", ".join(schema_diag["missing_source_of_truth_tables"])
-                        )
-                    if schema_diag.get("missing_compatibility_detail_tables"):
-                        st.warning(
-                            "Missing compatibility/detail tables: "
-                            + ", ".join(schema_diag["missing_compatibility_detail_tables"])
-                        )
-                    if schema_diag.get("missing_required_columns"):
-                        st.warning(
-                            "Missing required columns: "
-                            + "; ".join(
-                                f"{table_name}({', '.join(columns)})"
-                                for table_name, columns in sorted(schema_diag["missing_required_columns"].items())
+                    if schema_diag:
+                        st.caption(
+                            "Manifest Version: {version} | Source Tables: {source_present}/{source_total} | Compatibility Tables: {compat_present}/{compat_total}".format(
+                                version=schema_diag.get("manifest_version"),
+                                source_present=len(schema_diag.get("categories", {}).get("source_of_truth", {}).get("present", [])),
+                                source_total=schema_diag.get("categories", {}).get("source_of_truth", {}).get("total", 0),
+                                compat_present=len(schema_diag.get("categories", {}).get("compatibility_detail", {}).get("present", [])),
+                                compat_total=schema_diag.get("categories", {}).get("compatibility_detail", {}).get("total", 0),
                             )
                         )
-                    if schema_diag.get("legacy_obsolete_tables_present"):
-                        st.info(
-                            "Legacy/obsolete tables still present for compatibility review: "
-                            + ", ".join(schema_diag["legacy_obsolete_tables_present"])
-                        )
+                        if schema_diag.get("ok"):
+                            st.success("Schema manifest check passed for required source-of-truth tables and columns.")
+                        else:
+                            st.warning("Schema manifest check needs attention.")
+                        if schema_diag.get("missing_source_of_truth_tables"):
+                            st.error(
+                                "Missing required production tables: "
+                                + ", ".join(schema_diag["missing_source_of_truth_tables"])
+                            )
+                        if schema_diag.get("missing_compatibility_detail_tables"):
+                            st.warning(
+                                "Missing compatibility/detail tables: "
+                                + ", ".join(schema_diag["missing_compatibility_detail_tables"])
+                            )
+                        if schema_diag.get("missing_required_columns"):
+                            st.warning(
+                                "Missing required columns: "
+                                + "; ".join(
+                                    f"{table_name}({', '.join(columns)})"
+                                    for table_name, columns in sorted(schema_diag["missing_required_columns"].items())
+                                )
+                            )
+                        if schema_diag.get("legacy_obsolete_tables_present"):
+                            st.info(
+                                "Legacy/obsolete tables still present for compatibility review: "
+                                + ", ".join(schema_diag["legacy_obsolete_tables_present"])
+                            )
+                    else:
+                        st.info("Schema manifest detail is available after running full health audit.")
+                    if full_audit_result:
+                        with st.expander("Full health audit timings", expanded=False):
+                            st.dataframe(
+                                pd.DataFrame(full_audit_result.get("top_slow_steps") or []),
+                                use_container_width=True,
+                                hide_index=True,
+                            )
+                            full_persistence = (full_audit_result.get("persistence") or {})
+                            st.caption(
+                                "Full audit cloud backup count: {count} | reason: {reason}".format(
+                                    count=full_persistence.get("cloud_backup_company_count", "unknown"),
+                                    reason=full_persistence.get("cloud_backup_reason", "n/a"),
+                                )
+                            )
                     audit_summary = operations_snapshot["audit"]
                     st.markdown("---")
                     st.caption("Audit & Operations Visibility")
@@ -2837,168 +3139,177 @@ else:
                         except Exception as journal_company_error:
                             logger.warning("Could not load companies for journal dominance diagnostics: %s", sanitize_error_message(journal_company_error))
                         if selected_health_company:
-                            company_operations_snapshot = build_operations_console_snapshot(
-                                conn=conn,
-                                selected_company_key=selected_health_company,
-                                branch_id=st.session_state.get("active_branch_id"),
-                                end_date=datetime.now().date(),
-                            )
-                            journal_diag = company_operations_snapshot["accounting_core"]
-                            st.markdown("---")
-                            st.caption("Accounting Core Dominance")
-                            jd1, jd2, jd3 = st.columns(3)
-                            jd1.metric("Journal Integrity", "Healthy" if journal_diag.get("ok") else "Needs Review")
-                            jd2.metric(
-                                "A/R Reconciliation",
-                                "Matched"
-                                if journal_diag["integrity"]["accounts_receivable"]["reconciled"]
-                                else "Mismatch",
-                                format_currency(journal_diag["integrity"]["accounts_receivable"]["difference"]),
-                            )
-                            jd3.metric(
-                                "A/P Reconciliation",
-                                "Matched"
-                                if journal_diag["integrity"]["accounts_payable"]["reconciled"]
-                                else "Mismatch",
-                                format_currency(journal_diag["integrity"]["accounts_payable"]["difference"]),
-                            )
-                            st.caption(
-                                "Source of truth: {source} | Posted journals: {count} | Unbalanced: {unbalanced} | Orphaned refs: {orphaned}".format(
-                                    source=journal_diag["source_of_truth"],
-                                    count=journal_diag["posted_journal_count"],
-                                    unbalanced=journal_diag["integrity"]["unbalanced_journal_count"],
-                                    orphaned=journal_diag["integrity"]["orphaned_journal_reference_count"],
+                            if not full_audit_result:
+                                st.info(
+                                    "Run full health audit to load company accounting integrity diagnostics "
+                                    "for the selected company."
                                 )
-                            )
-                            if journal_diag.get("warnings"):
-                                st.warning("Accounting core warnings: " + " ".join(journal_diag["warnings"]))
                             else:
-                                st.success("Accounting core dominance check passed.")
-                            with st.expander("Compatibility Tables: History Only", expanded=False):
-                                st.dataframe(pd.DataFrame(journal_diag["compatibility_tables"]), use_container_width=True)
-                            workflow_diag = company_operations_snapshot["document_workflow"]
-                            st.caption("Controlled Document Workflow")
-                            wd1, wd2, wd3 = st.columns(3)
-                            wd1.metric("Workflow Integrity", "Healthy" if workflow_diag.get("ok") else "Needs Review")
-                            wd2.metric("Duplicate Postings", int(workflow_diag.get("duplicate_posting_count") or 0))
-                            wd3.metric("State/GL Mismatches", len(workflow_diag.get("source_document_mismatches") or []))
-                            st.caption(
-                                "Controlled tables: {tables} | Statuses: {statuses}".format(
-                                    tables=", ".join(workflow_diag.get("controlled_source_tables") or []),
-                                    statuses=", ".join(workflow_diag.get("controlled_statuses") or []),
+                                company_operations_snapshot = build_operations_console_full_audit(
+                                    conn=conn,
+                                    selected_company_key=selected_health_company,
+                                    branch_id=st.session_state.get("active_branch_id"),
+                                    end_date=datetime.now().date(),
                                 )
-                            )
-                            if workflow_diag.get("warnings"):
-                                st.warning("Workflow warnings: " + " ".join(workflow_diag["warnings"]))
-                            else:
-                                st.success("Document workflow enforcement check passed.")
-                            with st.expander("Document Counts by Posting State", expanded=False):
-                                st.dataframe(pd.DataFrame(workflow_diag["document_counts"]), use_container_width=True)
-                            if workflow_diag.get("source_document_mismatches"):
-                                with st.expander("Posting-State / GL Mismatches", expanded=False):
-                                    st.dataframe(pd.DataFrame(workflow_diag["source_document_mismatches"]), use_container_width=True)
-                            if workflow_diag.get("duplicate_postings"):
-                                with st.expander("Duplicate Posted Journal Impact", expanded=False):
-                                    st.dataframe(pd.DataFrame(workflow_diag["duplicate_postings"]), use_container_width=True)
-                            posting_engine_diag = company_operations_snapshot["posting_engine"]
-                            st.caption("Unified Posting Engine")
-                            pe1, pe2, pe3 = st.columns(3)
-                            pe1.metric(
-                                "Posting Engine",
-                                "Unified" if posting_engine_diag.get("ok") else "Review",
-                                posting_engine_diag.get("engine_version", "unknown"),
-                            )
-                            pe2.metric(
-                                "Duplicate Attempts Blocked",
-                                int(posting_engine_diag.get("duplicate_post_attempts_blocked") or 0),
-                            )
-                            pe3.metric(
-                                "Missing Source Linkage",
-                                int(posting_engine_diag.get("missing_source_linkage_count") or 0),
-                            )
-                            if posting_engine_diag.get("warnings"):
-                                st.warning("Posting engine warnings: " + " ".join(posting_engine_diag["warnings"]))
-                            else:
-                                st.success("Unified posting engine checks passed.")
-                            with st.expander("Posting Engine Transition Map", expanded=False):
-                                st.write("Authoritative service: " + posting_engine_diag.get("authoritative_posting_service", "unknown"))
-                                st.write("Controlled source tables: " + ", ".join(posting_engine_diag.get("controlled_source_tables") or []))
-                                st.markdown("Enforced checks")
-                                st.write(", ".join(posting_engine_diag.get("enforced_checks") or []))
-                                st.markdown("Transitional/non-controlled source tables")
-                                st.dataframe(pd.DataFrame(posting_engine_diag.get("transitional_source_tables") or []), use_container_width=True)
-                                st.markdown("Reversal / void counts")
-                                st.dataframe(pd.DataFrame(posting_engine_diag.get("reversal_void_counts") or []), use_container_width=True)
-                            reporting_diag = company_operations_snapshot["reporting_trust"]
-                            st.caption("Reporting Trust & Period Controls")
-                            reporting_status = "Green" if reporting_diag.get("ok") else "Yellow"
-                            rt1, rt2, rt3 = st.columns(3)
-                            rt1.metric(
-                                "Trial Balance",
-                                "Green - Balanced" if reporting_diag["trial_balance"]["balanced"] else "Red - Out of Balance",
-                                format_currency(reporting_diag["trial_balance"]["difference"]),
-                            )
-                            rt2.metric(
-                                "Balance Sheet",
-                                "Green - Balanced" if reporting_diag["balance_sheet"]["balanced"] else "Red - Needs Review",
-                                format_currency(reporting_diag["balance_sheet"]["difference"]),
-                            )
-                            rt3.metric(
-                                "Reporting Status",
-                                reporting_status,
-                                reporting_diag["period_control"]["current_period_status"],
-                            )
-                            rc1, rc2, rc3 = st.columns(3)
-                            rc1.metric(
-                                "A/R Aging vs GL",
-                                "Green - Matched" if reporting_diag.get("ar_aging", {}).get("reconciled") else "Yellow - Review",
-                                format_currency(reporting_diag.get("ar_aging", {}).get("difference", 0.0)),
-                            )
-                            rc2.metric(
-                                "A/P Aging vs GL",
-                                "Green - Matched" if reporting_diag.get("ap_aging", {}).get("reconciled") else "Yellow - Review",
-                                format_currency(reporting_diag.get("ap_aging", {}).get("difference", 0.0)),
-                            )
-                            rc3.metric(
-                                "Cash Equivalents",
-                                format_currency(reporting_diag.get("cash_book", {}).get("combined_cash_equivalent_balance", 0.0)),
-                                reporting_diag["period_control"]["current_period"],
-                            )
-                            rr1, rr2, rr3 = st.columns(3)
-                            inventory_diag = reporting_diag.get("reconciliation", {}).get("inventory", {})
-                            fixed_asset_diag = reporting_diag.get("fixed_assets", {})
-                            rr1.metric(
-                                "Inventory GL vs Register",
-                                "Green - Matched" if inventory_diag.get("reconciled") else "Yellow - Review",
-                                format_currency(inventory_diag.get("difference", 0.0)),
-                            )
-                            rr2.metric(
-                                "Fixed Assets GL vs Register",
-                                "Green - Matched" if fixed_asset_diag.get("reconciled") else "Yellow - Review",
-                                format_currency(fixed_asset_diag.get("difference") or 0.0),
-                            )
-                            rr3.metric(
-                                "Tax Liabilities",
-                                format_currency(reporting_diag.get("tax_liabilities", {}).get("total_balance", 0.0)),
-                            )
-                            rj1, rj2, rj3 = st.columns(3)
-                            rj1.metric(
-                                "Cash/Bank Unmatched",
-                                format_currency(reporting_diag["reconciliation"]["cash_bank"]["unmatched_total"]),
-                            )
-                            rj2.metric(
-                                "Unbalanced Journals",
-                                int(reporting_diag["reconciliation"]["unbalanced_journal_count"] or 0),
-                            )
-                            rj3.metric(
-                                "Orphaned References",
-                                int(reporting_diag["reconciliation"]["orphaned_journal_reference_count"] or 0),
-                            )
-                            st.caption(f"Report source: {reporting_diag['report_source']}")
-                            if reporting_diag.get("warnings"):
-                                st.warning("Reporting status needs review: " + " ".join(sanitize_error_message(item) for item in reporting_diag["warnings"]))
-                            else:
-                                st.success("Green - Reporting trust and period-control checks passed.")
+                                journal_diag = company_operations_snapshot.get("accounting_core") or {}
+                                if not journal_diag:
+                                    st.warning("Accounting core diagnostics unavailable for the selected company.")
+                                else:
+                                    st.markdown("---")
+                                    st.caption("Accounting Core Dominance")
+                                    jd1, jd2, jd3 = st.columns(3)
+                                    jd1.metric("Journal Integrity", "Healthy" if journal_diag.get("ok") else "Needs Review")
+                                jd2.metric(
+                                    "A/R Reconciliation",
+                                    "Matched"
+                                    if journal_diag["integrity"]["accounts_receivable"]["reconciled"]
+                                    else "Mismatch",
+                                    format_currency(journal_diag["integrity"]["accounts_receivable"]["difference"]),
+                                )
+                                jd3.metric(
+                                    "A/P Reconciliation",
+                                    "Matched"
+                                    if journal_diag["integrity"]["accounts_payable"]["reconciled"]
+                                    else "Mismatch",
+                                    format_currency(journal_diag["integrity"]["accounts_payable"]["difference"]),
+                                )
+                                st.caption(
+                                    "Source of truth: {source} | Posted journals: {count} | Unbalanced: {unbalanced} | Orphaned refs: {orphaned}".format(
+                                        source=journal_diag["source_of_truth"],
+                                        count=journal_diag["posted_journal_count"],
+                                        unbalanced=journal_diag["integrity"]["unbalanced_journal_count"],
+                                        orphaned=journal_diag["integrity"]["orphaned_journal_reference_count"],
+                                    )
+                                )
+                                if journal_diag.get("warnings"):
+                                    st.warning("Accounting core warnings: " + " ".join(journal_diag["warnings"]))
+                                else:
+                                    st.success("Accounting core dominance check passed.")
+                                with st.expander("Compatibility Tables: History Only", expanded=False):
+                                    st.dataframe(pd.DataFrame(journal_diag["compatibility_tables"]), use_container_width=True)
+                                workflow_diag = company_operations_snapshot["document_workflow"]
+                                st.caption("Controlled Document Workflow")
+                                wd1, wd2, wd3 = st.columns(3)
+                                wd1.metric("Workflow Integrity", "Healthy" if workflow_diag.get("ok") else "Needs Review")
+                                wd2.metric("Duplicate Postings", int(workflow_diag.get("duplicate_posting_count") or 0))
+                                wd3.metric("State/GL Mismatches", len(workflow_diag.get("source_document_mismatches") or []))
+                                st.caption(
+                                    "Controlled tables: {tables} | Statuses: {statuses}".format(
+                                        tables=", ".join(workflow_diag.get("controlled_source_tables") or []),
+                                        statuses=", ".join(workflow_diag.get("controlled_statuses") or []),
+                                    )
+                                )
+                                if workflow_diag.get("warnings"):
+                                    st.warning("Workflow warnings: " + " ".join(workflow_diag["warnings"]))
+                                else:
+                                    st.success("Document workflow enforcement check passed.")
+                                with st.expander("Document Counts by Posting State", expanded=False):
+                                    st.dataframe(pd.DataFrame(workflow_diag["document_counts"]), use_container_width=True)
+                                if workflow_diag.get("source_document_mismatches"):
+                                    with st.expander("Posting-State / GL Mismatches", expanded=False):
+                                        st.dataframe(pd.DataFrame(workflow_diag["source_document_mismatches"]), use_container_width=True)
+                                if workflow_diag.get("duplicate_postings"):
+                                    with st.expander("Duplicate Posted Journal Impact", expanded=False):
+                                        st.dataframe(pd.DataFrame(workflow_diag["duplicate_postings"]), use_container_width=True)
+                                posting_engine_diag = company_operations_snapshot["posting_engine"]
+                                st.caption("Unified Posting Engine")
+                                pe1, pe2, pe3 = st.columns(3)
+                                pe1.metric(
+                                    "Posting Engine",
+                                    "Unified" if posting_engine_diag.get("ok") else "Review",
+                                    posting_engine_diag.get("engine_version", "unknown"),
+                                )
+                                pe2.metric(
+                                    "Duplicate Attempts Blocked",
+                                    int(posting_engine_diag.get("duplicate_post_attempts_blocked") or 0),
+                                )
+                                pe3.metric(
+                                    "Missing Source Linkage",
+                                    int(posting_engine_diag.get("missing_source_linkage_count") or 0),
+                                )
+                                if posting_engine_diag.get("warnings"):
+                                    st.warning("Posting engine warnings: " + " ".join(posting_engine_diag["warnings"]))
+                                else:
+                                    st.success("Unified posting engine checks passed.")
+                                with st.expander("Posting Engine Transition Map", expanded=False):
+                                    st.write("Authoritative service: " + posting_engine_diag.get("authoritative_posting_service", "unknown"))
+                                    st.write("Controlled source tables: " + ", ".join(posting_engine_diag.get("controlled_source_tables") or []))
+                                    st.markdown("Enforced checks")
+                                    st.write(", ".join(posting_engine_diag.get("enforced_checks") or []))
+                                    st.markdown("Transitional/non-controlled source tables")
+                                    st.dataframe(pd.DataFrame(posting_engine_diag.get("transitional_source_tables") or []), use_container_width=True)
+                                    st.markdown("Reversal / void counts")
+                                    st.dataframe(pd.DataFrame(posting_engine_diag.get("reversal_void_counts") or []), use_container_width=True)
+                                reporting_diag = company_operations_snapshot["reporting_trust"]
+                                st.caption("Reporting Trust & Period Controls")
+                                reporting_status = "Green" if reporting_diag.get("ok") else "Yellow"
+                                rt1, rt2, rt3 = st.columns(3)
+                                rt1.metric(
+                                    "Trial Balance",
+                                    "Green - Balanced" if reporting_diag["trial_balance"]["balanced"] else "Red - Out of Balance",
+                                    format_currency(reporting_diag["trial_balance"]["difference"]),
+                                )
+                                rt2.metric(
+                                    "Balance Sheet",
+                                    "Green - Balanced" if reporting_diag["balance_sheet"]["balanced"] else "Red - Needs Review",
+                                    format_currency(reporting_diag["balance_sheet"]["difference"]),
+                                )
+                                rt3.metric(
+                                    "Reporting Status",
+                                    reporting_status,
+                                    reporting_diag["period_control"]["current_period_status"],
+                                )
+                                rc1, rc2, rc3 = st.columns(3)
+                                rc1.metric(
+                                    "A/R Aging vs GL",
+                                    "Green - Matched" if reporting_diag.get("ar_aging", {}).get("reconciled") else "Yellow - Review",
+                                    format_currency(reporting_diag.get("ar_aging", {}).get("difference", 0.0)),
+                                )
+                                rc2.metric(
+                                    "A/P Aging vs GL",
+                                    "Green - Matched" if reporting_diag.get("ap_aging", {}).get("reconciled") else "Yellow - Review",
+                                    format_currency(reporting_diag.get("ap_aging", {}).get("difference", 0.0)),
+                                )
+                                rc3.metric(
+                                    "Cash Equivalents",
+                                    format_currency(reporting_diag.get("cash_book", {}).get("combined_cash_equivalent_balance", 0.0)),
+                                    reporting_diag["period_control"]["current_period"],
+                                )
+                                rr1, rr2, rr3 = st.columns(3)
+                                inventory_diag = reporting_diag.get("reconciliation", {}).get("inventory", {})
+                                fixed_asset_diag = reporting_diag.get("fixed_assets", {})
+                                rr1.metric(
+                                    "Inventory GL vs Register",
+                                    "Green - Matched" if inventory_diag.get("reconciled") else "Yellow - Review",
+                                    format_currency(inventory_diag.get("difference", 0.0)),
+                                )
+                                rr2.metric(
+                                    "Fixed Assets GL vs Register",
+                                    "Green - Matched" if fixed_asset_diag.get("reconciled") else "Yellow - Review",
+                                    format_currency(fixed_asset_diag.get("difference") or 0.0),
+                                )
+                                rr3.metric(
+                                    "Tax Liabilities",
+                                    format_currency(reporting_diag.get("tax_liabilities", {}).get("total_balance", 0.0)),
+                                )
+                                rj1, rj2, rj3 = st.columns(3)
+                                rj1.metric(
+                                    "Cash/Bank Unmatched",
+                                    format_currency(reporting_diag["reconciliation"]["cash_bank"]["unmatched_total"]),
+                                )
+                                rj2.metric(
+                                    "Unbalanced Journals",
+                                    int(reporting_diag["reconciliation"]["unbalanced_journal_count"] or 0),
+                                )
+                                rj3.metric(
+                                    "Orphaned References",
+                                    int(reporting_diag["reconciliation"]["orphaned_journal_reference_count"] or 0),
+                                )
+                                st.caption(f"Report source: {reporting_diag['report_source']}")
+                                if reporting_diag.get("warnings"):
+                                    st.warning("Reporting status needs review: " + " ".join(sanitize_error_message(item) for item in reporting_diag["warnings"]))
+                                else:
+                                    st.success("Green - Reporting trust and period-control checks passed.")
                             with st.expander("Accounting Period Control Summary", expanded=False):
                                 st.json(reporting_diag["period_control"]["period_counts"])
                                 st.dataframe(pd.DataFrame(reporting_diag["period_control"]["periods"]), use_container_width=True)
@@ -3558,6 +3869,7 @@ else:
                     logger.error("Portfolio interaction error: %s", sanitize_error_message(portfolio_click_error))
                     st.warning("Company selection is temporarily unavailable, but the portfolio table is still visible.")
 
+                eka_modules.render_lv003_hot_path_panel(u.get("role"), expanded=False, panel_key="dev_gatekeeper_lv003")
                 conn.close()
             except Exception as e:
                 st.error(build_user_safe_error(e, u["role"]))

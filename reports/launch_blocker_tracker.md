@@ -16,8 +16,8 @@
 | Development certification | **92%** (complete) |
 | Live browser UAT execution | **0%** (Sprint 1 in progress) |
 | Open launch blockers | **5** |
-| Open live defects | **0** (intake ready) |
-| Last updated | 2026-06-28 |
+| Open live defects | **1** (LV-001 fixed pending retest; **DEF-002 Open** — LV-002D/LV-003 hot-path audit; verify `system_health_load_ms` < 3s) |
+| Last updated | 2026-07-02 |
 
 ---
 
@@ -66,8 +66,8 @@ Use `reports/live_defect_intake_template.md` for new entries. Copy verified rows
 
 | Defect ID | Severity | Module | Role | Title | Owner | Status | Launch blocking decision | Evidence | Screenshot |
 |---|---|---|---|---|---|---|---|---|---|
-| DEF-001 | | | | | | Open | | | |
-| DEF-002 | | | | | | Open | | | |
+| DEF-001 | High | Dashboard / Financial Reports | Owner / CEO | Slow login load; empty dashboard charts; empty financial reports despite posted journals | Technical Owner | Fixed | **DOES NOT BLOCK LAUNCH** until live retest verified | Root cause: (1) PostgreSQL `date()` filter mismatch returned empty ledger/report rows; (2) Trial Balance incorrectly applied period `start_date` to cumulative balances; (3) Dashboard charts were POS-only with no journal fallback; (4) Dashboard deferred heavy legacy/journal compare to expander. Evidence: `tests/test_live_defect_lv001_dashboard_reports.py`; LV-001 diagnostics expander on Dashboard and Financial Reports | |
+| DEF-002 | High | System Health / PostgreSQL Runtime | Dev / System Admin | App incredibly slow on active PostgreSQL; readiness score 0/100 with 291 blockers; misleading "switch not enabled" message | Technical Owner | **Open** | **DOES NOT BLOCK LAUNCH** until live retest confirms `system_health_load_ms` < 3s | LV-002/002B improved readiness and caching. LV-002C–D: fast snapshot reduced from ~33s to ~7s by removing subscription billing deep check, runtime ping persistence, and on-demand full audit. **LV-003**: Streamlit hot-path audit — per-rerun call tree (admin-only), session-cache startup guard/subscription checks, defer Dev gatekeeper ops snapshot + billing to session/refresh button, sidebar/page-access cache, currency DB sync only on change. **Open** until live confirms system health < 3s. Evidence: `tests/test_lv002_postgres_performance_and_readiness.py`, `tests/test_lv003_streamlit_hot_path_performance.py` | |
 | DEF-003 | | | | | | Open | | | |
 
 ---

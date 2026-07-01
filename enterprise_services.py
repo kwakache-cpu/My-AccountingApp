@@ -4,6 +4,7 @@ This module intentionally uses lazy imports so app startup stays stable and
 service ownership can be made explicit without creating new import cycles.
 """
 
+import time
 from datetime import datetime
 
 
@@ -90,31 +91,127 @@ def _safe_section(label, loader):
         }
 
 
+def _timed_section(label, loader, timings_ms):
+    started = time.perf_counter()
+    try:
+        return loader()
+    except Exception as exc:
+        return {
+            "ok": False,
+            "service_section": label,
+            "reason": str(exc),
+        }
+    finally:
+        timings_ms[label] = round((time.perf_counter() - started) * 1000.0, 2)
+
+
 def build_operations_console_snapshot(
     conn=None,
     selected_company_key=None,
     branch_id=None,
     end_date=None,
     audit_limit=25,
+    audit_mode="fast",
 ):
     """Collect System Health diagnostics without coupling UI code to every service.
 
-    The returned dictionary is intentionally plain data so Streamlit rendering can
-    stay in app.py while diagnostics remain reusable and centrally maintained.
+    Fast mode (default) avoids cloud downloads, SQLite file scans, and per-table
+  column introspection. Full audit runs only on demand.
     """
-    from database import (
-        get_audit_operations_summary,
-        get_data_migration_export_plan,
-        get_persistence_diagnostics,
-        get_postgres_readiness_diagnostics,
-        get_schema_manifest_diagnostics,
-        run_persistence_self_test,
+    from database import diagnostics_ttl_cache, get_active_db_backend, get_diagnostics_cache_stats
+
+    normalized_mode = str(audit_mode or "fast").strip().lower()
+    if normalized_mode not in {"fast", "full"}:
+        normalized_mode = "fast"
+    cache_key = (
+        f"ops_console:{normalized_mode}:{get_active_db_backend()}:"
+        f"{selected_company_key or 'none'}:{branch_id or 'none'}:{audit_limit}"
+    )
+    started = time.perf_counter()
+    stats_before = get_diagnostics_cache_stats()
+    result = diagnostics_ttl_cache(
+        cache_key,
+        60,
+        lambda: _build_operations_console_snapshot(
+            conn=conn,
+            selected_company_key=selected_company_key,
+            branch_id=branch_id,
+            end_date=end_date,
+            audit_limit=audit_limit,
+            audit_mode=normalized_mode,
+        ),
+    )
+    stats_after = get_diagnostics_cache_stats()
+    from_cache = stats_after.get("hits", 0) > stats_before.get("hits", 0)
+    try:
+        import modules as eka_modules
+
+        eka_modules.record_lv003_hot_path_call(
+            "enterprise_services.build_operations_console_snapshot",
+            (time.perf_counter() - started) * 1000.0,
+            from_cache=from_cache,
+            required=normalized_mode == "full",
+            recommendation="defer" if normalized_mode == "fast" else "keep",
+            surface="system_health",
+            metadata={"audit_mode": normalized_mode},
+        )
+    except Exception:
+        pass
+    return result
+
+
+def build_operations_console_full_audit(
+    conn=None,
+    selected_company_key=None,
+    branch_id=None,
+    end_date=None,
+    audit_limit=25,
+):
+    """Run the full System Health audit (network/file-heavy checks) on demand."""
+    return build_operations_console_snapshot(
+        conn=conn,
+        selected_company_key=selected_company_key,
+        branch_id=branch_id,
+        end_date=end_date,
+        audit_limit=audit_limit,
+        audit_mode="full",
     )
 
+
+def _build_operations_console_snapshot(
+    conn=None,
+    selected_company_key=None,
+    branch_id=None,
+    end_date=None,
+    audit_limit=25,
+    audit_mode="fast",
+):
+    from database import (
+        build_fast_runtime_ping,
+        get_audit_operations_summary,
+        get_data_migration_export_plan,
+        get_data_migration_export_plan_summary,
+        get_persistence_diagnostics,
+        get_persistence_diagnostics_fast,
+        get_postgres_readiness_diagnostics,
+        get_recovery_source_diagnostics,
+        get_schema_manifest_diagnostics,
+        get_startup_backend_diagnostics,
+        run_persistence_self_test,
+        run_persistence_self_test_fast,
+        validate_postgres_runtime_cutover_guard,
+    )
+
+    timings_ms = {}
+    fast_mode = audit_mode == "fast"
     snapshot = {
+        "audit_mode": audit_mode,
+        "fast_snapshot": fast_mode,
+        "generated_at": datetime.now().isoformat(timespec="seconds"),
+        "timings_ms": timings_ms,
         "service_ownership": get_service_ownership_map(),
-        "persistence": _safe_section("persistence", get_persistence_diagnostics),
-        "persistence_self_test": _safe_section("persistence_self_test", run_persistence_self_test),
+        "persistence": None,
+        "persistence_self_test": None,
         "paystack": None,
         "subscription_billing": None,
         "schema": None,
@@ -123,26 +220,96 @@ def build_operations_console_snapshot(
         "document_workflow": None,
         "reporting_trust": None,
         "posting_engine": None,
-        "postgres_readiness": _safe_section("postgres_readiness", get_postgres_readiness_diagnostics),
-        "data_migration_plan": _safe_section("data_migration_plan", get_data_migration_export_plan),
+        "postgres_readiness": None,
+        "data_migration_plan": None,
+        "startup_backend": None,
+        "recovery_source": None,
+        "cutover_guard": None,
     }
 
-    from modules import get_paystack_diagnostics, get_subscription_billing_health_snapshot
+    runtime_ping = build_fast_runtime_ping(conn) if fast_mode and conn is not None else None
 
-    snapshot["paystack"] = _safe_section("paystack", get_paystack_diagnostics)
-    snapshot["subscription_billing"] = _safe_section("subscription_billing", get_subscription_billing_health_snapshot)
-
-    if conn is not None:
-        snapshot["schema"] = _safe_section(
-            "schema_manifest",
-            lambda: get_schema_manifest_diagnostics(conn),
+    if fast_mode:
+        snapshot["persistence"] = _timed_section(
+            "persistence_diagnostics",
+            lambda: get_persistence_diagnostics_fast(conn=conn, runtime_ping=runtime_ping),
+            timings_ms,
         )
-        snapshot["audit"] = _safe_section(
+        snapshot["persistence_self_test"] = _timed_section(
+            "persistence_self_test",
+            lambda: run_persistence_self_test_fast(conn=conn, runtime_ping=runtime_ping),
+            timings_ms,
+        )
+        snapshot["postgres_readiness"] = _timed_section(
+            "postgres_readiness",
+            lambda: get_postgres_readiness_diagnostics(conn=conn, include_table_introspection=False),
+            timings_ms,
+        )
+        snapshot["data_migration_plan"] = _timed_section(
+            "data_migration_plan",
+            lambda: get_data_migration_export_plan_summary(conn=conn),
+            timings_ms,
+        )
+        snapshot["startup_backend"] = _timed_section("startup_backend_diagnostics", get_startup_backend_diagnostics, timings_ms)
+        snapshot["recovery_source"] = {
+            "fast_snapshot": True,
+            "checked": False,
+            "reason": "not_checked_in_fast_mode",
+        }
+        snapshot["cutover_guard"] = _timed_section("cutover_guard", validate_postgres_runtime_cutover_guard, timings_ms)
+        snapshot["subscription_billing"] = {
+            "fast_snapshot": True,
+            "checked": False,
+            "reason": "not_checked_in_fast_mode",
+        }
+    else:
+        snapshot["persistence"] = _timed_section("persistence_diagnostics", get_persistence_diagnostics, timings_ms)
+        snapshot["persistence_self_test"] = _timed_section("persistence_self_test", run_persistence_self_test, timings_ms)
+        snapshot["postgres_readiness"] = _timed_section(
+            "postgres_readiness",
+            lambda: get_postgres_readiness_diagnostics(conn=conn, include_table_introspection=False),
+            timings_ms,
+        )
+        snapshot["data_migration_plan"] = _timed_section(
+            "data_migration_plan",
+            lambda: get_data_migration_export_plan(conn=conn, include_row_counts=True, include_columns=True),
+            timings_ms,
+        )
+        snapshot["startup_backend"] = _timed_section("startup_backend_diagnostics", get_startup_backend_diagnostics, timings_ms)
+        snapshot["recovery_source"] = _timed_section("recovery_source_diagnostics", get_recovery_source_diagnostics, timings_ms)
+        snapshot["cutover_guard"] = _timed_section("cutover_guard", validate_postgres_runtime_cutover_guard, timings_ms)
+        if conn is not None:
+            snapshot["schema"] = _timed_section(
+                "schema_manifest",
+                lambda: get_schema_manifest_diagnostics(conn),
+                timings_ms,
+            )
+            snapshot["audit"] = _timed_section(
+                "audit_operations",
+                lambda: get_audit_operations_summary(conn=conn, limit=audit_limit),
+                timings_ms,
+            )
+
+        from modules import get_subscription_billing_health_snapshot
+
+        snapshot["subscription_billing"] = _timed_section(
+            "subscription_billing",
+            get_subscription_billing_health_snapshot,
+            timings_ms,
+        )
+
+    from modules import get_paystack_diagnostics
+
+    snapshot["paystack"] = _timed_section("paystack", get_paystack_diagnostics, timings_ms)
+
+    if conn is not None and fast_mode:
+        snapshot["audit"] = _timed_section(
             "audit_operations",
             lambda: get_audit_operations_summary(conn=conn, limit=audit_limit),
+            timings_ms,
         )
 
-    if selected_company_key:
+    if selected_company_key and not fast_mode:
         from accounting_engine import (
             get_document_workflow_diagnostics,
             get_journal_dominance_diagnostics,
@@ -151,23 +318,25 @@ def build_operations_console_snapshot(
         )
 
         report_end_date = end_date or datetime.now().date()
-        snapshot["accounting_core"] = _safe_section(
+        snapshot["accounting_core"] = _timed_section(
             "accounting_core",
             lambda: get_journal_dominance_diagnostics(
                 selected_company_key,
                 branch_id=branch_id,
                 conn=conn,
             ),
+            timings_ms,
         )
-        snapshot["document_workflow"] = _safe_section(
+        snapshot["document_workflow"] = _timed_section(
             "document_workflow",
             lambda: get_document_workflow_diagnostics(
                 selected_company_key,
                 branch_id=branch_id,
                 conn=conn,
             ),
+            timings_ms,
         )
-        snapshot["reporting_trust"] = _safe_section(
+        snapshot["reporting_trust"] = _timed_section(
             "reporting_trust",
             lambda: get_reporting_trust_diagnostics(
                 selected_company_key,
@@ -175,14 +344,22 @@ def build_operations_console_snapshot(
                 branch_id=branch_id,
                 conn=conn,
             ),
+            timings_ms,
         )
-        snapshot["posting_engine"] = _safe_section(
+        snapshot["posting_engine"] = _timed_section(
             "posting_engine",
             lambda: get_unified_posting_engine_diagnostics(
                 selected_company_key,
                 branch_id=branch_id,
                 conn=conn,
             ),
+            timings_ms,
         )
 
+    snapshot["total_elapsed_ms"] = round(sum(timings_ms.values()), 2)
+    snapshot["top_slow_steps"] = sorted(
+        [{"step": step, "elapsed_ms": elapsed} for step, elapsed in timings_ms.items()],
+        key=lambda item: item["elapsed_ms"],
+        reverse=True,
+    )[:10]
     return snapshot
