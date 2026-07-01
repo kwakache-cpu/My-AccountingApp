@@ -221,6 +221,39 @@ def _csv_button(label, dataframe, key):
     )
 
 
+def _lazy_csv_button(label, dataframe, key):
+    """Prepare CSV bytes only after the user clicks Export (not during ordinary render)."""
+    blob_key = f"_fr_csv_blob_{key}"
+    if st.button(f"📥 Export {label} CSV", key=f"_fr_csv_prepare_{key}"):
+        st.session_state[blob_key] = (
+            dataframe.to_csv(index=False).encode("utf-8")
+            if dataframe is not None and not dataframe.empty
+            else b""
+        )
+    prepared = st.session_state.get(blob_key)
+    if prepared is not None:
+        st.download_button(
+            f"⬇️ Download {label} CSV",
+            data=prepared,
+            file_name=f"{label.lower().replace(' ', '_')}.csv",
+            mime="text/csv",
+            key=f"download_{key}",
+        )
+
+
+FINANCIAL_REPORT_TYPE_OPTIONS = (
+    ("Trial Balance", "trial_balance"),
+    ("Statement of Profit or Loss", "income_statement"),
+    ("Statement of Financial Position", "balance_sheet"),
+    ("Statement of Cash Flows", "cash_flow"),
+    ("Statement of Changes in Equity", "equity"),
+    ("Depreciation Schedule", "depreciation"),
+)
+FINANCIAL_REPORT_TYPE_LABELS = {key: label for label, key in FINANCIAL_REPORT_TYPE_OPTIONS}
+FINANCIAL_REPORT_TYPE_KEYS = {label: key for label, key in FINANCIAL_REPORT_TYPE_OPTIONS}
+DEFAULT_FINANCIAL_REPORT_TYPE = "trial_balance"
+
+
 def _money_label():
     return f"({get_currency_symbol()})"
 
@@ -488,12 +521,13 @@ def _get_changes_in_equity_legacy(company_key, start_date=None, end_date=None, a
     )
 
 
-def get_depreciation_schedule(company_key):
-    conn = get_connection()
-    try:
-        df = _portable_read_dataframe(
-            conn,
-            """
+def get_depreciation_schedule(company_key, conn=None):
+    profiler = _SHOW_FR_PROFILER
+    call_started = time.perf_counter()
+    owns_connection = conn is None
+    if owns_connection:
+        conn = get_connection()
+    sql = """
             SELECT
                 asset_name AS "Asset Name",
                 asset_category AS "Category",
@@ -510,12 +544,33 @@ def get_depreciation_schedule(company_key):
             FROM fixed_assets
             WHERE company_key = ?
             ORDER BY asset_name
-            """,
+            """
+    try:
+        sql_started = time.perf_counter()
+        df = _portable_read_dataframe(
+            conn,
+            sql,
             (company_key,),
         )
+        sql_ms = (time.perf_counter() - sql_started) * 1000.0
+        if profiler is not None:
+            call_index = int(profiler.function_calls.get("get_depreciation_schedule", {}).get("call_count", 0)) + 1
+            profiler.record_sql_execution(
+                function_name="get_depreciation_schedule",
+                sql=sql,
+                elapsed_ms=sql_ms,
+                call_index=call_index,
+            )
+            profiler.record_function_call(
+                "get_depreciation_schedule",
+                (time.perf_counter() - call_started) * 1000.0,
+                sql_ms=round(sql_ms, 2),
+                row_count=int(len(df)),
+            )
         return df
     finally:
-        conn.close()
+        if owns_connection:
+            conn.close()
 
 
 def _show_manual_record_transaction_legacy(company_key, role):
@@ -1715,8 +1770,14 @@ def _display_table_with_rate(df_original):
     return df_display
 
 
-def get_ledger_balances(company_key, start_date=None, end_date=None, account_name=None, branch_id=None):
-    conn = get_connection()
+def get_ledger_balances(company_key, start_date=None, end_date=None, account_name=None, branch_id=None, conn=None):
+    profiler = _SHOW_FR_PROFILER
+    call_started = time.perf_counter()
+    owns_connection = conn is None
+    conn_started = time.perf_counter()
+    if owns_connection:
+        conn = get_connection()
+    conn_ms = (time.perf_counter() - conn_started) * 1000.0
     try:
         query = """
             SELECT
@@ -1749,9 +1810,32 @@ def get_ledger_balances(company_key, start_date=None, end_date=None, account_nam
             GROUP BY COALESCE(c.code, c.account_code, ''), COALESCE(c.name, c.account_name, ''), COALESCE(c.type, c.category, c.account_type, '')
             ORDER BY COALESCE(c.code, c.account_code, ''), COALESCE(c.name, c.account_name, '')
         """
+        sql_started = time.perf_counter()
         rows = execute_portable_query(conn, query, tuple(params)).fetchall()
+        sql_ms = (time.perf_counter() - sql_started) * 1000.0
+        if profiler is not None:
+            call_index = int(profiler.function_calls.get("get_ledger_balances", {}).get("call_count", 0)) + 1
+            label = "get_ledger_balances:cumulative" if start_date is None else "get_ledger_balances:period"
+            profiler.record_sql_execution(
+                function_name=label,
+                sql=query,
+                elapsed_ms=sql_ms,
+                call_index=call_index,
+            )
         if not rows:
+            if profiler is not None:
+                profiler.record_function_call(
+                    "get_ledger_balances",
+                    (time.perf_counter() - call_started) * 1000.0,
+                    connection_ms=round(conn_ms, 2),
+                    sql_ms=round(sql_ms, 2),
+                    row_count=0,
+                    start_date=_resolve_date(start_date) if start_date else None,
+                    end_date=_resolve_date(end_date) if end_date else None,
+                    branch_id=branch_id,
+                )
             return {}
+        map_started = time.perf_counter()
         balances = {}
         for row in rows:
             debit = float(row_get(row, "total_debit", 0) or 0.0)
@@ -1765,11 +1849,30 @@ def get_ledger_balances(company_key, start_date=None, end_date=None, account_nam
                 "credit": credit,
                 "balance": balance,
             }
+        if profiler is not None:
+            profiler.record_function_call(
+                "get_ledger_balances",
+                (time.perf_counter() - call_started) * 1000.0,
+                connection_ms=round(conn_ms, 2),
+                sql_ms=round(sql_ms, 2),
+                map_build_ms=round((time.perf_counter() - map_started) * 1000.0, 2),
+                row_count=len(rows),
+                start_date=_resolve_date(start_date) if start_date else None,
+                end_date=_resolve_date(end_date) if end_date else None,
+                branch_id=branch_id,
+            )
         return balances
     except Exception:
+        if profiler is not None:
+            profiler.record_function_call(
+                "get_ledger_balances",
+                (time.perf_counter() - call_started) * 1000.0,
+                error=True,
+            )
         return {}
     finally:
-        conn.close()
+        if owns_connection:
+            conn.close()
 
 
 def _financial_report_runtime_diagnostics(company_key, start_date=None, end_date=None, branch_id=None):
@@ -2052,6 +2155,114 @@ def _equity_from_reports(bs_df, income_df):
 
 
 _FINANCIAL_REPORT_PIPELINE_TIMINGS = {}
+_FINANCIAL_REPORTS_SHOW_TIMING_BREAKDOWN = {}
+_SHOW_FR_PROFILER = None
+
+
+class _ShowFinancialReportsProfiler:
+    """Stage profiler active only during financials.show_financial_reports()."""
+
+    def __init__(self, company_key):
+        self.company_key = company_key
+        self.started = time.perf_counter()
+        self.stages = []
+        self.sql_executions = []
+        self.function_calls = {}
+
+    def record_stage(self, stage, elapsed_ms, **metadata):
+        entry = {
+            "stage": stage,
+            "elapsed_ms": round(float(elapsed_ms or 0.0), 2),
+        }
+        entry.update(metadata or {})
+        self.stages.append(entry)
+
+    def record_function_call(self, function_name, elapsed_ms, **metadata):
+        count = int(self.function_calls.get(function_name, {}).get("call_count", 0)) + 1
+        prior_total = float(self.function_calls.get(function_name, {}).get("total_elapsed_ms", 0.0))
+        self.function_calls[function_name] = {
+            "call_count": count,
+            "total_elapsed_ms": round(prior_total + float(elapsed_ms or 0.0), 2),
+            "last_elapsed_ms": round(float(elapsed_ms or 0.0), 2),
+            **(metadata or {}),
+        }
+
+    def record_sql_execution(self, *, function_name, sql, elapsed_ms, call_index=1):
+        self.sql_executions.append(
+            {
+                "function": function_name,
+                "call_index": int(call_index),
+                "elapsed_ms": round(float(elapsed_ms or 0.0), 2),
+                "sql": " ".join(str(sql or "").split()),
+            }
+        )
+
+    def finalize(self, *, backend=None):
+        total_ms = round((time.perf_counter() - self.started) * 1000.0, 2)
+        ranked_stages = sorted(self.stages, key=lambda row: row.get("elapsed_ms", 0.0), reverse=True)
+        ranked_sql = sorted(self.sql_executions, key=lambda row: row.get("elapsed_ms", 0.0), reverse=True)
+        majority_stage = ranked_stages[0] if ranked_stages else None
+        over_one_second = [
+            row
+            for row in (ranked_stages + ranked_sql)
+            if float(row.get("elapsed_ms", 0.0)) >= 1000.0
+        ]
+        return {
+            "company_key": self.company_key,
+            "backend": backend,
+            "total_elapsed_ms": total_ms,
+            "majority_stage": majority_stage.get("stage") if majority_stage else None,
+            "majority_stage_elapsed_ms": majority_stage.get("elapsed_ms") if majority_stage else None,
+            "majority_stage_share_pct": round(
+                (float(majority_stage.get("elapsed_ms", 0.0)) / total_ms) * 100.0,
+                2,
+            )
+            if majority_stage and total_ms > 0
+            else None,
+            "stages": ranked_stages,
+            "function_calls": dict(self.function_calls),
+            "sql_executions": ranked_sql,
+            "over_one_second": over_one_second,
+        }
+
+
+class _ShowFinancialReportsProfilerStage:
+    def __init__(self, profiler, stage):
+        self.profiler = profiler
+        self.stage = stage
+        self.started = None
+        self.metadata = {}
+
+    def __enter__(self):
+        self.started = time.perf_counter()
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        elapsed_ms = (time.perf_counter() - self.started) * 1000.0
+        self.profiler.record_stage(self.stage, elapsed_ms, **self.metadata)
+        return False
+
+
+def _begin_show_financial_reports_profiler(company_key):
+    global _SHOW_FR_PROFILER
+    _SHOW_FR_PROFILER = _ShowFinancialReportsProfiler(company_key)
+
+
+def _finalize_show_financial_reports_profiler():
+    global _SHOW_FR_PROFILER, _FINANCIAL_REPORTS_SHOW_TIMING_BREAKDOWN
+    profiler = _SHOW_FR_PROFILER
+    _SHOW_FR_PROFILER = None
+    if profiler is None:
+        return {}
+    breakdown = profiler.finalize(backend=get_active_db_backend())
+    _FINANCIAL_REPORTS_SHOW_TIMING_BREAKDOWN = breakdown
+    logger.info("FINANCIAL_REPORTS_SHOW_TIMING %s", breakdown)
+    return breakdown
+
+
+def get_financial_reports_show_timing_breakdown():
+    """Return the latest show_financial_reports() stage profiler snapshot."""
+    return dict(_FINANCIAL_REPORTS_SHOW_TIMING_BREAKDOWN)
 
 
 def get_financial_report_pipeline_timings():
@@ -2146,40 +2357,226 @@ def _financial_report_cache_date(value):
     return str(value)
 
 
-@st.cache_data(ttl=60, show_spinner=False)
-def _cached_financial_reports_bundle(company_key, start_key, end_key, account_key, branch_key, backend_key):
-    """Build all financial reports from at most two ledger balance queries."""
+def _financial_report_scope_from_keys(start_key, end_key, account_key, branch_key):
     start_date = None if start_key in (None, "none") else datetime.fromisoformat(start_key).date()
     end_date = None if end_key in (None, "none") else datetime.fromisoformat(end_key).date()
     account_name = None if account_key in (None, "none", "") else account_key
     branch_id = None if branch_key in (None, "none", "") else branch_key
+    return start_date, end_date, account_name, branch_id
+
+
+def _fetch_ledger_balance_snapshot(company_key, start_date=None, end_date=None, account_name=None, branch_id=None):
+    """Fetch cumulative and period ledger balances using one shared connection."""
+    conn = get_connection()
+    try:
+        cumulative_balances = get_ledger_balances(
+            company_key,
+            start_date=None,
+            end_date=end_date,
+            account_name=account_name,
+            branch_id=branch_id,
+            conn=conn,
+        )
+        if start_date:
+            period_balances = get_ledger_balances(
+                company_key,
+                start_date=start_date,
+                end_date=end_date,
+                account_name=account_name,
+                branch_id=branch_id,
+                conn=conn,
+            )
+        else:
+            period_balances = cumulative_balances
+        return {
+            "cumulative": cumulative_balances,
+            "period": period_balances,
+        }
+    finally:
+        conn.close()
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def _cached_ledger_balance_snapshot(company_key, start_key, end_key, account_key, branch_key, backend_key):
+    start_date, end_date, account_name, branch_id = _financial_report_scope_from_keys(
+        start_key,
+        end_key,
+        account_key,
+        branch_key,
+    )
+    return _fetch_ledger_balance_snapshot(
+        company_key,
+        start_date=start_date,
+        end_date=end_date,
+        account_name=account_name,
+        branch_id=branch_id,
+    )
+
+
+def _build_financial_report_dataframe(report_type_key, company_key, ledger_snapshot=None, *, conn=None):
+    """Build one financial report dataframe without touching unrelated report types."""
+    report_type_key = str(report_type_key or DEFAULT_FINANCIAL_REPORT_TYPE)
+    if report_type_key == "depreciation":
+        owns_connection = conn is None
+        if owns_connection:
+            conn = get_connection()
+        try:
+            return get_depreciation_schedule(company_key, conn=conn)
+        finally:
+            if owns_connection:
+                conn.close()
+
+    if ledger_snapshot is None:
+        raise ValueError("ledger_snapshot is required for ledger-derived financial reports.")
+
+    cumulative_balances = ledger_snapshot.get("cumulative") or {}
+    period_balances = ledger_snapshot.get("period") or {}
+
+    if report_type_key == "trial_balance":
+        return _trial_balance_from_balances(cumulative_balances)
+    if report_type_key == "income_statement":
+        return _income_statement_from_balances(period_balances)
+    if report_type_key == "balance_sheet":
+        return _balance_sheet_from_trial_balance(_trial_balance_from_balances(cumulative_balances))
+    if report_type_key == "cash_flow":
+        income_statement_df = _income_statement_from_balances(period_balances)
+        balance_sheet_df = _balance_sheet_from_trial_balance(_trial_balance_from_balances(cumulative_balances))
+        return _cash_flow_from_reports(income_statement_df, balance_sheet_df)
+    if report_type_key == "equity":
+        trial_balance_df = _trial_balance_from_balances(cumulative_balances)
+        balance_sheet_df = _balance_sheet_from_trial_balance(trial_balance_df)
+        income_statement_df = _income_statement_from_balances(period_balances)
+        return _equity_from_reports(balance_sheet_df, income_statement_df)
+    raise ValueError(f"Unsupported financial report type: {report_type_key}")
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def _cached_financial_report_by_type(
+    company_key,
+    start_key,
+    end_key,
+    account_key,
+    branch_key,
+    backend_key,
+    report_type_key,
+):
+    """Compute a single financial report for the active tab only."""
+    report_type_key = str(report_type_key or DEFAULT_FINANCIAL_REPORT_TYPE)
+    pipeline_started = time.perf_counter()
+    if report_type_key == "depreciation":
+        report_df = _build_financial_report_dataframe(report_type_key, company_key)
+        stage = "depreciation_schedule_ms"
+    else:
+        ledger_snapshot = _cached_ledger_balance_snapshot(
+            company_key,
+            start_key,
+            end_key,
+            account_key,
+            branch_key,
+            backend_key,
+        )
+        report_df = _build_financial_report_dataframe(
+            report_type_key,
+            company_key,
+            ledger_snapshot=ledger_snapshot,
+        )
+        stage = f"{report_type_key}_format_ms"
+
+    timings = {
+        stage: round((time.perf_counter() - pipeline_started) * 1000.0, 2),
+        "total_ms": round((time.perf_counter() - pipeline_started) * 1000.0, 2),
+        "slowest_stage": stage,
+        "slowest_elapsed_ms": round((time.perf_counter() - pipeline_started) * 1000.0, 2),
+        "company_key": company_key,
+        "branch_key": branch_key,
+        "start_key": start_key,
+        "end_key": end_key,
+        "backend_key": backend_key,
+        "report_type_key": report_type_key,
+    }
+    return {
+        "report_type_key": report_type_key,
+        "dataframe": report_df,
+        "pipeline_timings": timings,
+    }
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def _cached_financial_report_summary(
+    company_key,
+    start_key,
+    end_key,
+    account_key,
+    branch_key,
+    backend_key,
+):
+    """Lightweight summary metrics derived from one shared ledger snapshot."""
+    ledger_snapshot = _cached_ledger_balance_snapshot(
+        company_key,
+        start_key,
+        end_key,
+        account_key,
+        branch_key,
+        backend_key,
+    )
+    trial_balance_df = _trial_balance_from_balances(ledger_snapshot.get("cumulative") or {})
+    income_statement_df = _income_statement_from_balances(ledger_snapshot.get("period") or {})
+    balance_sheet_df = _balance_sheet_from_trial_balance(trial_balance_df)
+    total_debits = _safe_number(trial_balance_df.get("Debit (GHS)"))
+    total_credits = _safe_number(trial_balance_df.get("Credit (GHS)"))
+    total_assets = _safe_number(
+        balance_sheet_df.loc[balance_sheet_df["Category"].isin(["Current Assets", "Non-Current Assets"]), "Amount (GHS)"]
+    ) if not balance_sheet_df.empty else 0.0
+    total_liabilities = _safe_number(
+        balance_sheet_df.loc[
+            balance_sheet_df["Category"].isin(["Current Liabilities", "Non-Current Liabilities"]),
+            "Amount (GHS)",
+        ]
+    ) if not balance_sheet_df.empty else 0.0
+    total_equity = _safe_number(
+        balance_sheet_df.loc[balance_sheet_df["Category"] == "Equity", "Amount (GHS)"]
+    ) if not balance_sheet_df.empty else 0.0
+    net_profit = _safe_number(
+        income_statement_df.loc[income_statement_df["Account"] == "Net Profit", "Amount (GHS)"]
+    ) if not income_statement_df.empty else 0.0
+    return {
+        "total_debits": total_debits,
+        "total_credits": total_credits,
+        "total_assets": total_assets,
+        "total_liabilities": total_liabilities,
+        "total_equity": total_equity,
+        "net_profit": net_profit,
+        "balanced": abs(total_debits - total_credits) < 0.01,
+        "balance_sheet_balanced": abs(total_assets - (total_liabilities + total_equity)) < 0.01,
+    }
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def _cached_financial_reports_bundle(company_key, start_key, end_key, account_key, branch_key, backend_key):
+    """Build all financial reports from at most two ledger balance queries (legacy/admin path)."""
+    start_date, end_date, account_name, branch_id = _financial_report_scope_from_keys(
+        start_key,
+        end_key,
+        account_key,
+        branch_key,
+    )
     timings = {}
     pipeline_started = time.perf_counter()
 
     stage = "ledger_balances_cumulative_ms"
     stage_started = time.perf_counter()
-    cumulative_balances = get_ledger_balances(
+    ledger_snapshot = _fetch_ledger_balance_snapshot(
         company_key,
-        start_date=None,
+        start_date=start_date,
         end_date=end_date,
         account_name=account_name,
         branch_id=branch_id,
     )
     timings[stage] = round((time.perf_counter() - stage_started) * 1000.0, 2)
+    timings["ledger_balances_period_ms"] = 0.0 if not start_date else timings[stage]
 
-    stage = "ledger_balances_period_ms"
-    stage_started = time.perf_counter()
-    if start_date:
-        period_balances = get_ledger_balances(
-            company_key,
-            start_date=start_date,
-            end_date=end_date,
-            account_name=account_name,
-            branch_id=branch_id,
-        )
-    else:
-        period_balances = cumulative_balances
-    timings[stage] = round((time.perf_counter() - stage_started) * 1000.0, 2)
+    cumulative_balances = ledger_snapshot["cumulative"]
+    period_balances = ledger_snapshot["period"]
 
     stage = "trial_balance_format_ms"
     stage_started = time.perf_counter()
@@ -2235,240 +2632,426 @@ def _cached_financial_reports_bundle(company_key, start_key, end_key, account_ke
 
 @st.cache_data(ttl=60, show_spinner=False)
 def _cached_trial_balance_report(company_key, start_key, end_key, account_key, branch_key, backend_key):
-    bundle = _cached_financial_reports_bundle(company_key, start_key, end_key, account_key, branch_key, backend_key)
-    return bundle["trial_balance"]
+    payload = _cached_financial_report_by_type(
+        company_key,
+        start_key,
+        end_key,
+        account_key,
+        branch_key,
+        backend_key,
+        "trial_balance",
+    )
+    return payload["dataframe"]
 
 
 @st.cache_data(ttl=60, show_spinner=False)
 def _cached_income_statement_report(company_key, start_key, end_key, account_key, branch_key, backend_key):
-    bundle = _cached_financial_reports_bundle(company_key, start_key, end_key, account_key, branch_key, backend_key)
-    return bundle["income_statement"]
+    payload = _cached_financial_report_by_type(
+        company_key,
+        start_key,
+        end_key,
+        account_key,
+        branch_key,
+        backend_key,
+        "income_statement",
+    )
+    return payload["dataframe"]
 
 
 @st.cache_data(ttl=60, show_spinner=False)
 def _cached_balance_sheet_report(company_key, start_key, end_key, account_key, branch_key, backend_key):
-    bundle = _cached_financial_reports_bundle(company_key, start_key, end_key, account_key, branch_key, backend_key)
-    return bundle["balance_sheet"]
+    payload = _cached_financial_report_by_type(
+        company_key,
+        start_key,
+        end_key,
+        account_key,
+        branch_key,
+        backend_key,
+        "balance_sheet",
+    )
+    return payload["dataframe"]
 
 
 def show_financial_reports(company_key, role=None):
+    _begin_show_financial_reports_profiler(company_key)
+    profiler = _SHOW_FR_PROFILER
     reports_started = time.perf_counter()
-    eka_modules = importlib.import_module("modules")
-    eka_modules.render_ui_standard_styles()
-    eka_modules.page_header("📊 Financial Reports", "View financial statements, trial balance, and cash flow analysis")
-    effective_role = role or st.session_state.get("user", {}).get("role", "System")
-    if not require_permission(effective_role, "view_reports", action_label="view reports", company_key=company_key):
-        return
-    with st.expander("Year-End Closing", expanded=False):
-        closing_date = st.date_input("Closing Date", value=datetime.now().date(), key=f"year_end_close_{company_key}")
-        if st.button("Post Year-End Closing Entry", key=f"year_end_close_btn_{company_key}"):
-            try:
-                if not require_permission(
-                    effective_role,
-                    "close_period",
-                    action_label="post year-end closing entries",
-                    company_key=company_key,
-                ):
-                    return
-                entry_id = close_fiscal_year(
-                    company_key,
-                    closing_date,
-                    effective_role,
-                    branch_id=st.session_state.get("active_branch_id"),
-                )
-                if entry_id:
-                    st.success(f"Year-end closing entry posted as journal #{entry_id}.")
-                else:
-                    st.info("No net profit or loss balance was available to close.")
-            except Exception as exc:
-                st.error(build_user_safe_error(exc, effective_role))
-    
-    # Consolidator for Master Admins
-    if effective_role == "Master Admin":
-        if st.button("🔄 Generate Consolidated Group Reports", key=f"consolidator_{company_key}"):
-            st.session_state.consolidated_view = True
-            st.rerun()
-        if st.session_state.get("consolidated_view"):
-            if st.button("🔙 Back to Branch Reports", key=f"back_to_branch_{company_key}"):
-                st.session_state.consolidated_view = False
-                st.rerun()
-    
-    consolidated = st.session_state.get("consolidated_view", False) and effective_role == "Master Admin"
-    
+    eka_modules = None
     try:
-        start_date, end_date, account_name = _filter_controls(f"financial_ifrs_safe_{company_key}")
-    except Exception:
-        start_date, end_date, account_name = None, None, None
+        with _ShowFinancialReportsProfilerStage(profiler, "ui_styles_header_permission"):
+            eka_modules = importlib.import_module("modules")
+            eka_modules.render_ui_standard_styles()
+            eka_modules.page_header("📊 Financial Reports", "View financial statements, trial balance, and cash flow analysis")
+            effective_role = role or st.session_state.get("user", {}).get("role", "System")
+            if not require_permission(effective_role, "view_reports", action_label="view reports", company_key=company_key):
+                return
 
-    if consolidated:
-        try:
-            trial_balance_df = get_trial_balance(company_key, start_date, end_date, account_name)  # Consolidated
-        except Exception:
-            trial_balance_df = pd.DataFrame(columns=["Account Code", "Account", "Type", "Debit (GHS)", "Credit (GHS)", "Balance (GHS)", "Balanced"])
-        try:
-            income_statement_df = get_consolidated_pnl(company_key, start_date, end_date)
-        except Exception:
-            income_statement_df = pd.DataFrame(columns=["Category", "Account Code", "Account", "Amount (GHS)"])
-        try:
-            balance_sheet_df = get_consolidated_balance_sheet(company_key, start_date, end_date)
-        except Exception:
-            balance_sheet_df = pd.DataFrame(columns=["Category", "Account Code", "Account", "Amount (GHS)"])
-        # For consolidated, skip cash flow and equity for now
-        cash_flow_df = pd.DataFrame(columns=["Section", "Line Item", "Amount (GHS)"])
-        equity_df = pd.DataFrame(columns=["Account Code", "Line Item", "Amount (GHS)"])
-    else:
-        start_key = _financial_report_cache_date(start_date)
-        end_key = _financial_report_cache_date(end_date)
-        account_key = _financial_report_cache_date(account_name)
-        branch_key = _financial_report_cache_date(st.session_state.get("active_branch_id"))
-        backend_key = get_active_db_backend()
-        try:
-            bundle = _cached_financial_reports_bundle(
-                company_key,
-                start_key,
-                end_key,
-                account_key,
-                branch_key,
-                backend_key,
-            )
-            trial_balance_df = bundle["trial_balance"]
-            income_statement_df = bundle["income_statement"]
-            balance_sheet_df = bundle["balance_sheet"]
-            cash_flow_df = bundle["cash_flow"]
-            equity_df = bundle["equity"]
-            depreciation_df = bundle["depreciation"]
-            global _FINANCIAL_REPORT_PIPELINE_TIMINGS
-            _FINANCIAL_REPORT_PIPELINE_TIMINGS = dict(bundle.get("pipeline_timings") or {})
-        except Exception:
-            trial_balance_df = pd.DataFrame(columns=["Account Code", "Account", "Type", "Debit (GHS)", "Credit (GHS)", "Balance (GHS)", "Balanced"])
-            income_statement_df = pd.DataFrame(columns=["Category", "Account Code", "Account", "Amount (GHS)"])
-            balance_sheet_df = pd.DataFrame(columns=["Category", "Account Code", "Account", "Amount (GHS)"])
-            cash_flow_df = pd.DataFrame(columns=["Section", "Line Item", "Amount (GHS)"])
-            equity_df = pd.DataFrame(columns=["Account Code", "Line Item", "Amount (GHS)"])
-            depreciation_df = pd.DataFrame(columns=["Asset Name", "Category", "Purchase Date", "Cost (GHS)", "Useful Life (Years)", "Residual Value (GHS)", "Method", "Rate (%)", "Accumulated Depreciation (GHS)", "Book Value (GHS)", "Last Depreciation Date", "Status"])
+        with st.expander("Year-End Closing", expanded=False):
+            closing_date = st.date_input("Closing Date", value=datetime.now().date(), key=f"year_end_close_{company_key}")
+            if st.button("Post Year-End Closing Entry", key=f"year_end_close_btn_{company_key}"):
+                try:
+                    if not require_permission(
+                        effective_role,
+                        "close_period",
+                        action_label="post year-end closing entries",
+                        company_key=company_key,
+                    ):
+                        return
+                    entry_id = close_fiscal_year(
+                        company_key,
+                        closing_date,
+                        effective_role,
+                        branch_id=st.session_state.get("active_branch_id"),
+                    )
+                    if entry_id:
+                        st.success(f"Year-end closing entry posted as journal #{entry_id}.")
+                    else:
+                        st.info("No net profit or loss balance was available to close.")
+                except Exception as exc:
+                    st.error(build_user_safe_error(exc, effective_role))
 
-    if consolidated:
-        try:
-            depreciation_df = get_depreciation_schedule(company_key)
-        except Exception:
-            depreciation_df = pd.DataFrame(columns=["Asset Name", "Category", "Purchase Date", "Cost (GHS)", "Useful Life (Years)", "Residual Value (GHS)", "Method", "Rate (%)", "Accumulated Depreciation (GHS)", "Book Value (GHS)", "Last Depreciation Date", "Status"])
+        if effective_role == "Master Admin":
+            if st.button("🔄 Generate Consolidated Group Reports", key=f"consolidator_{company_key}"):
+                st.session_state.consolidated_view = True
+                st.rerun()
+            if st.session_state.get("consolidated_view"):
+                if st.button("🔙 Back to Branch Reports", key=f"back_to_branch_{company_key}"):
+                    st.session_state.consolidated_view = False
+                    st.rerun()
 
-    total_debits = _safe_number(trial_balance_df.get("Debit (GHS)"))
-    total_credits = _safe_number(trial_balance_df.get("Credit (GHS)"))
-    total_assets = _safe_number(balance_sheet_df.loc[balance_sheet_df["Category"].isin(["Current Assets", "Non-Current Assets"]), "Amount (GHS)"]) if not balance_sheet_df.empty else 0.0
-    total_liabilities = _safe_number(balance_sheet_df.loc[balance_sheet_df["Category"].isin(["Current Liabilities", "Non-Current Liabilities"]), "Amount (GHS)"]) if not balance_sheet_df.empty else 0.0
-    total_equity = _safe_number(balance_sheet_df.loc[balance_sheet_df["Category"] == "Equity", "Amount (GHS)"]) if not balance_sheet_df.empty else 0.0
-    net_profit = _safe_number(income_statement_df.loc[income_statement_df["Account"] == "Net Profit", "Amount (GHS)"]) if not income_statement_df.empty else 0.0
-    balanced = abs(total_debits - total_credits) < 0.01
-    integrity_key = "finance_integrity_{company}_{branch}_{end}".format(
-        company=company_key,
-        branch=_financial_report_cache_date(st.session_state.get("active_branch_id")),
-        end=_financial_report_cache_date(end_date),
-    )
+        consolidated = st.session_state.get("consolidated_view", False) and effective_role == "Master Admin"
 
-    col1, col2, col3 = st.columns(3)
-    col1.metric("Trial Balance", "Balanced" if balanced else "Out of Balance")
-    col2.metric("Profit for the Period", format_currency(_report_convert(net_profit)))
-    col3.metric("Balance Sheet", "Balanced" if abs(total_assets - (total_liabilities + total_equity)) < 0.01 else "Needs Review")
-    st.caption(f"Debit/Credit Validation: {'Balanced' if balanced else 'Needs review'}")
-    with st.expander("Finance Integrity", expanded=False):
-        if st.button("Run integrity check", key=f"run_finance_integrity_{company_key}"):
-            from accounting_engine import get_finance_integrity_diagnostics
+        with _ShowFinancialReportsProfilerStage(profiler, "filter_controls"):
+            try:
+                start_date, end_date, account_name = _filter_controls(f"financial_ifrs_safe_{company_key}")
+            except Exception:
+                start_date, end_date, account_name = None, None, None
 
-            st.session_state[integrity_key] = get_finance_integrity_diagnostics(
-                company_key,
-                as_of_date=end_date,
-                branch_id=st.session_state.get("active_branch_id"),
-            )
-        integrity = st.session_state.get(integrity_key)
-        if not integrity:
-            st.caption("Run integrity check on demand to reconcile subledgers.")
-        else:
-            i1, i2, i3 = st.columns(3)
-            i1.metric(
-                "A/R Reconciliation",
-                "Matched" if integrity["accounts_receivable"]["reconciled"] else "Mismatch",
-                format_currency(integrity["accounts_receivable"]["difference"]),
-            )
-            i2.metric(
-                "A/P Reconciliation",
-                "Matched" if integrity["accounts_payable"]["reconciled"] else "Mismatch",
-                format_currency(integrity["accounts_payable"]["difference"]),
-            )
-            i3.metric(
-                "Inventory Reconciliation",
-                "Matched" if integrity["inventory"]["reconciled"] else "Mismatch",
-                format_currency(integrity["inventory"]["difference"]),
-            )
-            j1, j2, j3 = st.columns(3)
-            j1.metric("Unbalanced Journals", str(int(integrity["unbalanced_journal_count"])))
-            j2.metric("Orphaned Journal Refs", str(int(integrity["orphaned_journal_reference_count"])))
-            j3.metric("Missing GL Impact", str(int(integrity["source_documents_missing_gl_count"])))
-            st.caption(
-                "A/R subledger {ar_sub} vs control {ar_gl} | A/P subledger {ap_sub} vs control {ap_gl} | Inventory subledger {inv_sub} vs control {inv_gl}".format(
-                    ar_sub=format_currency(integrity["accounts_receivable"]["subledger_total"]),
-                    ar_gl=format_currency(integrity["accounts_receivable"]["control_account_balance"]),
-                    ap_sub=format_currency(integrity["accounts_payable"]["subledger_total"]),
-                    ap_gl=format_currency(integrity["accounts_payable"]["control_account_balance"]),
-                    inv_sub=format_currency(integrity["inventory"]["subledger_total"]),
-                    inv_gl=format_currency(integrity["inventory"]["control_account_balance"]),
-                )
-            )
-            if integrity["orphaned_journal_references"]:
-                st.markdown("Orphaned source-document journal references")
-                st.dataframe(pd.DataFrame(integrity["orphaned_journal_references"]), use_container_width=True)
-            if integrity["source_document_mismatches"]:
-                st.markdown("Source documents with missing or unexpected GL impact")
-                st.dataframe(pd.DataFrame(integrity["source_document_mismatches"]), use_container_width=True)
-            account_warnings = integrity["chart_of_accounts"].get("warnings", [])
-            if account_warnings:
-                st.warning("Account structure warnings: " + "; ".join(account_warnings))
-            else:
-                st.success("Account structure warnings: none")
-
-    tabs = st.tabs(
-        [
-            "Trial Balance",
-            "Statement of Profit or Loss",
-            "Statement of Financial Position",
-            "Statement of Cash Flows",
-            "Statement of Changes in Equity",
-            "Depreciation Schedule",
+        depreciation_columns = [
+            "Asset Name",
+            "Category",
+            "Purchase Date",
+            "Cost (GHS)",
+            "Useful Life (Years)",
+            "Residual Value (GHS)",
+            "Method",
+            "Rate (%)",
+            "Accumulated Depreciation (GHS)",
+            "Book Value (GHS)",
+            "Last Depreciation Date",
+            "Status",
         ]
-    )
-    report_defs = [
-        ("Trial Balance", trial_balance_df),
-        ("Statement of Profit or Loss", income_statement_df),
-        ("Statement of Financial Position", balance_sheet_df),
-        ("Statement of Cash Flows", cash_flow_df),
-        ("Statement of Changes in Equity", equity_df),
-        ("Depreciation Schedule", depreciation_df),
-    ]
-    reports_empty = all(_safe_dataframe(df, []).empty for _, df in report_defs)
-    if reports_empty:
-        st.warning(
-            "No financial report rows were returned for the current filters. "
-            "Trial Balance and Balance Sheet use cumulative balances through End Date; "
-            "Income Statement uses Start Date through End Date."
+        active_report_df = pd.DataFrame()
+        active_report_label = FINANCIAL_REPORT_TYPE_LABELS.get(DEFAULT_FINANCIAL_REPORT_TYPE, "Trial Balance")
+        active_report_type_key = DEFAULT_FINANCIAL_REPORT_TYPE
+        summary_metrics = {}
+        integrity_key = "finance_integrity_{company}_{branch}_{end}".format(
+            company=company_key,
+            branch=_financial_report_cache_date(st.session_state.get("active_branch_id")),
+            end=_financial_report_cache_date(end_date),
         )
 
-    for tab, (label, df) in zip(tabs, report_defs):
-        with tab:
-            display_df = _ifrs_account_display(_convert_money_frame(_safe_dataframe(df, [])))
-            _display_table_with_rate(display_df)
-            _csv_button(label, display_df, f"{label}_ifrs_safe_{company_key}")
-    eka_modules.record_lv002b_operation(
-        "financial_reports.load",
-        (time.perf_counter() - reports_started) * 1000.0,
-        surface="financial_reports",
-    )
-    eka_modules.record_lv003_hot_path_call(
-        "financials.show_financial_reports",
-        (time.perf_counter() - reports_started) * 1000.0,
-        required=True,
-        recommendation="keep",
-        surface="financial_reports",
-    )
+        if consolidated:
+            depreciation_df = pd.DataFrame(columns=depreciation_columns)
+            with _ShowFinancialReportsProfilerStage(profiler, "consolidated_report_generation"):
+                try:
+                    trial_balance_df = get_trial_balance(company_key, start_date, end_date, account_name)
+                except Exception:
+                    trial_balance_df = pd.DataFrame(columns=["Account Code", "Account", "Type", "Debit (GHS)", "Credit (GHS)", "Balance (GHS)", "Balanced"])
+                try:
+                    income_statement_df = get_consolidated_pnl(company_key, start_date, end_date)
+                except Exception:
+                    income_statement_df = pd.DataFrame(columns=["Category", "Account Code", "Account", "Amount (GHS)"])
+                try:
+                    balance_sheet_df = get_consolidated_balance_sheet(company_key, start_date, end_date)
+                except Exception:
+                    balance_sheet_df = pd.DataFrame(columns=["Category", "Account Code", "Account", "Amount (GHS)"])
+                cash_flow_df = pd.DataFrame(columns=["Section", "Line Item", "Amount (GHS)"])
+                equity_df = pd.DataFrame(columns=["Account Code", "Line Item", "Amount (GHS)"])
+            try:
+                depreciation_df = get_depreciation_schedule(company_key)
+            except Exception:
+                pass
+            summary_metrics = {
+                "total_debits": _safe_number(trial_balance_df.get("Debit (GHS)")),
+                "total_credits": _safe_number(trial_balance_df.get("Credit (GHS)")),
+                "total_assets": _safe_number(
+                    balance_sheet_df.loc[
+                        balance_sheet_df["Category"].isin(["Current Assets", "Non-Current Assets"]),
+                        "Amount (GHS)",
+                    ]
+                )
+                if not balance_sheet_df.empty
+                else 0.0,
+                "total_liabilities": _safe_number(
+                    balance_sheet_df.loc[
+                        balance_sheet_df["Category"].isin(["Current Liabilities", "Non-Current Liabilities"]),
+                        "Amount (GHS)",
+                    ]
+                )
+                if not balance_sheet_df.empty
+                else 0.0,
+                "total_equity": _safe_number(
+                    balance_sheet_df.loc[balance_sheet_df["Category"] == "Equity", "Amount (GHS)"]
+                )
+                if not balance_sheet_df.empty
+                else 0.0,
+                "net_profit": _safe_number(
+                    income_statement_df.loc[income_statement_df["Account"] == "Net Profit", "Amount (GHS)"]
+                )
+                if not income_statement_df.empty
+                else 0.0,
+            }
+            summary_metrics["balanced"] = abs(summary_metrics["total_debits"] - summary_metrics["total_credits"]) < 0.01
+            summary_metrics["balance_sheet_balanced"] = abs(
+                summary_metrics["total_assets"] - (summary_metrics["total_liabilities"] + summary_metrics["total_equity"])
+            ) < 0.01
+        else:
+            start_key = _financial_report_cache_date(start_date)
+            end_key = _financial_report_cache_date(end_date)
+            account_key = _financial_report_cache_date(account_name)
+            branch_key = _financial_report_cache_date(st.session_state.get("active_branch_id"))
+            backend_key = get_active_db_backend()
+
+            with _ShowFinancialReportsProfilerStage(profiler, "report_selector_render"):
+                report_labels = [label for label, _ in FINANCIAL_REPORT_TYPE_OPTIONS]
+                selected_label = st.radio(
+                    "Report",
+                    options=report_labels,
+                    horizontal=True,
+                    key=f"financial_report_tab_{company_key}",
+                )
+                active_report_type_key = FINANCIAL_REPORT_TYPE_KEYS.get(
+                    selected_label,
+                    DEFAULT_FINANCIAL_REPORT_TYPE,
+                )
+                active_report_label = selected_label
+
+            with _ShowFinancialReportsProfilerStage(profiler, "summary_metrics_fetch"):
+                try:
+                    summary_metrics = _cached_financial_report_summary(
+                        company_key,
+                        start_key,
+                        end_key,
+                        account_key,
+                        branch_key,
+                        backend_key,
+                    )
+                except Exception:
+                    summary_metrics = {
+                        "total_debits": 0.0,
+                        "total_credits": 0.0,
+                        "total_assets": 0.0,
+                        "total_liabilities": 0.0,
+                        "total_equity": 0.0,
+                        "net_profit": 0.0,
+                        "balanced": True,
+                        "balance_sheet_balanced": True,
+                    }
+
+            report_stage = _ShowFinancialReportsProfilerStage(profiler, "active_report_fetch")
+            report_stage.__enter__()
+            try:
+                report_payload = _cached_financial_report_by_type(
+                    company_key,
+                    start_key,
+                    end_key,
+                    account_key,
+                    branch_key,
+                    backend_key,
+                    active_report_type_key,
+                )
+                active_report_df = report_payload.get("dataframe")
+                pipeline_timings = dict(report_payload.get("pipeline_timings") or {})
+                global _FINANCIAL_REPORT_PIPELINE_TIMINGS
+                _FINANCIAL_REPORT_PIPELINE_TIMINGS = pipeline_timings
+                report_stage.metadata = {
+                    "cache_key": {
+                        "company_key": company_key,
+                        "start_key": start_key,
+                        "end_key": end_key,
+                        "account_key": account_key,
+                        "branch_key": branch_key,
+                        "backend_key": backend_key,
+                        "report_type_key": active_report_type_key,
+                    },
+                    "report_pipeline_timings": pipeline_timings,
+                }
+            except Exception:
+                active_report_df = pd.DataFrame()
+            finally:
+                report_stage.__exit__(None, None, None)
+
+        with _ShowFinancialReportsProfilerStage(profiler, "summary_metrics_render"):
+            balanced = bool(summary_metrics.get("balanced", True))
+            net_profit = float(summary_metrics.get("net_profit", 0.0) or 0.0)
+            total_assets = float(summary_metrics.get("total_assets", 0.0) or 0.0)
+            total_liabilities = float(summary_metrics.get("total_liabilities", 0.0) or 0.0)
+            total_equity = float(summary_metrics.get("total_equity", 0.0) or 0.0)
+            balance_sheet_balanced = bool(summary_metrics.get("balance_sheet_balanced", True))
+
+            col1, col2, col3 = st.columns(3)
+            col1.metric("Trial Balance", "Balanced" if balanced else "Out of Balance")
+            col2.metric("Profit for the Period", format_currency(_report_convert(net_profit)))
+            col3.metric(
+                "Balance Sheet",
+                "Balanced" if balance_sheet_balanced else "Needs Review",
+            )
+            st.caption(f"Debit/Credit Validation: {'Balanced' if balanced else 'Needs review'}")
+
+        with _ShowFinancialReportsProfilerStage(profiler, "integrity_expander_render"):
+            with st.expander("Finance Integrity", expanded=False):
+                if st.button("Run integrity check", key=f"run_finance_integrity_{company_key}"):
+                    from accounting_engine import get_finance_integrity_diagnostics
+
+                    st.session_state[integrity_key] = get_finance_integrity_diagnostics(
+                        company_key,
+                        as_of_date=end_date,
+                        branch_id=st.session_state.get("active_branch_id"),
+                    )
+                integrity = st.session_state.get(integrity_key)
+                if not integrity:
+                    st.caption("Run integrity check on demand to reconcile subledgers.")
+                else:
+                    i1, i2, i3 = st.columns(3)
+                    i1.metric(
+                        "A/R Reconciliation",
+                        "Matched" if integrity["accounts_receivable"]["reconciled"] else "Mismatch",
+                        format_currency(integrity["accounts_receivable"]["difference"]),
+                    )
+                    i2.metric(
+                        "A/P Reconciliation",
+                        "Matched" if integrity["accounts_payable"]["reconciled"] else "Mismatch",
+                        format_currency(integrity["accounts_payable"]["difference"]),
+                    )
+                    i3.metric(
+                        "Inventory Reconciliation",
+                        "Matched" if integrity["inventory"]["reconciled"] else "Mismatch",
+                        format_currency(integrity["inventory"]["difference"]),
+                    )
+                    j1, j2, j3 = st.columns(3)
+                    j1.metric("Unbalanced Journals", str(int(integrity["unbalanced_journal_count"])))
+                    j2.metric("Orphaned Journal Refs", str(int(integrity["orphaned_journal_reference_count"])))
+                    j3.metric("Missing GL Impact", str(int(integrity["source_documents_missing_gl_count"])))
+                    st.caption(
+                        "A/R subledger {ar_sub} vs control {ar_gl} | A/P subledger {ap_sub} vs control {ap_gl} | Inventory subledger {inv_sub} vs control {inv_gl}".format(
+                            ar_sub=format_currency(integrity["accounts_receivable"]["subledger_total"]),
+                            ar_gl=format_currency(integrity["accounts_receivable"]["control_account_balance"]),
+                            ap_sub=format_currency(integrity["accounts_payable"]["subledger_total"]),
+                            ap_gl=format_currency(integrity["accounts_payable"]["control_account_balance"]),
+                            inv_sub=format_currency(integrity["inventory"]["subledger_total"]),
+                            inv_gl=format_currency(integrity["inventory"]["control_account_balance"]),
+                        )
+                    )
+                    if integrity["orphaned_journal_references"]:
+                        st.markdown("Orphaned source-document journal references")
+                        st.dataframe(pd.DataFrame(integrity["orphaned_journal_references"]), use_container_width=True)
+                    if integrity["source_document_mismatches"]:
+                        st.markdown("Source documents with missing or unexpected GL impact")
+                        st.dataframe(pd.DataFrame(integrity["source_document_mismatches"]), use_container_width=True)
+                    account_warnings = integrity["chart_of_accounts"].get("warnings", [])
+                    if account_warnings:
+                        st.warning("Account structure warnings: " + "; ".join(account_warnings))
+                    else:
+                        st.success("Account structure warnings: none")
+
+        with _ShowFinancialReportsProfilerStage(profiler, "report_formatting_and_render"):
+            if consolidated:
+                tabs = st.tabs([label for label, _ in FINANCIAL_REPORT_TYPE_OPTIONS])
+                report_defs = [
+                    ("Trial Balance", trial_balance_df),
+                    ("Statement of Profit or Loss", income_statement_df),
+                    ("Statement of Financial Position", balance_sheet_df),
+                    ("Statement of Cash Flows", cash_flow_df),
+                    ("Statement of Changes in Equity", equity_df),
+                    ("Depreciation Schedule", depreciation_df),
+                ]
+                reports_empty = all(_safe_dataframe(df, []).empty for _, df in report_defs)
+                if reports_empty:
+                    st.warning(
+                        "No financial report rows were returned for the current filters. "
+                        "Trial Balance and Balance Sheet use cumulative balances through End Date; "
+                        "Income Statement uses Start Date through End Date."
+                    )
+                for tab, (label, df) in zip(tabs, report_defs):
+                    tab_started = time.perf_counter()
+                    with tab:
+                        format_started = time.perf_counter()
+                        display_df = _ifrs_account_display(_convert_money_frame(_safe_dataframe(df, [])))
+                        format_ms = (time.perf_counter() - format_started) * 1000.0
+                        render_started = time.perf_counter()
+                        _display_table_with_rate(display_df)
+                        _lazy_csv_button(label, display_df, f"{label}_ifrs_safe_{company_key}")
+                        render_ms = (time.perf_counter() - render_started) * 1000.0
+                    profiler.record_stage(
+                        f"report_tab:{label}",
+                        (time.perf_counter() - tab_started) * 1000.0,
+                        formatting_ms=round(format_ms, 2),
+                        rendering_ms=round(render_ms, 2),
+                        row_count=int(len(display_df)),
+                    )
+            else:
+                tab_started = time.perf_counter()
+                format_started = time.perf_counter()
+                display_df = _ifrs_account_display(
+                    _convert_money_frame(_safe_dataframe(active_report_df, []))
+                )
+                format_ms = (time.perf_counter() - format_started) * 1000.0
+                if display_df.empty:
+                    st.warning(
+                        "No financial report rows were returned for the current filters. "
+                        "Trial Balance and Balance Sheet use cumulative balances through End Date; "
+                        "Income Statement uses Start Date through End Date."
+                    )
+                render_started = time.perf_counter()
+                _display_table_with_rate(display_df)
+                _lazy_csv_button(
+                    active_report_label,
+                    display_df,
+                    f"{active_report_label}_ifrs_safe_{company_key}",
+                )
+                render_ms = (time.perf_counter() - render_started) * 1000.0
+                profiler.record_stage(
+                    f"report_tab:{active_report_label}",
+                    (time.perf_counter() - tab_started) * 1000.0,
+                    formatting_ms=round(format_ms, 2),
+                    rendering_ms=round(render_ms, 2),
+                    row_count=int(len(display_df)),
+                    report_type_key=active_report_type_key,
+                )
+
+        if eka_modules is not None:
+            eka_modules.record_lv002b_operation(
+                "financial_reports.load",
+                (time.perf_counter() - reports_started) * 1000.0,
+                surface="financial_reports",
+            )
+            eka_modules.record_lv003_hot_path_call(
+                "financials.show_financial_reports",
+                (time.perf_counter() - reports_started) * 1000.0,
+                required=True,
+                recommendation="keep",
+                surface="financial_reports",
+            )
+    finally:
+        breakdown = _finalize_show_financial_reports_profiler()
+        if breakdown:
+            pipeline = breakdown.get("function_calls") or {}
+            ledger_calls = pipeline.get("get_ledger_balances", {})
+            if ledger_calls:
+                breakdown["ledger_balances_call_count"] = ledger_calls.get("call_count")
+            bundle_stage = next(
+                (
+                    row
+                    for row in breakdown.get("stages", [])
+                    if row.get("stage") in {"reports_bundle_fetch", "active_report_fetch"}
+                ),
+                None,
+            )
+            if bundle_stage:
+                timings = bundle_stage.get("bundle_pipeline_timings") or bundle_stage.get("report_pipeline_timings")
+                if timings:
+                    breakdown["bundle_internal_timings"] = timings
 
 
 def show_reports(company_key, role=None):

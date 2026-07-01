@@ -25,7 +25,7 @@ DEFAULT_SUMMARY_PATH = REPORTS_DIR / "migration_integrity_summary.md"
 AUDIT_SCRIPT = REPO_ROOT / "scripts" / "run_migration_integrity_audit.py"
 PLAN_SCRIPT = REPO_ROOT / "scripts" / "plan_migration_data_cleanup.py"
 
-MIGRATION_CLEANUP_ROLES = frozenset({"Dev", "Master Admin"})
+MIGRATION_CLEANUP_ROLES = frozenset({"Dev", "Master Admin", "System Admin"})
 CONFIRM_PAYMENT_APPLY_TEXT = "I confirm this payment reference fix"
 
 
