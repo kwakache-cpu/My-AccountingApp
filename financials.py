@@ -1715,7 +1715,7 @@ def _display_table_with_rate(df_original):
     return df_display
 
 
-def get_ledger_balances(company_key, start_date=None, end_date=None, account_name=None):
+def get_ledger_balances(company_key, start_date=None, end_date=None, account_name=None, branch_id=None):
     conn = get_connection()
     try:
         query = """
@@ -1733,6 +1733,9 @@ def get_ledger_balances(company_key, start_date=None, end_date=None, account_nam
               AND COALESCE(je.approval_status, 'Posted') = 'Posted'
         """
         params = [company_key]
+        if branch_id:
+            query += " AND COALESCE(je.branch_id, '') = ?"
+            params.append(str(branch_id))
         if start_date:
             query += f" AND {sql_date_on_or_after('je.date')}"
             params.append(_resolve_date(start_date))
@@ -1886,137 +1889,215 @@ def _financial_report_runtime_diagnostics(company_key, start_date=None, end_date
     return diagnostics
 
 
-def get_trial_balance(company_key, start_date=None, end_date=None, account_name=None):
-    try:
-        # Cumulative trial balance as of end_date; period movement belongs on income statement.
-        balances = get_ledger_balances(company_key, start_date=None, end_date=end_date, account_name=account_name)
-        if not balances:
-            return pd.DataFrame(columns=["Account Code", "Account", "Type", "Debit (GHS)", "Credit (GHS)", "Balance (GHS)", "Balanced"])
-        rows = []
-        total_debits = 0.0
-        total_credits = 0.0
-        for account_name_key, payload in balances.items():
-            debit = float(payload.get("debit", 0.0))
-            credit = float(payload.get("credit", 0.0))
-            total_debits += debit
-            total_credits += credit
+def _trial_balance_from_balances(balances):
+    if not balances:
+        return pd.DataFrame(columns=["Account Code", "Account", "Type", "Debit (GHS)", "Credit (GHS)", "Balance (GHS)", "Balanced"])
+    rows = []
+    total_debits = 0.0
+    total_credits = 0.0
+    for account_name_key, payload in balances.items():
+        debit = float(payload.get("debit", 0.0))
+        credit = float(payload.get("credit", 0.0))
+        total_debits += debit
+        total_credits += credit
+        rows.append(
+            {
+                "Account Code": payload.get("account_code", ""),
+                "Account": account_name_key,
+                "Type": payload.get("account_type", ""),
+                "Debit (GHS)": debit,
+                "Credit (GHS)": credit,
+                "Balance (GHS)": float(payload.get("balance", 0.0)),
+            }
+        )
+    balanced = abs(total_debits - total_credits) < 0.01
+    df = pd.DataFrame(rows)
+    df["Balanced"] = "Yes" if balanced else "No"
+    return df.sort_values(["Account Code", "Account"], na_position="last").reset_index(drop=True)
+
+
+def _income_statement_from_balances(balances):
+    if not balances:
+        return pd.DataFrame(columns=["Category", "Account Code", "Account", "Amount (GHS)"])
+    rows = []
+    gross_revenue = 0.0
+    sales_returns = 0.0
+    cost_of_sales = 0.0
+    operating_expenses = 0.0
+    for account_name_key, payload in balances.items():
+        account_type = str(payload.get("account_type", "")).title()
+        account = str(account_name_key or "").strip()
+        normalized_account = account.lower()
+        if account_type == "Income":
+            amount = float(payload.get("credit", 0.0) - payload.get("debit", 0.0))
+            gross_revenue += amount
             rows.append(
                 {
+                    "Category": "Revenue",
                     "Account Code": payload.get("account_code", ""),
-                    "Account": account_name_key,
-                    "Type": payload.get("account_type", ""),
-                    "Debit (GHS)": debit,
-                    "Credit (GHS)": credit,
-                    "Balance (GHS)": float(payload.get("balance", 0.0)),
+                    "Account": account,
+                    "Amount (GHS)": amount,
                 }
             )
-        balanced = abs(total_debits - total_credits) < 0.01
-        df = pd.DataFrame(rows)
-        df["Balanced"] = "Yes" if balanced else "No"
-        return df.sort_values(["Account Code", "Account"], na_position="last").reset_index(drop=True)
+        elif account_type == "Expense":
+            amount = float(payload.get("debit", 0.0) - payload.get("credit", 0.0))
+            category = _account_bucket(payload.get("account_code", ""), account, account_type)
+            if normalized_account == "sales returns and refunds":
+                sales_returns += amount
+                amount = -amount
+                account = "Less: Sales Returns and Refunds"
+            elif normalized_account == "cost of goods sold":
+                cost_of_sales += amount
+            else:
+                operating_expenses += amount
+            rows.append(
+                {
+                    "Category": category,
+                    "Account Code": payload.get("account_code", ""),
+                    "Account": account,
+                    "Amount (GHS)": amount,
+                }
+            )
+    net_sales = gross_revenue - sales_returns
+    gross_profit = net_sales - cost_of_sales
+    rows.append(
+        {
+            "Category": "Revenue",
+            "Account Code": "",
+            "Account": "Net Sales",
+            "Amount (GHS)": net_sales,
+        }
+    )
+    rows.append(
+        {
+            "Category": "Profit for the Period",
+            "Account Code": "",
+            "Account": "Gross Profit",
+            "Amount (GHS)": gross_profit,
+        }
+    )
+    rows.append(
+        {
+            "Category": "Profit for the Period",
+            "Account Code": "",
+            "Account": "Net Profit",
+            "Amount (GHS)": gross_profit - operating_expenses,
+        }
+    )
+    return pd.DataFrame(rows)
+
+
+def _balance_sheet_from_trial_balance(tb):
+    if tb.empty:
+        return pd.DataFrame(columns=["Category", "Account Code", "Account", "Amount (GHS)"])
+    rows = []
+    for _, row in tb.iterrows():
+        account_type = str(row.get("Type", "")).title()
+        if account_type not in ("Asset", "Liability", "Equity"):
+            continue
+        amount = (
+            float(row.get("Debit (GHS)", 0.0) - row.get("Credit (GHS)", 0.0))
+            if account_type == "Asset"
+            else float(row.get("Credit (GHS)", 0.0) - row.get("Debit (GHS)", 0.0))
+        )
+        rows.append(
+            {
+                "Category": _account_bucket(row.get("Account Code", ""), row.get("Account", ""), account_type),
+                "Account Code": row.get("Account Code", ""),
+                "Account": row.get("Account", ""),
+                "Amount (GHS)": amount,
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def _cash_flow_from_reports(income_df, bs_df):
+    net_profit = _safe_number(income_df.loc[income_df["Account"] == "Net Profit", "Amount (GHS)"]) if not income_df.empty else 0.0
+    depreciation = _safe_number(income_df.loc[income_df["Account"].astype(str).str.contains("Depreciation", case=False, na=False), "Amount (GHS)"]) if not income_df.empty else 0.0
+    receivables = _safe_number(bs_df.loc[bs_df["Account"].astype(str).str.contains("Receivable", case=False, na=False), "Amount (GHS)"]) if not bs_df.empty else 0.0
+    inventory = _safe_number(bs_df.loc[bs_df["Account"].astype(str).str.contains("Inventory", case=False, na=False), "Amount (GHS)"]) if not bs_df.empty else 0.0
+    payables = _safe_number(bs_df.loc[bs_df["Account"].astype(str).str.contains("Payable", case=False, na=False), "Amount (GHS)"]) if not bs_df.empty else 0.0
+    fixed_assets = _safe_number(bs_df.loc[bs_df["Category"] == "Non-Current Assets", "Amount (GHS)"]) if not bs_df.empty else 0.0
+    capital = _safe_number(bs_df.loc[bs_df["Account"].astype(str).str.contains("Capital|Equity", case=False, na=False), "Amount (GHS)"]) if not bs_df.empty else 0.0
+    operating = net_profit + depreciation - receivables - inventory + payables
+    investing = -fixed_assets
+    financing = capital
+    return pd.DataFrame(
+        [
+            {"Section": "Operating Activities", "Line Item": "Profit for the Period", "Amount (GHS)": net_profit},
+            {"Section": "Operating Activities", "Line Item": "Depreciation and Non-Cash Adjustments", "Amount (GHS)": depreciation},
+            {"Section": "Operating Activities", "Line Item": "Working Capital Changes", "Amount (GHS)": -receivables - inventory + payables},
+            {"Section": "Operating Activities", "Line Item": "Net Cash from Operating Activities", "Amount (GHS)": operating},
+            {"Section": "Investing Activities", "Line Item": "Acquisition of Non-Current Assets", "Amount (GHS)": investing},
+            {"Section": "Financing Activities", "Line Item": "Capital Contributions and Equity Movements", "Amount (GHS)": financing},
+            {"Section": "Net Movement", "Line Item": "Net Increase or Decrease in Cash", "Amount (GHS)": operating + investing + financing},
+        ]
+    )
+
+
+def _equity_from_reports(bs_df, income_df):
+    opening_equity = _safe_number(bs_df.loc[bs_df["Account"].astype(str).str.contains("Opening Balance Equity", case=False, na=False), "Amount (GHS)"]) if not bs_df.empty else 0.0
+    owner_capital = _safe_number(bs_df.loc[bs_df["Account"].astype(str).str.contains("Owner Capital|Capital", case=False, na=False), "Amount (GHS)"]) if not bs_df.empty else 0.0
+    retained_earnings = _safe_number(bs_df.loc[bs_df["Account"].astype(str).str.contains("Retained Earnings", case=False, na=False), "Amount (GHS)"]) if not bs_df.empty else 0.0
+    net_profit = _safe_number(income_df.loc[income_df["Account"] == "Net Profit", "Amount (GHS)"]) if not income_df.empty else 0.0
+    return pd.DataFrame(
+        [
+            {"Account Code": "", "Line Item": "Opening Equity", "Amount (GHS)": opening_equity},
+            {"Account Code": "", "Line Item": "Capital Contributions", "Amount (GHS)": owner_capital},
+            {"Account Code": "", "Line Item": "Retained Earnings", "Amount (GHS)": retained_earnings},
+            {"Account Code": "", "Line Item": "Profit for the Period", "Amount (GHS)": net_profit},
+            {"Account Code": "", "Line Item": "Closing Equity", "Amount (GHS)": opening_equity + owner_capital + retained_earnings + net_profit},
+        ]
+    )
+
+
+_FINANCIAL_REPORT_PIPELINE_TIMINGS = {}
+
+
+def get_financial_report_pipeline_timings():
+    """Return the most recent financial report pipeline timings for admin diagnostics."""
+    return dict(_FINANCIAL_REPORT_PIPELINE_TIMINGS)
+
+
+def get_trial_balance(company_key, start_date=None, end_date=None, account_name=None):
+    try:
+        balances = get_ledger_balances(
+            company_key,
+            start_date=None,
+            end_date=end_date,
+            account_name=account_name,
+        )
+        if not balances:
+            return pd.DataFrame(columns=["Account Code", "Account", "Type", "Debit (GHS)", "Credit (GHS)", "Balance (GHS)", "Balanced"])
+        return _trial_balance_from_balances(balances)
     except Exception:
         return pd.DataFrame(columns=["Account Code", "Account", "Type", "Debit (GHS)", "Credit (GHS)", "Balance (GHS)", "Balanced"])
 
 
 def get_income_statement(company_key, start_date=None, end_date=None, account_name=None):
     try:
-        balances = get_ledger_balances(company_key, start_date=start_date, end_date=end_date, account_name=account_name)
+        balances = get_ledger_balances(
+            company_key,
+            start_date=start_date,
+            end_date=end_date,
+            account_name=account_name,
+        )
         if not balances:
             return pd.DataFrame(columns=["Category", "Account Code", "Account", "Amount (GHS)"])
-        rows = []
-        gross_revenue = 0.0
-        sales_returns = 0.0
-        cost_of_sales = 0.0
-        operating_expenses = 0.0
-        for account_name_key, payload in balances.items():
-            account_type = str(payload.get("account_type", "")).title()
-            account = str(account_name_key or "").strip()
-            normalized_account = account.lower()
-            if account_type == "Income":
-                amount = float(payload.get("credit", 0.0) - payload.get("debit", 0.0))
-                gross_revenue += amount
-                rows.append(
-                    {
-                        "Category": "Revenue",
-                        "Account Code": payload.get("account_code", ""),
-                        "Account": account,
-                        "Amount (GHS)": amount,
-                    }
-                )
-            elif account_type == "Expense":
-                amount = float(payload.get("debit", 0.0) - payload.get("credit", 0.0))
-                category = _account_bucket(payload.get("account_code", ""), account, account_type)
-                if normalized_account == "sales returns and refunds":
-                    sales_returns += amount
-                    amount = -amount
-                    account = "Less: Sales Returns and Refunds"
-                elif normalized_account == "cost of goods sold":
-                    cost_of_sales += amount
-                else:
-                    operating_expenses += amount
-                rows.append(
-                    {
-                        "Category": category,
-                        "Account Code": payload.get("account_code", ""),
-                        "Account": account,
-                        "Amount (GHS)": amount,
-                    }
-                )
-        net_sales = gross_revenue - sales_returns
-        gross_profit = net_sales - cost_of_sales
-        rows.append(
-            {
-                "Category": "Revenue",
-                "Account Code": "",
-                "Account": "Net Sales",
-                "Amount (GHS)": net_sales,
-            }
-        )
-        rows.append(
-            {
-                "Category": "Profit for the Period",
-                "Account Code": "",
-                "Account": "Gross Profit",
-                "Amount (GHS)": gross_profit,
-            }
-        )
-        rows.append(
-            {
-                "Category": "Profit for the Period",
-                "Account Code": "",
-                "Account": "Net Profit",
-                "Amount (GHS)": gross_profit - operating_expenses,
-            }
-        )
-        return pd.DataFrame(rows)
+        return _income_statement_from_balances(balances)
     except Exception:
         return pd.DataFrame(columns=["Category", "Account Code", "Account", "Amount (GHS)"])
 
 
 def get_balance_sheet(company_key, start_date=None, end_date=None, account_name=None):
     try:
-        tb = get_trial_balance(company_key, start_date=None, end_date=end_date, account_name=account_name)
-        if tb.empty:
-            return pd.DataFrame(columns=["Category", "Account Code", "Account", "Amount (GHS)"])
-        rows = []
-        for _, row in tb.iterrows():
-            account_type = str(row.get("Type", "")).title()
-            if account_type not in ("Asset", "Liability", "Equity"):
-                continue
-            amount = (
-                float(row.get("Debit (GHS)", 0.0) - row.get("Credit (GHS)", 0.0))
-                if account_type == "Asset"
-                else float(row.get("Credit (GHS)", 0.0) - row.get("Debit (GHS)", 0.0))
-            )
-            rows.append(
-                {
-                    "Category": _account_bucket(row.get("Account Code", ""), row.get("Account", ""), account_type),
-                    "Account Code": row.get("Account Code", ""),
-                    "Account": row.get("Account", ""),
-                    "Amount (GHS)": amount,
-                }
-            )
-        return pd.DataFrame(rows)
+        tb = get_trial_balance(
+            company_key,
+            start_date=None,
+            end_date=end_date,
+            account_name=account_name,
+        )
+        return _balance_sheet_from_trial_balance(tb)
     except Exception:
         return pd.DataFrame(columns=["Category", "Account Code", "Account", "Amount (GHS)"])
 
@@ -2025,27 +2106,7 @@ def get_cash_flow_statement(company_key, start_date=None, end_date=None, account
     try:
         income_df = get_income_statement(company_key, start_date, end_date, account_name)
         bs_df = get_balance_sheet(company_key, start_date, end_date, account_name)
-        net_profit = _safe_number(income_df.loc[income_df["Account"] == "Net Profit", "Amount (GHS)"]) if not income_df.empty else 0.0
-        depreciation = _safe_number(income_df.loc[income_df["Account"].astype(str).str.contains("Depreciation", case=False, na=False), "Amount (GHS)"]) if not income_df.empty else 0.0
-        receivables = _safe_number(bs_df.loc[bs_df["Account"].astype(str).str.contains("Receivable", case=False, na=False), "Amount (GHS)"]) if not bs_df.empty else 0.0
-        inventory = _safe_number(bs_df.loc[bs_df["Account"].astype(str).str.contains("Inventory", case=False, na=False), "Amount (GHS)"]) if not bs_df.empty else 0.0
-        payables = _safe_number(bs_df.loc[bs_df["Account"].astype(str).str.contains("Payable", case=False, na=False), "Amount (GHS)"]) if not bs_df.empty else 0.0
-        fixed_assets = _safe_number(bs_df.loc[bs_df["Category"] == "Non-Current Assets", "Amount (GHS)"]) if not bs_df.empty else 0.0
-        capital = _safe_number(bs_df.loc[bs_df["Account"].astype(str).str.contains("Capital|Equity", case=False, na=False), "Amount (GHS)"]) if not bs_df.empty else 0.0
-        operating = net_profit + depreciation - receivables - inventory + payables
-        investing = -fixed_assets
-        financing = capital
-        return pd.DataFrame(
-            [
-                {"Section": "Operating Activities", "Line Item": "Profit for the Period", "Amount (GHS)": net_profit},
-                {"Section": "Operating Activities", "Line Item": "Depreciation and Non-Cash Adjustments", "Amount (GHS)": depreciation},
-                {"Section": "Operating Activities", "Line Item": "Working Capital Changes", "Amount (GHS)": -receivables - inventory + payables},
-                {"Section": "Operating Activities", "Line Item": "Net Cash from Operating Activities", "Amount (GHS)": operating},
-                {"Section": "Investing Activities", "Line Item": "Acquisition of Non-Current Assets", "Amount (GHS)": investing},
-                {"Section": "Financing Activities", "Line Item": "Capital Contributions and Equity Movements", "Amount (GHS)": financing},
-                {"Section": "Net Movement", "Line Item": "Net Increase or Decrease in Cash", "Amount (GHS)": operating + investing + financing},
-            ]
-        )
+        return _cash_flow_from_reports(income_df, bs_df)
     except Exception:
         return pd.DataFrame(columns=["Section", "Line Item", "Amount (GHS)"])
 
@@ -2054,19 +2115,7 @@ def get_changes_in_equity(company_key, start_date=None, end_date=None, account_n
     try:
         bs_df = get_balance_sheet(company_key, start_date, end_date, account_name)
         income_df = get_income_statement(company_key, start_date, end_date, account_name)
-        opening_equity = _safe_number(bs_df.loc[bs_df["Account"].astype(str).str.contains("Opening Balance Equity", case=False, na=False), "Amount (GHS)"]) if not bs_df.empty else 0.0
-        owner_capital = _safe_number(bs_df.loc[bs_df["Account"].astype(str).str.contains("Owner Capital|Capital", case=False, na=False), "Amount (GHS)"]) if not bs_df.empty else 0.0
-        retained_earnings = _safe_number(bs_df.loc[bs_df["Account"].astype(str).str.contains("Retained Earnings", case=False, na=False), "Amount (GHS)"]) if not bs_df.empty else 0.0
-        net_profit = _safe_number(income_df.loc[income_df["Account"] == "Net Profit", "Amount (GHS)"]) if not income_df.empty else 0.0
-        return pd.DataFrame(
-            [
-                {"Account Code": "", "Line Item": "Opening Equity", "Amount (GHS)": opening_equity},
-                {"Account Code": "", "Line Item": "Capital Contributions", "Amount (GHS)": owner_capital},
-                {"Account Code": "", "Line Item": "Retained Earnings", "Amount (GHS)": retained_earnings},
-                {"Account Code": "", "Line Item": "Profit for the Period", "Amount (GHS)": net_profit},
-                {"Account Code": "", "Line Item": "Closing Equity", "Amount (GHS)": opening_equity + owner_capital + retained_earnings + net_profit},
-            ]
-        )
+        return _equity_from_reports(bs_df, income_df)
     except Exception:
         return pd.DataFrame(columns=["Account Code", "Line Item", "Amount (GHS)"])
 
@@ -2098,27 +2147,108 @@ def _financial_report_cache_date(value):
 
 
 @st.cache_data(ttl=60, show_spinner=False)
-def _cached_trial_balance_report(company_key, start_key, end_key, account_key):
+def _cached_financial_reports_bundle(company_key, start_key, end_key, account_key, branch_key, backend_key):
+    """Build all financial reports from at most two ledger balance queries."""
     start_date = None if start_key in (None, "none") else datetime.fromisoformat(start_key).date()
     end_date = None if end_key in (None, "none") else datetime.fromisoformat(end_key).date()
     account_name = None if account_key in (None, "none", "") else account_key
-    return get_trial_balance(company_key, start_date=start_date, end_date=end_date, account_name=account_name)
+    branch_id = None if branch_key in (None, "none", "") else branch_key
+    timings = {}
+    pipeline_started = time.perf_counter()
+
+    stage = "ledger_balances_cumulative_ms"
+    stage_started = time.perf_counter()
+    cumulative_balances = get_ledger_balances(
+        company_key,
+        start_date=None,
+        end_date=end_date,
+        account_name=account_name,
+        branch_id=branch_id,
+    )
+    timings[stage] = round((time.perf_counter() - stage_started) * 1000.0, 2)
+
+    stage = "ledger_balances_period_ms"
+    stage_started = time.perf_counter()
+    if start_date:
+        period_balances = get_ledger_balances(
+            company_key,
+            start_date=start_date,
+            end_date=end_date,
+            account_name=account_name,
+            branch_id=branch_id,
+        )
+    else:
+        period_balances = cumulative_balances
+    timings[stage] = round((time.perf_counter() - stage_started) * 1000.0, 2)
+
+    stage = "trial_balance_format_ms"
+    stage_started = time.perf_counter()
+    trial_balance_df = _trial_balance_from_balances(cumulative_balances)
+    timings[stage] = round((time.perf_counter() - stage_started) * 1000.0, 2)
+
+    stage = "income_statement_format_ms"
+    stage_started = time.perf_counter()
+    income_statement_df = _income_statement_from_balances(period_balances)
+    timings[stage] = round((time.perf_counter() - stage_started) * 1000.0, 2)
+
+    stage = "balance_sheet_format_ms"
+    stage_started = time.perf_counter()
+    balance_sheet_df = _balance_sheet_from_trial_balance(trial_balance_df)
+    timings[stage] = round((time.perf_counter() - stage_started) * 1000.0, 2)
+
+    stage = "cash_flow_format_ms"
+    stage_started = time.perf_counter()
+    cash_flow_df = _cash_flow_from_reports(income_statement_df, balance_sheet_df)
+    timings[stage] = round((time.perf_counter() - stage_started) * 1000.0, 2)
+
+    stage = "equity_format_ms"
+    stage_started = time.perf_counter()
+    equity_df = _equity_from_reports(balance_sheet_df, income_statement_df)
+    timings[stage] = round((time.perf_counter() - stage_started) * 1000.0, 2)
+
+    stage = "depreciation_schedule_ms"
+    stage_started = time.perf_counter()
+    depreciation_df = get_depreciation_schedule(company_key)
+    timings[stage] = round((time.perf_counter() - stage_started) * 1000.0, 2)
+
+    timings["total_ms"] = round((time.perf_counter() - pipeline_started) * 1000.0, 2)
+    measurable = {key: value for key, value in timings.items() if key != "total_ms"}
+    slowest_stage = max(measurable, key=measurable.get) if measurable else None
+    timings["slowest_stage"] = slowest_stage
+    timings["slowest_elapsed_ms"] = measurable.get(slowest_stage) if slowest_stage else None
+    timings["company_key"] = company_key
+    timings["branch_key"] = branch_key
+    timings["start_key"] = start_key
+    timings["end_key"] = end_key
+    timings["backend_key"] = backend_key
+
+    return {
+        "trial_balance": trial_balance_df,
+        "income_statement": income_statement_df,
+        "balance_sheet": balance_sheet_df,
+        "cash_flow": cash_flow_df,
+        "equity": equity_df,
+        "depreciation": depreciation_df,
+        "pipeline_timings": timings,
+    }
 
 
 @st.cache_data(ttl=60, show_spinner=False)
-def _cached_income_statement_report(company_key, start_key, end_key, account_key):
-    start_date = None if start_key in (None, "none") else datetime.fromisoformat(start_key).date()
-    end_date = None if end_key in (None, "none") else datetime.fromisoformat(end_key).date()
-    account_name = None if account_key in (None, "none", "") else account_key
-    return get_income_statement(company_key, start_date=start_date, end_date=end_date, account_name=account_name)
+def _cached_trial_balance_report(company_key, start_key, end_key, account_key, branch_key, backend_key):
+    bundle = _cached_financial_reports_bundle(company_key, start_key, end_key, account_key, branch_key, backend_key)
+    return bundle["trial_balance"]
 
 
 @st.cache_data(ttl=60, show_spinner=False)
-def _cached_balance_sheet_report(company_key, start_key, end_key, account_key):
-    start_date = None if start_key in (None, "none") else datetime.fromisoformat(start_key).date()
-    end_date = None if end_key in (None, "none") else datetime.fromisoformat(end_key).date()
-    account_name = None if account_key in (None, "none", "") else account_key
-    return get_balance_sheet(company_key, start_date=start_date, end_date=end_date, account_name=account_name)
+def _cached_income_statement_report(company_key, start_key, end_key, account_key, branch_key, backend_key):
+    bundle = _cached_financial_reports_bundle(company_key, start_key, end_key, account_key, branch_key, backend_key)
+    return bundle["income_statement"]
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def _cached_balance_sheet_report(company_key, start_key, end_key, account_key, branch_key, backend_key):
+    bundle = _cached_financial_reports_bundle(company_key, start_key, end_key, account_key, branch_key, backend_key)
+    return bundle["balance_sheet"]
 
 
 def show_financial_reports(company_key, role=None):
@@ -2190,31 +2320,38 @@ def show_financial_reports(company_key, role=None):
         start_key = _financial_report_cache_date(start_date)
         end_key = _financial_report_cache_date(end_date)
         account_key = _financial_report_cache_date(account_name)
+        branch_key = _financial_report_cache_date(st.session_state.get("active_branch_id"))
+        backend_key = get_active_db_backend()
         try:
-            trial_balance_df = _cached_trial_balance_report(company_key, start_key, end_key, account_key)
+            bundle = _cached_financial_reports_bundle(
+                company_key,
+                start_key,
+                end_key,
+                account_key,
+                branch_key,
+                backend_key,
+            )
+            trial_balance_df = bundle["trial_balance"]
+            income_statement_df = bundle["income_statement"]
+            balance_sheet_df = bundle["balance_sheet"]
+            cash_flow_df = bundle["cash_flow"]
+            equity_df = bundle["equity"]
+            depreciation_df = bundle["depreciation"]
+            global _FINANCIAL_REPORT_PIPELINE_TIMINGS
+            _FINANCIAL_REPORT_PIPELINE_TIMINGS = dict(bundle.get("pipeline_timings") or {})
         except Exception:
             trial_balance_df = pd.DataFrame(columns=["Account Code", "Account", "Type", "Debit (GHS)", "Credit (GHS)", "Balance (GHS)", "Balanced"])
-        try:
-            income_statement_df = _cached_income_statement_report(company_key, start_key, end_key, account_key)
-        except Exception:
             income_statement_df = pd.DataFrame(columns=["Category", "Account Code", "Account", "Amount (GHS)"])
-        try:
-            balance_sheet_df = _cached_balance_sheet_report(company_key, start_key, end_key, account_key)
-        except Exception:
             balance_sheet_df = pd.DataFrame(columns=["Category", "Account Code", "Account", "Amount (GHS)"])
-        try:
-            cash_flow_df = get_cash_flow_statement(company_key, start_date, end_date, account_name)
-        except Exception:
             cash_flow_df = pd.DataFrame(columns=["Section", "Line Item", "Amount (GHS)"])
-        try:
-            equity_df = get_changes_in_equity(company_key, start_date, end_date, account_name)
-        except Exception:
             equity_df = pd.DataFrame(columns=["Account Code", "Line Item", "Amount (GHS)"])
-    
-    try:
-        depreciation_df = get_depreciation_schedule(company_key)
-    except Exception:
-        depreciation_df = pd.DataFrame(columns=["Asset Name", "Category", "Purchase Date", "Cost (GHS)", "Useful Life (Years)", "Residual Value (GHS)", "Method", "Rate (%)", "Accumulated Depreciation (GHS)", "Book Value (GHS)", "Last Depreciation Date", "Status"])
+            depreciation_df = pd.DataFrame(columns=["Asset Name", "Category", "Purchase Date", "Cost (GHS)", "Useful Life (Years)", "Residual Value (GHS)", "Method", "Rate (%)", "Accumulated Depreciation (GHS)", "Book Value (GHS)", "Last Depreciation Date", "Status"])
+
+    if consolidated:
+        try:
+            depreciation_df = get_depreciation_schedule(company_key)
+        except Exception:
+            depreciation_df = pd.DataFrame(columns=["Asset Name", "Category", "Purchase Date", "Cost (GHS)", "Useful Life (Years)", "Residual Value (GHS)", "Method", "Rate (%)", "Accumulated Depreciation (GHS)", "Book Value (GHS)", "Last Depreciation Date", "Status"])
 
     total_debits = _safe_number(trial_balance_df.get("Debit (GHS)"))
     total_credits = _safe_number(trial_balance_df.get("Credit (GHS)"))
@@ -2223,10 +2360,10 @@ def show_financial_reports(company_key, role=None):
     total_equity = _safe_number(balance_sheet_df.loc[balance_sheet_df["Category"] == "Equity", "Amount (GHS)"]) if not balance_sheet_df.empty else 0.0
     net_profit = _safe_number(income_statement_df.loc[income_statement_df["Account"] == "Net Profit", "Amount (GHS)"]) if not income_statement_df.empty else 0.0
     balanced = abs(total_debits - total_credits) < 0.01
-    integrity = get_finance_integrity_diagnostics(
-        company_key,
-        as_of_date=end_date,
-        branch_id=st.session_state.get("active_branch_id"),
+    integrity_key = "finance_integrity_{company}_{branch}_{end}".format(
+        company=company_key,
+        branch=_financial_report_cache_date(st.session_state.get("active_branch_id")),
+        end=_financial_report_cache_date(end_date),
     )
 
     col1, col2, col3 = st.columns(3)
@@ -2235,47 +2372,59 @@ def show_financial_reports(company_key, role=None):
     col3.metric("Balance Sheet", "Balanced" if abs(total_assets - (total_liabilities + total_equity)) < 0.01 else "Needs Review")
     st.caption(f"Debit/Credit Validation: {'Balanced' if balanced else 'Needs review'}")
     with st.expander("Finance Integrity", expanded=False):
-        i1, i2, i3 = st.columns(3)
-        i1.metric(
-            "A/R Reconciliation",
-            "Matched" if integrity["accounts_receivable"]["reconciled"] else "Mismatch",
-            format_currency(integrity["accounts_receivable"]["difference"]),
-        )
-        i2.metric(
-            "A/P Reconciliation",
-            "Matched" if integrity["accounts_payable"]["reconciled"] else "Mismatch",
-            format_currency(integrity["accounts_payable"]["difference"]),
-        )
-        i3.metric(
-            "Inventory Reconciliation",
-            "Matched" if integrity["inventory"]["reconciled"] else "Mismatch",
-            format_currency(integrity["inventory"]["difference"]),
-        )
-        j1, j2, j3 = st.columns(3)
-        j1.metric("Unbalanced Journals", str(int(integrity["unbalanced_journal_count"])))
-        j2.metric("Orphaned Journal Refs", str(int(integrity["orphaned_journal_reference_count"])))
-        j3.metric("Missing GL Impact", str(int(integrity["source_documents_missing_gl_count"])))
-        st.caption(
-            "A/R subledger {ar_sub} vs control {ar_gl} | A/P subledger {ap_sub} vs control {ap_gl} | Inventory subledger {inv_sub} vs control {inv_gl}".format(
-                ar_sub=format_currency(integrity["accounts_receivable"]["subledger_total"]),
-                ar_gl=format_currency(integrity["accounts_receivable"]["control_account_balance"]),
-                ap_sub=format_currency(integrity["accounts_payable"]["subledger_total"]),
-                ap_gl=format_currency(integrity["accounts_payable"]["control_account_balance"]),
-                inv_sub=format_currency(integrity["inventory"]["subledger_total"]),
-                inv_gl=format_currency(integrity["inventory"]["control_account_balance"]),
+        if st.button("Run integrity check", key=f"run_finance_integrity_{company_key}"):
+            from accounting_engine import get_finance_integrity_diagnostics
+
+            st.session_state[integrity_key] = get_finance_integrity_diagnostics(
+                company_key,
+                as_of_date=end_date,
+                branch_id=st.session_state.get("active_branch_id"),
             )
-        )
-        if integrity["orphaned_journal_references"]:
-            st.markdown("Orphaned source-document journal references")
-            st.dataframe(pd.DataFrame(integrity["orphaned_journal_references"]), use_container_width=True)
-        if integrity["source_document_mismatches"]:
-            st.markdown("Source documents with missing or unexpected GL impact")
-            st.dataframe(pd.DataFrame(integrity["source_document_mismatches"]), use_container_width=True)
-        account_warnings = integrity["chart_of_accounts"].get("warnings", [])
-        if account_warnings:
-            st.warning("Account structure warnings: " + "; ".join(account_warnings))
+        integrity = st.session_state.get(integrity_key)
+        if not integrity:
+            st.caption("Run integrity check on demand to reconcile subledgers.")
         else:
-            st.success("Account structure warnings: none")
+            i1, i2, i3 = st.columns(3)
+            i1.metric(
+                "A/R Reconciliation",
+                "Matched" if integrity["accounts_receivable"]["reconciled"] else "Mismatch",
+                format_currency(integrity["accounts_receivable"]["difference"]),
+            )
+            i2.metric(
+                "A/P Reconciliation",
+                "Matched" if integrity["accounts_payable"]["reconciled"] else "Mismatch",
+                format_currency(integrity["accounts_payable"]["difference"]),
+            )
+            i3.metric(
+                "Inventory Reconciliation",
+                "Matched" if integrity["inventory"]["reconciled"] else "Mismatch",
+                format_currency(integrity["inventory"]["difference"]),
+            )
+            j1, j2, j3 = st.columns(3)
+            j1.metric("Unbalanced Journals", str(int(integrity["unbalanced_journal_count"])))
+            j2.metric("Orphaned Journal Refs", str(int(integrity["orphaned_journal_reference_count"])))
+            j3.metric("Missing GL Impact", str(int(integrity["source_documents_missing_gl_count"])))
+            st.caption(
+                "A/R subledger {ar_sub} vs control {ar_gl} | A/P subledger {ap_sub} vs control {ap_gl} | Inventory subledger {inv_sub} vs control {inv_gl}".format(
+                    ar_sub=format_currency(integrity["accounts_receivable"]["subledger_total"]),
+                    ar_gl=format_currency(integrity["accounts_receivable"]["control_account_balance"]),
+                    ap_sub=format_currency(integrity["accounts_payable"]["subledger_total"]),
+                    ap_gl=format_currency(integrity["accounts_payable"]["control_account_balance"]),
+                    inv_sub=format_currency(integrity["inventory"]["subledger_total"]),
+                    inv_gl=format_currency(integrity["inventory"]["control_account_balance"]),
+                )
+            )
+            if integrity["orphaned_journal_references"]:
+                st.markdown("Orphaned source-document journal references")
+                st.dataframe(pd.DataFrame(integrity["orphaned_journal_references"]), use_container_width=True)
+            if integrity["source_document_mismatches"]:
+                st.markdown("Source documents with missing or unexpected GL impact")
+                st.dataframe(pd.DataFrame(integrity["source_document_mismatches"]), use_container_width=True)
+            account_warnings = integrity["chart_of_accounts"].get("warnings", [])
+            if account_warnings:
+                st.warning("Account structure warnings: " + "; ".join(account_warnings))
+            else:
+                st.success("Account structure warnings: none")
 
     tabs = st.tabs(
         [
@@ -2296,34 +2445,11 @@ def show_financial_reports(company_key, role=None):
         ("Depreciation Schedule", depreciation_df),
     ]
     reports_empty = all(_safe_dataframe(df, []).empty for _, df in report_defs)
-    if eka_modules.can_view_runtime_admin_diagnostics(effective_role):
-        eka_modules.render_backend_activation_diagnostics_panel(
-            effective_role,
-            expanded=reports_empty and get_active_db_backend() != "postgres",
-        )
-        with st.expander("LV-001 Live Validation Diagnostics (Admin Only)", expanded=reports_empty):
-            lv001 = eka_modules.get_live_validation_lv001_diagnostics(
-                company_key,
-                branch_id=st.session_state.get("active_branch_id"),
-                start_date=start_date,
-                end_date=end_date,
-            )
-            st.dataframe(
-                pd.DataFrame(
-                    [{key: value for key, value in lv001.items() if key != "postgres_query_timings"}]
-                ),
-                use_container_width=True,
-                hide_index=True,
-            )
-            if lv001.get("postgres_query_timings"):
-                st.markdown("**PostgreSQL Read Timings (Recent)**")
-                st.dataframe(pd.DataFrame(lv001["postgres_query_timings"]), use_container_width=True, hide_index=True)
     if reports_empty:
         st.warning(
             "No financial report rows were returned for the current filters. "
             "Trial Balance and Balance Sheet use cumulative balances through End Date; "
-            "Income Statement uses Start Date through End Date. "
-            "Open LV-001 diagnostics to confirm company scope, row counts, and query timing."
+            "Income Statement uses Start Date through End Date."
         )
 
     for tab, (label, df) in zip(tabs, report_defs):

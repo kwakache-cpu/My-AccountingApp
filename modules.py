@@ -4660,8 +4660,7 @@ def show_debtors_by_city_report(company_key):
 
 
 def init_db():
-    from database import startup_database
-    return startup_database()
+    return get_session_canonical_startup_result()
 
 
 def log_system_event(level, module_name, message):
@@ -8867,20 +8866,13 @@ def show_system_health_module():
     st.dataframe(pd.DataFrame(diag_rows), use_container_width=True, hide_index=True)
     st.warning(deployment["sqlite_concurrency_warning"])
     st.caption(deployment["recommended_action"])
-    render_backend_activation_diagnostics_panel(
+    render_runtime_admin_diagnostics_suite(
         st.session_state.get("user", {}).get("role", "System Admin"),
+        surface="system_health",
+        company_key=st.session_state.get("company_id"),
+        branch_id=st.session_state.get("active_branch_id"),
         expanded=False,
-        panel_key="system_health_backend_activation",
-    )
-    render_lv002_postgres_performance_panel(
-        st.session_state.get("user", {}).get("role", "System Admin"),
-        expanded=False,
-        panel_key="system_health_lv002_postgres_performance",
-    )
-    render_lv003_hot_path_panel(
-        st.session_state.get("user", {}).get("role", "System Admin"),
-        expanded=False,
-        panel_key="system_health_lv003_hot_path",
+        panel_key_prefix="system_health",
     )
 
     conn = get_connection()
@@ -16904,6 +16896,139 @@ def can_view_runtime_admin_diagnostics(role):
     return normalized_role in {"Dev", "Master Admin", "System Admin"}
 
 
+ADMIN_DIAGNOSTICS_SURFACES = frozenset(
+    {
+        "dev_gatekeeper",
+        "system_health",
+        "system_administration",
+    }
+)
+
+_WARMUP_SKIP_ITEMS = (
+    "cloud_backup_download",
+    "firebase_verification",
+    "subscription_billing",
+    "sqlite_recovery",
+    "sqlite_health_scans",
+    "migration_export_scans",
+    "schema_manifest_scans",
+    "financial_reports",
+    "full_health_audit",
+)
+
+_PROCESS_WARMUP_CACHE = {
+    "signature": None,
+    "startup_result": None,
+    "warmup_started": None,
+    "warmup_completed": None,
+    "warmup_elapsed_ms": None,
+    "warmed_items": [],
+    "skipped_items": list(_WARMUP_SKIP_ITEMS),
+    "warmup_errors": [],
+    "cache_hits": 0,
+    "cache_misses": 0,
+    "completed": False,
+}
+
+
+def can_render_admin_diagnostics_surface(surface):
+    """Allow LV diagnostics only on approved admin surfaces."""
+    return str(surface or "") in ADMIN_DIAGNOSTICS_SURFACES
+
+
+def clear_process_startup_warmup_cache():
+    """Reset process-level warmup cache after config change or admin refresh."""
+    global _PROCESS_WARMUP_CACHE
+    _PROCESS_WARMUP_CACHE = {
+        "signature": None,
+        "startup_result": None,
+        "warmup_started": None,
+        "warmup_completed": None,
+        "warmup_elapsed_ms": None,
+        "warmed_items": [],
+        "skipped_items": list(_WARMUP_SKIP_ITEMS),
+        "warmup_errors": [],
+        "cache_hits": 0,
+        "cache_misses": 0,
+        "completed": False,
+    }
+
+
+def get_process_warmup_diagnostics():
+    """Return LV-007 process warmup diagnostics for admin panels only."""
+    return dict(_PROCESS_WARMUP_CACHE)
+
+
+def run_process_startup_warmup(*, force=False):
+    """Run lightweight process warmup once; reused across sessions until invalidated."""
+    from database import (
+        build_fast_runtime_ping,
+        get_connection,
+        get_startup_config_signature,
+        run_canonical_startup_pipeline,
+    )
+
+    signature = get_startup_config_signature()
+    cache = _PROCESS_WARMUP_CACHE
+    if not force and cache.get("completed") and cache.get("signature") == signature:
+        cache["cache_hits"] = int(cache.get("cache_hits", 0)) + 1
+        return cache
+
+    cache["cache_misses"] = int(cache.get("cache_misses", 0)) + 1
+    started = time.perf_counter()
+    cache["warmup_started"] = datetime.now().isoformat(timespec="seconds")
+    warmed = []
+    errors = []
+
+    try:
+        warmed.append("backend_configuration")
+        startup = run_canonical_startup_pipeline()
+        cache["startup_result"] = startup
+        warmed.append("canonical_startup_pipeline")
+        if startup.get("startup_route") == "postgres_runtime":
+            warmed.append("postgresql_connection_validation")
+        _ = ENTERPRISE_ROLE_PERMISSIONS
+        warmed.append("role_metadata")
+        warmed.append("page_permissions_metadata")
+        try:
+            import app as eka_app
+
+            _ = getattr(eka_app, "PRIMARY_NAV_ITEMS", ())
+            _ = getattr(eka_app, "SIDEBAR_NAV_GROUPS", ())
+            warmed.append("menu_metadata")
+        except Exception as exc:
+            errors.append(f"menu_metadata: {exc}")
+        warmed.append("dashboard_shell_metadata")
+        warmed.append("company_neutral_metadata")
+        try:
+            from enterprise_services import _get_fast_startup_snapshot
+
+            _get_fast_startup_snapshot()
+            conn = get_connection()
+            try:
+                build_fast_runtime_ping(conn)
+            finally:
+                conn.close()
+            warmed.append("fast_system_health_snapshot")
+        except Exception as exc:
+            errors.append(f"fast_system_health_snapshot: {exc}")
+    except Exception as exc:
+        errors.append(str(exc))
+
+    cache.update(
+        {
+            "signature": signature,
+            "completed": True,
+            "warmup_completed": datetime.now().isoformat(timespec="seconds"),
+            "warmup_elapsed_ms": round((time.perf_counter() - started) * 1000.0, 2),
+            "warmed_items": warmed,
+            "skipped_items": list(_WARMUP_SKIP_ITEMS),
+            "warmup_errors": errors,
+        }
+    )
+    return cache
+
+
 def record_lv002b_operation(label, elapsed_ms, *, surface=None, metadata=None):
     """Record LV-002B runtime timings for admin performance panels."""
     if st is None:
@@ -17076,13 +17201,52 @@ def get_lv003_hot_path_call_tree():
 
 
 def get_session_startup_backend_diagnostics():
-    """Session-cache startup backend diagnostics after successful database startup."""
+    """Return startup backend diagnostics from the session-cached canonical startup result."""
+    startup = get_session_canonical_startup_result()
+    return {
+        "configured_backend": startup.get("configured_backend"),
+        "active_backend": startup.get("active_backend"),
+        "postgres_requested": startup.get("configured_backend") == "postgres",
+        "postgres_runtime_enabled": startup.get("runtime_enabled"),
+        "database_url_configured": startup.get("database_url_configured"),
+        "database_url_label": startup.get("database_url_label"),
+        "should_run_sqlite_startup": startup.get("startup_route") == "sqlite_runtime",
+        "startup_route": startup.get("startup_route"),
+        "sqlite_startup_skipped": startup.get("sqlite_startup_skipped"),
+        "postgres_schema_blocked": startup.get("startup_route") == "postgres_runtime",
+        "runtime_cutover_guard_ok": startup.get("runtime_cutover_guard_ok"),
+        "runtime_cutover_guard_reasons": startup.get("runtime_cutover_guard_reasons") or [],
+        "environment_label": startup.get("environment"),
+        "environment_approved": startup.get("production_approved"),
+        "message": startup.get("blocked_reason") or "",
+        "reasons": [startup.get("blocked_reason")] if startup.get("blocked_reason") else [],
+        "startup_ok": startup.get("startup_ok"),
+        "elapsed_ms": startup.get("elapsed_ms"),
+    }
+
+
+def get_session_canonical_startup_result(*, force_refresh=False):
+    """Run canonical startup once per session unless config changes or admin refresh."""
+    from database import get_startup_config_signature, run_canonical_startup_pipeline
+
+    if force_refresh:
+        clear_process_startup_warmup_cache()
+    warmup = run_process_startup_warmup(force=force_refresh)
+    process_startup = warmup.get("startup_result")
+
     if st is None:
-        return get_startup_backend_diagnostics()
-    cached = st.session_state.get("session_startup_backend_diagnostics")
-    if cached is not None:
+        return process_startup or run_canonical_startup_pipeline()
+    signature = get_startup_config_signature()
+    cached_signature = st.session_state.get("canonical_startup_config_signature")
+    cached = st.session_state.get("canonical_startup_result")
+    if (
+        not force_refresh
+        and cached is not None
+        and cached_signature == signature
+        and cached.get("startup_ok")
+    ):
         record_lv003_hot_path_call(
-            "database.get_startup_backend_diagnostics",
+            "database.run_canonical_startup_pipeline",
             0.0,
             from_cache=True,
             required=True,
@@ -17090,17 +17254,88 @@ def get_session_startup_backend_diagnostics():
             surface="startup",
         )
         return cached
-    diagnostics = timed_lv003_hot_path(
-        "database.get_startup_backend_diagnostics",
-        get_startup_backend_diagnostics,
-        required=True,
-        recommendation="cache",
-        surface="startup",
-    )
-    startup_status = st.session_state.get("database_startup_status") or {}
-    if startup_status.get("ok"):
-        st.session_state["session_startup_backend_diagnostics"] = diagnostics
-    return diagnostics
+    if (
+        not force_refresh
+        and process_startup is not None
+        and warmup.get("signature") == signature
+    ):
+        result = process_startup
+        record_lv003_hot_path_call(
+            "database.run_canonical_startup_pipeline",
+            float(process_startup.get("elapsed_ms") or 0.0),
+            from_cache=True,
+            required=True,
+            recommendation="cache",
+            surface="startup",
+        )
+    else:
+        result = timed_lv003_hot_path(
+            "database.run_canonical_startup_pipeline",
+            run_canonical_startup_pipeline,
+            required=True,
+            recommendation="cache",
+            surface="startup",
+        )
+        warmup["startup_result"] = result
+        warmup["signature"] = signature
+        warmup["completed"] = True
+    st.session_state["canonical_startup_result"] = result
+    st.session_state["canonical_startup_config_signature"] = signature
+    st.session_state["database_startup_status"] = result
+    if result.get("startup_ok"):
+        st.session_state["session_startup_backend_diagnostics"] = {
+            "configured_backend": result.get("configured_backend"),
+            "active_backend": result.get("active_backend"),
+            "startup_route": result.get("startup_route"),
+            "sqlite_startup_skipped": result.get("sqlite_startup_skipped"),
+            "runtime_cutover_guard_ok": result.get("runtime_cutover_guard_ok"),
+            "environment_label": result.get("environment"),
+            "environment_approved": result.get("production_approved"),
+        }
+    return result
+
+
+def render_lv006_startup_pipeline_panel(role, *, expanded=False, panel_key="lv006_startup_pipeline"):
+    """Admin-only LV-006 canonical startup pipeline diagnostics."""
+    if not can_view_runtime_admin_diagnostics(role):
+        return
+    from database import get_database_startup_diagnostics
+
+    startup = get_database_startup_diagnostics()
+    with st.expander("LV-006 Startup Pipeline (Admin Only)", expanded=expanded):
+        st.caption("Deterministic startup: config → route → validate → execute once per session.")
+        if st.button("Refresh startup diagnostics", key=f"{panel_key}_refresh_startup"):
+            get_session_canonical_startup_result(force_refresh=True)
+            st.rerun()
+        if st.button("Run startup warmup now", key=f"{panel_key}_run_warmup"):
+            run_process_startup_warmup(force=True)
+            get_session_canonical_startup_result(force_refresh=True)
+            st.rerun()
+        display = {
+            key: startup.get(key)
+            for key in (
+                "configured_backend",
+                "active_backend",
+                "runtime_enabled",
+                "environment",
+                "startup_route",
+                "startup_ok",
+                "sqlite_startup_skipped",
+                "postgres_connection_ok",
+                "production_approved",
+                "blocked_reason",
+                "elapsed_ms",
+            )
+        }
+        st.dataframe(pd.DataFrame([display]), use_container_width=True, hide_index=True)
+        sources = startup.get("config_resolution_sources") or {}
+        if sources:
+            st.markdown("**Config resolution sources**")
+            st.dataframe(
+                pd.DataFrame([{"setting": k, "source": v} for k, v in sources.items()]),
+                use_container_width=True,
+                hide_index=True,
+            )
 
 
 def get_session_company_subscription_status(company_key):
@@ -17305,6 +17540,119 @@ def render_lv002_postgres_performance_panel(
             if query_timings:
                 st.markdown("**Recent PostgreSQL query timings**")
                 st.dataframe(pd.DataFrame(query_timings), use_container_width=True, hide_index=True)
+
+
+def render_lv007_warmup_panel(role, *, expanded=False, panel_key="lv007_warmup"):
+    """Admin-only LV-007 process warmup diagnostics."""
+    if not can_view_runtime_admin_diagnostics(role):
+        return
+    warmup = get_process_warmup_diagnostics()
+    with st.expander("LV-007 Warmup Diagnostics (Admin Only)", expanded=expanded):
+        st.caption("Process-level warmup runs once after startup and is reused across sessions.")
+        if st.button("Run startup warmup now", key=f"{panel_key}_run_warmup"):
+            run_process_startup_warmup(force=True)
+            get_session_canonical_startup_result(force_refresh=True)
+            st.rerun()
+        display = {
+            key: warmup.get(key)
+            for key in (
+                "warmup_started",
+                "warmup_completed",
+                "warmup_elapsed_ms",
+                "cache_hits",
+                "cache_misses",
+                "completed",
+            )
+        }
+        st.dataframe(pd.DataFrame([display]), use_container_width=True, hide_index=True)
+        if warmup.get("warmed_items"):
+            st.markdown("**Warmed items**")
+            st.write(", ".join(warmup.get("warmed_items") or []))
+        if warmup.get("skipped_items"):
+            st.markdown("**Skipped items**")
+            st.write(", ".join(warmup.get("skipped_items") or []))
+        if warmup.get("warmup_errors"):
+            st.warning("Warmup errors: " + "; ".join(warmup.get("warmup_errors") or []))
+
+
+def render_runtime_admin_diagnostics_suite(
+    role,
+    *,
+    surface,
+    company_key=None,
+    branch_id=None,
+    expanded=False,
+    panel_key_prefix="admin",
+    include_lv001=False,
+    lv001_start_date=None,
+    lv001_end_date=None,
+):
+    """Render all LV admin diagnostics only on approved admin surfaces."""
+    if not can_view_runtime_admin_diagnostics(role):
+        return
+    if not can_render_admin_diagnostics_surface(surface):
+        return
+    render_backend_activation_diagnostics_panel(
+        role,
+        expanded=expanded,
+        panel_key=f"{panel_key_prefix}_backend_activation",
+    )
+    render_lv002_postgres_performance_panel(
+        role,
+        company_key=company_key,
+        branch_id=branch_id,
+        expanded=expanded,
+        panel_key=f"{panel_key_prefix}_lv002_postgres_performance",
+    )
+    render_lv003_hot_path_panel(
+        role,
+        expanded=expanded,
+        panel_key=f"{panel_key_prefix}_lv003_hot_path",
+    )
+    render_lv006_startup_pipeline_panel(
+        role,
+        expanded=expanded,
+        panel_key=f"{panel_key_prefix}_lv006_startup_pipeline",
+    )
+    render_lv007_warmup_panel(
+        role,
+        expanded=expanded,
+        panel_key=f"{panel_key_prefix}_lv007_warmup",
+    )
+    if include_lv001 and company_key:
+        with st.expander("LV-001 Live Validation Diagnostics (Admin Only)", expanded=expanded):
+            lv001 = get_live_validation_lv001_diagnostics(
+                company_key,
+                branch_id=branch_id,
+                start_date=lv001_start_date,
+                end_date=lv001_end_date,
+            )
+            st.dataframe(
+                pd.DataFrame(
+                    [{key: value for key, value in lv001.items() if key != "postgres_query_timings"}]
+                ),
+                use_container_width=True,
+                hide_index=True,
+            )
+            if lv001.get("postgres_query_timings"):
+                st.markdown("**PostgreSQL Read Timings (Recent)**")
+                st.dataframe(pd.DataFrame(lv001["postgres_query_timings"]), use_container_width=True, hide_index=True)
+        try:
+            financials = importlib.import_module("financials")
+            pipeline_timings = financials.get_financial_report_pipeline_timings()
+            if pipeline_timings:
+                st.markdown("**Financial Reports Pipeline Timings (Recent)**")
+                st.dataframe(pd.DataFrame([pipeline_timings]), use_container_width=True, hide_index=True)
+                slowest = pipeline_timings.get("slowest_stage")
+                if slowest:
+                    st.caption(
+                        "Slowest stage: {stage} ({elapsed} ms)".format(
+                            stage=slowest,
+                            elapsed=pipeline_timings.get("slowest_elapsed_ms"),
+                        )
+                    )
+        except Exception:
+            pass
 
 
 def get_live_validation_lv001_diagnostics(company_key, branch_id=None, start_date=None, end_date=None):
@@ -17723,32 +18071,6 @@ def show_dashboard(company_key, company_name, role):
                 empty_hint="Outstanding supplier balances will appear here.",
                 column_labels={"name": "Supplier", "balance": "Balance"},
             )
-
-        render_backend_activation_diagnostics_panel(role, expanded=False)
-        render_lv002_postgres_performance_panel(
-            role,
-            company_key=company_key,
-            branch_id=active_branch_id,
-            expanded=False,
-        )
-        render_lv003_hot_path_panel(role, expanded=False)
-
-        if can_view_runtime_admin_diagnostics(role):
-            with st.expander("LV-001 Live Validation Diagnostics (Admin Only)", expanded=False):
-                lv001 = get_live_validation_lv001_diagnostics(
-                    company_key,
-                    branch_id=active_branch_id,
-                )
-                st.dataframe(
-                    pd.DataFrame(
-                        [{key: value for key, value in lv001.items() if key != "postgres_query_timings"}]
-                    ),
-                    use_container_width=True,
-                    hide_index=True,
-                )
-                if lv001.get("postgres_query_timings"):
-                    st.markdown("**PostgreSQL Read Timings (Recent)**")
-                    st.dataframe(pd.DataFrame(lv001["postgres_query_timings"]), use_container_width=True, hide_index=True)
 
         st.markdown('<div class="dashboard-section-title">Live Activity</div>', unsafe_allow_html=True)
         conn = None

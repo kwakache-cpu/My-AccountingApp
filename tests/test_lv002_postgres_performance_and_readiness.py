@@ -252,8 +252,8 @@ class Lv002cOperationsSnapshotTests(ERPIsolatedTestCase):
         self.assertTrue(persistence.get("fast_snapshot"))
         self.assertEqual(persistence.get("cloud_backup_reason"), "fast_snapshot_skipped_network")
         migration = snapshot.get("data_migration_plan") or {}
-        self.assertEqual(migration.get("mode"), "fast_summary")
-        self.assertIsNone((migration.get("tables") or [{}])[0].get("columns") if migration.get("tables") else None)
+        self.assertTrue(migration.get("fast_snapshot"))
+        self.assertEqual(migration.get("reason"), "not_checked_in_fast_mode")
 
     def test_fast_operations_snapshot_excludes_subscription_billing_deep_check(self):
         with mock.patch("modules.get_subscription_billing_health_snapshot") as billing_mock:
@@ -280,6 +280,9 @@ class Lv002cOperationsSnapshotTests(ERPIsolatedTestCase):
         self.assertEqual(recovery.get("reason"), "not_checked_in_fast_mode")
         timings = snapshot.get("timings_ms") or {}
         self.assertNotIn("recovery_source_diagnostics", timings)
+        self.assertNotIn("cutover_guard", timings)
+        self.assertNotIn("postgres_readiness", timings)
+        self.assertNotIn("data_migration_plan", timings)
 
     def test_fast_operations_snapshot_uses_runtime_ping_for_persistence(self):
         ping = {
