@@ -1916,19 +1916,38 @@ def main():
     st.session_state["database_startup_mode"] = startup_mode
     startup_ok = bool(startup_status.get("ok")) if isinstance(startup_status, dict) else bool(startup_status)
     if not startup_ok:
-        if isinstance(startup_status, dict) and startup_status.get("stage") == "postgres_schema_not_implemented":
+        postgres_startup_stage = isinstance(startup_status, dict) and startup_status.get("stage") in {
+            "postgres_runtime_validation",
+            "postgres_runtime_connection",
+            "postgres_runtime_cutover_guard",
+            "postgres_schema_not_implemented",
+        }
+        if postgres_startup_stage or (isinstance(startup_status, dict) and startup_status.get("sqlite_startup_skipped")):
             logger.error(
-                "Application startup halted by backend-aware gate: configured_backend=%s active_backend=%s reason=%s",
-                startup_status.get("configured_backend"),
-                startup_status.get("active_backend"),
-                startup_status.get("reason"),
+                "Application startup halted by PostgreSQL runtime gate: stage=%s reason=%s",
+                startup_status.get("stage") if isinstance(startup_status, dict) else "unknown",
+                startup_status.get("reason") if isinstance(startup_status, dict) else "unknown",
             )
             st.error(
-                f"{startup_status.get('reason')}\n\n"
-                f"Configured Backend: {startup_status.get('configured_backend', 'unknown')}\n"
-                f"Active Backend: {startup_status.get('active_backend', 'unknown')}\n"
-                "The app stopped safely before running SQLite schema or recovery paths."
+                "PostgreSQL runtime startup could not complete.\n\n"
+                f"Stage: {startup_status.get('stage', 'unknown') if isinstance(startup_status, dict) else 'unknown'}\n"
+                f"Reason: {startup_status.get('reason', 'startup_database returned a falsey result') if isinstance(startup_status, dict) else 'startup_database returned a falsey result'}\n"
+                f"Configured Backend: {startup_status.get('configured_backend', 'unknown') if isinstance(startup_status, dict) else 'unknown'}\n"
+                f"Active Backend: {startup_status.get('active_backend', 'unknown') if isinstance(startup_status, dict) else 'unknown'}\n"
+                f"Startup Route: {startup_status.get('startup_route', 'postgres_runtime') if isinstance(startup_status, dict) else 'postgres_runtime'}\n"
+                "SQLite local file startup/recovery was skipped for controlled PostgreSQL cutover."
             )
+            if eka_modules.can_view_runtime_admin_diagnostics(st.session_state.get("user", {}).get("role")):
+                try:
+                    from database import get_database_startup_diagnostics
+
+                    st.dataframe(
+                        pd.DataFrame([get_database_startup_diagnostics()]),
+                        use_container_width=True,
+                        hide_index=True,
+                    )
+                except Exception:
+                    pass
             st.stop()
         logger.error(
             "Application startup halted because the runtime database is not safe for use: stage=%s reason=%s",
