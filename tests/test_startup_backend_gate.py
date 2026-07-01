@@ -67,14 +67,21 @@ class StartupBackendGateTests(TestCase):
             os.environ,
             {"DB_BACKEND": "postgres", "DATABASE_URL": secret_url, "ERP_ENABLE_POSTGRES_RUNTIME": "1", "ERP_ENVIRONMENT": "staging"},
             clear=False,
-        ), mock.patch.object(database, "_ensure_local_db_file") as ensure_local_db_file, mock.patch.object(
+        ), mock.patch.object(database, "test_postgres_connection", return_value={"ok": True, "message": "ok"}), mock.patch.object(
+            database, "get_connection"
+        ) as get_connection, mock.patch.object(database, "_ensure_local_db_file") as ensure_local_db_file, mock.patch.object(
             database, "_open_sqlite_connection"
         ) as open_sqlite_connection:
+            conn = mock.MagicMock()
+            conn.execute.return_value.fetchone.return_value = {"company_count": 0}
+            get_connection.return_value = conn
             result = database.startup_database()
         self.assertTrue(result["ok"])
         self.assertEqual(result["stage"], "postgres_runtime_startup")
         self.assertEqual(result["startup_mode"], "postgres_runtime_startup")
         self.assertEqual(result["active_backend"], "postgres")
+        self.assertTrue(result["sqlite_startup_skipped"])
+        self.assertEqual(result["startup_route"], "postgres_runtime")
         self.assertTrue(result["runtime_cutover_guard_ok"])
         self.assertEqual(result["schema_deployment_status"], "PASSED")
         self.assertEqual(result["row_reconciliation_status"], "PASSED")
@@ -82,7 +89,7 @@ class StartupBackendGateTests(TestCase):
         ensure_local_db_file.assert_not_called()
         open_sqlite_connection.assert_not_called()
 
-    def test_postgres_runtime_blocks_when_cutover_evidence_missing(self):
+    def test_postgres_runtime_allows_startup_when_cutover_evidence_missing(self):
         database = self._load_database()
         secret_url = "postgresql://user:super-secret@example.supabase.co:6543/postgres"
         missing_report = os.path.join(os.getcwd(), ".test-tmp", "startup_backend_gate", "missing_cutover_report.md")
@@ -94,12 +101,17 @@ class StartupBackendGateTests(TestCase):
             database.POSTGRES_CUTOVER_REPORTS,
             {"schema_deployment": (missing_report, ("Status: PASSED",))},
             clear=True,
-        ), mock.patch.object(database, "_ensure_local_db_file") as ensure_local_db_file, mock.patch.object(
+        ), mock.patch.object(database, "test_postgres_connection", return_value={"ok": True, "message": "ok"}), mock.patch.object(
+            database, "get_connection"
+        ) as get_connection, mock.patch.object(database, "_ensure_local_db_file") as ensure_local_db_file, mock.patch.object(
             database, "_open_sqlite_connection"
         ) as open_sqlite_connection:
+            conn = mock.MagicMock()
+            conn.execute.return_value.fetchone.return_value = {"company_count": 1}
+            get_connection.return_value = conn
             result = database.startup_database()
-        self.assertFalse(result["ok"])
-        self.assertEqual(result["stage"], "postgres_runtime_cutover_guard")
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["stage"], "postgres_runtime_startup")
         self.assertFalse(result["runtime_cutover_guard_ok"])
         self.assertIn("missing or stale", " ".join(result["runtime_cutover_guard_reasons"]).lower())
         ensure_local_db_file.assert_not_called()
@@ -198,10 +210,12 @@ class StartupBackendGateTests(TestCase):
         )
         blocked_status = {
             "ok": False,
-            "stage": "postgres_runtime_cutover_guard",
-            "reason": "PostgreSQL runtime is selected; SQLite startup paths are blocked for controlled runtime cutover.",
+            "stage": "postgres_runtime_validation",
+            "reason": "ERP_ENVIRONMENT must be staging, or production with ERP_POSTGRES_PRODUCTION_APPROVED=1.",
             "configured_backend": "postgres",
             "active_backend": "postgres",
+            "startup_route": "postgres_runtime",
+            "sqlite_startup_skipped": True,
         }
         with mock.patch.object(app, "st", fake_st), mock.patch.object(app, "should_run_sqlite_startup", return_value=False), mock.patch.object(
             app,

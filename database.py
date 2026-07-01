@@ -1338,6 +1338,7 @@ def get_backend_activation_diagnostics():
         and database_url
         and not cutover.get("ok")
     )
+    startup_diagnostics = get_database_startup_diagnostics()
     return {
         "os_db_backend": os.getenv("DB_BACKEND"),
         "os_erp_enable_postgres_runtime": os.getenv("ERP_ENABLE_POSTGRES_RUNTIME"),
@@ -1361,6 +1362,10 @@ def get_backend_activation_diagnostics():
         "runtime_readiness_status": cutover.get("runtime_readiness_status"),
         "runtime_dryrun_status": cutover.get("runtime_dryrun_status"),
         "startup_reasons": list(startup.get("reasons") or []),
+        "startup_route": startup_diagnostics.get("startup_route"),
+        "sqlite_startup_skipped": startup_diagnostics.get("sqlite_startup_skipped"),
+        "startup_blocked_reason": startup_diagnostics.get("blocked_reason"),
+        "runtime_validation_ok": startup_diagnostics.get("runtime_validation_ok"),
     }
 
 
@@ -1463,8 +1468,168 @@ POSTGRES_CUTOVER_REPORTS = {
 
 
 def should_block_postgres_startup_until_schema_ready():
-    """Block enabled PostgreSQL runtime before SQLite-only startup paths can run."""
+    """Block SQLite-only startup paths when PostgreSQL runtime is the active backend."""
     return get_active_db_backend() == "postgres"
+
+
+def _resolve_database_startup_route():
+    """Return postgres_runtime when PostgreSQL is active; otherwise sqlite_runtime."""
+    if get_active_db_backend() == "postgres":
+        return "postgres_runtime"
+    return "sqlite_runtime"
+
+
+def get_database_startup_diagnostics():
+    """Admin-safe startup routing diagnostics without exposing DATABASE_URL."""
+    route = _resolve_database_startup_route()
+    validation = validate_postgres_runtime_enabled()
+    cutover = validate_postgres_runtime_cutover_guard()
+    blocked_reason = None
+    if route == "postgres_runtime" and not validation.get("ok"):
+        blocked_reason = "; ".join(validation.get("reasons") or []) or "PostgreSQL runtime validation failed."
+    return {
+        "configured_backend": get_configured_db_backend(),
+        "active_backend": get_active_db_backend(),
+        "runtime_enabled": is_postgres_runtime_enabled(),
+        "startup_route": route,
+        "sqlite_startup_skipped": route == "postgres_runtime",
+        "runtime_validation_ok": bool(validation.get("ok")),
+        "runtime_validation_reasons": list(validation.get("reasons") or []),
+        "runtime_cutover_guard_ok": bool(cutover.get("ok")),
+        "runtime_cutover_guard_reasons": list(cutover.get("reasons") or []),
+        "database_url_configured": bool(get_database_url()),
+        "database_url_label": validation.get("database_url_label"),
+        "environment_label": validation.get("environment_label"),
+        "environment_approved": validation.get("environment_approved"),
+        "blocked_reason": blocked_reason,
+        "local_sqlite_db_path": DB_PATH if route == "sqlite_runtime" else None,
+    }
+
+
+def _startup_postgres_runtime(backend_diagnostics):
+    """Initialize PostgreSQL runtime only; never enter SQLite file startup/recovery."""
+    validation = validate_postgres_runtime_enabled()
+    if not validation.get("ok"):
+        reasons = list(validation.get("reasons") or [])
+        reason = "; ".join(reasons) or "PostgreSQL runtime validation failed."
+        logger.error(
+            "PostgreSQL startup blocked by runtime validation: configured_backend=%s active_backend=%s database_url_configured=%s reason=%s",
+            backend_diagnostics.get("configured_backend"),
+            backend_diagnostics.get("active_backend"),
+            backend_diagnostics.get("database_url_configured"),
+            reason,
+        )
+        return {
+            "ok": False,
+            "stage": "postgres_runtime_validation",
+            "reason": reason,
+            "configured_backend": backend_diagnostics.get("configured_backend"),
+            "active_backend": backend_diagnostics.get("active_backend"),
+            "postgres_requested": backend_diagnostics.get("postgres_requested"),
+            "postgres_runtime_enabled": backend_diagnostics.get("postgres_runtime_enabled"),
+            "database_url_configured": backend_diagnostics.get("database_url_configured"),
+            "database_url_label": backend_diagnostics.get("database_url_label"),
+            "environment_label": backend_diagnostics.get("environment_label"),
+            "environment_approved": backend_diagnostics.get("environment_approved"),
+            "runtime_validation_ok": False,
+            "runtime_validation_reasons": reasons,
+            "startup_route": "postgres_runtime",
+            "sqlite_startup_skipped": True,
+            "startup_mode": "postgres_runtime_validation",
+            "bootstrap_needed": False,
+            "recovery_attempted": False,
+            "recovery_succeeded": False,
+            "db_path": None,
+        }
+
+    connection = test_postgres_connection()
+    if not connection.get("ok"):
+        reason = connection.get("message") or "PostgreSQL connection check failed."
+        logger.error(
+            "PostgreSQL startup blocked by connection check: configured_backend=%s active_backend=%s reason=%s",
+            backend_diagnostics.get("configured_backend"),
+            backend_diagnostics.get("active_backend"),
+            sanitize_error_message(reason),
+        )
+        return {
+            "ok": False,
+            "stage": "postgres_runtime_connection",
+            "reason": reason,
+            "configured_backend": backend_diagnostics.get("configured_backend"),
+            "active_backend": backend_diagnostics.get("active_backend"),
+            "postgres_requested": backend_diagnostics.get("postgres_requested"),
+            "postgres_runtime_enabled": backend_diagnostics.get("postgres_runtime_enabled"),
+            "database_url_configured": backend_diagnostics.get("database_url_configured"),
+            "database_url_label": backend_diagnostics.get("database_url_label"),
+            "environment_label": backend_diagnostics.get("environment_label"),
+            "environment_approved": backend_diagnostics.get("environment_approved"),
+            "runtime_validation_ok": True,
+            "startup_route": "postgres_runtime",
+            "sqlite_startup_skipped": True,
+            "startup_mode": "postgres_runtime_connection",
+            "bootstrap_needed": False,
+            "recovery_attempted": False,
+            "recovery_succeeded": False,
+            "db_path": None,
+        }
+
+    company_count = 0
+    structural_valid = True
+    production_ready = True
+    try:
+        conn = get_connection()
+        try:
+            company_row = conn.execute("SELECT COUNT(*) AS company_count FROM companies").fetchone()
+            company_count = int(company_row["company_count"] or 0) if company_row else 0
+        finally:
+            conn.close()
+    except Exception as exc:
+        structural_valid = False
+        production_ready = False
+        logger.warning(
+            "PostgreSQL runtime startup structural probe failed: %s",
+            sanitize_error_message(exc),
+        )
+
+    cutover = validate_postgres_runtime_cutover_guard()
+    logger.info(
+        "PostgreSQL runtime startup completed: configured_backend=%s active_backend=%s database_url_configured=%s company_count=%s cutover_guard_ok=%s sqlite_startup_skipped=true",
+        backend_diagnostics.get("configured_backend"),
+        backend_diagnostics.get("active_backend"),
+        backend_diagnostics.get("database_url_configured"),
+        company_count,
+        cutover.get("ok"),
+    )
+    return {
+        "ok": True,
+        "stage": "postgres_runtime_startup",
+        "reason": "PostgreSQL runtime startup completed; SQLite local file startup/recovery skipped.",
+        "configured_backend": backend_diagnostics.get("configured_backend"),
+        "active_backend": backend_diagnostics.get("active_backend"),
+        "postgres_requested": backend_diagnostics.get("postgres_requested"),
+        "postgres_runtime_enabled": backend_diagnostics.get("postgres_runtime_enabled"),
+        "database_url_configured": backend_diagnostics.get("database_url_configured"),
+        "database_url_label": backend_diagnostics.get("database_url_label"),
+        "environment_label": backend_diagnostics.get("environment_label"),
+        "environment_approved": backend_diagnostics.get("environment_approved"),
+        "schema_deployment_status": cutover.get("schema_deployment_status"),
+        "row_reconciliation_status": cutover.get("row_reconciliation_status"),
+        "runtime_readiness_status": cutover.get("runtime_readiness_status"),
+        "runtime_dryrun_status": cutover.get("runtime_dryrun_status"),
+        "runtime_cutover_guard_ok": cutover.get("ok"),
+        "runtime_cutover_guard_reasons": list(cutover.get("reasons") or []),
+        "runtime_validation_ok": True,
+        "startup_route": "postgres_runtime",
+        "sqlite_startup_skipped": True,
+        "startup_mode": "postgres_runtime_startup",
+        "bootstrap_needed": company_count == 0,
+        "recovery_attempted": False,
+        "recovery_succeeded": False,
+        "structurally_valid": structural_valid,
+        "production_ready": production_ready,
+        "company_count": company_count,
+        "db_path": None,
+    }
 
 
 def _truthy_secret(value):
@@ -1587,6 +1752,7 @@ def _build_startup_backend_diagnostics():
         reasons.append("PostgreSQL runtime requested but ERP_ENVIRONMENT is not staging or production-approved.")
     if postgres_schema_blocked:
         reasons.append(POSTGRES_SCHEMA_NOT_IMPLEMENTED_MESSAGE)
+    startup_route = _resolve_database_startup_route()
     return {
         "configured_backend": configured_backend,
         "active_backend": active_backend,
@@ -1594,7 +1760,9 @@ def _build_startup_backend_diagnostics():
         "postgres_runtime_enabled": runtime_enabled,
         "database_url_configured": bool(database_url),
         "database_url_label": _redact_database_url(database_url),
-        "should_run_sqlite_startup": not postgres_schema_blocked,
+        "should_run_sqlite_startup": startup_route == "sqlite_runtime",
+        "startup_route": startup_route,
+        "sqlite_startup_skipped": startup_route == "postgres_runtime",
         "postgres_schema_blocked": postgres_schema_blocked,
         "postgres_schema_ready": cutover_guard.get("schema_deployment_status") == "PASSED",
         "schema_deployment_status": cutover_guard.get("schema_deployment_status"),
@@ -10091,72 +10259,9 @@ def startup_database():
     """
     global LAST_RESTORE_SOURCE
     backend_diagnostics = get_startup_backend_diagnostics()
-    if backend_diagnostics["postgres_schema_blocked"]:
-        if backend_diagnostics.get("runtime_cutover_guard_ok"):
-            logger.info(
-                "PostgreSQL startup allowed after cutover guard: configured_backend=%s active_backend=%s database_url_configured=%s schema_deployment_status=%s row_reconciliation_status=%s runtime_readiness_status=%s runtime_dryrun_status=%s",
-                backend_diagnostics["configured_backend"],
-                backend_diagnostics["active_backend"],
-                backend_diagnostics["database_url_configured"],
-                backend_diagnostics["schema_deployment_status"],
-                backend_diagnostics["row_reconciliation_status"],
-                backend_diagnostics["runtime_readiness_status"],
-                backend_diagnostics["runtime_dryrun_status"],
-            )
-            return {
-                "ok": True,
-                "stage": "postgres_runtime_startup",
-                "reason": "PostgreSQL runtime startup allowed after all cutover guards and validation evidence passed.",
-                "configured_backend": backend_diagnostics["configured_backend"],
-                "active_backend": backend_diagnostics["active_backend"],
-                "postgres_requested": backend_diagnostics["postgres_requested"],
-                "postgres_runtime_enabled": backend_diagnostics["postgres_runtime_enabled"],
-                "database_url_configured": backend_diagnostics["database_url_configured"],
-                "database_url_label": backend_diagnostics["database_url_label"],
-                "environment_label": backend_diagnostics["environment_label"],
-                "environment_approved": backend_diagnostics["environment_approved"],
-                "schema_deployment_status": backend_diagnostics["schema_deployment_status"],
-                "row_reconciliation_status": backend_diagnostics["row_reconciliation_status"],
-                "runtime_readiness_status": backend_diagnostics["runtime_readiness_status"],
-                "runtime_dryrun_status": backend_diagnostics["runtime_dryrun_status"],
-                "runtime_cutover_guard_ok": backend_diagnostics["runtime_cutover_guard_ok"],
-                "runtime_cutover_guard_reasons": [],
-                "startup_mode": "postgres_runtime_startup",
-                "bootstrap_needed": False,
-                "recovery_attempted": False,
-                "recovery_succeeded": False,
-            }
-        logger.error(
-            "PostgreSQL startup blocked before SQLite schema/recovery paths: configured_backend=%s active_backend=%s database_url_configured=%s cutover_guard_ok=%s reason=%s",
-            backend_diagnostics["configured_backend"],
-            backend_diagnostics["active_backend"],
-            backend_diagnostics["database_url_configured"],
-            backend_diagnostics["runtime_cutover_guard_ok"],
-            backend_diagnostics["message"],
-        )
-        return {
-            "ok": False,
-            "stage": "postgres_runtime_cutover_guard",
-            "reason": POSTGRES_SCHEMA_NOT_IMPLEMENTED_MESSAGE,
-            "configured_backend": backend_diagnostics["configured_backend"],
-            "active_backend": backend_diagnostics["active_backend"],
-            "postgres_requested": backend_diagnostics["postgres_requested"],
-            "postgres_runtime_enabled": backend_diagnostics["postgres_runtime_enabled"],
-            "database_url_configured": backend_diagnostics["database_url_configured"],
-            "database_url_label": backend_diagnostics["database_url_label"],
-            "environment_label": backend_diagnostics["environment_label"],
-            "environment_approved": backend_diagnostics["environment_approved"],
-            "schema_deployment_status": backend_diagnostics["schema_deployment_status"],
-            "row_reconciliation_status": backend_diagnostics["row_reconciliation_status"],
-            "runtime_readiness_status": backend_diagnostics["runtime_readiness_status"],
-            "runtime_dryrun_status": backend_diagnostics["runtime_dryrun_status"],
-            "runtime_cutover_guard_ok": backend_diagnostics["runtime_cutover_guard_ok"],
-            "runtime_cutover_guard_reasons": backend_diagnostics["runtime_cutover_guard_reasons"],
-            "startup_mode": "postgres_runtime_cutover_guard",
-            "bootstrap_needed": False,
-            "recovery_attempted": False,
-            "recovery_succeeded": False,
-        }
+    startup_route = backend_diagnostics.get("startup_route") or _resolve_database_startup_route()
+    if startup_route == "postgres_runtime":
+        return _startup_postgres_runtime(backend_diagnostics)
     LAST_RESTORE_SOURCE = "local_runtime_database"
     logger.info("Database startup entered: db_path=%s", DB_PATH)
     restore_guard = _load_restore_guard_state()

@@ -16,7 +16,7 @@
 | Development certification | **92%** (complete) |
 | Live browser UAT execution | **0%** (Sprint 1 in progress) |
 | Open launch blockers | **5** |
-| Open live defects | **1** (LV-001 fixed pending retest; **DEF-002 Open** — LV-002D/LV-003 hot-path audit; verify `system_health_load_ms` < 3s) |
+| Open live defects | **1** (LV-001 fixed pending retest; **DEF-002 Open** — performance; **LV-004** fixes Streamlit Cloud PostgreSQL startup cutover guard) |
 | Last updated | 2026-07-02 |
 
 ---
@@ -69,6 +69,19 @@ Use `reports/live_defect_intake_template.md` for new entries. Copy verified rows
 | DEF-001 | High | Dashboard / Financial Reports | Owner / CEO | Slow login load; empty dashboard charts; empty financial reports despite posted journals | Technical Owner | Fixed | **DOES NOT BLOCK LAUNCH** until live retest verified | Root cause: (1) PostgreSQL `date()` filter mismatch returned empty ledger/report rows; (2) Trial Balance incorrectly applied period `start_date` to cumulative balances; (3) Dashboard charts were POS-only with no journal fallback; (4) Dashboard deferred heavy legacy/journal compare to expander. Evidence: `tests/test_live_defect_lv001_dashboard_reports.py`; LV-001 diagnostics expander on Dashboard and Financial Reports | |
 | DEF-002 | High | System Health / PostgreSQL Runtime | Dev / System Admin | App incredibly slow on active PostgreSQL; readiness score 0/100 with 291 blockers; misleading "switch not enabled" message | Technical Owner | **Open** | **DOES NOT BLOCK LAUNCH** until live retest confirms `system_health_load_ms` < 3s | LV-002/002B improved readiness and caching. LV-002C–D: fast snapshot reduced from ~33s to ~7s by removing subscription billing deep check, runtime ping persistence, and on-demand full audit. **LV-003**: Streamlit hot-path audit — per-rerun call tree (admin-only), session-cache startup guard/subscription checks, defer Dev gatekeeper ops snapshot + billing to session/refresh button, sidebar/page-access cache, currency DB sync only on change. **Open** until live confirms system health < 3s. Evidence: `tests/test_lv002_postgres_performance_and_readiness.py`, `tests/test_lv003_streamlit_hot_path_performance.py` | |
 | DEF-003 | | | | | | Open | | | |
+| DEF-004 | Critical | Startup / PostgreSQL Cutover | Dev / System Admin | Streamlit Cloud PostgreSQL selected but startup blocked at `postgres_runtime_cutover_guard`; error referenced SQLite `/data/eka_enterprise_v3.db` | Technical Owner | **Fixed** (pending live retest) | **BLOCKS LAUNCH** until Streamlit Cloud confirms PostgreSQL startup | **LV-004**: Root cause — `startup_database()` required cutover evidence report files before allowing postgres runtime, failing even when runtime config + connection were valid; error UI showed SQLite DB path. Fix: route `postgres_runtime` validates runtime config + connection probe only; skips SQLite file startup/recovery; cutover evidence remains advisory; admin startup diagnostics added. Evidence: `tests/test_lv004_streamlit_postgres_cutover_startup.py` | |
+
+---
+
+## LV-004 Streamlit Cloud PostgreSQL Cutover Startup (2026-07-02)
+
+| Item | Detail |
+|---|---|
+| Symptom | `Stage: postgres_runtime_cutover_guard` with SQLite path in error on Streamlit Cloud |
+| Root cause | Active PostgreSQL runtime blocked on static cutover report files instead of runtime validation |
+| Fix | `startup_route=postgres_runtime` → validate config + connection; skip SQLite startup/recovery |
+| Admin diagnostics | `get_database_startup_diagnostics()` — configured/active backend, startup_route, sqlite_startup_skipped |
+| Retest | Deploy to Streamlit Cloud with PostgreSQL secrets; confirm app loads without SQLite path error |
 
 ---
 
