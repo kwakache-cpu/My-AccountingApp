@@ -1,4 +1,5 @@
 ﻿import html
+import importlib
 import logging
 import json
 import logging
@@ -772,17 +773,23 @@ from database import (
     get_cached_table_column_names,
     get_connection,
     get_active_db_backend,
+    get_backend_activation_diagnostics,
+    get_postgres_activation_admin_message,
     get_inserted_id,
     ensure_insert_sql_returning,
     get_database_health_snapshot,
+    get_diagnostics_cache_stats,
+    get_lv002_postgres_performance_diagnostics,
     get_postgres_query_timings,
     get_postgres_readiness_diagnostics,
     get_persistence_diagnostics,
     get_schema_manifest_diagnostics,
+    _get_active_runtime_health_snapshot,
     get_subscription_plan_setting,
     get_subscription_plan_settings,
     get_company_subscription_snapshot,
     get_recovery_source_diagnostics,
+    get_startup_backend_diagnostics,
     get_subscription_billing_diagnostics,
     get_subscription_billing_summary,
     is_postgres_backend,
@@ -792,6 +799,9 @@ from database import (
     rows_to_dicts,
     sql_date_equals,
     sql_date_on_or_after,
+    sql_date_on_or_before,
+    sql_cast_as_date,
+    fetch_scalar,
     upsert_subscription_plan_setting,
     log_audit_action as database_log_audit_action,
 )
@@ -8591,6 +8601,11 @@ def get_system_health_snapshot():
     }
 
 
+@st.cache_data(ttl=120, show_spinner=False)
+def _cached_deployment_readiness_diagnostics(backend_token, company_token):
+    return _build_deployment_readiness_diagnostics()
+
+
 def get_deployment_readiness_diagnostics():
     conn = None
     recommendations = []
@@ -8611,14 +8626,56 @@ def get_deployment_readiness_diagnostics():
         "recommended_action": "Review diagnostics before client rollout.",
     }
     try:
-        db_health = get_database_health_snapshot()
+        conn = get_connection()
+        postgres_diag = get_postgres_readiness_diagnostics(conn=conn, include_table_introspection=False)
+        company_row = None
+        if conn:
+            company_row = conn.execute(
+                "SELECT key FROM companies ORDER BY created_at DESC LIMIT 1"
+            ).fetchone()
+        company_token = row_get(company_row, "key") if company_row else "none"
+        backend_token = postgres_diag.get("active_backend") or get_active_db_backend()
+        return _cached_deployment_readiness_diagnostics(backend_token, company_token)
+    except Exception as exc:
+        diagnostics["recommended_action"] = build_user_safe_error(exc, st.session_state.get("user", {}).get("role"))
+        return diagnostics
+    finally:
+        if conn:
+            conn.close()
+
+
+def _build_deployment_readiness_diagnostics():
+    conn = None
+    recommendations = []
+    diagnostics = {
+        "database_backend": "SQLite",
+        "db_label": "Unavailable",
+        "company_count": 0,
+        "cloud_vault_status": "Unknown",
+        "runtime_db_valid": False,
+        "last_local_backup": "Unknown",
+        "last_cloud_backup": "Unknown",
+        "cloud_backup_count": "Unknown",
+        "schema_self_heal_status": "Unknown",
+        "journal_integrity_status": "Unknown",
+        "trial_balance_balanced": "Unknown",
+        "pos_source_document_control": "Unknown",
+        "sqlite_concurrency_warning": "SQLite is suitable for pilot/small-client use but not high-concurrency enterprise deployment.",
+        "recommended_action": "Review diagnostics before client rollout.",
+    }
+    try:
+        conn = get_connection()
+        postgres_diag = get_postgres_readiness_diagnostics(conn=conn, include_table_introspection=False)
+        if postgres_diag.get("active_backend") == "postgres":
+            db_health = _get_active_runtime_health_snapshot(conn=conn)
+        else:
+            db_health = get_database_health_snapshot()
         persistence = get_persistence_diagnostics()
-        postgres_diag = get_postgres_readiness_diagnostics()
-        schema_diag = get_schema_manifest_diagnostics()
+        schema_diag = get_schema_manifest_diagnostics(conn)
         diagnostics.update(
             {
                 "database_backend": postgres_diag.get("active_backend", "sqlite").upper(),
-                "db_label": db_health.get("db_path") or "SQLite runtime database",
+                "db_label": db_health.get("db_path") or ("PostgreSQL runtime" if postgres_diag.get("active_backend") == "postgres" else "SQLite runtime database"),
                 "company_count": int(db_health.get("company_count") or 0),
                 "cloud_vault_status": str(persistence.get("latest_cloud_backup_status") or "Unknown"),
                 "runtime_db_valid": bool(db_health.get("structural_valid")),
@@ -8627,16 +8684,26 @@ def get_deployment_readiness_diagnostics():
                 "cloud_backup_count": str(persistence.get("cloud_backup_count") if persistence.get("cloud_backup_count") is not None else "Unknown"),
                 "schema_self_heal_status": "OK" if schema_diag.get("ok") else "Needs Attention",
                 "sqlite_concurrency_warning": postgres_diag.get("sqlite_concurrency_warning") or "",
+                "postgres_readiness_mode": postgres_diag.get("readiness_mode"),
+                "postgres_readiness_score": postgres_diag.get("readiness_score"),
             }
         )
-        if postgres_diag.get("switch_blocked"):
+        if postgres_diag.get("active_backend") != "postgres" and postgres_diag.get("switch_blocked"):
             recommendations.append("PostgreSQL/Supabase migration is not ready; review backend readiness diagnostics.")
+        elif postgres_diag.get("active_backend") == "postgres" and postgres_diag.get("switch_blocked"):
+            missing = postgres_diag.get("runtime_cutover_missing_evidence") or []
+            if missing:
+                recommendations.append(
+                    "PostgreSQL runtime is active but cutover evidence is incomplete: "
+                    + ", ".join(item.get("report") or item.get("evidence_key") for item in missing)
+                )
+            else:
+                recommendations.append("PostgreSQL runtime is active but cutover guard has open configuration items.")
         if not diagnostics["runtime_db_valid"]:
             recommendations.append("Repair or restore the runtime database before deployment.")
         if not schema_diag.get("ok"):
             recommendations.append("Run startup migration/self-heal and review missing schema columns.")
 
-        conn = get_connection()
         company_row = None
         if conn:
             company_row = conn.execute(
@@ -8772,6 +8839,7 @@ def show_company_registration_module():
 
 
 def show_system_health_module():
+    started = time.perf_counter()
     st.subheader("System Health & Logs")
     snapshot = get_system_health_snapshot()
 
@@ -8799,6 +8867,21 @@ def show_system_health_module():
     st.dataframe(pd.DataFrame(diag_rows), use_container_width=True, hide_index=True)
     st.warning(deployment["sqlite_concurrency_warning"])
     st.caption(deployment["recommended_action"])
+    render_backend_activation_diagnostics_panel(
+        st.session_state.get("user", {}).get("role", "System Admin"),
+        expanded=False,
+        panel_key="system_health_backend_activation",
+    )
+    render_lv002_postgres_performance_panel(
+        st.session_state.get("user", {}).get("role", "System Admin"),
+        expanded=False,
+        panel_key="system_health_lv002_postgres_performance",
+    )
+    render_lv003_hot_path_panel(
+        st.session_state.get("user", {}).get("role", "System Admin"),
+        expanded=False,
+        panel_key="system_health_lv003_hot_path",
+    )
 
     conn = get_connection()
     try:
@@ -8836,6 +8919,18 @@ def show_system_health_module():
                 use_container_width=True,
                 hide_index=True,
             )
+    record_lv002b_operation(
+        "system_health.load",
+        (time.perf_counter() - started) * 1000.0,
+        surface="system_health",
+    )
+    record_lv003_hot_path_call(
+        "modules.show_system_health_module",
+        (time.perf_counter() - started) * 1000.0,
+        required=True,
+        recommendation="keep",
+        surface="system_health",
+    )
 
 
 def show_license_renewal_module():
@@ -16506,6 +16601,14 @@ def _fetch_dashboard_sales_analytics(conn, company_key, branch_id=None):
         analytics["has_pos_data"] = bool(
             analytics["daily_sales"] or analytics["top_items"] or analytics["payment_methods"]
         )
+        if not analytics["has_pos_data"]:
+            journal_fallback = _fetch_dashboard_journal_sales_fallback(conn, company_key, branch_id=branch_id)
+            if journal_fallback.get("daily_sales"):
+                analytics["daily_sales"] = journal_fallback["daily_sales"]
+                analytics["top_items"] = journal_fallback.get("top_items") or []
+                analytics["payment_methods"] = journal_fallback.get("payment_methods") or []
+                analytics["has_pos_data"] = True
+                analytics["data_source"] = "journal_fallback"
     except Exception as exc:
         logger.debug("Dashboard POS analytics skipped: %s", sanitize_error_message(exc))
     return analytics
@@ -16703,6 +16806,562 @@ def _fetch_dashboard_receivable_payable_health(company_key, branch_id=None):
     }
 
 
+def _fetch_dashboard_journal_sales_fallback(conn, company_key, branch_id=None):
+    """Populate dashboard sales charts from posted journal activity when POS tables are empty."""
+    window_start = (datetime.now().date() - timedelta(days=29)).isoformat()
+    branch_sql, branch_params = _dashboard_pos_branch_sql(branch_id, alias="je")
+    fallback = {"daily_sales": [], "top_items": [], "payment_methods": []}
+    try:
+        daily_rows = _portable_fetchall(
+            conn,
+            f"""
+            SELECT {sql_cast_as_date('je.date')} AS sale_day,
+                   COALESCE(SUM(jl.credit), 0) AS sales_total
+            FROM journal_entries je
+            JOIN journal_lines jl ON jl.entry_id = je.id
+            JOIN chart_of_accounts c ON c.id = jl.account_id
+            WHERE je.company_key = ?
+              AND {sql_date_on_or_after('je.date')}
+              AND lower(COALESCE(NULLIF(c.name, ''), NULLIF(c.account_name, ''), '')) LIKE lower(?)
+              AND COALESCE(je.is_voided, 0) = 0
+              AND COALESCE(je.approval_status, 'Posted') = 'Posted'
+              {branch_sql}
+            GROUP BY {sql_cast_as_date('je.date')}
+            ORDER BY sale_day
+            """,
+            tuple([company_key, window_start, "sales%"] + branch_params),
+        )
+        fallback["daily_sales"] = [
+            {
+                "sale_day": str(row_get(row, "sale_day")),
+                "sales_total": float(row_get(row, "sales_total", 0) or 0.0),
+            }
+            for row in daily_rows
+        ]
+        item_rows = _portable_fetchall(
+            conn,
+            f"""
+            SELECT COALESCE(NULLIF(c.name, ''), NULLIF(c.account_name, ''), 'Sales') AS item_name,
+                   COUNT(*) AS qty_sold,
+                   COALESCE(SUM(jl.credit), 0) AS revenue
+            FROM journal_entries je
+            JOIN journal_lines jl ON jl.entry_id = je.id
+            JOIN chart_of_accounts c ON c.id = jl.account_id
+            WHERE je.company_key = ?
+              AND {sql_date_on_or_after('je.date')}
+              AND lower(COALESCE(NULLIF(c.name, ''), NULLIF(c.account_name, ''), '')) LIKE lower(?)
+              AND COALESCE(je.is_voided, 0) = 0
+              AND COALESCE(je.approval_status, 'Posted') = 'Posted'
+              {branch_sql}
+            GROUP BY COALESCE(NULLIF(c.name, ''), NULLIF(c.account_name, ''), 'Sales')
+            ORDER BY revenue DESC, qty_sold DESC
+            LIMIT 10
+            """,
+            tuple([company_key, window_start, "sales%"] + branch_params),
+        )
+        fallback["top_items"] = [
+            {
+                "item_name": str(row_get(row, "item_name") or "Sales"),
+                "qty_sold": float(row_get(row, "qty_sold", 0) or 0.0),
+                "revenue": float(row_get(row, "revenue", 0) or 0.0),
+            }
+            for row in item_rows
+        ]
+        if fallback["top_items"]:
+            fallback["payment_methods"] = [
+                {
+                    "payment_method": "Journal Posting",
+                    "sales_total": round(sum(item["revenue"] for item in fallback["top_items"]), 2),
+                    "sale_count": int(sum(item["qty_sold"] for item in fallback["top_items"])),
+                }
+            ]
+    except Exception as exc:
+        logger.debug("Dashboard journal sales fallback skipped: %s", sanitize_error_message(exc))
+    return fallback
+
+
+def _normalize_dashboard_chart_dataframe(chart_df):
+    if chart_df is None or chart_df.empty:
+        return chart_df
+    normalized = chart_df.copy()
+    normalized.index = pd.Index(
+        [
+            str(value)[:10] if value is not None and str(value).strip() else ""
+            for value in normalized.index
+        ]
+    )
+    normalized = normalized.loc[normalized.index.astype(str).str.strip() != ""]
+    if normalized.empty:
+        return normalized
+    for column_name in normalized.columns:
+        normalized[column_name] = pd.to_numeric(normalized[column_name], errors="coerce").fillna(0.0)
+    return normalized.sort_index()
+
+
+def can_view_runtime_admin_diagnostics(role):
+    """Restrict runtime/backend diagnostics to internal admin roles only."""
+    normalized_role = _normalize_role_name(role)
+    return normalized_role in {"Dev", "Master Admin", "System Admin"}
+
+
+def record_lv002b_operation(label, elapsed_ms, *, surface=None, metadata=None):
+    """Record LV-002B runtime timings for admin performance panels."""
+    if st is None:
+        return
+    event = {
+        "label": str(label or "operation"),
+        "elapsed_ms": round(float(elapsed_ms or 0.0), 2),
+        "surface": surface,
+        "metadata": dict(metadata or {}),
+        "recorded_at": datetime.now().isoformat(timespec="seconds"),
+    }
+    events = st.session_state.setdefault("lv002b_operation_events", [])
+    events.append(event)
+    if len(events) > 200:
+        del events[:-200]
+    if surface:
+        surfaces = st.session_state.setdefault("lv002b_surface_timings", {})
+        surfaces[surface] = {
+            "elapsed_ms": event["elapsed_ms"],
+            "label": event["label"],
+            "updated_at": event["recorded_at"],
+        }
+
+
+def _lv003_default_recommendation(label, *, required=True, from_cache=False):
+    normalized = str(label or "").lower()
+    if from_cache:
+        return "cache"
+    if not required:
+        return "defer"
+    if any(token in normalized for token in ("cloud_backup", "recovery_source", "subscription_billing", "full_audit")):
+        return "remove from hot path"
+    if any(token in normalized for token in ("startup_backend", "sidebar_nav_styles", "page_access")):
+        return "cache"
+    if any(token in normalized for token in ("operations_console_snapshot", "persistence_diagnostics", "persistence_self_test")):
+        return "defer"
+    return "keep"
+
+
+def begin_lv003_hot_path_rerun(*, active_page=None):
+    """Reset LV-003 per-rerun call tree counters at the start of app.main()."""
+    if st is None:
+        return
+    previous = st.session_state.get("lv003_current_rerun")
+    if previous and not previous.get("finalized"):
+        finalize_lv003_hot_path_rerun(active_page=previous.get("active_page"))
+    seq = int(st.session_state.get("lv003_rerun_seq", 0)) + 1
+    st.session_state["lv003_rerun_seq"] = seq
+    st.session_state["lv003_current_rerun"] = {
+        "seq": seq,
+        "started_at": datetime.now().isoformat(timespec="seconds"),
+        "active_page": active_page,
+        "calls": {},
+        "main_started": time.perf_counter(),
+        "finalized": False,
+    }
+
+
+def record_lv003_hot_path_call(
+    label,
+    elapsed_ms,
+    *,
+    from_cache=False,
+    required=True,
+    recommendation=None,
+    surface=None,
+    metadata=None,
+):
+    """Record one hot-path operation for the current Streamlit rerun."""
+    if st is None:
+        return
+    rerun = st.session_state.get("lv003_current_rerun")
+    if not rerun:
+        begin_lv003_hot_path_rerun()
+        rerun = st.session_state.get("lv003_current_rerun") or {}
+    calls = rerun.setdefault("calls", {})
+    key = str(label or "operation")
+    entry = calls.get(key) or {
+        "label": key,
+        "count": 0,
+        "elapsed_ms": 0.0,
+        "from_cache": bool(from_cache),
+        "required": bool(required),
+        "recommendation": recommendation
+        or _lv003_default_recommendation(key, required=required, from_cache=from_cache),
+        "surface": surface,
+        "metadata": {},
+    }
+    entry["count"] = int(entry.get("count") or 0) + 1
+    entry["elapsed_ms"] = round(float(entry.get("elapsed_ms") or 0.0) + float(elapsed_ms or 0.0), 2)
+    entry["from_cache"] = bool(from_cache) or bool(entry.get("from_cache"))
+    if recommendation:
+        entry["recommendation"] = recommendation
+    if surface:
+        entry["surface"] = surface
+    if metadata:
+        entry["metadata"].update(dict(metadata))
+    calls[key] = entry
+
+
+def timed_lv003_hot_path(
+    label,
+    loader,
+    *,
+    from_cache=False,
+    required=True,
+    recommendation=None,
+    surface=None,
+    metadata=None,
+):
+    """Run a callable and record LV-003 hot-path timing for the current rerun."""
+    started = time.perf_counter()
+    try:
+        return loader()
+    finally:
+        record_lv003_hot_path_call(
+            label,
+            (time.perf_counter() - started) * 1000.0,
+            from_cache=from_cache,
+            required=required,
+            recommendation=recommendation,
+            surface=surface,
+            metadata=metadata,
+        )
+
+
+def finalize_lv003_hot_path_rerun(*, active_page=None):
+    """Finalize app.main() timing and persist the latest rerun call tree."""
+    if st is None:
+        return
+    rerun = st.session_state.get("lv003_current_rerun") or {}
+    if not rerun:
+        return
+    if active_page:
+        rerun["active_page"] = active_page
+    main_started = rerun.get("main_started")
+    if main_started is not None:
+        record_lv003_hot_path_call(
+            "app.main",
+            (time.perf_counter() - float(main_started)) * 1000.0,
+            required=True,
+            recommendation="keep",
+            surface="main",
+        )
+    summary = get_lv003_hot_path_call_tree()
+    history = st.session_state.setdefault("lv003_rerun_history", [])
+    history.append(
+        {
+            "seq": rerun.get("seq"),
+            "started_at": rerun.get("started_at"),
+            "active_page": rerun.get("active_page"),
+            "call_count": len(summary),
+            "total_elapsed_ms": round(sum(row.get("elapsed_ms", 0.0) for row in summary), 2),
+            "top_label": summary[0]["label"] if summary else None,
+        }
+    )
+    if len(history) > 20:
+        del history[:-20]
+    st.session_state["lv003_last_rerun_summary"] = summary
+    rerun["finalized"] = True
+
+
+def get_lv003_hot_path_call_tree():
+    """Return the current rerun call tree sorted by elapsed ms."""
+    if st is None:
+        return []
+    rerun = st.session_state.get("lv003_current_rerun") or {}
+    calls = list((rerun.get("calls") or {}).values())
+    return sorted(calls, key=lambda item: item.get("elapsed_ms", 0.0), reverse=True)
+
+
+def get_session_startup_backend_diagnostics():
+    """Session-cache startup backend diagnostics after successful database startup."""
+    if st is None:
+        return get_startup_backend_diagnostics()
+    cached = st.session_state.get("session_startup_backend_diagnostics")
+    if cached is not None:
+        record_lv003_hot_path_call(
+            "database.get_startup_backend_diagnostics",
+            0.0,
+            from_cache=True,
+            required=True,
+            recommendation="cache",
+            surface="startup",
+        )
+        return cached
+    diagnostics = timed_lv003_hot_path(
+        "database.get_startup_backend_diagnostics",
+        get_startup_backend_diagnostics,
+        required=True,
+        recommendation="cache",
+        surface="startup",
+    )
+    startup_status = st.session_state.get("database_startup_status") or {}
+    if startup_status.get("ok"):
+        st.session_state["session_startup_backend_diagnostics"] = diagnostics
+    return diagnostics
+
+
+def get_session_company_subscription_status(company_key):
+    """Session-cache subscription snapshot for ordinary reruns."""
+    if st is None or not company_key:
+        return get_company_subscription_snapshot(company_key)
+    cache_key = f"session_subscription_status:{company_key}"
+    cached = st.session_state.get(cache_key)
+    if cached is not None:
+        record_lv003_hot_path_call(
+            "database.get_company_subscription_snapshot",
+            0.0,
+            from_cache=True,
+            required=True,
+            recommendation="cache",
+            surface="auth",
+        )
+        return cached
+    snapshot = timed_lv003_hot_path(
+        "database.get_company_subscription_snapshot",
+        lambda: get_company_subscription_snapshot(company_key),
+        required=True,
+        recommendation="cache",
+        surface="auth",
+    )
+    st.session_state[cache_key] = snapshot
+    return snapshot
+
+
+def render_lv003_hot_path_panel(role, *, expanded=False, panel_key="lv003_hot_path"):
+    """Admin-only LV-003 Streamlit hot-path call tree for the current rerun."""
+    if not can_view_runtime_admin_diagnostics(role):
+        return
+    call_tree = get_lv003_hot_path_call_tree()
+    with st.expander("LV-003 Streamlit Hot Path (Admin Only)", expanded=expanded):
+        st.caption(
+            "Per-rerun call tree for expensive work. "
+            "Recommendations: keep = required now; cache/defer = session or on-demand; "
+            "remove from hot path = cloud/backup/subscription deep checks."
+        )
+        rerun = st.session_state.get("lv003_current_rerun") or {}
+        st.caption(
+            "Rerun #{seq} | Page: {page} | Tracked calls: {count}".format(
+                seq=rerun.get("seq", "?"),
+                page=rerun.get("active_page") or "(unknown)",
+                count=len(call_tree),
+            )
+        )
+        if call_tree:
+            st.dataframe(
+                pd.DataFrame(
+                    [
+                        {
+                            "label": row.get("label"),
+                            "count": row.get("count"),
+                            "elapsed_ms": row.get("elapsed_ms"),
+                            "from_cache": row.get("from_cache"),
+                            "required": row.get("required"),
+                            "recommendation": row.get("recommendation"),
+                            "surface": row.get("surface"),
+                        }
+                        for row in call_tree
+                    ]
+                ),
+                use_container_width=True,
+                hide_index=True,
+            )
+        history = st.session_state.get("lv003_rerun_history") or []
+        if history:
+            st.markdown("**Recent rerun totals (session)**")
+            st.dataframe(pd.DataFrame(history[-10:]), use_container_width=True, hide_index=True)
+
+
+def get_lv002b_performance_panel_data():
+    """Return lightweight LV-002B session performance summary for admin panels."""
+    events = list(st.session_state.get("lv002b_operation_events") or []) if st is not None else []
+    by_label = {}
+    for event in reversed(events):
+        label = event.get("label")
+        if label and label not in by_label:
+            by_label[label] = event
+    top_slow_ops = sorted(by_label.values(), key=lambda item: item.get("elapsed_ms", 0.0), reverse=True)[:10]
+    surfaces = dict(st.session_state.get("lv002b_surface_timings") or {}) if st is not None else {}
+    return {
+        "login_ms": (surfaces.get("login") or {}).get("elapsed_ms"),
+        "dashboard_load_ms": (surfaces.get("dashboard") or {}).get("elapsed_ms"),
+        "dashboard_rerun_ms": (surfaces.get("dashboard_rerun") or {}).get("elapsed_ms"),
+        "system_health_load_ms": (surfaces.get("system_health") or {}).get("elapsed_ms"),
+        "financial_reports_load_ms": (surfaces.get("financial_reports") or {}).get("elapsed_ms"),
+        "startup_ms": (surfaces.get("startup") or {}).get("elapsed_ms"),
+        "top_slow_ops": top_slow_ops,
+        "cache_stats": get_diagnostics_cache_stats(),
+        "event_count": len(events),
+    }
+
+
+def render_backend_activation_diagnostics_panel(role, *, expanded=False, panel_key="backend_activation"):
+    """Admin-only LV-001E backend activation diagnostics."""
+    if not can_view_runtime_admin_diagnostics(role):
+        return
+    diagnostics = get_backend_activation_diagnostics()
+    admin_message = get_postgres_activation_admin_message()
+    with st.expander("LV-001E Backend Activation Diagnostics (Admin Only)", expanded=expanded):
+        display_row = {
+            key: value
+            for key, value in diagnostics.items()
+            if key not in {"runtime_cutover_guard_reasons", "config_resolution_sources", "startup_reasons"}
+        }
+        st.dataframe(pd.DataFrame([display_row]), use_container_width=True, hide_index=True)
+        st.markdown("**Config resolution sources**")
+        st.dataframe(
+            pd.DataFrame(
+                [
+                    {"setting": setting, "source": source}
+                    for setting, source in (diagnostics.get("config_resolution_sources") or {}).items()
+                ]
+            ),
+            use_container_width=True,
+            hide_index=True,
+        )
+        if diagnostics.get("runtime_cutover_guard_reasons"):
+            st.markdown("**Cutover guard reasons**")
+            st.dataframe(
+                pd.DataFrame(
+                    [{"reason": reason} for reason in diagnostics.get("runtime_cutover_guard_reasons") or []]
+                ),
+                use_container_width=True,
+                hide_index=True,
+            )
+        if admin_message:
+            st.warning(admin_message)
+
+
+def render_lv002_postgres_performance_panel(
+    role,
+    *,
+    company_key=None,
+    branch_id=None,
+    start_date=None,
+    end_date=None,
+    expanded=False,
+    panel_key="lv002_postgres_performance",
+):
+    """Admin-only LV-002B PostgreSQL performance and readiness diagnostics."""
+    if not can_view_runtime_admin_diagnostics(role):
+        return
+    panel_data = get_lv002b_performance_panel_data()
+    with st.expander("LV-002B Runtime Performance (Admin Only)", expanded=expanded):
+        st.caption(
+            "Fast mode excludes subscription/deep backup checks. "
+            "Use System Health → Run full health audit for deep subscription and cloud backup validation."
+        )
+        summary = {
+            "login_ms": panel_data.get("login_ms"),
+            "dashboard_load_ms": panel_data.get("dashboard_load_ms"),
+            "dashboard_rerun_ms": panel_data.get("dashboard_rerun_ms"),
+            "system_health_load_ms": panel_data.get("system_health_load_ms"),
+            "financial_reports_load_ms": panel_data.get("financial_reports_load_ms"),
+            "startup_ms": panel_data.get("startup_ms"),
+            "cache_hits": (panel_data.get("cache_stats") or {}).get("hits"),
+            "cache_misses": (panel_data.get("cache_stats") or {}).get("misses"),
+            "cache_entries": (panel_data.get("cache_stats") or {}).get("entries"),
+            "tracked_events": panel_data.get("event_count"),
+        }
+        st.dataframe(pd.DataFrame([summary]), use_container_width=True, hide_index=True)
+        top_slow = panel_data.get("top_slow_ops") or []
+        if top_slow:
+            st.markdown("**Top slow operations (session)**")
+            st.dataframe(pd.DataFrame(top_slow), use_container_width=True, hide_index=True)
+        if st.button("Run deep PostgreSQL diagnostics", key=f"{panel_key}_deep_diagnostics"):
+            st.session_state[f"{panel_key}_run_deep"] = True
+        if st.session_state.get(f"{panel_key}_run_deep"):
+            conn = get_connection()
+            try:
+                diagnostics = get_lv002_postgres_performance_diagnostics(
+                    conn=conn,
+                    company_key=company_key,
+                    branch_id=branch_id,
+                    start_date=start_date,
+                    end_date=end_date,
+                )
+            finally:
+                if conn:
+                    conn.close()
+            st.markdown("**Deep diagnostics timings (ms)**")
+            st.dataframe(
+                pd.DataFrame(
+                    [{"operation": key, "elapsed_ms": value} for key, value in (diagnostics.get("timings_ms") or {}).items()]
+                ),
+                use_container_width=True,
+                hide_index=True,
+            )
+            deep_top_slow = diagnostics.get("top_slow_operations") or []
+            if deep_top_slow:
+                st.markdown("**Top slow deep operations**")
+                st.dataframe(pd.DataFrame(deep_top_slow), use_container_width=True, hide_index=True)
+            missing = diagnostics.get("runtime_cutover_missing_evidence") or []
+            if missing:
+                st.markdown("**Missing cutover evidence**")
+                st.dataframe(pd.DataFrame(missing), use_container_width=True, hide_index=True)
+            query_timings = diagnostics.get("postgres_query_timings") or []
+            if query_timings:
+                st.markdown("**Recent PostgreSQL query timings**")
+                st.dataframe(pd.DataFrame(query_timings), use_container_width=True, hide_index=True)
+
+
+def get_live_validation_lv001_diagnostics(company_key, branch_id=None, start_date=None, end_date=None):
+    """Collect LV-001 live validation evidence for dashboard and financial report defects."""
+    diagnostics = {
+        "company_key": company_key,
+        "backend_active": get_active_db_backend(),
+        "branch_id": branch_id or "(all branches)",
+        "selected_start_date": start_date.isoformat() if hasattr(start_date, "isoformat") else (str(start_date) if start_date else None),
+        "selected_end_date": end_date.isoformat() if hasattr(end_date, "isoformat") else (str(end_date) if end_date else None),
+    }
+    financials = importlib.import_module("financials")
+    scope = financials._financial_report_runtime_diagnostics(
+        company_key,
+        start_date=start_date,
+        end_date=end_date,
+        branch_id=branch_id,
+    )
+    diagnostics.update(scope)
+
+    report_started = time.perf_counter()
+    trial_balance_df = financials.get_trial_balance(company_key, start_date=start_date, end_date=end_date)
+    income_statement_df = financials.get_income_statement(company_key, start_date=start_date, end_date=end_date)
+    balance_sheet_df = financials.get_balance_sheet(company_key, start_date=start_date, end_date=end_date)
+    diagnostics["financial_report_query_ms"] = round((time.perf_counter() - report_started) * 1000.0, 2)
+    diagnostics["trial_balance_rows"] = int(len(trial_balance_df))
+    diagnostics["income_statement_rows"] = int(len(income_statement_df))
+    diagnostics["balance_sheet_rows"] = int(len(balance_sheet_df))
+    diagnostics["report_trial_balance_empty"] = bool(trial_balance_df.empty)
+    diagnostics["report_income_statement_empty"] = bool(income_statement_df.empty)
+    diagnostics["report_balance_sheet_empty"] = bool(balance_sheet_df.empty)
+
+    dashboard_started = time.perf_counter()
+    analytics_bundle = _cached_dashboard_analytics_bundle(
+        company_key,
+        str(branch_id or ""),
+        datetime.now().strftime("%Y-%m-%d"),
+    )
+    diagnostics["dashboard_query_ms"] = round((time.perf_counter() - dashboard_started) * 1000.0, 2)
+    sales = analytics_bundle.get("sales") or {}
+    daily_sales_df = pd.DataFrame(sales.get("daily_sales") or [])
+    if not daily_sales_df.empty:
+        daily_sales_df = daily_sales_df.set_index("sale_day")[["sales_total"]]
+    top_items_df = pd.DataFrame(sales.get("top_items") or [])
+    if not top_items_df.empty:
+        top_items_df = top_items_df.set_index("item_name")[["qty_sold"]]
+    payment_df = pd.DataFrame(sales.get("payment_methods") or [])
+    if not payment_df.empty:
+        payment_df = payment_df.set_index("payment_method")[["sales_total"]]
+    diagnostics["dashboard_data_source"] = sales.get("data_source") or ("pos_sales" if sales.get("has_pos_data") else "none")
+    diagnostics["chart_daily_sales_empty"] = not _dashboard_chart_has_data(_normalize_dashboard_chart_dataframe(daily_sales_df))
+    diagnostics["chart_top_items_empty"] = not _dashboard_chart_has_data(_normalize_dashboard_chart_dataframe(top_items_df))
+    diagnostics["chart_payment_methods_empty"] = not _dashboard_chart_has_data(_normalize_dashboard_chart_dataframe(payment_df))
+    diagnostics["postgres_query_timings"] = get_postgres_query_timings(limit=10)
+    return diagnostics
+
+
 @st.cache_data(ttl=120, show_spinner=False)
 def _cached_dashboard_analytics_bundle(company_key, branch_id_key, period_key):
     conn = get_connection()
@@ -16768,6 +17427,7 @@ def _render_dashboard_chart_card(
     st.markdown(f"**{title}**")
     if caption:
         st.caption(caption)
+    chart_df = _normalize_dashboard_chart_dataframe(chart_df)
     if not _dashboard_chart_has_data(chart_df):
         _render_dashboard_empty_state(
             empty_message or "No data available for this view yet.",
@@ -16802,6 +17462,8 @@ def _render_dashboard_balance_card(title, rows, *, empty_message, empty_hint=Non
 
 def show_dashboard(company_key, company_name, role):
     """Executive operational dashboard with cached analytics snapshots."""
+    dashboard_started = time.perf_counter()
+    dashboard_surface = "dashboard_rerun" if st.session_state.get("_dashboard_loaded_once") else "dashboard"
     render_ui_standard_styles()
     page_header("📊 Enterprise Dashboard", f"Operational intelligence for {company_name}")
     enforce_branch_session_lock(st.session_state.get("user"))
@@ -16839,6 +17501,19 @@ def show_dashboard(company_key, company_name, role):
         demo_row2[3].metric("Cash/Bank Balance", format_currency(18250.0))
         st.markdown("</div>", unsafe_allow_html=True)
         st.info("Demo mode shows sample executive metrics. Live analytics are available in company workspaces.")
+        st.session_state["_dashboard_loaded_once"] = True
+        record_lv002b_operation(
+            "dashboard.load",
+            (time.perf_counter() - dashboard_started) * 1000.0,
+            surface=dashboard_surface,
+        )
+        record_lv003_hot_path_call(
+            "modules.show_dashboard",
+            (time.perf_counter() - dashboard_started) * 1000.0,
+            required=True,
+            recommendation="keep",
+            surface="dashboard",
+        )
         return
 
     try:
@@ -17049,6 +17724,32 @@ def show_dashboard(company_key, company_name, role):
                 column_labels={"name": "Supplier", "balance": "Balance"},
             )
 
+        render_backend_activation_diagnostics_panel(role, expanded=False)
+        render_lv002_postgres_performance_panel(
+            role,
+            company_key=company_key,
+            branch_id=active_branch_id,
+            expanded=False,
+        )
+        render_lv003_hot_path_panel(role, expanded=False)
+
+        if can_view_runtime_admin_diagnostics(role):
+            with st.expander("LV-001 Live Validation Diagnostics (Admin Only)", expanded=False):
+                lv001 = get_live_validation_lv001_diagnostics(
+                    company_key,
+                    branch_id=active_branch_id,
+                )
+                st.dataframe(
+                    pd.DataFrame(
+                        [{key: value for key, value in lv001.items() if key != "postgres_query_timings"}]
+                    ),
+                    use_container_width=True,
+                    hide_index=True,
+                )
+                if lv001.get("postgres_query_timings"):
+                    st.markdown("**PostgreSQL Read Timings (Recent)**")
+                    st.dataframe(pd.DataFrame(lv001["postgres_query_timings"]), use_container_width=True, hide_index=True)
+
         st.markdown('<div class="dashboard-section-title">Live Activity</div>', unsafe_allow_html=True)
         conn = None
         try:
@@ -17080,12 +17781,13 @@ def show_dashboard(company_key, company_name, role):
                     ]
                     st.dataframe(format_currency_dataframe(recent_txns), use_container_width=True, hide_index=True)
                 st.markdown("</div>", unsafe_allow_html=True)
-            compare_legacy_and_journal_totals(
-                company_key,
-                branch_id=active_branch_id,
-                logger_instance=logger,
-                conn=conn,
-            )
+            with st.expander("Legacy vs Journal Validation", expanded=False):
+                compare_legacy_and_journal_totals(
+                    company_key,
+                    branch_id=active_branch_id,
+                    logger_instance=logger,
+                    conn=conn,
+                )
             with right_col:
                 st.markdown('<div class="eka-card">', unsafe_allow_html=True)
                 st.markdown("**Low Stock Items**")
@@ -17134,6 +17836,19 @@ def show_dashboard(company_key, company_name, role):
         if action_col5.button("📊 Data Analytics", key=f"dashboard_reports_{company_key}", use_container_width=True):
             st.session_state.page = "Data Analytics"
             st.rerun()
+        st.session_state["_dashboard_loaded_once"] = True
+        record_lv002b_operation(
+            "dashboard.load",
+            (time.perf_counter() - dashboard_started) * 1000.0,
+            surface=dashboard_surface,
+        )
+        record_lv003_hot_path_call(
+            "modules.show_dashboard",
+            (time.perf_counter() - dashboard_started) * 1000.0,
+            required=True,
+            recommendation="keep",
+            surface="dashboard",
+        )
     except Exception as exc:
         st.error(build_user_safe_error(exc, st.session_state.get("user", {}).get("role")))
 

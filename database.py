@@ -3,6 +3,7 @@ import sqlite3
 import logging
 import random
 import string
+import importlib
 from datetime import datetime, timedelta
 import os
 import shutil
@@ -440,6 +441,15 @@ def get_schema_manifest_diagnostics(conn=None):
     Compare the live database schema with the manifest.
     This is diagnostic-only and never creates, drops, or rewrites data.
     """
+    cache_key = f"schema_manifest_diagnostics:{get_active_db_backend()}:{SCHEMA_MANIFEST_VERSION}"
+    return diagnostics_ttl_cache(
+        cache_key,
+        90,
+        lambda: _build_schema_manifest_diagnostics(conn),
+    )
+
+
+def _build_schema_manifest_diagnostics(conn=None):
     owns_connection = conn is None
     diagnostics_conn = conn
     if diagnostics_conn is None:
@@ -669,8 +679,25 @@ def _scan_postgres_readiness_sources():
     return findings
 
 
-def get_postgres_readiness_diagnostics(conn=None):
+_POSTGRES_READINESS_SOURCE_SCAN_CACHE = {"signature": None, "findings": None}
+
+
+def _cached_scan_postgres_readiness_sources():
+    signature = []
+    for relative_path in POSTGRES_AUDIT_FILES:
+        file_path = os.path.join(BASE_DIR, relative_path)
+        if os.path.exists(file_path):
+            signature.append((relative_path, os.path.getmtime(file_path), os.path.getsize(file_path)))
+    signature_tuple = tuple(signature)
+    if _POSTGRES_READINESS_SOURCE_SCAN_CACHE["signature"] == signature_tuple:
+        return _POSTGRES_READINESS_SOURCE_SCAN_CACHE["findings"]
     findings = _scan_postgres_readiness_sources()
+    _POSTGRES_READINESS_SOURCE_SCAN_CACHE["signature"] = signature_tuple
+    _POSTGRES_READINESS_SOURCE_SCAN_CACHE["findings"] = findings
+    return findings
+
+
+def _postgres_code_portability_blockers(findings):
     blocker_keys = {
         "direct_sqlite3_usage",
         "pragma_usage",
@@ -681,7 +708,7 @@ def get_postgres_readiness_diagnostics(conn=None):
         "sqlite_master_usage",
         "db_path_file_assumption",
     }
-    blockers = [
+    return [
         {
             "key": key,
             "count": len(rows),
@@ -690,31 +717,90 @@ def get_postgres_readiness_diagnostics(conn=None):
         for key, rows in sorted(findings.items())
         if rows and key in blocker_keys
     ]
-    warning_count = sum(len(rows) for rows in findings.values())
+
+
+def _compute_code_portability_readiness_score(findings):
+    blockers = _postgres_code_portability_blockers(findings)
     blocker_count = sum(item["count"] for item in blockers)
-    score = max(0, 100 - min(85, blocker_count * 2) - min(15, max(0, warning_count - blocker_count) // 10))
+    warning_count = sum(len(rows) for rows in findings.values())
+    return max(0, 100 - min(85, blocker_count * 2) - min(15, max(0, warning_count - blocker_count) // 10))
+
+
+def _compute_runtime_cutover_readiness_score(cutover_guard):
+    evidence = cutover_guard.get("evidence") or {}
+    evidence_items = [
+        payload
+        for key, payload in evidence.items()
+        if key != "all_required_evidence_present" and isinstance(payload, dict)
+    ]
+    if not evidence_items:
+        return 0
+    passed = sum(1 for payload in evidence_items if payload.get("required_markers_present"))
+    return int(round((passed / len(evidence_items)) * 100))
+
+
+def _runtime_cutover_missing_evidence(cutover_guard):
+    missing = []
+    evidence = cutover_guard.get("evidence") or {}
+    for key, payload in evidence.items():
+        if key == "all_required_evidence_present" or not isinstance(payload, dict):
+            continue
+        if not payload.get("required_markers_present"):
+            missing.append(
+                {
+                    "evidence_key": key,
+                    "report": payload.get("report"),
+                    "status": payload.get("status"),
+                    "missing_markers": list(payload.get("missing_markers") or []),
+                }
+            )
+    return missing
+
+
+def get_postgres_readiness_diagnostics(conn=None, include_table_introspection=False):
+    active_backend = get_active_db_backend()
+    cutover_guard = validate_postgres_runtime_cutover_guard()
+    findings = _cached_scan_postgres_readiness_sources() if active_backend != "postgres" else {}
+    blockers = _postgres_code_portability_blockers(findings) if findings else []
+    code_portability_score = _compute_code_portability_readiness_score(findings) if findings else None
+    if active_backend == "postgres":
+        readiness_score = _compute_runtime_cutover_readiness_score(cutover_guard)
+        switch_blocked = not bool(cutover_guard.get("ok"))
+        readiness_mode = "runtime_cutover_evidence"
+        runtime_blockers = _runtime_cutover_missing_evidence(cutover_guard)
+    else:
+        readiness_score = code_portability_score if findings else 0
+        switch_blocked = bool(blockers) or active_backend != "postgres"
+        readiness_mode = "code_portability_audit"
+        runtime_blockers = []
     table_notes = {}
     owns_connection = conn is None
     diagnostics_conn = conn
-    try:
-        diagnostics_conn = diagnostics_conn or get_connection()
-        if diagnostics_conn:
-            tables = list_tables(diagnostics_conn)
-            for table_name in tables:
-                columns = list_columns(diagnostics_conn, table_name)
-                pk_columns = [column["name"] for column in columns if column.get("primary_key")]
-                column_names = {column["name"] for column in columns}
-                table_notes[table_name] = {
-                    "has_primary_key": bool(pk_columns),
-                    "primary_key_columns": pk_columns,
-                    "has_created_at": "created_at" in column_names,
-                    "has_updated_at": "updated_at" in column_names,
-                }
-    except Exception as exc:
-        table_notes["_error"] = {"reason": sanitize_error_message(exc)}
-    finally:
-        if owns_connection and diagnostics_conn:
-            diagnostics_conn.close()
+    if include_table_introspection or active_backend != "postgres":
+        try:
+            diagnostics_conn = diagnostics_conn or get_connection()
+            if diagnostics_conn:
+                tables = list_tables(diagnostics_conn)
+                for table_name in tables:
+                    columns = list_columns(diagnostics_conn, table_name)
+                    pk_columns = [column["name"] for column in columns if column.get("primary_key")]
+                    column_names = {column["name"] for column in columns}
+                    table_notes[table_name] = {
+                        "has_primary_key": bool(pk_columns),
+                        "primary_key_columns": pk_columns,
+                        "has_created_at": "created_at" in column_names,
+                        "has_updated_at": "updated_at" in column_names,
+                    }
+        except Exception as exc:
+            table_notes["_error"] = {"reason": sanitize_error_message(exc)}
+        finally:
+            if owns_connection and diagnostics_conn:
+                diagnostics_conn.close()
+    elif active_backend == "postgres":
+        table_notes["_summary"] = {
+            "introspection": "skipped_on_runtime_hot_path",
+            "reason": "Use admin LV-002 diagnostics for full PostgreSQL table introspection.",
+        }
 
     source_document_unique_constraints_needed = [
         "journal_entries(company_key, source_table, source_id, source_type)",
@@ -729,27 +815,355 @@ def get_postgres_readiness_diagnostics(conn=None):
     ]
     return {
         "configured_backend": get_db_backend(),
-        "active_backend": get_active_db_backend(),
+        "active_backend": active_backend,
         "database_url_configured": bool(_get_database_url()),
         "database_url_label": _redact_database_url(_get_database_url()),
         "supabase_sslmode": _postgres_sslmode(_get_database_url()) or "missing",
         "postgres_runtime_enabled": is_postgres_runtime_enabled(),
         "sqlite_concurrency_warning": (
             "SQLite is suitable for pilot/small-client use but not high-concurrency enterprise deployment."
-            if get_active_db_backend() == "sqlite"
+            if active_backend == "sqlite"
             else ""
         ),
-        "readiness_score": score,
-        "blockers": blockers,
+        "readiness_mode": readiness_mode,
+        "readiness_score": readiness_score,
+        "code_portability_score": code_portability_score,
+        "blockers": runtime_blockers if active_backend == "postgres" else blockers,
+        "code_portability_blockers": blockers,
+        "code_portability_warning_count": sum(len(rows) for rows in findings.values()) if findings else 0,
+        "runtime_cutover_guard_ok": bool(cutover_guard.get("ok")),
+        "runtime_cutover_missing_evidence": runtime_blockers,
+        "schema_deployment_status": cutover_guard.get("schema_deployment_status"),
+        "row_reconciliation_status": cutover_guard.get("row_reconciliation_status"),
+        "runtime_readiness_status": cutover_guard.get("runtime_readiness_status"),
+        "runtime_dryrun_status": cutover_guard.get("runtime_dryrun_status"),
         "sqlite_only_constructs": {key: len(rows) for key, rows in findings.items() if rows},
         "table_readiness": table_notes,
         "source_document_unique_constraints_needed": source_document_unique_constraints_needed,
         "journal_indexes_needed": journal_indexes_needed,
-        "switch_blocked": bool(blockers) or get_active_db_backend() != "postgres",
+        "switch_blocked": switch_blocked,
     }
 
 
-def get_data_migration_export_plan(conn=None):
+def _get_active_runtime_health_snapshot(conn=None, logger_instance=None):
+    """Return runtime health for the active backend without opening SQLite when PostgreSQL is active."""
+    logger_instance = logger_instance or logger
+    if is_postgres_backend():
+        owns_connection = conn is None
+        diagnostics_conn = conn
+        snapshot = {
+            "db_path": None,
+            "backend": "postgres",
+            "backend_label": "PostgreSQL",
+            "file_size_bytes": None,
+            "file_exists": None,
+            "sqlite_open_success": None,
+            "structural_valid": False,
+            "production_ready": False,
+            "company_count": 0,
+            "database_uuid": None,
+            "schema_version": None,
+            "database_created_at": None,
+            "last_startup_at": None,
+            "environment_label": _get_runtime_environment_label() or "unknown",
+            "required_tables_exist": False,
+            "missing_tables": [],
+            "companies_table_exists": False,
+            "database_identity_exists": False,
+            "schema_version_exists": False,
+            "readiness_failures": [],
+        }
+        try:
+            diagnostics_conn = diagnostics_conn or get_connection()
+            if diagnostics_conn:
+                company_row = diagnostics_conn.execute("SELECT COUNT(*) AS company_count FROM companies").fetchone()
+                snapshot["company_count"] = int(company_row["company_count"] or 0) if company_row else 0
+                snapshot["companies_table_exists"] = db_table_exists(diagnostics_conn, "companies")
+                snapshot["required_tables_exist"] = snapshot["companies_table_exists"]
+                snapshot["structural_valid"] = True
+                snapshot["production_ready"] = snapshot["companies_table_exists"]
+        except Exception as exc:
+            snapshot["readiness_failures"] = [sanitize_error_message(exc)]
+            logger_instance.warning("PostgreSQL runtime health snapshot failed: %s", sanitize_error_message(exc))
+        finally:
+            if owns_connection and diagnostics_conn:
+                diagnostics_conn.close()
+        return snapshot
+    return get_database_health_snapshot(DB_PATH, logger_instance=logger_instance)
+
+
+def _get_fast_runtime_health_snapshot(conn=None, logger_instance=None):
+    """Lightweight runtime health using the active connection only (no SQLite file or cloud scans)."""
+    logger_instance = logger_instance or logger
+    owns_connection = conn is None
+    diagnostics_conn = conn
+    snapshot = {
+        "db_path": None if is_postgres_backend() else DB_PATH,
+        "backend": get_active_db_backend(),
+        "backend_label": "PostgreSQL" if is_postgres_backend() else "SQLite",
+        "company_count": 0,
+        "structural_valid": False,
+        "production_ready": False,
+        "missing_tables": [],
+        "environment_label": _get_runtime_environment_label() or "unknown",
+    }
+    try:
+        diagnostics_conn = diagnostics_conn or get_connection()
+        if diagnostics_conn:
+            company_row = diagnostics_conn.execute("SELECT COUNT(*) AS company_count FROM companies").fetchone()
+            snapshot["company_count"] = int(company_row["company_count"] or 0) if company_row else 0
+            snapshot["companies_table_exists"] = db_table_exists(diagnostics_conn, "companies")
+            snapshot["structural_valid"] = snapshot["companies_table_exists"]
+            snapshot["production_ready"] = snapshot["companies_table_exists"]
+    except Exception as exc:
+        logger_instance.warning("Fast runtime health snapshot failed: %s", sanitize_error_message(exc))
+    finally:
+        if owns_connection and diagnostics_conn:
+            diagnostics_conn.close()
+    return snapshot
+
+
+def get_data_migration_export_plan_summary(conn=None):
+    """Fast migration-plan summary: table names/count only, no per-table column introspection."""
+    owns_connection = conn is None
+    diagnostics_conn = conn
+    table_names = []
+    try:
+        diagnostics_conn = diagnostics_conn or get_connection()
+        if diagnostics_conn:
+            table_names = list_tables(diagnostics_conn)
+    finally:
+        if owns_connection and diagnostics_conn:
+            diagnostics_conn.close()
+    return {
+        "mode": "fast_summary",
+        "tables": [{"table": table_name, "row_count": None, "columns": None} for table_name in table_names],
+        "table_count": len(table_names),
+        "export_order": [],
+        "foreign_key_risk_notes": [],
+        "fast_snapshot": True,
+    }
+
+
+def build_fast_runtime_ping(conn):
+    """Single active-runtime ping using an existing connection; no file/cloud/schema scans."""
+    backend_label = "PostgreSQL" if is_postgres_backend() else "SQLite"
+    ping = {
+        "company_count": None,
+        "structural_valid": False,
+        "production_ready": False,
+        "ping_ok": False,
+        "backend_label": backend_label,
+        "active_backend": get_active_db_backend(),
+        "environment_label": _get_runtime_environment_label() or "unknown",
+    }
+    if conn is None:
+        return ping
+    try:
+        conn.execute("SELECT 1 AS ping_ok").fetchone()
+        company_row = conn.execute("SELECT COUNT(*) AS company_count FROM companies").fetchone()
+        company_count = int(company_row["company_count"] or 0) if company_row else 0
+        ping.update(
+            {
+                "company_count": company_count,
+                "structural_valid": True,
+                "production_ready": True,
+                "ping_ok": True,
+            }
+        )
+    except Exception as exc:
+        logger.warning("Fast runtime ping failed: %s", sanitize_error_message(exc))
+    return ping
+
+
+def build_persistence_diagnostics_fast_from_ping(runtime_ping):
+    """Assemble fast persistence diagnostics from a runtime ping and cached status only."""
+    runtime_ping = runtime_ping or {}
+    return {
+        "canonical_db_path": None if is_postgres_backend() else DB_PATH,
+        "db_backend": runtime_ping.get("backend_label") or get_active_db_backend(),
+        "db_file_size_bytes": None,
+        "database_uuid": None,
+        "local_db_uuid": None,
+        "schema_version": None,
+        "database_created_at": None,
+        "last_startup_at": None,
+        "environment_label": runtime_ping.get("environment_label"),
+        "runtime_mode": get_runtime_mode(),
+        "force_cloud_restore_enabled": is_force_cloud_restore_enabled(),
+        "cloud_restore_disabled_due_to_tests": is_test_runtime(),
+        "cloud_upload_disabled_due_to_tests": is_test_runtime(),
+        "has_suspicious_companies": False,
+        "suspicious_companies": [],
+        "suspicious_company_count": 0,
+        "local_db_valid": bool(runtime_ping.get("structural_valid")),
+        "production_ready": bool(runtime_ping.get("production_ready")),
+        "company_count": runtime_ping.get("company_count"),
+        "required_tables_missing": [],
+        "latest_backup_upload_status": LAST_BACKUP_STATUS.get("status"),
+        "last_backup_timestamp": LAST_BACKUP_STATUS.get("timestamp"),
+        "last_backup_reason": LAST_BACKUP_STATUS.get("reason"),
+        "latest_cloud_backup_status": LAST_BACKUP_STATUS.get("status") or "fast_snapshot_not_verified",
+        "last_cloud_backup_timestamp": LAST_BACKUP_STATUS.get("timestamp"),
+        "last_cloud_backup_reason": LAST_BACKUP_STATUS.get("reason") or "fast_snapshot_skipped_network",
+        "cloud_object_path": LAST_BACKUP_STATUS.get("latest_object") or FIREBASE_OBJECT_NAME,
+        "history_object_path": LAST_BACKUP_STATUS.get("history_object"),
+        "latest_local_backup_status": "fast_snapshot_skipped",
+        "last_local_backup_timestamp": None,
+        "last_local_backup_reason": "fast_snapshot_skipped_file_scan",
+        "local_backup_latest_path": None,
+        "local_backup_history_path": None,
+        "local_backup_company_count": None,
+        "local_backup_last_modified": None,
+        "local_backup_production_ready": None,
+        "local_backup_reason": "fast_snapshot_skipped_file_scan",
+        "local_cloud_backup_mismatch": False,
+        "restore_source_used_at_startup": LAST_RESTORE_SOURCE,
+        "restore_skipped_reason": LAST_CLOUD_RESTORE_SKIP_REASON,
+        "upload_blocked_reason": LAST_CLOUD_UPLOAD_BLOCK_REASON,
+        "bucket_name": None,
+        "cloud_backup_company_count": None,
+        "cloud_backup_last_modified": None,
+        "cloud_backup_database_uuid": None,
+        "cloud_db_uuid": None,
+        "cloud_backup_newer_than_local": None,
+        "cloud_backup_reason": "fast_snapshot_skipped_network",
+        "recovery_source_checked": False,
+        "fast_snapshot": True,
+        "postgres_runtime_active": is_postgres_backend(),
+    }
+
+
+def build_persistence_self_test_fast_from_ping(runtime_ping):
+    """Fast persistence self-test: runtime ping only, no backup/file/cloud validation."""
+    runtime_ping = runtime_ping or {}
+    return {
+        "ok": bool(runtime_ping.get("ping_ok")),
+        "local_company_count": int(runtime_ping.get("company_count") or 0),
+        "local_backup_company_count": None,
+        "cloud_backup_company_count": None,
+        "latest_local_backup_path": None,
+        "latest_backup_object_path": None,
+        "last_local_backup_time": None,
+        "last_cloud_backup_time": None,
+        "last_backup_time": None,
+        "mismatch": False,
+        "local_cloud_mismatch": False,
+        "runtime_cloud_mismatch": False,
+        "runtime_local_backup_mismatch": False,
+        "fast_snapshot": True,
+        "reason": "fast_runtime_ping_only",
+    }
+
+
+def get_persistence_diagnostics_fast(conn=None, runtime_ping=None):
+    ping = runtime_ping or (build_fast_runtime_ping(conn) if conn is not None else None)
+    if ping is not None:
+        return build_persistence_diagnostics_fast_from_ping(ping)
+    return diagnostics_ttl_cache(
+        f"persistence_diagnostics_fast:{get_active_db_backend()}",
+        60,
+        _build_persistence_diagnostics_fast_legacy,
+    )
+
+
+def _build_persistence_diagnostics_fast_legacy():
+    runtime_health = _get_fast_runtime_health_snapshot(logger_instance=logger)
+    return build_persistence_diagnostics_fast_from_ping(
+        {
+            "company_count": runtime_health.get("company_count"),
+            "structural_valid": runtime_health.get("structural_valid"),
+            "production_ready": runtime_health.get("production_ready"),
+            "backend_label": runtime_health.get("backend_label"),
+            "environment_label": runtime_health.get("environment_label"),
+            "ping_ok": runtime_health.get("structural_valid"),
+        }
+    )
+
+
+def get_lv002_postgres_performance_diagnostics(
+    conn=None,
+    company_key=None,
+    branch_id=None,
+    start_date=None,
+    end_date=None,
+):
+    """Measure LV-002 admin diagnostics timings for PostgreSQL runtime performance triage."""
+    timings_ms = {}
+    owns_connection = conn is None
+    diagnostics_conn = conn
+
+    started = time.perf_counter()
+    diagnostics_conn = diagnostics_conn or get_connection()
+    timings_ms["connection_creation_ms"] = round((time.perf_counter() - started) * 1000.0, 2)
+
+    started = time.perf_counter()
+    startup_guard = get_startup_backend_diagnostics()
+    timings_ms["startup_guard_ms"] = round((time.perf_counter() - started) * 1000.0, 2)
+
+    started = time.perf_counter()
+    cutover_guard = validate_postgres_runtime_cutover_guard()
+    timings_ms["cutover_guard_ms"] = round((time.perf_counter() - started) * 1000.0, 2)
+
+    started = time.perf_counter()
+    readiness = get_postgres_readiness_diagnostics(conn=diagnostics_conn, include_table_introspection=False)
+    timings_ms["postgres_readiness_ms"] = round((time.perf_counter() - started) * 1000.0, 2)
+
+    started = time.perf_counter()
+    persistence = get_persistence_diagnostics()
+    timings_ms["backup_diagnostics_ms"] = round((time.perf_counter() - started) * 1000.0, 2)
+
+    started = time.perf_counter()
+    schema_diag = get_schema_manifest_diagnostics(diagnostics_conn)
+    timings_ms["schema_manifest_ms"] = round((time.perf_counter() - started) * 1000.0, 2)
+
+    started = time.perf_counter()
+    get_data_migration_export_plan(conn=diagnostics_conn, include_row_counts=False)
+    timings_ms["data_migration_plan_ms"] = round((time.perf_counter() - started) * 1000.0, 2)
+
+    dashboard_ms = None
+    report_ms = None
+    if company_key:
+        modules = importlib.import_module("modules")
+        dashboard_started = time.perf_counter()
+        modules._cached_dashboard_analytics_bundle(
+            company_key,
+            str(branch_id or ""),
+            datetime.now().strftime("%Y-%m-%d"),
+        )
+        dashboard_ms = round((time.perf_counter() - dashboard_started) * 1000.0, 2)
+        timings_ms["dashboard_queries_ms"] = dashboard_ms
+
+        financials = importlib.import_module("financials")
+        report_started = time.perf_counter()
+        financials.get_trial_balance(company_key, start_date=start_date, end_date=end_date)
+        financials.get_income_statement(company_key, start_date=start_date, end_date=end_date)
+        financials.get_balance_sheet(company_key, start_date=start_date, end_date=end_date)
+        report_ms = round((time.perf_counter() - report_started) * 1000.0, 2)
+        timings_ms["report_queries_ms"] = report_ms
+
+    if owns_connection and diagnostics_conn:
+        diagnostics_conn.close()
+
+    top_slow = sorted(timings_ms.items(), key=lambda item: item[1], reverse=True)[:10]
+    return {
+        "active_backend": get_active_db_backend(),
+        "configured_backend": get_db_backend(),
+        "timings_ms": timings_ms,
+        "top_slow_operations": [{"operation": name, "elapsed_ms": elapsed} for name, elapsed in top_slow],
+        "startup_guard": startup_guard,
+        "cutover_guard_ok": bool(cutover_guard.get("ok")),
+        "readiness_mode": readiness.get("readiness_mode"),
+        "readiness_score": readiness.get("readiness_score"),
+        "runtime_cutover_missing_evidence": readiness.get("runtime_cutover_missing_evidence") or [],
+        "code_portability_score": readiness.get("code_portability_score"),
+        "postgres_query_timings": get_postgres_query_timings(limit=10),
+        "persistence_backend": persistence.get("db_backend"),
+        "schema_manifest_ok": bool(schema_diag.get("ok")),
+    }
+
+
+def get_data_migration_export_plan(conn=None, include_row_counts=True, include_columns=True):
     owns_connection = conn is None
     diagnostics_conn = conn
     tables = []
@@ -757,12 +1171,17 @@ def get_data_migration_export_plan(conn=None):
         diagnostics_conn = diagnostics_conn or get_connection()
         if diagnostics_conn:
             for table_name in list_tables(diagnostics_conn):
-                count_row = diagnostics_conn.execute(f"SELECT COUNT(*) AS row_count FROM {table_name}").fetchone()
-                columns = [column["name"] for column in list_columns(diagnostics_conn, table_name)]
+                row_count = None
+                if include_row_counts:
+                    count_row = diagnostics_conn.execute(f"SELECT COUNT(*) AS row_count FROM {table_name}").fetchone()
+                    row_count = int(count_row["row_count"] or 0)
+                columns = None
+                if include_columns:
+                    columns = [column["name"] for column in list_columns(diagnostics_conn, table_name)]
                 tables.append(
                     {
                         "table": table_name,
-                        "row_count": int(count_row["row_count"] or 0),
+                        "row_count": row_count,
                         "columns": columns,
                     }
                 )
@@ -802,18 +1221,183 @@ def get_data_migration_export_plan(conn=None):
     }
 
 
+def _runtime_secret_sections():
+    return ("database", "postgres", "runtime", "supabase")
+
+
+def _normalize_runtime_secret_value(value):
+    if value in (None, ""):
+        return None
+    normalized = str(value).strip()
+    return normalized or None
+
+
 def _read_runtime_secret(secret_name, default=None):
-    env_value = os.getenv(secret_name)
-    if env_value not in (None, ""):
+    env_value = _normalize_runtime_secret_value(os.getenv(secret_name))
+    if env_value is not None:
         return env_value
     if st is None:
         return default
     try:
         if secret_name in st.secrets:
-            return st.secrets[secret_name]
+            secret_value = _normalize_runtime_secret_value(st.secrets[secret_name])
+            if secret_value is not None:
+                return secret_value
+        for section_name in _runtime_secret_sections():
+            try:
+                section_obj = st.secrets.get(section_name)
+            except Exception:
+                section_obj = None
+            if not section_obj:
+                continue
+            try:
+                if secret_name in section_obj:
+                    secret_value = _normalize_runtime_secret_value(section_obj[secret_name])
+                    if secret_value is not None:
+                        return secret_value
+            except Exception:
+                continue
     except Exception:
         return default
     return default
+
+
+def _probe_secret_resolution_source(secret_name):
+    env_value = _normalize_runtime_secret_value(os.getenv(secret_name))
+    if env_value is not None:
+        return "os.environ"
+    if st is None:
+        return "default_or_unset"
+    try:
+        if secret_name in st.secrets:
+            secret_value = _normalize_runtime_secret_value(st.secrets[secret_name])
+            if secret_value is not None:
+                return "st.secrets.top_level"
+        for section_name in _runtime_secret_sections():
+            try:
+                section_obj = st.secrets.get(section_name)
+            except Exception:
+                section_obj = None
+            if not section_obj:
+                continue
+            try:
+                if secret_name in section_obj:
+                    secret_value = _normalize_runtime_secret_value(section_obj[secret_name])
+                    if secret_value is not None:
+                        return f"st.secrets.{section_name}"
+            except Exception:
+                continue
+    except Exception:
+        return "default_or_unset"
+    return "default_or_unset"
+
+
+def _postgres_activation_blockers():
+    blockers = []
+    configured_backend = get_configured_db_backend()
+    runtime_enabled = is_postgres_runtime_enabled()
+    database_url = get_database_url()
+    if configured_backend != "postgres":
+        blockers.append("DB_BACKEND is not configured as postgres.")
+    if not runtime_enabled:
+        blockers.append("ERP_ENABLE_POSTGRES_RUNTIME is not enabled.")
+    if not database_url:
+        blockers.append("DATABASE_URL is missing or empty.")
+    return blockers
+
+
+def get_backend_activation_diagnostics():
+    """Focused backend activation evidence for LV-001E without exposing DATABASE_URL."""
+    configured_backend = get_configured_db_backend()
+    active_backend = get_active_db_backend()
+    runtime_enabled = is_postgres_runtime_enabled()
+    database_url = get_database_url()
+    startup = get_startup_backend_diagnostics()
+    cutover = validate_postgres_runtime_cutover_guard()
+    resolution_sources = {
+        "DB_BACKEND": _probe_secret_resolution_source("DB_BACKEND"),
+        "ERP_ENABLE_POSTGRES_RUNTIME": _probe_secret_resolution_source("ERP_ENABLE_POSTGRES_RUNTIME"),
+        "ERP_ENVIRONMENT": _probe_secret_resolution_source("ERP_ENVIRONMENT"),
+        "DATABASE_URL": _probe_secret_resolution_source("DATABASE_URL"),
+    }
+    source_values = set(resolution_sources.values())
+    reading_os_env = "os.environ" in source_values
+    reading_streamlit_secrets = any(str(value).startswith("st.secrets") for value in source_values)
+    if reading_os_env and not reading_streamlit_secrets:
+        config_resolution_channel = "os.environ"
+    elif reading_streamlit_secrets and not reading_os_env:
+        config_resolution_channel = "st.secrets"
+    elif reading_os_env and reading_streamlit_secrets:
+        config_resolution_channel = "mixed"
+    else:
+        config_resolution_channel = "default_or_unset"
+    activation_blockers = _postgres_activation_blockers()
+    cutover_guard_blocked = bool(
+        configured_backend == "postgres"
+        and runtime_enabled
+        and database_url
+        and not cutover.get("ok")
+    )
+    return {
+        "os_db_backend": os.getenv("DB_BACKEND"),
+        "os_erp_enable_postgres_runtime": os.getenv("ERP_ENABLE_POSTGRES_RUNTIME"),
+        "os_erp_environment": os.getenv("ERP_ENVIRONMENT"),
+        "database_url_present": bool(database_url),
+        "configured_backend": configured_backend,
+        "active_backend": active_backend,
+        "postgres_runtime_enabled": runtime_enabled,
+        "reason_postgres_not_activated": "; ".join(activation_blockers) if active_backend != "postgres" else "",
+        "cutover_guard_blocked": cutover_guard_blocked,
+        "runtime_cutover_guard_ok": bool(cutover.get("ok")),
+        "runtime_cutover_guard_reasons": list(cutover.get("reasons") or []),
+        "config_resolution_sources": resolution_sources,
+        "config_resolution_channel": config_resolution_channel,
+        "reading_os_env": reading_os_env,
+        "reading_streamlit_secrets": reading_streamlit_secrets,
+        "environment_label": cutover.get("environment_label"),
+        "environment_approved": cutover.get("environment_approved"),
+        "schema_deployment_status": cutover.get("schema_deployment_status"),
+        "row_reconciliation_status": cutover.get("row_reconciliation_status"),
+        "runtime_readiness_status": cutover.get("runtime_readiness_status"),
+        "runtime_dryrun_status": cutover.get("runtime_dryrun_status"),
+        "startup_reasons": list(startup.get("reasons") or []),
+    }
+
+
+def get_postgres_activation_admin_message():
+    """Return an admin-only activation message when PostgreSQL is requested but not active."""
+    diagnostics = get_backend_activation_diagnostics()
+    validation = validate_postgres_runtime_enabled()
+    lines = []
+    if diagnostics.get("active_backend") != "postgres":
+        if diagnostics.get("reason_postgres_not_activated"):
+            lines.append(f"PostgreSQL not activated: {diagnostics['reason_postgres_not_activated']}")
+    if diagnostics.get("config_resolution_channel") == "default_or_unset":
+        lines.append(
+            "Backend config was not resolved from os.environ or st.secrets. "
+            "Set DB_BACKEND, ERP_ENABLE_POSTGRES_RUNTIME, ERP_ENVIRONMENT, and DATABASE_URL in the same "
+            "Streamlit launch shell or in .streamlit/secrets.toml."
+        )
+    elif diagnostics.get("config_resolution_channel") == "st.secrets":
+        lines.append("Backend config is currently resolved from Streamlit secrets.")
+    elif diagnostics.get("config_resolution_channel") == "os.environ":
+        lines.append("Backend config is currently resolved from OS environment variables.")
+    if diagnostics.get("configured_backend") == "postgres" and not validation.get("ok"):
+        for reason in validation.get("reasons") or []:
+            lines.append(f"- {reason}")
+    if diagnostics.get("cutover_guard_blocked"):
+        lines.append("PostgreSQL cutover guard blocked activation. Required evidence/config:")
+        for reason in diagnostics.get("runtime_cutover_guard_reasons") or []:
+            lines.append(f"- {reason}")
+        evidence = get_postgres_runtime_cutover_evidence()
+        for key, payload in evidence.items():
+            if key == "all_required_evidence_present" or not isinstance(payload, dict):
+                continue
+            if not payload.get("required_markers_present"):
+                lines.append(f"- Missing or stale cutover report: {payload.get('report')}")
+    if not lines:
+        return None
+    return "\n".join(lines)
 
 
 SUPPORTED_DB_BACKENDS = {"sqlite", "postgres", "postgresql", "supabase"}
@@ -905,19 +1489,30 @@ def _report_contains_required_markers(path, markers):
         with open(path, "r", encoding="utf-8") as report_file:
             content = report_file.read()
     except OSError:
-        return False
-    return all(marker in content for marker in markers)
+        return False, list(markers)
+    missing_markers = [marker for marker in markers if marker not in content]
+    return not missing_markers, missing_markers
 
 
 def get_postgres_runtime_cutover_evidence():
     """Return report-backed cutover evidence without opening SQLite or PostgreSQL."""
+    return diagnostics_ttl_cache(
+        "postgres_runtime_cutover_evidence",
+        300,
+        _build_postgres_runtime_cutover_evidence,
+    )
+
+
+def _build_postgres_runtime_cutover_evidence():
+    """Build report-backed cutover evidence without opening SQLite or PostgreSQL."""
     evidence = {}
     for key, (path, markers) in POSTGRES_CUTOVER_REPORTS.items():
-        passed = _report_contains_required_markers(path, markers)
+        passed, missing_markers = _report_contains_required_markers(path, markers)
         evidence[key] = {
             "status": "PASSED" if passed else "MISSING_OR_STALE",
             "report": os.path.relpath(path, BASE_DIR),
             "required_markers_present": passed,
+            "missing_markers": missing_markers,
         }
     evidence["all_required_evidence_present"] = all(
         item.get("required_markers_present") for item in evidence.values() if isinstance(item, dict)
@@ -926,6 +1521,15 @@ def get_postgres_runtime_cutover_evidence():
 
 
 def validate_postgres_runtime_cutover_guard():
+    """Validate final runtime cutover guards and report-backed evidence."""
+    return diagnostics_ttl_cache(
+        f"postgres_runtime_cutover_guard:{_runtime_validation_cache_key()}",
+        60,
+        _build_postgres_runtime_cutover_guard,
+    )
+
+
+def _build_postgres_runtime_cutover_guard():
     """Validate final runtime cutover guards and report-backed evidence."""
     validation = validate_postgres_runtime_enabled()
     evidence = get_postgres_runtime_cutover_evidence()
@@ -957,6 +1561,15 @@ def should_run_sqlite_startup():
 
 
 def get_startup_backend_diagnostics():
+    """Return startup backend routing details without exposing DATABASE_URL."""
+    return diagnostics_ttl_cache(
+        f"startup_backend_diagnostics:{_runtime_validation_cache_key()}",
+        60,
+        _build_startup_backend_diagnostics,
+    )
+
+
+def _build_startup_backend_diagnostics():
     """Return startup backend routing details without exposing DATABASE_URL."""
     configured_backend = get_configured_db_backend()
     runtime_enabled = is_postgres_runtime_enabled()
@@ -1064,6 +1677,14 @@ def validate_postgres_runtime_enabled():
     Validate whether PostgreSQL runtime activation requirements are satisfied.
     Does not open a connection unless all prerequisites pass.
     """
+    return diagnostics_ttl_cache(
+        f"postgres_runtime_enabled:{_runtime_validation_cache_key()}",
+        30,
+        _build_validate_postgres_runtime_enabled,
+    )
+
+
+def _build_validate_postgres_runtime_enabled():
     configured_backend = get_configured_db_backend()
     database_url = get_database_url()
     runtime_enabled = is_postgres_runtime_enabled()
@@ -1665,6 +2286,47 @@ def get_postgres_query_timings(limit=25):
 
 def clear_postgres_query_timings():
     _POSTGRES_QUERY_TIMINGS.clear()
+
+
+_DIAGNOSTICS_TTL_CACHE = {}
+_DIAGNOSTICS_CACHE_STATS = {"hits": 0, "misses": 0, "entries": 0}
+
+
+def diagnostics_ttl_cache(cache_key, ttl_seconds, builder):
+    """Short-lived in-process cache for expensive non-financial diagnostics."""
+    now = time.monotonic()
+    entry = _DIAGNOSTICS_TTL_CACHE.get(cache_key)
+    if entry is not None and (now - entry["stored_at"]) < float(ttl_seconds):
+        _DIAGNOSTICS_CACHE_STATS["hits"] += 1
+        return entry["value"]
+    _DIAGNOSTICS_CACHE_STATS["misses"] += 1
+    value = builder()
+    _DIAGNOSTICS_TTL_CACHE[cache_key] = {"stored_at": now, "value": value}
+    _DIAGNOSTICS_CACHE_STATS["entries"] = len(_DIAGNOSTICS_TTL_CACHE)
+    return value
+
+
+def clear_diagnostics_ttl_cache():
+    _DIAGNOSTICS_TTL_CACHE.clear()
+    _DIAGNOSTICS_CACHE_STATS["entries"] = 0
+
+
+def get_diagnostics_cache_stats():
+    stats = dict(_DIAGNOSTICS_CACHE_STATS)
+    stats["size"] = len(_DIAGNOSTICS_TTL_CACHE)
+    return stats
+
+
+def _runtime_validation_cache_key():
+    return (
+        get_configured_db_backend(),
+        bool(get_database_url()),
+        is_postgres_runtime_enabled(),
+        _get_runtime_environment_label(),
+        _truthy_secret(
+            _read_runtime_secret("ERP_POSTGRES_PRODUCTION_APPROVED", os.getenv("ERP_POSTGRES_PRODUCTION_APPROVED", "0"))
+        ),
+    )
 
 
 def execute_timed_portable_query(conn, sql, params=(), *, label=None, backend=None):
@@ -2460,6 +3122,14 @@ def get_db_diagnostics():
 
 
 def get_firebase_service_account_info():
+    return diagnostics_ttl_cache(
+        "firebase_service_account_info",
+        300,
+        _build_firebase_service_account_info,
+    )
+
+
+def _build_firebase_service_account_info():
     firebase_key_path = str(FIREBASE_KEY_PATH or "").strip()
     source_attempt_order = "structured Streamlit secrets -> local firebase_key.json -> legacy FIREBASE_SERVICE_ACCOUNT_JSON"
     invalid_secret_reason = (
@@ -2609,6 +3279,14 @@ def get_firebase_service_account_info():
 
 
 def get_recovery_source_diagnostics():
+    return diagnostics_ttl_cache(
+        "recovery_source_diagnostics",
+        120,
+        _build_recovery_source_diagnostics,
+    )
+
+
+def _build_recovery_source_diagnostics():
     firebase_config = get_firebase_runtime_config()
     firebase_key_path = str(firebase_config.get("key_path") or "").strip()
     firebase_key_exists = bool(firebase_key_path) and os.path.exists(firebase_key_path)
@@ -3474,10 +4152,78 @@ def _run_post_commit_persistence_hook(conn):
 
 
 def get_persistence_diagnostics():
-    local_health = get_database_health_snapshot(DB_PATH, logger_instance=logger)
+    return diagnostics_ttl_cache(
+        f"persistence_diagnostics:{get_active_db_backend()}",
+        45,
+        _build_persistence_diagnostics,
+    )
+
+
+def _build_persistence_diagnostics():
+    postgres_active = is_postgres_backend()
     recovery_diagnostics = get_recovery_source_diagnostics()
-    local_backup = get_local_backup_diagnostics(logger_instance=logger)
     cloud_backup = get_cloud_backup_diagnostics(logger_instance=logger)
+    if postgres_active:
+        runtime_health = _get_active_runtime_health_snapshot(logger_instance=logger)
+        backup_counts_known = cloud_backup.get("company_count") is not None
+        runtime_cloud_mismatch = (
+            int(runtime_health.get("company_count") or 0) != int(cloud_backup.get("company_count") or 0)
+            if backup_counts_known
+            else False
+        )
+        return {
+            "canonical_db_path": None,
+            "db_backend": runtime_health.get("backend_label") or "PostgreSQL",
+            "db_file_size_bytes": None,
+            "database_uuid": runtime_health.get("database_uuid"),
+            "local_db_uuid": runtime_health.get("database_uuid"),
+            "schema_version": runtime_health.get("schema_version"),
+            "database_created_at": runtime_health.get("database_created_at"),
+            "last_startup_at": runtime_health.get("last_startup_at"),
+            "environment_label": runtime_health.get("environment_label"),
+            "runtime_mode": get_runtime_mode(),
+            "force_cloud_restore_enabled": is_force_cloud_restore_enabled(),
+            "cloud_restore_disabled_due_to_tests": is_test_runtime(),
+            "cloud_upload_disabled_due_to_tests": is_test_runtime(),
+            "has_suspicious_companies": False,
+            "suspicious_companies": [],
+            "suspicious_company_count": 0,
+            "local_db_valid": bool(runtime_health.get("structural_valid")),
+            "production_ready": bool(runtime_health.get("production_ready")),
+            "company_count": runtime_health.get("company_count"),
+            "required_tables_missing": runtime_health.get("missing_tables", []),
+            "latest_backup_upload_status": LAST_BACKUP_STATUS.get("status"),
+            "last_backup_timestamp": LAST_BACKUP_STATUS.get("timestamp"),
+            "last_backup_reason": LAST_BACKUP_STATUS.get("reason"),
+            "latest_cloud_backup_status": LAST_BACKUP_STATUS.get("status"),
+            "last_cloud_backup_timestamp": LAST_BACKUP_STATUS.get("timestamp"),
+            "last_cloud_backup_reason": LAST_BACKUP_STATUS.get("reason"),
+            "cloud_object_path": LAST_BACKUP_STATUS.get("latest_object") or recovery_diagnostics.get("object_name"),
+            "history_object_path": LAST_BACKUP_STATUS.get("history_object"),
+            "latest_local_backup_status": "skipped_postgres_runtime",
+            "last_local_backup_timestamp": None,
+            "last_local_backup_reason": "SQLite local backup diagnostics skipped while PostgreSQL runtime is active.",
+            "local_backup_latest_path": None,
+            "local_backup_history_path": None,
+            "local_backup_company_count": None,
+            "local_backup_last_modified": None,
+            "local_backup_production_ready": None,
+            "local_backup_reason": "skipped_postgres_runtime",
+            "local_cloud_backup_mismatch": runtime_cloud_mismatch,
+            "restore_source_used_at_startup": LAST_RESTORE_SOURCE,
+            "restore_skipped_reason": LAST_CLOUD_RESTORE_SKIP_REASON,
+            "upload_blocked_reason": LAST_CLOUD_UPLOAD_BLOCK_REASON,
+            "bucket_name": recovery_diagnostics.get("bucket_name"),
+            "cloud_backup_company_count": cloud_backup.get("company_count"),
+            "cloud_backup_last_modified": cloud_backup.get("last_modified"),
+            "cloud_backup_database_uuid": cloud_backup.get("database_uuid"),
+            "cloud_db_uuid": cloud_backup.get("database_uuid"),
+            "cloud_backup_newer_than_local": cloud_backup.get("newer_than_local"),
+            "cloud_backup_reason": cloud_backup.get("reason"),
+            "postgres_runtime_active": True,
+        }
+    local_health = get_database_health_snapshot(DB_PATH, logger_instance=logger)
+    local_backup = get_local_backup_diagnostics(logger_instance=logger)
     backup_counts_known = local_backup.get("company_count") is not None and cloud_backup.get("company_count") is not None
     local_cloud_mismatch = (
         int(local_backup.get("company_count") or 0) != int(cloud_backup.get("company_count") or 0)
@@ -3540,6 +4286,14 @@ def get_persistence_diagnostics():
 
 
 def get_local_backup_diagnostics(logger_instance=None):
+    return diagnostics_ttl_cache(
+        f"local_backup_diagnostics:{get_active_db_backend()}",
+        60,
+        lambda: _build_local_backup_diagnostics(logger_instance),
+    )
+
+
+def _build_local_backup_diagnostics(logger_instance=None):
     logger_instance = logger_instance or logger
     latest_path = LAST_LOCAL_BACKUP_STATUS.get("latest_path") or LOCAL_LATEST_BACKUP_PATH
     result = {
@@ -3976,6 +4730,14 @@ def restore_runtime_database_from_local_file(source_db_path, logger_instance=Non
 
 
 def get_cloud_backup_diagnostics(logger_instance=None):
+    return diagnostics_ttl_cache(
+        f"cloud_backup_diagnostics:{get_active_db_backend()}",
+        120,
+        lambda: _build_cloud_backup_diagnostics(logger_instance),
+    )
+
+
+def _build_cloud_backup_diagnostics(logger_instance=None):
     logger_instance = logger_instance or logger
     diagnostics = get_recovery_source_diagnostics()
     latest_object = diagnostics.get("object_name") or FIREBASE_OBJECT_NAME
@@ -4075,8 +4837,77 @@ def get_cloud_backup_diagnostics(logger_instance=None):
                 pass
 
 
-def run_persistence_self_test(logger_instance=None):
+def run_persistence_self_test_fast(logger_instance=None, conn=None, runtime_ping=None):
+    ping = runtime_ping or (build_fast_runtime_ping(conn) if conn is not None else None)
+    if ping is not None:
+        return build_persistence_self_test_fast_from_ping(ping)
+    return diagnostics_ttl_cache(
+        f"persistence_self_test_fast:{get_active_db_backend()}",
+        60,
+        lambda: _build_persistence_self_test_fast_legacy(logger_instance),
+    )
+
+
+def _build_persistence_self_test_fast_legacy(logger_instance=None):
     logger_instance = logger_instance or logger
+    runtime_health = _get_fast_runtime_health_snapshot(logger_instance=logger_instance)
+    result = build_persistence_self_test_fast_from_ping(
+        {
+            "company_count": runtime_health.get("company_count"),
+            "structural_valid": runtime_health.get("structural_valid"),
+            "ping_ok": runtime_health.get("structural_valid"),
+        }
+    )
+    logger_instance.info(
+        "Persistence self-test (fast snapshot legacy): local_company_count=%s reason=%s",
+        result["local_company_count"],
+        result["reason"],
+    )
+    return result
+
+
+def run_persistence_self_test(logger_instance=None):
+    return diagnostics_ttl_cache(
+        f"persistence_self_test:{get_active_db_backend()}",
+        60,
+        lambda: _build_persistence_self_test(logger_instance),
+    )
+
+
+def _build_persistence_self_test(logger_instance=None):
+    logger_instance = logger_instance or logger
+    if is_postgres_backend():
+        runtime_health = _get_active_runtime_health_snapshot(logger_instance=logger_instance)
+        cloud_backup = get_cloud_backup_diagnostics(logger_instance=logger_instance)
+        runtime_cloud_mismatch = (
+            cloud_backup.get("company_count") is not None
+            and int(runtime_health.get("company_count") or 0) != int(cloud_backup.get("company_count") or 0)
+        )
+        result = {
+            "ok": bool(cloud_backup.get("ok")) and not runtime_cloud_mismatch,
+            "local_company_count": int(runtime_health.get("company_count") or 0),
+            "local_backup_company_count": None,
+            "cloud_backup_company_count": cloud_backup.get("company_count"),
+            "latest_local_backup_path": None,
+            "latest_backup_object_path": cloud_backup.get("object_name"),
+            "last_local_backup_time": None,
+            "last_cloud_backup_time": cloud_backup.get("last_modified"),
+            "last_backup_time": cloud_backup.get("last_modified"),
+            "mismatch": bool(runtime_cloud_mismatch),
+            "local_cloud_mismatch": False,
+            "runtime_cloud_mismatch": runtime_cloud_mismatch,
+            "runtime_local_backup_mismatch": False,
+            "postgres_runtime_active": True,
+            "reason": f"postgres_runtime; cloud_backup={cloud_backup.get('reason')}",
+        }
+        logger_instance.info(
+            "Persistence self-test (PostgreSQL runtime): local_company_count=%s cloud_backup_company_count=%s mismatch=%s reason=%s",
+            result["local_company_count"],
+            result["cloud_backup_company_count"],
+            result["mismatch"],
+            result["reason"],
+        )
+        return result
     local_health = get_database_health_snapshot(DB_PATH, logger_instance=logger_instance)
     local_backup = get_local_backup_diagnostics(logger_instance=logger_instance)
     cloud_backup = get_cloud_backup_diagnostics(logger_instance=logger_instance)
