@@ -173,7 +173,7 @@ class StartupBackendGateTests(TestCase):
         self.assertEqual(guard["row_reconciliation_status"], "PASSED")
 
     def test_app_sqlite_startup_still_calls_ensure_schema_and_startup_database(self):
-        database = self._load_database()
+        self._load_database()
         import app
 
         stop_error = RuntimeError("stop")
@@ -184,17 +184,22 @@ class StartupBackendGateTests(TestCase):
             error=mock.Mock(),
             stop=mock.Mock(side_effect=stop_error),
         )
-        with mock.patch.object(app, "st", fake_st), mock.patch.object(app, "should_run_sqlite_startup", return_value=True), mock.patch.object(
-            app, "get_startup_backend_diagnostics", return_value=database.get_startup_backend_diagnostics()
-        ), mock.patch.object(app, "ensure_schema") as ensure_schema, mock.patch.object(
-            app,
-            "startup_database",
-            return_value={"ok": False, "stage": "test_stop", "reason": "stop after startup gate"},
-        ) as startup_database:
+        canonical_result = {
+            "startup_ok": False,
+            "ok": False,
+            "startup_route": "sqlite_runtime",
+            "stage": "test_stop",
+            "reason": "stop after startup gate",
+        }
+        with mock.patch.object(app, "st", fake_st), mock.patch.object(
+            app.eka_modules,
+            "get_session_canonical_startup_result",
+            return_value=canonical_result,
+        ) as canonical_startup, mock.patch.object(app, "ensure_schema") as ensure_schema:
             with self.assertRaises(RuntimeError):
                 app.main()
         ensure_schema.assert_called_once()
-        startup_database.assert_called_once()
+        canonical_startup.assert_called_once()
 
     def test_app_postgres_block_skips_sqlite_ensure_schema(self):
         self._load_database()
@@ -209,6 +214,7 @@ class StartupBackendGateTests(TestCase):
             stop=mock.Mock(side_effect=stop_error),
         )
         blocked_status = {
+            "startup_ok": False,
             "ok": False,
             "stage": "postgres_runtime_validation",
             "reason": "ERP_ENVIRONMENT must be staging, or production with ERP_POSTGRES_PRODUCTION_APPROVED=1.",
@@ -217,19 +223,13 @@ class StartupBackendGateTests(TestCase):
             "startup_route": "postgres_runtime",
             "sqlite_startup_skipped": True,
         }
-        with mock.patch.object(app, "st", fake_st), mock.patch.object(app, "should_run_sqlite_startup", return_value=False), mock.patch.object(
-            app,
-            "get_startup_backend_diagnostics",
-            return_value={
-                "configured_backend": "postgres",
-                "active_backend": "postgres",
-                "message": blocked_status["reason"],
-            },
-        ), mock.patch.object(app, "ensure_schema") as ensure_schema, mock.patch.object(
-            app, "startup_database", return_value=blocked_status
-        ) as startup_database:
+        with mock.patch.object(app, "st", fake_st), mock.patch.object(
+            app.eka_modules,
+            "get_session_canonical_startup_result",
+            return_value=blocked_status,
+        ) as canonical_startup, mock.patch.object(app, "ensure_schema") as ensure_schema:
             with self.assertRaises(RuntimeError):
                 app.main()
         ensure_schema.assert_not_called()
-        startup_database.assert_called_once()
+        canonical_startup.assert_called_once()
         fake_st.error.assert_called_once()

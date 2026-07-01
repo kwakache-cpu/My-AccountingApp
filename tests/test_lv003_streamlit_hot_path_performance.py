@@ -76,12 +76,23 @@ class Lv003SessionCacheTests(ERPIsolatedTestCase):
         self.modules.st.session_state.pop("session_startup_backend_diagnostics", None)
 
     def test_startup_guard_is_session_cached_after_success(self):
-        sentinel = {"active_backend": "sqlite", "configured_backend": "sqlite"}
-        with mock.patch.object(self.modules, "get_startup_backend_diagnostics", return_value=sentinel) as guard_mock:
+        sentinel = {
+            "startup_ok": True,
+            "configured_backend": "sqlite",
+            "active_backend": "sqlite",
+            "startup_route": "sqlite_runtime",
+            "sqlite_startup_skipped": False,
+            "runtime_enabled": False,
+            "production_approved": False,
+            "environment": "unknown",
+        }
+        self.modules.st.session_state["canonical_startup_result"] = sentinel
+        with mock.patch.object(self.modules, "get_startup_backend_diagnostics") as guard_mock:
             first = self.modules.get_session_startup_backend_diagnostics()
             second = self.modules.get_session_startup_backend_diagnostics()
-        self.assertEqual(first, second)
-        guard_mock.assert_called_once()
+        guard_mock.assert_not_called()
+        self.assertEqual(first["active_backend"], "sqlite")
+        self.assertEqual(second["active_backend"], "sqlite")
 
     def test_subscription_snapshot_is_session_cached(self):
         sentinel = {"ok": True, "renewal_required": False, "days_left": 30}

@@ -16,12 +16,10 @@ from database import (
     get_connection,
     get_recovery_source_diagnostics,
     get_sqlite_concurrency_diagnostics,
-    get_startup_backend_diagnostics,
     row_get,
     rows_to_dicts,
     restore_latest_cloud_backup_to_local,
     should_run_sqlite_startup,
-    startup_database,
 )
 import json
 import logging
@@ -346,9 +344,9 @@ def _get_cloud_vault_status():
 
 def _verify_cloud_vault_handshake():
     try:
-        st.session_state.cloud_vault_status = _get_cloud_vault_status()
+        st.session_state["cloud_vault_status"] = _get_cloud_vault_status()
     except Exception:
-        st.session_state.cloud_vault_status = "Cloud Vault: Local Mode"
+        st.session_state["cloud_vault_status"] = "Cloud Vault: Local Mode"
 
 
 st.set_page_config(
@@ -607,6 +605,8 @@ def _clear_session():
         "last_activity",
         "login_key",
         "database_startup_status",
+        "canonical_startup_result",
+        "canonical_startup_config_signature",
         "session_startup_backend_diagnostics",
         "lv002b_operation_events",
         "lv002b_surface_timings",
@@ -1850,6 +1850,7 @@ def main():
     eka_modules.begin_lv003_hot_path_rerun(
         active_page=st.session_state.get("active_page") or st.session_state.get("page"),
     )
+    eka_modules.run_process_startup_warmup()
     if st.session_state.pop("_clear_streamlit_caches", False):
         st.cache_data.clear()
         st.cache_resource.clear()
@@ -1861,35 +1862,28 @@ def main():
             logger.exception("Failed to clear diagnostics TTL cache during logout/cache reset")
 
     startup_main_started = time.perf_counter()
-    # SQLite continuity on ephemeral hosting is temporary; managed persistent DB remains the target architecture.
-    startup_backend = eka_modules.get_session_startup_backend_diagnostics()
-    if should_run_sqlite_startup():
+    startup_result = eka_modules.get_session_canonical_startup_result()
+    startup_backend = {
+        "configured_backend": startup_result.get("configured_backend"),
+        "active_backend": startup_result.get("active_backend"),
+        "startup_route": startup_result.get("startup_route"),
+        "sqlite_startup_skipped": startup_result.get("sqlite_startup_skipped"),
+        "runtime_cutover_guard_ok": startup_result.get("runtime_cutover_guard_ok"),
+        "schema_deployment_status": startup_result.get("schema_deployment_status"),
+        "row_reconciliation_status": startup_result.get("row_reconciliation_status"),
+        "message": startup_result.get("blocked_reason") or "",
+    }
+    if startup_result.get("startup_route") == "sqlite_runtime":
         eka_modules.timed_lv003_hot_path("database.ensure_schema", ensure_schema, required=True, surface="startup")
-    else:
-        if startup_backend.get("runtime_cutover_guard_ok"):
-            logger.info(
-                "Application startup skipping SQLite schema path for PostgreSQL runtime: configured_backend=%s active_backend=%s schema_deployment_status=%s row_reconciliation_status=%s",
-                startup_backend.get("configured_backend"),
-                startup_backend.get("active_backend"),
-                startup_backend.get("schema_deployment_status"),
-                startup_backend.get("row_reconciliation_status"),
-            )
-        else:
-            logger.error(
-                "Application startup blocked before SQLite schema path: configured_backend=%s active_backend=%s reason=%s",
-                startup_backend.get("configured_backend"),
-                startup_backend.get("active_backend"),
-                startup_backend.get("message"),
-            )
-    if "database_startup_status" not in st.session_state:
-        st.session_state["database_startup_status"] = eka_modules.timed_lv003_hot_path(
-            "database.startup_database",
-            startup_database,
-            required=True,
-            recommendation="cache",
-            surface="startup",
+    elif startup_backend.get("runtime_cutover_guard_ok"):
+        logger.info(
+            "Application startup skipping SQLite schema path for PostgreSQL runtime: configured_backend=%s active_backend=%s schema_deployment_status=%s row_reconciliation_status=%s",
+            startup_backend.get("configured_backend"),
+            startup_backend.get("active_backend"),
+            startup_backend.get("schema_deployment_status"),
+            startup_backend.get("row_reconciliation_status"),
         )
-    startup_status = st.session_state["database_startup_status"]
+    startup_status = startup_result
     try:
         eka_modules.record_lv002b_operation(
             "app.startup_main",
@@ -1914,7 +1908,7 @@ def main():
     )
     st.session_state["bootstrap_needed"] = bootstrap_needed
     st.session_state["database_startup_mode"] = startup_mode
-    startup_ok = bool(startup_status.get("ok")) if isinstance(startup_status, dict) else bool(startup_status)
+    startup_ok = bool(startup_status.get("startup_ok", startup_status.get("ok"))) if isinstance(startup_status, dict) else bool(startup_status)
     if not startup_ok:
         postgres_startup_stage = isinstance(startup_status, dict) and startup_status.get("stage") in {
             "postgres_runtime_validation",
@@ -1966,7 +1960,10 @@ def main():
     if bootstrap_needed:
         st.info("No company has been created yet. Complete initial company setup to activate this ERP.")
     if "cloud_vault_status" not in st.session_state:
-        _verify_cloud_vault_handshake()
+        if startup_result.get("startup_route") == "sqlite_runtime":
+            _verify_cloud_vault_handshake()
+        else:
+            st.session_state["cloud_vault_status"] = "Cloud Vault: Skipped (PostgreSQL runtime)"
     if "base_currency" not in st.session_state:
         st.session_state.base_currency = "GHS"
     if "exchange_rate" not in st.session_state:
@@ -2884,8 +2881,17 @@ else:
                             )
                             if postgres_diag.get("switch_blocked"):
                                 st.info("PostgreSQL switch is not enabled yet. Review readiness blockers before changing runtime backend.")
-                    eka_modules.render_backend_activation_diagnostics_panel(u["role"], expanded=False)
-                    eka_modules.render_lv002_postgres_performance_panel(u["role"], expanded=False)
+                    eka_modules.render_runtime_admin_diagnostics_suite(
+                        u["role"],
+                        surface="dev_gatekeeper",
+                        company_key=st.session_state.get("company_id"),
+                        branch_id=st.session_state.get("active_branch_id"),
+                        expanded=False,
+                        panel_key_prefix="dev_gatekeeper",
+                        include_lv001=bool(st.session_state.get("company_id")),
+                        lv001_start_date=None,
+                        lv001_end_date=None,
+                    )
                     sqlite_diag = get_sqlite_concurrency_diagnostics()
                     if sqlite_diag.get("sqlite_active"):
                         st.warning(
@@ -3888,7 +3894,6 @@ else:
                     logger.error("Portfolio interaction error: %s", sanitize_error_message(portfolio_click_error))
                     st.warning("Company selection is temporarily unavailable, but the portfolio table is still visible.")
 
-                eka_modules.render_lv003_hot_path_panel(u.get("role"), expanded=False, panel_key="dev_gatekeeper_lv003")
                 conn.close()
             except Exception as e:
                 st.error(build_user_safe_error(e, u["role"]))

@@ -178,6 +178,54 @@ def build_operations_console_full_audit(
     )
 
 
+def _get_fast_startup_snapshot():
+    """Use process/session cached canonical startup result when available."""
+    try:
+        import modules as eka_modules
+
+        process_warmup = eka_modules.get_process_warmup_diagnostics()
+        process_startup = process_warmup.get("startup_result")
+        if isinstance(process_startup, dict) and process_startup.get("startup_ok"):
+            return {
+                "fast_snapshot": True,
+                "from_process_cache": True,
+                "configured_backend": process_startup.get("configured_backend"),
+                "active_backend": process_startup.get("active_backend"),
+                "startup_route": process_startup.get("startup_route"),
+                "sqlite_startup_skipped": process_startup.get("sqlite_startup_skipped"),
+                "runtime_enabled": process_startup.get("runtime_enabled"),
+                "environment": process_startup.get("environment"),
+                "production_approved": process_startup.get("production_approved"),
+                "postgres_connection_ok": process_startup.get("postgres_connection_ok"),
+                "startup_ok": process_startup.get("startup_ok"),
+                "elapsed_ms": process_startup.get("elapsed_ms"),
+            }
+        if eka_modules.st is not None:
+            cached = eka_modules.st.session_state.get("canonical_startup_result")
+            if isinstance(cached, dict) and cached.get("startup_ok"):
+                return {
+                    "fast_snapshot": True,
+                    "from_session_cache": True,
+                    "configured_backend": cached.get("configured_backend"),
+                    "active_backend": cached.get("active_backend"),
+                    "startup_route": cached.get("startup_route"),
+                    "sqlite_startup_skipped": cached.get("sqlite_startup_skipped"),
+                    "runtime_enabled": cached.get("runtime_enabled"),
+                    "environment": cached.get("environment"),
+                    "production_approved": cached.get("production_approved"),
+                    "postgres_connection_ok": cached.get("postgres_connection_ok"),
+                    "startup_ok": cached.get("startup_ok"),
+                    "elapsed_ms": cached.get("elapsed_ms"),
+                }
+    except Exception:
+        pass
+    return {
+        "fast_snapshot": True,
+        "from_session_cache": False,
+        "reason": "startup_result_not_in_session",
+    }
+
+
 def _build_operations_console_snapshot(
     conn=None,
     selected_company_key=None,
@@ -230,6 +278,7 @@ def _build_operations_console_snapshot(
     runtime_ping = build_fast_runtime_ping(conn) if fast_mode and conn is not None else None
 
     if fast_mode:
+        snapshot["startup_backend"] = _get_fast_startup_snapshot()
         snapshot["persistence"] = _timed_section(
             "persistence_diagnostics",
             lambda: get_persistence_diagnostics_fast(conn=conn, runtime_ping=runtime_ping),
@@ -240,23 +289,26 @@ def _build_operations_console_snapshot(
             lambda: run_persistence_self_test_fast(conn=conn, runtime_ping=runtime_ping),
             timings_ms,
         )
-        snapshot["postgres_readiness"] = _timed_section(
-            "postgres_readiness",
-            lambda: get_postgres_readiness_diagnostics(conn=conn, include_table_introspection=False),
-            timings_ms,
-        )
-        snapshot["data_migration_plan"] = _timed_section(
-            "data_migration_plan",
-            lambda: get_data_migration_export_plan_summary(conn=conn),
-            timings_ms,
-        )
-        snapshot["startup_backend"] = _timed_section("startup_backend_diagnostics", get_startup_backend_diagnostics, timings_ms)
+        snapshot["postgres_readiness"] = {
+            "fast_snapshot": True,
+            "checked": False,
+            "reason": "not_checked_in_fast_mode",
+        }
+        snapshot["data_migration_plan"] = {
+            "fast_snapshot": True,
+            "checked": False,
+            "reason": "not_checked_in_fast_mode",
+        }
         snapshot["recovery_source"] = {
             "fast_snapshot": True,
             "checked": False,
             "reason": "not_checked_in_fast_mode",
         }
-        snapshot["cutover_guard"] = _timed_section("cutover_guard", validate_postgres_runtime_cutover_guard, timings_ms)
+        snapshot["cutover_guard"] = {
+            "fast_snapshot": True,
+            "checked": False,
+            "reason": "not_checked_in_fast_mode",
+        }
         snapshot["subscription_billing"] = {
             "fast_snapshot": True,
             "checked": False,
@@ -301,13 +353,6 @@ def _build_operations_console_snapshot(
     from modules import get_paystack_diagnostics
 
     snapshot["paystack"] = _timed_section("paystack", get_paystack_diagnostics, timings_ms)
-
-    if conn is not None and fast_mode:
-        snapshot["audit"] = _timed_section(
-            "audit_operations",
-            lambda: get_audit_operations_summary(conn=conn, limit=audit_limit),
-            timings_ms,
-        )
 
     if selected_company_key and not fast_mode:
         from accounting_engine import (
