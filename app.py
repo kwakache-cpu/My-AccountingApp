@@ -620,6 +620,12 @@ def _clear_session():
     ]
     for k in keys:
         st.session_state.pop(k, None)
+    try:
+        from database import close_session_postgres_connection
+
+        close_session_postgres_connection()
+    except Exception:
+        logger.debug("Session PostgreSQL connection cleanup skipped during logout.", exc_info=True)
     for key in list(st.session_state.keys()):
         if isinstance(key, str) and (
             key.startswith("lv003_page_access:")

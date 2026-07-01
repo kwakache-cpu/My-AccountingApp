@@ -852,6 +852,11 @@ def can_access_migration_cleanup(role):
     return migration_cleanup_service.can_access_migration_cleanup(role)
 
 
+def can_render_migration_cleanup_diagnostics(role, surface):
+    """Migration cleanup is admin-diagnostics only — never on client System Configuration."""
+    return can_access_migration_cleanup(role) and can_render_admin_diagnostics_surface(surface)
+
+
 def log_audit_action(
     conn,
     company_key,
@@ -11565,22 +11570,10 @@ def show_company_setup(company_key, company_name, role):
     st.header("⚙️ System Configuration")
     if not require_permission(role, "manage_company", action_label="manage company settings", company_key=company_key):
         return
-    if can_access_migration_cleanup(role):
-        _render_migration_cleanup_review(role, company_key)
-        st.markdown("---")
     st.subheader("Company Profile")
     conn = None
     try:
         conn = get_connection()
-        conn.execute("ALTER TABLE users ADD COLUMN user_id TEXT")
-    except sqlite3.Error:
-        pass
-    try:
-        if conn:
-            conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_user_id_runtime ON users(user_id)")
-    except sqlite3.Error:
-        pass
-    try:
         company = conn.execute("SELECT * FROM companies WHERE key = ?", (company_key,)).fetchone()
         company_data = dict(company) if company is not None else {}
         if company:
@@ -17619,6 +17612,9 @@ def render_runtime_admin_diagnostics_suite(
         expanded=expanded,
         panel_key=f"{panel_key_prefix}_lv007_warmup",
     )
+    if can_render_migration_cleanup_diagnostics(role, surface) and st is not None:
+        with st.expander("Migration Cleanup Review (Admin Diagnostics)", expanded=expanded):
+            _render_migration_cleanup_review(role, company_key or st.session_state.get("company_id"))
     if include_lv001 and company_key:
         with st.expander("LV-001 Live Validation Diagnostics (Admin Only)", expanded=expanded):
             lv001 = get_live_validation_lv001_diagnostics(
@@ -17733,10 +17729,23 @@ def _cached_dashboard_analytics_bundle(company_key, branch_id_key, period_key):
             "kpis": kpis,
             "sales": sales,
             "inventory": inventory,
-            "receivable_payable": _fetch_dashboard_receivable_payable_health(company_key, branch_id=branch_id),
         }
     finally:
         conn.close()
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def _cached_dashboard_receivable_payable_health(company_key, branch_id_key):
+    """Deferred AR/AP aging snapshot; isolated from the main dashboard bundle hot path."""
+    started = time.perf_counter()
+    branch_id = branch_id_key or None
+    payload = _fetch_dashboard_receivable_payable_health(company_key, branch_id=branch_id)
+    if is_postgres_backend():
+        record_postgres_query_timing(
+            "dashboard.receivable_payable",
+            time.perf_counter() - started,
+        )
+    return payload
 
 
 def _dashboard_chart_has_data(chart_df):
@@ -17873,7 +17882,13 @@ def show_dashboard(company_key, company_name, role):
         kpis = analytics_bundle.get("kpis") or {}
         sales = analytics_bundle.get("sales") or {}
         inventory = analytics_bundle.get("inventory") or {}
-        receivable_payable = analytics_bundle.get("receivable_payable") or {}
+        receivable_payable_key = f"dashboard_rp_loaded_{company_key}_{active_branch_id or 'all'}"
+        receivable_payable = {}
+        if st.session_state.get(receivable_payable_key):
+            receivable_payable = _cached_dashboard_receivable_payable_health(
+                company_key,
+                str(active_branch_id or ""),
+            )
 
         st.markdown('<div class="dashboard-section-title">Executive KPIs</div>', unsafe_allow_html=True)
         st.markdown('<div class="dashboard-kpi-grid">', unsafe_allow_html=True)
@@ -18020,57 +18035,69 @@ def show_dashboard(company_key, company_name, role):
         exp_col3.metric("Invalid Expiry", int(expiring_summary.get("invalid", 0)))
 
         st.markdown('<div class="dashboard-section-title">Receivable / Payable Health</div>', unsafe_allow_html=True)
-        rp_col1, rp_col2, rp_col3, rp_col4 = st.columns(4)
-        rp_col1.metric("Overdue Receivables", format_currency(receivable_payable.get("ar_overdue_total", 0.0)))
-        rp_col2.metric("Overdue Payables", format_currency(receivable_payable.get("ap_overdue_total", 0.0)))
-        rp_col3.metric("AR Documents Overdue", str(receivable_payable.get("ar_overdue_count", 0)))
-        rp_col4.metric("AP Documents Overdue", str(receivable_payable.get("ap_overdue_count", 0)))
+        if not st.session_state.get(receivable_payable_key):
+            if st.button(
+                "Load receivables and payables",
+                key=f"dashboard_load_rp_{company_key}",
+                use_container_width=False,
+            ):
+                st.session_state[receivable_payable_key] = True
+                st.rerun()
+            st.caption("AR/AP aging loads on demand to keep the dashboard fast.")
+        elif not receivable_payable:
+            st.caption("Loading receivable and payable health…")
+        else:
+            rp_col1, rp_col2, rp_col3, rp_col4 = st.columns(4)
+            rp_col1.metric("Overdue Receivables", format_currency(receivable_payable.get("ar_overdue_total", 0.0)))
+            rp_col2.metric("Overdue Payables", format_currency(receivable_payable.get("ap_overdue_total", 0.0)))
+            rp_col3.metric("AR Documents Overdue", str(receivable_payable.get("ar_overdue_count", 0)))
+            rp_col4.metric("AP Documents Overdue", str(receivable_payable.get("ap_overdue_count", 0)))
 
-        aging_col1, aging_col2 = st.columns(2)
-        ar_aging = receivable_payable.get("ar_aging") or {}
-        ap_aging = receivable_payable.get("ap_aging") or {}
-        with aging_col1:
-            st.markdown('<div class="eka-card dashboard-chart-card">', unsafe_allow_html=True)
-            st.markdown("**Receivables Aging**")
-            if sum(float(amount or 0.0) for amount in ar_aging.values()) > 0:
-                for bucket, amount in ar_aging.items():
-                    st.caption(f"{bucket}: {format_currency(amount)}")
-            else:
-                _render_dashboard_empty_state(
-                    "No receivable balances available yet.",
-                    "Posted customer invoices and credits will populate aging buckets.",
-                )
-            st.markdown("</div>", unsafe_allow_html=True)
-        with aging_col2:
-            st.markdown('<div class="eka-card dashboard-chart-card">', unsafe_allow_html=True)
-            st.markdown("**Payables Aging**")
-            if sum(float(amount or 0.0) for amount in ap_aging.values()) > 0:
-                for bucket, amount in ap_aging.items():
-                    st.caption(f"{bucket}: {format_currency(amount)}")
-            else:
-                _render_dashboard_empty_state(
-                    "No payable balances available yet.",
-                    "Supplier bills and payments will populate aging buckets.",
-                )
-            st.markdown("</div>", unsafe_allow_html=True)
+            aging_col1, aging_col2 = st.columns(2)
+            ar_aging = receivable_payable.get("ar_aging") or {}
+            ap_aging = receivable_payable.get("ap_aging") or {}
+            with aging_col1:
+                st.markdown('<div class="eka-card dashboard-chart-card">', unsafe_allow_html=True)
+                st.markdown("**Receivables Aging**")
+                if sum(float(amount or 0.0) for amount in ar_aging.values()) > 0:
+                    for bucket, amount in ar_aging.items():
+                        st.caption(f"{bucket}: {format_currency(amount)}")
+                else:
+                    _render_dashboard_empty_state(
+                        "No receivable balances available yet.",
+                        "Posted customer invoices and credits will populate aging buckets.",
+                    )
+                st.markdown("</div>", unsafe_allow_html=True)
+            with aging_col2:
+                st.markdown('<div class="eka-card dashboard-chart-card">', unsafe_allow_html=True)
+                st.markdown("**Payables Aging**")
+                if sum(float(amount or 0.0) for amount in ap_aging.values()) > 0:
+                    for bucket, amount in ap_aging.items():
+                        st.caption(f"{bucket}: {format_currency(amount)}")
+                else:
+                    _render_dashboard_empty_state(
+                        "No payable balances available yet.",
+                        "Supplier bills and payments will populate aging buckets.",
+                    )
+                st.markdown("</div>", unsafe_allow_html=True)
 
-        debtor_col, creditor_col = st.columns(2)
-        with debtor_col:
-            _render_dashboard_balance_card(
-                "Biggest Debtors",
-                receivable_payable.get("top_debtors") or [],
-                empty_message="No balances available.",
-                empty_hint="Outstanding customer balances will appear here.",
-                column_labels={"name": "Customer", "balance": "Balance"},
-            )
-        with creditor_col:
-            _render_dashboard_balance_card(
-                "Biggest Suppliers Owed",
-                receivable_payable.get("top_creditors") or [],
-                empty_message="No balances available.",
-                empty_hint="Outstanding supplier balances will appear here.",
-                column_labels={"name": "Supplier", "balance": "Balance"},
-            )
+            debtor_col, creditor_col = st.columns(2)
+            with debtor_col:
+                _render_dashboard_balance_card(
+                    "Biggest Debtors",
+                    receivable_payable.get("top_debtors") or [],
+                    empty_message="No balances available.",
+                    empty_hint="Outstanding customer balances will appear here.",
+                    column_labels={"name": "Customer", "balance": "Balance"},
+                )
+            with creditor_col:
+                _render_dashboard_balance_card(
+                    "Biggest Suppliers Owed",
+                    receivable_payable.get("top_creditors") or [],
+                    empty_message="No balances available.",
+                    empty_hint="Outstanding supplier balances will appear here.",
+                    column_labels={"name": "Supplier", "balance": "Balance"},
+                )
 
         st.markdown('<div class="dashboard-section-title">Live Activity</div>', unsafe_allow_html=True)
         conn = None

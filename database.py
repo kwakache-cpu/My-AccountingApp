@@ -2527,6 +2527,117 @@ _TABLE_COLUMN_CACHE = {}
 _TABLE_COLUMN_CACHE_TTL_SECONDS = 300
 _POSTGRES_QUERY_TIMINGS = []
 _POSTGRES_QUERY_TIMINGS_LIMIT = 200
+_PG_SESSION_CONN_KEY = "_postgres_session_connection"
+_LV008_CONNECTION_STATS = {
+    "opens": 0,
+    "session_pins": 0,
+    "reuses": 0,
+    "closes": 0,
+    "ephemeral_opens": 0,
+}
+
+
+class _PostgresSessionConnectionProxy:
+    """PostgreSQL connection pinned for the Streamlit session; close() is a no-op."""
+
+    __slots__ = ("_conn",)
+
+    def __init__(self, conn):
+        self._conn = conn
+
+    def close(self):
+        return None
+
+    def commit(self):
+        return self._conn.commit()
+
+    def rollback(self):
+        return self._conn.rollback()
+
+    def cursor(self):
+        return self._conn.cursor()
+
+    def execute(self, sql, params=()):
+        return self._conn.execute(sql, params)
+
+    @property
+    def in_transaction(self):
+        return getattr(self._conn, "in_transaction", False)
+
+    @in_transaction.setter
+    def in_transaction(self, value):
+        if hasattr(self._conn, "in_transaction"):
+            self._conn.in_transaction = value
+
+
+def _streamlit_session_state():
+    try:
+        import streamlit as st
+
+        return st.session_state
+    except Exception:
+        return None
+
+
+def _postgres_connection_alive(conn):
+    if conn is None:
+        return False
+    try:
+        conn.execute("SELECT 1 AS ping_ok").fetchone()
+        return True
+    except Exception:
+        return False
+
+
+def get_lv008_connection_stats():
+    """Return measured PostgreSQL connection acquisition counters for LV-008 autopsy."""
+    return dict(_LV008_CONNECTION_STATS)
+
+
+def clear_lv008_connection_stats():
+    _LV008_CONNECTION_STATS.update(
+        {
+            "opens": 0,
+            "session_pins": 0,
+            "reuses": 0,
+            "closes": 0,
+            "ephemeral_opens": 0,
+        }
+    )
+
+
+def close_session_postgres_connection():
+    """Close the pinned PostgreSQL session connection on logout or session reset."""
+    state = _streamlit_session_state()
+    if state is None:
+        return
+    conn = state.pop(_PG_SESSION_CONN_KEY, None)
+    if conn is None:
+        return
+    try:
+        if isinstance(conn, _PostgresSessionConnectionProxy):
+            conn = conn._conn
+        conn.close()
+    except Exception:
+        logger.debug("Session PostgreSQL connection close skipped.", exc_info=True)
+    _LV008_CONNECTION_STATS["closes"] = int(_LV008_CONNECTION_STATS.get("closes", 0)) + 1
+
+
+def _get_postgres_session_connection():
+    state = _streamlit_session_state()
+    if state is None or not state.get("user"):
+        return None
+    existing = state.get(_PG_SESSION_CONN_KEY)
+    if existing is not None and _postgres_connection_alive(existing):
+        _LV008_CONNECTION_STATS["reuses"] = int(_LV008_CONNECTION_STATS.get("reuses", 0)) + 1
+        return _PostgresSessionConnectionProxy(existing)
+    if existing is not None:
+        close_session_postgres_connection()
+    conn = _open_postgres_connection()
+    state[_PG_SESSION_CONN_KEY] = conn
+    _LV008_CONNECTION_STATS["session_pins"] = int(_LV008_CONNECTION_STATS.get("session_pins", 0)) + 1
+    _LV008_CONNECTION_STATS["opens"] = int(_LV008_CONNECTION_STATS.get("opens", 0)) + 1
+    return _PostgresSessionConnectionProxy(conn)
 
 
 def get_cached_table_column_names(conn, table_name, backend=None, *, cache_seconds=None):
@@ -6878,6 +6989,62 @@ def ensure_branch_module_grants_for_branch(conn, company_key, branch_id, branch_
     }
 
 
+def ensure_users_user_id_schema_integrity(conn):
+    """
+    Ensure users.user_id column and supporting indexes exist idempotently.
+
+    Intended for startup/schema migration paths only — never call from UI render code.
+    """
+    if conn is None or not db_table_exists(conn, "users"):
+        return {
+            "user_id_column_present": False,
+            "user_id_column_added": False,
+            "index_ensured": False,
+        }
+    backend = _normalize_db_backend(get_active_db_backend())
+    existing_columns = _get_existing_columns(conn, "users")
+    added_column = False
+    if "user_id" not in existing_columns:
+        try:
+            if backend == "postgres":
+                execute_portable_write(
+                    conn,
+                    "ALTER TABLE users ADD COLUMN IF NOT EXISTS user_id TEXT",
+                    (),
+                    backend=backend,
+                )
+            else:
+                conn.execute("ALTER TABLE users ADD COLUMN user_id TEXT")
+            added_column = True
+            existing_columns.add("user_id")
+        except Exception as exc:
+            logger.warning(
+                "users.user_id schema ensure failed: %s",
+                sanitize_error_message(exc),
+            )
+    index_ensured = False
+    for index_sql in (
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_user_id ON users(user_id)",
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_user_id_runtime ON users(user_id)",
+    ):
+        try:
+            if backend == "postgres":
+                execute_portable_write(conn, index_sql, (), backend=backend)
+            else:
+                conn.execute(index_sql)
+            index_ensured = True
+        except Exception as exc:
+            logger.debug(
+                "users.user_id index ensure skipped: %s",
+                sanitize_error_message(exc),
+            )
+    return {
+        "user_id_column_present": "user_id" in existing_columns,
+        "user_id_column_added": added_column,
+        "index_ensured": index_ensured,
+    }
+
+
 def ensure_branch_licensing_schema_integrity(conn):
     """
     Additive branch licensing tables/columns. Safe on every startup; PostgreSQL-friendly types.
@@ -8225,7 +8392,7 @@ def ensure_schema_integrity(conn):
         },
         "stock_movements": {"branch_id": "TEXT", "reason": "TEXT", "created_by": "TEXT", "created_at": "TIMESTAMP DEFAULT CURRENT_TIMESTAMP", "status": "TEXT DEFAULT 'Draft'", "approval_status": "TEXT DEFAULT 'Draft'", "posted_entry_id": "INTEGER", "last_journal_sync_at": "TIMESTAMP", "submitted_at": "TIMESTAMP", "approved_at": "TIMESTAMP", "approved_by": "TEXT", "cancelled_at": "TIMESTAMP", "cancelled_by": "TEXT"},
         "transactions": {"branch_id": "TEXT"},
-        "users": {"branch_id": "TEXT"},
+        "users": {"branch_id": "TEXT", "user_id": "TEXT"},
         "vouchers": {"status": "TEXT DEFAULT 'Draft'", "branch_id": "TEXT", "approval_status": "TEXT DEFAULT 'Draft'", "is_voided": "INTEGER DEFAULT 0", "voided_at": "TIMESTAMP", "voided_by": "TEXT", "submitted_at": "TIMESTAMP", "approved_at": "TIMESTAMP", "approved_by": "TEXT", "posted_entry_id": "INTEGER", "last_journal_sync_at": "TIMESTAMP"},
         "payroll": {
             "status": "TEXT DEFAULT 'Active'",
@@ -9632,6 +9799,7 @@ def _run_lightweight_integrity_checks(conn):
     _ensure_migration_metadata_tables(conn)
     _ensure_database_identity_table(conn)
     ensure_schema_integrity(conn)
+    ensure_users_user_id_schema_integrity(conn)
     fixed_asset_schema = get_fixed_assets_schema_diagnostics(conn, repair=False)
     if fixed_asset_schema.get("missing_columns") or fixed_asset_schema.get("failed_repairs"):
         logger.warning(
@@ -9727,6 +9895,11 @@ def get_connection():
             validation = validate_postgres_runtime_enabled()
             if not validation.get("ok"):
                 raise RuntimeError("; ".join(validation.get("reasons") or ["PostgreSQL runtime is not enabled."]))
+            session_conn = _get_postgres_session_connection()
+            if session_conn is not None:
+                return session_conn
+            _LV008_CONNECTION_STATS["ephemeral_opens"] = int(_LV008_CONNECTION_STATS.get("ephemeral_opens", 0)) + 1
+            _LV008_CONNECTION_STATS["opens"] = int(_LV008_CONNECTION_STATS.get("opens", 0)) + 1
             return _open_postgres_connection()
         except Exception as exc:
             logger.critical("POSTGRES CONNECTION FAILURE: %s", sanitize_error_message(exc))

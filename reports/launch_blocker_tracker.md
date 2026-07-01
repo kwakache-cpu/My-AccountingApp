@@ -17,7 +17,32 @@
 | Live browser UAT execution | **0%** (Sprint 1 in progress) |
 | Open launch blockers | **5** |
 | Open live defects | **1** (DEF-002 **Open** — LV-007 cold-start warmup + client diagnostics removal + Financial Reports optimization; live timing: first login <3s, dashboard <3s, Financial Reports <5s, no client diagnostics) |
-| Last updated | 2026-07-03 |
+| Last updated | 2026-07-01 |
+
+---
+
+## LV-009 Phase 1 — Financial Reports Lazy Load (2026-07-01)
+
+| Item | Detail |
+|---|---|
+| Problem | Financial Reports still ~64s LIVE — eager 6-report bundle, eager CSV bytes, repeated connections |
+| Fix | Lazy per-report cache `_cached_financial_report_by_type(..., report_type_key)`; shell + summary first; `st.radio` selector (only active report computed); `_lazy_csv_button` (CSV on Export click only); `_fetch_ledger_balance_snapshot` shared connection |
+| Cache keys | `company_key`, `branch_key`, `start_date`, `end_date`, `account_key`, `backend_key`, `report_type_key` |
+| Preserved | `_cached_financial_reports_bundle()` for legacy/admin/tests; accounting formatters unchanged |
+| Targets | Financial Reports first paint **<5s** LIVE (DEF-002 remains **Open** until confirmed) |
+| Evidence | `tests/test_lv009_phase1_financial_reports_speed.py`, `reports/lv009_performance_forensic_audit.md` |
+
+---
+
+## LV-008 Performance Autopsy (2026-07-03)
+
+| Item | Detail |
+|---|---|
+| Report | `reports/lv008_performance_autopsy.md` |
+| Harness | `scripts/lv008_performance_autopsy.py` |
+| Root cause | PG connection churn (no session reuse) + dashboard AR/AP N+1 aging |
+| Fixes | Session-pinned PG connection; AR/AP deferred on dashboard |
+| Evidence | `tests/test_lv008_performance_autopsy.py` |
 
 ---
 
@@ -67,7 +92,7 @@ Use `reports/live_defect_intake_template.md` for new entries. Copy verified rows
 | Defect ID | Severity | Module | Role | Title | Owner | Status | Launch blocking decision | Evidence | Screenshot |
 |---|---|---|---|---|---|---|---|---|---|
 | DEF-001 | High | Dashboard / Financial Reports | Owner / CEO | Slow login load; empty dashboard charts; empty financial reports despite posted journals | Technical Owner | Fixed | **DOES NOT BLOCK LAUNCH** until live retest verified | Root cause: (1) PostgreSQL `date()` filter mismatch returned empty ledger/report rows; (2) Trial Balance incorrectly applied period `start_date` to cumulative balances; (3) Dashboard charts were POS-only with no journal fallback; (4) Dashboard deferred heavy legacy/journal compare to expander. Evidence: `tests/test_live_defect_lv001_dashboard_reports.py`; LV-001 diagnostics expander on Dashboard and Financial Reports | |
-| DEF-002 | High | System Health / PostgreSQL Runtime / Client UX | Dev / System Admin / All roles | App slow on first login after restart; LV diagnostics visible on client pages; Financial Reports ~64s | Technical Owner | **Open** | **DOES NOT BLOCK LAUNCH** until live retest confirms first login <3s, dashboard <3s, Financial Reports <5s, no diagnostics on client pages | LV-002–006 improved caching/fast paths. **LV-007**: process-level `run_process_startup_warmup()` (config, canonical startup, PG connection, role/menu/permissions metadata, fast health snapshot); client pages stripped of LV diagnostics; Financial Reports unified bundle cache `(company, branch, dates, backend)` TTL 60s; integrity check deferred on demand. **Open** until live timing confirmed. Evidence: `tests/test_lv007_performance_and_client_visibility.py`, `tests/test_lv00*.py` | |
+| DEF-002 | High | System Health / PostgreSQL Runtime / Client UX | Dev / System Admin / All roles | App slow on first login after restart; LV diagnostics visible on client pages; Financial Reports ~64s | Technical Owner | **Open** | **DOES NOT BLOCK LAUNCH** until live retest confirms first login <3s, dashboard <3s, Financial Reports <5s, no diagnostics on client pages | LV-002–006 improved caching/fast paths. **LV-007**: process warmup, client diagnostics removal, unified bundle cache. **LV-009 Phase 1**: lazy per-report fetch (`report_type` cache key), lazy CSV export, shared ledger connection in bundle path. **Open** until live timing confirmed. Evidence: `tests/test_lv007_performance_and_client_visibility.py`, `tests/test_lv009_phase1_financial_reports_speed.py`, `tests/test_lv00*.py` | |
 | DEF-003 | | | | | | Open | | | |
 | DEF-004 | Critical | Startup / PostgreSQL Cutover | Dev / System Admin | Streamlit Cloud PostgreSQL selected but startup blocked at `postgres_runtime_cutover_guard`; error referenced SQLite `/data/eka_enterprise_v3.db` | Technical Owner | **Fixed** (pending live retest) | **BLOCKS LAUNCH** until Streamlit Cloud confirms PostgreSQL startup | **LV-004**: Root cause — `startup_database()` required cutover evidence report files before allowing postgres runtime, failing even when runtime config + connection were valid; error UI showed SQLite DB path. Fix: route `postgres_runtime` validates runtime config + connection probe only; skips SQLite file startup/recovery; cutover evidence remains advisory; admin startup diagnostics added. Evidence: `tests/test_lv004_streamlit_postgres_cutover_startup.py` | |
 
