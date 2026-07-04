@@ -269,6 +269,53 @@ def _portable_read_dataframe(conn, query, params=()):
     return pd.DataFrame(rows_to_dicts(rows))
 
 
+def _payments_list_sql(payment_type=None):
+    type_filter = "AND p.payment_type = ?" if payment_type else ""
+    return f"""
+        SELECT
+            p.payment_date,
+            p.payment_type,
+            p.status,
+            p.approval_status,
+            p.amount,
+            p.currency,
+            p.method,
+            p.reference,
+            p.created_by,
+            COALESCE(p.customer_id, je.customer_id, inv.customer_id) AS customer_id,
+            COALESCE(p.supplier_id, je.supplier_id, b.supplier_id) AS supplier_id,
+            COALESCE(c_pay.name, c_je.name, c_inv.name) AS customer_name,
+            COALESCE(s_pay.name, s_je.name, s_bill.name) AS supplier_name
+        FROM payments p
+        LEFT JOIN customers c_pay ON c_pay.id = p.customer_id AND c_pay.company_key = p.company_key
+        LEFT JOIN suppliers s_pay ON s_pay.id = p.supplier_id AND s_pay.company_key = p.company_key
+        LEFT JOIN (
+            SELECT source_id, MAX(customer_id) AS customer_id, MAX(supplier_id) AS supplier_id
+            FROM journal_entries
+            WHERE source_table = 'payments'
+              AND company_key = ?
+              AND COALESCE(is_voided, 0) = 0
+            GROUP BY source_id
+        ) je ON je.source_id = p.id
+        LEFT JOIN customers c_je ON c_je.id = je.customer_id AND c_je.company_key = p.company_key
+        LEFT JOIN suppliers s_je ON s_je.id = je.supplier_id AND s_je.company_key = p.company_key
+        LEFT JOIN invoices inv ON inv.id = p.invoice_id AND inv.company_key = p.company_key
+        LEFT JOIN customers c_inv ON c_inv.id = inv.customer_id AND c_inv.company_key = p.company_key
+        LEFT JOIN bills b ON b.id = p.bill_id AND b.company_key = p.company_key
+        LEFT JOIN suppliers s_bill ON s_bill.id = b.supplier_id AND s_bill.company_key = p.company_key
+        WHERE p.company_key = ?
+        {type_filter}
+        ORDER BY p.payment_date DESC
+    """
+
+
+def _payments_list_params(company_key, payment_type=None):
+    params = [company_key, company_key]
+    if payment_type:
+        params.append(payment_type)
+    return tuple(params)
+
+
 def _convert_money_frame_legacy(dataframe):
     if dataframe.empty:
         return dataframe
@@ -946,9 +993,9 @@ def show_invoice_manager(company_key, role):
                 conn = get_connection()
                 payment_cursor = conn.execute(
                     ensure_insert_sql_returning(
-                        "INSERT INTO payments (company_key, payment_date, payment_type, status, amount, currency, method, reference, approval_status, created_by) VALUES (?, ?, ?, ?, ?, 'GHS', ?, ?, ?, ?)"
+                        "INSERT INTO payments (company_key, payment_date, payment_type, status, customer_id, supplier_id, amount, currency, method, reference, approval_status, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, 'GHS', ?, ?, ?, ?)"
                     ),
-                    (company_key, payment_date.isoformat(), payment_type, posting_state, amount, payment_method, payment_ref, posting_state, role),
+                    (company_key, payment_date.isoformat(), payment_type, posting_state, None, None, amount, payment_method, payment_ref, posting_state, role),
                 )
                 payment_id = get_inserted_id(payment_cursor)
                 if posting_state == "Posted":
@@ -1021,8 +1068,8 @@ def show_invoice_manager(company_key, role):
         conn = get_connection()
         df = _portable_read_dataframe(
             conn,
-            "SELECT payment_date, payment_type, status, approval_status, amount, currency, method, reference, created_by FROM payments WHERE company_key = ? ORDER BY payment_date DESC",
-            (company_key,),
+            _payments_list_sql(),
+            _payments_list_params(company_key),
         )
         conn.close()
         st.dataframe(format_currency_dataframe(df), use_container_width=True)
@@ -1310,9 +1357,9 @@ def show_receive_payment_page(company_key, role):
             customer_id = int(row_get(row, "id", row_get(row, 0))) if row else None
             payment_cursor = conn.execute(
                 ensure_insert_sql_returning(
-                    "INSERT INTO payments (company_key, payment_date, payment_type, status, amount, currency, method, reference, approval_status, created_by) VALUES (?, ?, ?, ?, ?, 'GHS', ?, ?, ?, ?)"
+                    "INSERT INTO payments (company_key, payment_date, payment_type, status, customer_id, supplier_id, amount, currency, method, reference, approval_status, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, 'GHS', ?, ?, ?, ?)"
                 ),
-                (company_key, payment_date.isoformat(), "Customer Receipt", posting_state, amount, payment_method, payment_ref, posting_state, role),
+                (company_key, payment_date.isoformat(), "Customer Receipt", posting_state, customer_id, None, amount, payment_method, payment_ref, posting_state, role),
             )
             payment_id = get_inserted_id(payment_cursor)
             if posting_state == "Posted":
@@ -1378,8 +1425,8 @@ def show_receive_payment_page(company_key, role):
     conn = get_connection()
     df = _portable_read_dataframe(
         conn,
-        "SELECT payment_date, payment_type, status, approval_status, amount, currency, method, reference, created_by FROM payments WHERE company_key = ? AND payment_type = 'Customer Receipt' ORDER BY payment_date DESC",
-        (company_key,),
+        _payments_list_sql("Customer Receipt"),
+        _payments_list_params(company_key, "Customer Receipt"),
     )
     conn.close()
     st.dataframe(format_currency_dataframe(df), use_container_width=True)
@@ -1431,9 +1478,9 @@ def show_supplier_payment_page(company_key, role):
             supplier_id = int(row_get(row, "id", row_get(row, 0))) if row else None
             payment_cursor = conn.execute(
                 ensure_insert_sql_returning(
-                    "INSERT INTO payments (company_key, payment_date, payment_type, status, amount, currency, method, reference, approval_status, created_by) VALUES (?, ?, ?, ?, ?, 'GHS', ?, ?, ?, ?)"
+                    "INSERT INTO payments (company_key, payment_date, payment_type, status, customer_id, supplier_id, amount, currency, method, reference, approval_status, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, 'GHS', ?, ?, ?, ?)"
                 ),
-                (company_key, payment_date.isoformat(), "Supplier Payment", posting_state, amount, payment_method, payment_ref, posting_state, role),
+                (company_key, payment_date.isoformat(), "Supplier Payment", posting_state, None, supplier_id, amount, payment_method, payment_ref, posting_state, role),
             )
             payment_id = get_inserted_id(payment_cursor)
             if posting_state == "Posted":
@@ -1499,8 +1546,8 @@ def show_supplier_payment_page(company_key, role):
     conn = get_connection()
     df = _portable_read_dataframe(
         conn,
-        "SELECT payment_date, payment_type, status, approval_status, amount, currency, method, reference, created_by FROM payments WHERE company_key = ? AND payment_type = 'Supplier Payment' ORDER BY payment_date DESC",
-        (company_key,),
+        _payments_list_sql("Supplier Payment"),
+        _payments_list_params(company_key, "Supplier Payment"),
     )
     conn.close()
     st.dataframe(format_currency_dataframe(df), use_container_width=True)

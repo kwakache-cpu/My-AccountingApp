@@ -7045,6 +7045,276 @@ def ensure_users_user_id_schema_integrity(conn):
     }
 
 
+def ensure_payments_party_identity_schema_integrity(conn):
+    """
+    Ensure payments.customer_id and payments.supplier_id exist idempotently.
+
+    Intended for startup/schema migration paths only — never call from UI render code.
+    """
+    if conn is None or not db_table_exists(conn, "payments"):
+        return {
+            "customer_id_column_present": False,
+            "supplier_id_column_present": False,
+            "customer_id_column_added": False,
+            "supplier_id_column_added": False,
+        }
+    backend = _normalize_db_backend(get_active_db_backend())
+    existing_columns = _get_existing_columns(conn, "payments")
+    added_customer = False
+    added_supplier = False
+    for column_name in ("customer_id", "supplier_id"):
+        if column_name in existing_columns:
+            continue
+        try:
+            if backend == "postgres":
+                execute_portable_write(
+                    conn,
+                    f"ALTER TABLE payments ADD COLUMN IF NOT EXISTS {column_name} INTEGER",
+                    (),
+                    backend=backend,
+                )
+            else:
+                conn.execute(f"ALTER TABLE payments ADD COLUMN {column_name} INTEGER")
+            existing_columns.add(column_name)
+            if column_name == "customer_id":
+                added_customer = True
+            else:
+                added_supplier = True
+        except Exception as exc:
+            logger.warning(
+                "payments.%s schema ensure failed: %s",
+                column_name,
+                sanitize_error_message(exc),
+            )
+    return {
+        "customer_id_column_present": "customer_id" in existing_columns,
+        "supplier_id_column_present": "supplier_id" in existing_columns,
+        "customer_id_column_added": added_customer,
+        "supplier_id_column_added": added_supplier,
+    }
+
+
+def _collect_payment_party_id_candidates(conn, payment_id, company_key, party_column, document_table, document_fk_column):
+    """Collect distinct non-null party IDs from journal, posted_entry, and document linkage."""
+    candidates = set()
+    payment_row = execute_portable_query(
+        conn,
+        f"""
+        SELECT id, customer_id, supplier_id, invoice_id, bill_id, posted_entry_id, payment_type
+        FROM payments
+        WHERE id = ? AND company_key = ?
+        """,
+        (int(payment_id), company_key),
+    ).fetchone()
+    if not payment_row:
+        return candidates, payment_row
+    direct_value = row_get(payment_row, party_column)
+    if direct_value not in (None, ""):
+        try:
+            candidates.add(int(direct_value))
+        except (TypeError, ValueError):
+            pass
+    journal_rows = execute_portable_query(
+        conn,
+        """
+        SELECT customer_id, supplier_id
+        FROM journal_entries
+        WHERE company_key = ?
+          AND source_table = 'payments'
+          AND source_id = ?
+          AND COALESCE(is_voided, 0) = 0
+        """,
+        (company_key, int(payment_id)),
+    ).fetchall()
+    for journal_row in journal_rows:
+        value = row_get(journal_row, party_column)
+        if value not in (None, ""):
+            try:
+                candidates.add(int(value))
+            except (TypeError, ValueError):
+                pass
+    posted_entry_id = row_get(payment_row, "posted_entry_id")
+    if posted_entry_id not in (None, ""):
+        posted_row = execute_portable_query(
+            conn,
+            """
+            SELECT customer_id, supplier_id
+            FROM journal_entries
+            WHERE id = ? AND company_key = ?
+            """,
+            (int(posted_entry_id), company_key),
+        ).fetchone()
+        if posted_row:
+            value = row_get(posted_row, party_column)
+            if value not in (None, ""):
+                try:
+                    candidates.add(int(value))
+                except (TypeError, ValueError):
+                    pass
+    document_id = row_get(payment_row, document_fk_column)
+    if document_id not in (None, ""):
+        document_row = execute_portable_query(
+            conn,
+            f"""
+            SELECT {party_column}
+            FROM {document_table}
+            WHERE id = ? AND company_key = ?
+            """,
+            (int(document_id), company_key),
+        ).fetchone()
+        if document_row:
+            value = row_get(document_row, party_column)
+            if value not in (None, ""):
+                try:
+                    candidates.add(int(value))
+                except (TypeError, ValueError):
+                    pass
+    return candidates, payment_row
+
+
+def resolve_payment_party_identity(conn, payment_row):
+    """
+    Resolve customer_id and supplier_id for a payment row.
+
+    Prefers values stored on the payment row, then journal linkage, then invoice/bill FKs.
+    """
+    payment_id = row_get(payment_row, "id")
+    company_key = row_get(payment_row, "company_key")
+    if payment_id is None or company_key is None:
+        return {"customer_id": None, "supplier_id": None, "customer_source": None, "supplier_source": None}
+    direct_customer = row_get(payment_row, "customer_id")
+    direct_supplier = row_get(payment_row, "supplier_id")
+    if direct_customer not in (None, ""):
+        try:
+            return {
+                "customer_id": int(direct_customer),
+                "supplier_id": int(direct_supplier) if direct_supplier not in (None, "") else None,
+                "customer_source": "payment",
+                "supplier_source": "payment" if direct_supplier not in (None, "") else None,
+            }
+        except (TypeError, ValueError):
+            pass
+    if direct_supplier not in (None, ""):
+        try:
+            return {
+                "customer_id": None,
+                "supplier_id": int(direct_supplier),
+                "customer_source": None,
+                "supplier_source": "payment",
+            }
+        except (TypeError, ValueError):
+            pass
+    customer_candidates, _ = _collect_payment_party_id_candidates(
+        conn, payment_id, company_key, "customer_id", "invoices", "invoice_id"
+    )
+    supplier_candidates, _ = _collect_payment_party_id_candidates(
+        conn, payment_id, company_key, "supplier_id", "bills", "bill_id"
+    )
+    resolved_customer = None
+    resolved_supplier = None
+    customer_source = None
+    supplier_source = None
+    if len(customer_candidates) == 1:
+        resolved_customer = next(iter(customer_candidates))
+        customer_source = "linked"
+    if len(supplier_candidates) == 1:
+        resolved_supplier = next(iter(supplier_candidates))
+        supplier_source = "linked"
+    return {
+        "customer_id": resolved_customer,
+        "supplier_id": resolved_supplier,
+        "customer_source": customer_source,
+        "supplier_source": supplier_source,
+    }
+
+
+def backfill_payments_party_identity(conn, company_key=None, dry_run=False):
+    """
+    Idempotent backfill of payments.customer_id / payments.supplier_id from journal or document linkage.
+
+    Skips ambiguous rows where multiple distinct party IDs are found. Never deletes data.
+    """
+    stats = {
+        "customer_updated": 0,
+        "supplier_updated": 0,
+        "customer_skipped_ambiguous": 0,
+        "supplier_skipped_ambiguous": 0,
+        "customer_unmatched": 0,
+        "supplier_unmatched": 0,
+        "dry_run": bool(dry_run),
+    }
+    if conn is None or not db_table_exists(conn, "payments"):
+        return stats
+    params = []
+    company_filter = ""
+    if company_key:
+        company_filter = " AND p.company_key = ?"
+        params.append(company_key)
+    customer_rows = execute_portable_query(
+        conn,
+        f"""
+        SELECT p.id, p.company_key
+        FROM payments p
+        WHERE p.payment_type = 'Customer Receipt'
+          AND (p.customer_id IS NULL OR p.customer_id = '')
+          {company_filter}
+        ORDER BY p.id
+        """,
+        tuple(params),
+    ).fetchall()
+    for row in customer_rows:
+        payment_id = int(row_get(row, "id"))
+        row_company_key = row_get(row, "company_key")
+        candidates, _ = _collect_payment_party_id_candidates(
+            conn, payment_id, row_company_key, "customer_id", "invoices", "invoice_id"
+        )
+        if len(candidates) == 1:
+            customer_id = next(iter(candidates))
+            if not dry_run:
+                execute_portable_write(
+                    conn,
+                    "UPDATE payments SET customer_id = ? WHERE id = ? AND company_key = ?",
+                    (customer_id, payment_id, row_company_key),
+                )
+            stats["customer_updated"] += 1
+        elif len(candidates) > 1:
+            stats["customer_skipped_ambiguous"] += 1
+        else:
+            stats["customer_unmatched"] += 1
+    supplier_rows = execute_portable_query(
+        conn,
+        f"""
+        SELECT p.id, p.company_key
+        FROM payments p
+        WHERE p.payment_type = 'Supplier Payment'
+          AND (p.supplier_id IS NULL OR p.supplier_id = '')
+          {company_filter}
+        ORDER BY p.id
+        """,
+        tuple(params),
+    ).fetchall()
+    for row in supplier_rows:
+        payment_id = int(row_get(row, "id"))
+        row_company_key = row_get(row, "company_key")
+        candidates, _ = _collect_payment_party_id_candidates(
+            conn, payment_id, row_company_key, "supplier_id", "bills", "bill_id"
+        )
+        if len(candidates) == 1:
+            supplier_id = next(iter(candidates))
+            if not dry_run:
+                execute_portable_write(
+                    conn,
+                    "UPDATE payments SET supplier_id = ? WHERE id = ? AND company_key = ?",
+                    (supplier_id, payment_id, row_company_key),
+                )
+            stats["supplier_updated"] += 1
+        elif len(candidates) > 1:
+            stats["supplier_skipped_ambiguous"] += 1
+        else:
+            stats["supplier_unmatched"] += 1
+    return stats
+
+
 def ensure_branch_licensing_schema_integrity(conn):
     """
     Additive branch licensing tables/columns. Safe on every startup; PostgreSQL-friendly types.
@@ -8407,7 +8677,7 @@ def ensure_schema_integrity(conn):
         "inventory": {"opening_balance": "REAL DEFAULT 0", "barcode": "TEXT", "inventory_account_id": "INTEGER", "cogs_account_id": "INTEGER"},
         "invoices": {"invoice_number": "TEXT", "input_vat": "REAL DEFAULT 0", "output_vat": "REAL DEFAULT 0", "approval_status": "TEXT DEFAULT 'Draft'", "submitted_at": "TIMESTAMP", "approved_at": "TIMESTAMP", "approved_by": "TEXT", "cancelled_at": "TIMESTAMP", "cancelled_by": "TEXT", "posted_entry_id": "INTEGER", "last_journal_sync_at": "TIMESTAMP"},
         "bills": {"bill_number": "TEXT", "input_vat": "REAL DEFAULT 0", "output_vat": "REAL DEFAULT 0", "approval_status": "TEXT DEFAULT 'Draft'", "submitted_at": "TIMESTAMP", "approved_at": "TIMESTAMP", "approved_by": "TEXT", "cancelled_at": "TIMESTAMP", "cancelled_by": "TEXT", "posted_entry_id": "INTEGER", "last_journal_sync_at": "TIMESTAMP"},
-        "payments": {"status": "TEXT DEFAULT 'Draft'", "invoice_id": "INTEGER", "bill_id": "INTEGER", "bank_account_id": "INTEGER", "approval_status": "TEXT DEFAULT 'Draft'", "submitted_at": "TIMESTAMP", "approved_at": "TIMESTAMP", "approved_by": "TEXT", "cancelled_at": "TIMESTAMP", "cancelled_by": "TEXT", "posted_entry_id": "INTEGER", "last_journal_sync_at": "TIMESTAMP"},
+        "payments": {"status": "TEXT DEFAULT 'Draft'", "customer_id": "INTEGER", "supplier_id": "INTEGER", "invoice_id": "INTEGER", "bill_id": "INTEGER", "bank_account_id": "INTEGER", "approval_status": "TEXT DEFAULT 'Draft'", "submitted_at": "TIMESTAMP", "approved_at": "TIMESTAMP", "approved_by": "TEXT", "cancelled_at": "TIMESTAMP", "cancelled_by": "TEXT", "posted_entry_id": "INTEGER", "last_journal_sync_at": "TIMESTAMP"},
         "bank_accounts": {"company_key": "TEXT", "branch_id": "TEXT", "account_name": "TEXT", "account_number": "TEXT", "bank_name": "TEXT", "currency": "TEXT DEFAULT 'GHS'", "account_type": "TEXT", "balance": "REAL DEFAULT 0", "created_by": "TEXT", "created_at": "TIMESTAMP DEFAULT CURRENT_TIMESTAMP"},
         "payment_allocations": {"company_key": "TEXT", "payment_id": "INTEGER", "invoice_id": "INTEGER", "bill_id": "INTEGER", "amount": "REAL DEFAULT 0", "currency": "TEXT DEFAULT 'GHS'", "branch_id": "TEXT", "created_by": "TEXT", "allocated_at": "TIMESTAMP DEFAULT CURRENT_TIMESTAMP"},
         "recurring_transactions": {"company_key": "TEXT", "branch_id": "TEXT", "description": "TEXT", "frequency": "TEXT", "next_run_date": "TEXT", "last_run_at": "TIMESTAMP", "is_active": "INTEGER DEFAULT 1", "created_by": "TEXT", "created_at": "TIMESTAMP DEFAULT CURRENT_TIMESTAMP", "source_module": "TEXT", "source_table": "TEXT", "source_id": "INTEGER", "recurrence_payload": "TEXT"},
@@ -9800,6 +10070,7 @@ def _run_lightweight_integrity_checks(conn):
     _ensure_database_identity_table(conn)
     ensure_schema_integrity(conn)
     ensure_users_user_id_schema_integrity(conn)
+    ensure_payments_party_identity_schema_integrity(conn)
     fixed_asset_schema = get_fixed_assets_schema_diagnostics(conn, repair=False)
     if fixed_asset_schema.get("missing_columns") or fixed_asset_schema.get("failed_repairs"):
         logger.warning(
