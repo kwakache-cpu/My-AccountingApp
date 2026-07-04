@@ -21,8 +21,8 @@
 
 | # | Item | Module(s) | Rationale | Evidence |
 |---|------|-----------|-----------|----------|
-| P0-1 | **Persist `customer_id` on customer payment INSERT** | AR, Banking, financials | Subledger reconciliation; payment reports; migration cleanup | Workflow trace 4; linkage map |
-| P0-2 | **Persist `supplier_id` on supplier payment INSERT** | AP, Banking, financials | Same as P0-1 for payables | Workflow trace 6 |
+| P0-1 | **Persist `customer_id` on customer payment INSERT** | AR, Banking, financials | Subledger reconciliation; payment reports; migration cleanup | **Sprint 1 complete** — `show_receive_payment_page` fixed; schema ensure + backfill added |
+| P0-2 | **Persist `supplier_id` on supplier payment INSERT** | AP, Banking, financials | Same as P0-1 for payables | **Sprint 1 complete** — `show_supplier_payment_page` fixed; banking path already correct |
 | P0-3 | **Add taxation test suite** | Tax/VAT/NHIL | Zero test coverage on compliance module | Module audit §12 |
 | P0-4 | **Add view permission gate on taxation page** | Tax | Ungated read of tax control data | Module audit §12 |
 | P0-5 | **Resolve POS posting permission model** | POS, accounting_engine | Cashier posts without `post_accounting_document` when `user_role` omitted — document as intentional OR pass role | Workflow trace 1–2; permission audit |
@@ -88,7 +88,7 @@
 ## Recommended Execution Order (First 90 Days)
 
 ### Sprint A — Data Integrity (P0)
-1. P0-1, P0-2 — payment subledger IDs
+1. ~~P0-1, P0-2 — payment subledger IDs~~ ✅ **Done (Sprint 1, 2026-07-04)** — see `reports/program_a_p0_sprint_1_payment_identity.md`
 2. P0-3, P0-4 — taxation tests + permission
 3. P0-5 — POS posting permission decision
 4. P0-6 — in-app help text for bill vs receive
