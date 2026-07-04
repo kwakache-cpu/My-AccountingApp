@@ -680,9 +680,9 @@ def apply_payment_reference_fix(
     confirmation_text: str,
     create_backup: bool = True,
 ) -> dict[str, Any]:
-    if not confirmed:
-        return {"ok": False, "reason": "Confirmation checkbox required."}
     if str(confirmation_text or "").strip() != CONFIRM_PAYMENT_APPLY_TEXT:
+        return {"ok": False, "reason": f"Confirmation text must match exactly: {CONFIRM_PAYMENT_APPLY_TEXT}"}
+    if not confirmed:
         return {"ok": False, "reason": f"Confirmation text must match exactly: {CONFIRM_PAYMENT_APPLY_TEXT}"}
     safe_reference = str(reference or "").strip()
     if not safe_reference:

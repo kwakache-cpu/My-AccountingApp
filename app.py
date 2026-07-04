@@ -1325,9 +1325,22 @@ def login_ui():
     with t4:
         show_system_status()
 
-    # Demo Mode Toggle
+    # Demo mode entry — button-only (avoids fragile Checkbox/Toggle frontend chunks on login/register reruns)
     st.markdown("---")
-    st.toggle('Try Demo Mode', key='demo_toggle')
+    demo_mode_selected = bool(st.session_state.get("demo_toggle"))
+    if demo_mode_selected:
+        st.info("Demo mode selected. Enter the sample workspace below or return to secure login.")
+        demo_col1, demo_col2 = st.columns(2)
+        with demo_col1:
+            st.button("Enter Demo ERP", on_click=enter_demo, key="enter_demo_erp_btn", use_container_width=True)
+            if st.button("Back to Secure Login", key="demo_mode_back_btn", use_container_width=True):
+                st.session_state.demo_toggle = False
+                st.rerun()
+    else:
+        st.caption("Explore the ERP with sample data. No payment or registration required.")
+        if st.button("Try Demo Mode", key="demo_mode_entry_btn"):
+            st.session_state.demo_toggle = True
+            st.rerun()
 
 # Dashboard Module (NEW FUNCTION)
 def _show_legacy_dashboard(company_key, company_name, role):
@@ -3666,8 +3679,9 @@ else:
                         "Override Reason",
                         help="Required for internal/admin-only emergency deployments that bypass Paystack.",
                     )
-                    override_confirmed = st.checkbox(
-                        "I understand this bypasses Paystack and is for internal/admin use only."
+                    override_confirm_text = st.text_input(
+                        "Type CONFIRM to acknowledge this bypasses Paystack (internal/admin only)",
+                        key="manual_deploy_override_confirm_text",
                     )
                     key_col, button_col = st.columns([3, 1])
                     with key_col:
@@ -3709,7 +3723,7 @@ else:
                                     max_branches=int(max_branches),
                                     branch_price_per_month=float(price_per_branch),
                                     override_reason=override_reason,
-                                    confirmation_checked=override_confirmed,
+                                    confirmation_checked=str(override_confirm_text or "").strip().upper() == "CONFIRM",
                                     logger_instance=logger,
                                 )
                                 if not override_result.get("ok"):
@@ -3817,17 +3831,17 @@ else:
                             key="company_lifecycle_action",
                             horizontal=True,
                         )
-                        confirm_action = st.checkbox(
-                            f"I confirm the {action_choice.lower()} action for {action_company_name}.",
-                            key="company_lifecycle_confirm",
+                        confirm_action_text = st.text_input(
+                            f"Type the company name to confirm {action_choice.lower()}",
+                            key="company_lifecycle_confirm_text",
                         )
                         action_col1, action_col2 = st.columns(2)
                         with action_col1:
                             if st.button("Apply Company Action", key="apply_company_action_btn"):
                                 if not require_role_permission(u["role"], "manage_company", action_label="manage companies"):
                                     st.stop()
-                                if not confirm_action:
-                                    st.warning("Confirm the company action before applying it.")
+                                if str(confirm_action_text or "").strip() != str(action_company_name or "").strip():
+                                    st.warning("Type the exact company name to confirm this action.")
                                 else:
                                     try:
                                         if action_choice == "Archive (Keep Data)":

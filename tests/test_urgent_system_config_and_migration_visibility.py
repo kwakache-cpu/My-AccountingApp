@@ -109,7 +109,7 @@ class UrgentMigrationCleanupVisibilityTests(TestCase):
     def test_admin_diagnostics_suite_includes_migration_cleanup_gate(self):
         source = inspect.getsource(self.modules.render_runtime_admin_diagnostics_suite)
         self.assertIn("can_render_migration_cleanup_diagnostics", source)
-        self.assertIn("_render_migration_cleanup_review", source)
+        self.assertIn("_render_migration_cleanup_diagnostics_lazy", source)
 
     def test_cleanup_role_gate_includes_system_admin(self):
         self.assertTrue(self.cleanup.can_access_migration_cleanup("System Admin"))

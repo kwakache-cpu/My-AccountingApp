@@ -9763,10 +9763,11 @@ def show_onboarding_payment():
                                     'trial_end_date': trial_result["end_date"],
                                 }
                                 st.caption(f"Company Key: {company_key}")
-                                st.link_button(
-                                    "Continue to Secure Paystack Checkout",
-                                    payment_result["authorization_url"],
-                                )
+                                checkout_url = str(payment_result.get("authorization_url") or "").strip()
+                                if checkout_url:
+                                    st.markdown(
+                                        f"[**Continue to Secure Paystack Checkout**]({checkout_url})"
+                                    )
                                 st.caption("Supported checkout channels: Card and Ghana Mobile Money.")
                             else:
                                 st.warning(
@@ -11128,6 +11129,32 @@ def show_chart_of_accounts(company_key, role):
 # ==========================================
 # COMPANY SETUP
 # ==========================================
+def _migration_cleanup_action_confirmed(typed_text, expected_phrase):
+    return str(typed_text or "").strip() == str(expected_phrase or "").strip()
+
+
+_MIGRATION_CONFIRM_POS_BRANCH = "CONFIRM POS BRANCH"
+_MIGRATION_CONFIRM_BRANCH_MANAGER = "CONFIRM BRANCH MANAGER"
+
+
+def _render_migration_cleanup_diagnostics_lazy(role, session_company_key, *, panel_key_prefix, expanded=False):
+    """Load migration cleanup only on demand to keep admin overview cards fast and stable."""
+    load_key = f"{panel_key_prefix}_migration_cleanup_loaded"
+    with st.expander("Migration Cleanup Review (Admin Diagnostics)", expanded=expanded):
+        if not st.session_state.get(load_key):
+            st.caption(
+                "Load this panel on demand. It avoids heavy admin widgets on System Overview first paint."
+            )
+            if st.button(
+                "Load migration cleanup review",
+                key=f"{panel_key_prefix}_load_migration_cleanup",
+            ):
+                st.session_state[load_key] = True
+                st.rerun()
+            return
+        _render_migration_cleanup_review(role, session_company_key)
+
+
 def _render_migration_cleanup_review(role, session_company_key):
     """Dev / Master Admin panel for Phase 5B migration data cleanup."""
     st.subheader("Migration Cleanup Review")
@@ -11321,10 +11348,12 @@ def _render_migration_cleanup_review(role, session_company_key):
                         use_container_width=True,
                         hide_index=True,
                     )
-                    confirm = st.checkbox(
-                        "I confirm assigning this branch to the POS sale",
+                    confirm_text = st.text_input(
+                        "Type CONFIRM POS BRANCH to assign this branch",
                         key=f"mig_pos_confirm_{sale_id}",
+                        placeholder=_MIGRATION_CONFIRM_POS_BRANCH,
                     )
+                    confirm = _migration_cleanup_action_confirmed(confirm_text, _MIGRATION_CONFIRM_POS_BRANCH)
                     if st.button("Save branch assignment", key=f"mig_pos_save_{sale_id}"):
                         write_conn = get_connection()
                         if not write_conn:
@@ -11427,13 +11456,15 @@ def _render_migration_cleanup_review(role, session_company_key):
                         use_container_width=True,
                         hide_index=True,
                     )
-                    confirm = st.checkbox(
-                        "I confirm assigning this branch manager",
+                    confirm_text = st.text_input(
+                        "Type CONFIRM BRANCH MANAGER to link this manager",
                         key=f"mig_mgr_confirm_{bid}",
+                        placeholder=_MIGRATION_CONFIRM_BRANCH_MANAGER,
                     )
+                    confirm = _migration_cleanup_action_confirmed(confirm_text, _MIGRATION_CONFIRM_BRANCH_MANAGER)
                     if st.button("Save manager", key=f"mig_mgr_save_{bid}"):
                         if not confirm:
-                            st.error("Confirmation required.")
+                            st.error("Type the confirmation phrase exactly before saving.")
                         else:
                             write_conn = get_connection()
                             if not write_conn:
@@ -11522,14 +11553,14 @@ def _render_migration_cleanup_review(role, session_company_key):
                 if not payment.get("still_needs_fix"):
                     st.warning("Payment no longer matches expected bad state.")
                 else:
-                    confirm = st.checkbox(
-                        "I confirm applying the payment reference fix",
-                        key=f"mig_pay_confirm_{pid}",
-                    )
                     confirm_text = st.text_input(
                         "Type confirmation phrase",
                         key=f"mig_pay_text_{pid}",
                         placeholder=migration_cleanup_service.CONFIRM_PAYMENT_APPLY_TEXT,
+                    )
+                    confirm = _migration_cleanup_action_confirmed(
+                        confirm_text,
+                        migration_cleanup_service.CONFIRM_PAYMENT_APPLY_TEXT,
                     )
                     if st.button("Apply payment fix (creates backup)", key=f"mig_pay_apply_{pid}"):
                         write_conn = get_connection()
@@ -17613,8 +17644,12 @@ def render_runtime_admin_diagnostics_suite(
         panel_key=f"{panel_key_prefix}_lv007_warmup",
     )
     if can_render_migration_cleanup_diagnostics(role, surface) and st is not None:
-        with st.expander("Migration Cleanup Review (Admin Diagnostics)", expanded=expanded):
-            _render_migration_cleanup_review(role, company_key or st.session_state.get("company_id"))
+        _render_migration_cleanup_diagnostics_lazy(
+            role,
+            company_key or st.session_state.get("company_id"),
+            panel_key_prefix=panel_key_prefix,
+            expanded=expanded,
+        )
     if include_lv001 and company_key:
         with st.expander("LV-001 Live Validation Diagnostics (Admin Only)", expanded=expanded):
             lv001 = get_live_validation_lv001_diagnostics(
