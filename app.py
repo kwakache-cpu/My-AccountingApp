@@ -1333,6 +1333,7 @@ def login_ui():
         demo_col1, demo_col2 = st.columns(2)
         with demo_col1:
             st.button("Enter Demo ERP", on_click=enter_demo, key="enter_demo_erp_btn", use_container_width=True)
+        with demo_col2:
             if st.button("Back to Secure Login", key="demo_mode_back_btn", use_container_width=True):
                 st.session_state.demo_toggle = False
                 st.rerun()
