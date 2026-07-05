@@ -4,6 +4,7 @@ import logging
 import random
 import string
 import importlib
+import uuid
 from datetime import datetime, timedelta
 import os
 import shutil
@@ -7315,6 +7316,194 @@ def backfill_payments_party_identity(conn, company_key=None, dry_run=False):
     return stats
 
 
+def generate_collision_safe_event_id(prefix="EVT"):
+    """Return a collision-resistant event identifier for audit/system logs."""
+    safe_prefix = str(prefix or "EVT").strip().upper() or "EVT"
+    return f"{safe_prefix}-{uuid.uuid4().hex}"
+
+
+def ensure_system_logs_event_id_schema_integrity(conn):
+    """
+    Ensure system_logs.event_id exists with a supporting unique index idempotently.
+
+    Intended for startup/schema migration paths only — never call from UI render code.
+    """
+    if conn is None or not db_table_exists(conn, "system_logs"):
+        return {
+            "event_id_column_present": False,
+            "event_id_column_added": False,
+            "event_id_index_ensured": False,
+        }
+    backend = _normalize_db_backend(get_active_db_backend())
+    existing_columns = _get_existing_columns(conn, "system_logs")
+    added_column = False
+    if "event_id" not in existing_columns:
+        try:
+            if backend == "postgres":
+                execute_portable_write(
+                    conn,
+                    "ALTER TABLE system_logs ADD COLUMN IF NOT EXISTS event_id TEXT",
+                    (),
+                    backend=backend,
+                )
+            else:
+                conn.execute("ALTER TABLE system_logs ADD COLUMN event_id TEXT")
+            existing_columns.add("event_id")
+            added_column = True
+        except Exception as exc:
+            logger.warning(
+                "system_logs.event_id schema ensure failed: %s",
+                sanitize_error_message(exc),
+            )
+    index_ensured = False
+    index_sql = (
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_system_logs_event_id "
+        "ON system_logs(event_id) WHERE event_id IS NOT NULL"
+    )
+    try:
+        if backend == "postgres":
+            execute_portable_write(conn, index_sql, (), backend=backend)
+        else:
+            conn.execute(index_sql)
+        index_ensured = True
+    except Exception as exc:
+        logger.debug(
+            "system_logs.event_id index ensure skipped: %s",
+            sanitize_error_message(exc),
+        )
+    return {
+        "event_id_column_present": "event_id" in existing_columns,
+        "event_id_column_added": added_column,
+        "event_id_index_ensured": index_ensured,
+    }
+
+
+def open_ephemeral_system_log_connection():
+    """
+    Open a standalone connection for best-effort system logging.
+
+    On PostgreSQL this avoids reusing the Streamlit session connection so a logging
+    failure cannot roll back an in-flight business transaction.
+    """
+    if is_postgres_backend():
+        return _open_postgres_connection(), True
+    return get_connection(), True
+
+
+def repair_postgres_table_identity_sequence(conn, table_name, column_name="id"):
+    """Best-effort repair for desynced PostgreSQL identity sequences after row copies."""
+    if conn is None or not is_postgres_backend():
+        return False
+    safe_table = str(table_name or "").strip()
+    safe_column = str(column_name or "id").strip() or "id"
+    if not safe_table.replace("_", "").isalnum() or not safe_column.replace("_", "").isalnum():
+        return False
+    try:
+        execute_portable_write(
+            conn,
+            f"""
+            SELECT setval(
+                pg_get_serial_sequence('{safe_table}', '{safe_column}'),
+                GREATEST(COALESCE((SELECT MAX({safe_column}) FROM {safe_table}), 0), 1),
+                (SELECT COUNT(*) > 0 FROM {safe_table})
+            )
+            """,
+            (),
+            backend="postgres",
+        )
+        return True
+    except Exception as exc:
+        logger.debug(
+            "PostgreSQL identity sequence repair skipped for %s.%s: %s",
+            safe_table,
+            safe_column,
+            sanitize_error_message(exc),
+        )
+        return False
+
+
+def _insert_system_log_row(conn, level, module_name, message, event_id):
+    backend = _normalize_db_backend(get_active_db_backend())
+    columns = get_cached_table_column_names(conn, "system_logs", backend=backend)
+    timestamp_value = datetime.now().isoformat(timespec="seconds")
+    if "event_id" in columns:
+        insert_sql = db_insert_ignore_sql(
+            "system_logs",
+            ("timestamp", "level", "module_name", "message", "event_id"),
+            conflict_columns=("event_id",),
+            backend=backend,
+        )
+        params = (timestamp_value, level, module_name, message, event_id)
+    else:
+        insert_sql = "INSERT INTO system_logs (timestamp, level, module_name, message) VALUES (?, ?, ?, ?)"
+        params = (timestamp_value, level, module_name, message)
+    execute_portable_write(conn, insert_sql, params, backend=backend)
+
+
+def persist_system_log_event(level, module_name, message):
+    """
+    Best-effort system log write that must never crash business workflows.
+
+    Returns True when a row was inserted, False otherwise.
+    """
+    conn = None
+    owned_connection = False
+    try:
+        conn, owned_connection = open_ephemeral_system_log_connection()
+        if conn is None:
+            return False
+        if not is_postgres_backend():
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS system_logs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp TEXT,
+                    level TEXT,
+                    module_name TEXT,
+                    message TEXT
+                )
+                """
+            )
+        elif not db_table_exists(conn, "system_logs"):
+            return False
+        event_id = generate_collision_safe_event_id("SYS")
+        try:
+            _insert_system_log_row(conn, level, module_name, message, event_id)
+            conn.commit()
+            return True
+        except Exception as first_exc:
+            if is_postgres_backend():
+                try:
+                    conn.rollback()
+                except Exception:
+                    logger.debug("System log rollback after first failure skipped.", exc_info=True)
+                repair_postgres_table_identity_sequence(conn, "system_logs", "id")
+                retry_event_id = generate_collision_safe_event_id("SYS")
+                _insert_system_log_row(conn, level, module_name, message, retry_event_id)
+                conn.commit()
+                return True
+            raise first_exc
+    except Exception as exc:
+        if conn is not None and owned_connection:
+            try:
+                conn.rollback()
+            except Exception:
+                logger.debug("System log rollback after failure skipped.", exc_info=True)
+        logger.warning(
+            "System event logging failed for module=%s level=%s: %s",
+            module_name,
+            level,
+            sanitize_error_message(exc),
+        )
+        return False
+    finally:
+        if conn is not None and owned_connection:
+            try:
+                conn.close()
+            except Exception:
+                logger.debug("System log connection close skipped.", exc_info=True)
+
+
 def ensure_branch_licensing_schema_integrity(conn):
     """
     Additive branch licensing tables/columns. Safe on every startup; PostgreSQL-friendly types.
@@ -8634,7 +8823,7 @@ def ensure_schema_integrity(conn):
             "before_after_summary": "TEXT",
             "event_id": "TEXT",
         },
-        "system_logs": {"timestamp": "TEXT", "level": "TEXT", "module_name": "TEXT", "message": "TEXT"},
+        "system_logs": {"timestamp": "TEXT", "level": "TEXT", "module_name": "TEXT", "message": "TEXT", "event_id": "TEXT"},
         "customers": {"customer_id": "TEXT", "current_balance": "REAL DEFAULT 0"},
         "customer_transactions": {"branch_id": "TEXT", "reference": "TEXT", "created_by": "TEXT", "transaction_date": "TEXT"},
         "supplier_transactions": {"reference": "TEXT", "created_by": "TEXT", "transaction_date": "TEXT"},
@@ -10071,6 +10260,7 @@ def _run_lightweight_integrity_checks(conn):
     ensure_schema_integrity(conn)
     ensure_users_user_id_schema_integrity(conn)
     ensure_payments_party_identity_schema_integrity(conn)
+    ensure_system_logs_event_id_schema_integrity(conn)
     fixed_asset_schema = get_fixed_assets_schema_diagnostics(conn, repair=False)
     if fixed_asset_schema.get("missing_columns") or fixed_asset_schema.get("failed_repairs"):
         logger.warning(
@@ -11325,7 +11515,7 @@ def log_audit_action(
     try:
         was_in_transaction = bool(getattr(conn, "in_transaction", False))
         columns = get_cached_table_column_names(conn, "audit_logs")
-        event_id = f"AUD-{datetime.utcnow().strftime('%Y%m%d%H%M%S%f')}"
+        event_id = generate_collision_safe_event_id("AUD")
         if {"action_type", "document_ref", "before_after_summary", "event_id"}.issubset(columns):
             execute_portable_write(
                 conn,

@@ -1420,6 +1420,7 @@ def show_receive_payment_page(company_key, role):
                 st.warning("Receipt saved without accounting impact. Move Posting State to Posted when it is approved.")
             conn.commit()
             conn.close()
+            st.success("Customer receipt saved successfully.")
             st.rerun()
 
     conn = get_connection()
@@ -1541,6 +1542,7 @@ def show_supplier_payment_page(company_key, role):
                 st.warning("Supplier payment saved without accounting impact. Move Posting State to Posted when it is approved.")
             conn.commit()
             conn.close()
+            st.success("Supplier payment saved successfully.")
             st.rerun()
 
     conn = get_connection()
