@@ -114,10 +114,26 @@ class PostgresRuntimeSqlDialectHardeningTests(ERPIsolatedTestCase):
         import modules
 
         fake = _FakePostgresConn()
-        with mock.patch.object(modules, "get_connection", return_value=fake), mock.patch.object(
-            modules, "is_postgres_backend", return_value=True
-        ), mock.patch.object(modules, "db_table_exists", return_value=True), mock.patch.object(
-            modules, "execute_portable_write", wraps=modules.execute_portable_write
+        with mock.patch.object(
+            self.database,
+            "open_ephemeral_system_log_connection",
+            return_value=(fake, True),
+        ), mock.patch.object(
+            self.database,
+            "is_postgres_backend",
+            return_value=True,
+        ), mock.patch.object(
+            self.database,
+            "db_table_exists",
+            return_value=True,
+        ), mock.patch.object(
+            self.database,
+            "get_cached_table_column_names",
+            return_value={"timestamp", "level", "module_name", "message", "event_id"},
+        ), mock.patch.object(
+            self.database,
+            "execute_portable_write",
+            wraps=self.database.execute_portable_write,
         ) as portable_write:
             modules.log_system_event("INFO", "POS", "test event")
 
@@ -125,7 +141,8 @@ class PostgresRuntimeSqlDialectHardeningTests(ERPIsolatedTestCase):
         self.assertFalse(any("CREATE TABLE" in statement for statement in fake.statements))
         portable_write.assert_called_once()
         insert_sql = portable_write.call_args[0][1]
-        self.assertIn("INSERT INTO system_logs", insert_sql)
+        self.assertIn("system_logs", insert_sql)
+        self.assertIn("event_id", insert_sql)
 
     def test_inventory_metrics_read_uses_portable_postgres_placeholders(self):
         import modules
@@ -168,9 +185,11 @@ class PostgresRuntimeSqlDialectHardeningTests(ERPIsolatedTestCase):
         conn = sqlite3.connect(":memory:")
         conn.row_factory = sqlite3.Row
         wrapped_conn = _NonClosingConn(conn)
-        with mock.patch.object(modules, "get_connection", return_value=wrapped_conn), mock.patch.object(
-            modules, "is_postgres_backend", return_value=False
-        ):
+        with mock.patch.object(
+            self.database,
+            "open_ephemeral_system_log_connection",
+            return_value=(wrapped_conn, True),
+        ), mock.patch.object(self.database, "is_postgres_backend", return_value=False):
             modules.log_system_event("INFO", "Test", "sqlite path")
         row = conn.execute(
             "SELECT level, module_name, message FROM system_logs ORDER BY id DESC LIMIT 1"

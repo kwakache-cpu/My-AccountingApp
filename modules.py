@@ -804,6 +804,7 @@ from database import (
     fetch_scalar,
     upsert_subscription_plan_setting,
     log_audit_action as database_log_audit_action,
+    persist_system_log_event,
 )
 from accounting_engine import (
     compare_legacy_and_journal_totals,
@@ -4669,35 +4670,8 @@ def init_db():
 
 
 def log_system_event(level, module_name, message):
-    conn = get_connection()
-    if conn is None:
-        return
-    try:
-        if not is_postgres_backend():
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS system_logs (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    timestamp TEXT,
-                    level TEXT,
-                    module_name TEXT,
-                    message TEXT
-                )
-                """
-            )
-        elif not db_table_exists(conn, "system_logs"):
-            return
-        execute_portable_write(
-            conn,
-            "INSERT INTO system_logs (timestamp, level, module_name, message) VALUES (?, ?, ?, ?)",
-            (datetime.now().isoformat(timespec="seconds"), level, module_name, message),
-        )
-        conn.commit()
-    except sqlite3.Error as exc:
-        logger.warning("System event logging failed for module=%s level=%s: %s", module_name, level, sanitize_error_message(exc))
-    finally:
-        if conn:
-            conn.close()
+    """Best-effort system log write; must never crash business workflows."""
+    persist_system_log_event(level, module_name, message)
 
 
 def get_excel_bin(df):
