@@ -6530,6 +6530,21 @@ PURCHASE_CLASSIFICATION_OPTIONS = [
     "Fixed Asset Purchase",
 ]
 
+CREATE_BILL_ACCOUNTING_NOTICE = (
+    "Creating a bill records supplier liability/accounting. "
+    "It does not receive stock unless inventory receiving is completed."
+)
+CREATE_BILL_INVENTORY_QTY_NOTICE = "Inventory quantity will not increase from this bill alone."
+CREATE_BILL_INVENTORY_NEXT_STEP = "Use Inventory → Receive Stock / Purchases to update quantities."
+CREATE_BILL_PAYMENT_STATUS_NOTICE = (
+    "Received means payment is settled — not that stock was received."
+)
+
+
+def _render_create_bill_workflow_guidance():
+    st.info(CREATE_BILL_ACCOUNTING_NOTICE)
+    st.caption(CREATE_BILL_INVENTORY_NEXT_STEP)
+
 FIXED_ASSET_PURCHASE_CATEGORIES = ["Vehicle", "Equipment", "Building", "Furniture", "Land", "Other"]
 FIXED_ASSET_ACQUISITION_TYPES = [
     "Opening Balance Asset",
@@ -9195,6 +9210,8 @@ def show_create_bill_page(company_key):
         ):
             return
 
+        _render_create_bill_workflow_guidance()
+
         suppliers = conn.execute("SELECT id, name FROM suppliers WHERE company_key = ? ORDER BY name", (company_key,)).fetchall()
         supplier_options = [""] + [row["name"] for row in suppliers]
         expense_account_options = get_purchase_expense_account_options(company_key, conn=conn)
@@ -9232,8 +9249,12 @@ def show_create_bill_page(company_key):
                 supplier_name = st.selectbox("Supplier", supplier_options)
                 bill_date = st.date_input("Bill Date", value=datetime.now().date())
                 purchase_classification = st.selectbox("Purchase Classification", PURCHASE_CLASSIFICATION_OPTIONS)
+                if purchase_classification == "Inventory Purchase":
+                    st.caption(CREATE_BILL_INVENTORY_QTY_NOTICE)
+                    st.caption(CREATE_BILL_INVENTORY_NEXT_STEP)
                 input_vat_rate = st.number_input("Input VAT Rate (%)", min_value=0.0, max_value=100.0, step=0.5, value=0.0)
                 status = st.selectbox("Payment Status", ["Pending", "Received"])
+                st.caption(CREATE_BILL_PAYMENT_STATUS_NOTICE)
                 payment_method = st.selectbox("Payment Method", ["Cash", "Bank", "Mobile Money"], disabled=status != "Received")
                 posting_state = st.selectbox("Posting State", DOCUMENT_WORKFLOW_STATUSES, index=1)
                 expense_account_name = None
