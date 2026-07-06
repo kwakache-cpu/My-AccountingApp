@@ -8,9 +8,11 @@ import sqlite3
 import pandas as pd
 
 from database import (
+    db_column_exists,
     db_table_exists,
     execute_db_write_transaction,
     execute_portable_query,
+    execute_portable_write,
     ensure_insert_sql_returning,
     fetch_scalar,
     get_active_db_backend,
@@ -402,6 +404,91 @@ def _coa_code_expression():
     return "COALESCE(NULLIF(account_code, ''), NULLIF(code, ''), '')"
 
 
+DEFAULT_SYSTEM_ACCOUNT_CODE_MAP = {
+    "accounts receivable": "1100",
+    "accounts payable": "2100",
+    "cash": "1000",
+    "bank": "1010",
+    "mobile money": "1020",
+    "inventory": "1200",
+    "sales revenue": "4000",
+    "cost of goods sold": "5000",
+    "vat payable": "2200",
+    "owner capital": "3000",
+    "loan payable": "2300",
+    "salary expense": "5100",
+}
+
+
+def resolve_display_account_code(account_code):
+    """Return a stable display code for reports; use em dash when no code exists."""
+    code = str(account_code or "").strip()
+    return code if code else "—"
+
+
+def backfill_default_account_codes(conn, dry_run=False):
+    """
+    Populate blank code/account_code fields for known default system accounts only.
+
+    Idempotent and non-destructive: never overwrites an existing code.
+    """
+    stats = {
+        "updated": 0,
+        "skipped_has_code": 0,
+        "skipped_unknown_account": 0,
+        "dry_run": bool(dry_run),
+    }
+    if conn is None or not db_table_exists(conn, "chart_of_accounts"):
+        return stats
+    rows = execute_portable_query(
+        conn,
+        f"""
+        SELECT
+            id,
+            {_coa_name_expression()} AS account_name,
+            {_coa_code_expression()} AS account_code
+        FROM chart_of_accounts
+        ORDER BY id
+        """,
+    ).fetchall()
+    for row in rows:
+        account_name = str(row_get(row, "account_name", "") or "").strip()
+        existing_code = str(row_get(row, "account_code", "") or "").strip()
+        if existing_code:
+            stats["skipped_has_code"] += 1
+            continue
+        default_code = DEFAULT_SYSTEM_ACCOUNT_CODE_MAP.get(account_name.lower())
+        if not default_code:
+            stats["skipped_unknown_account"] += 1
+            continue
+        if not dry_run:
+            execute_portable_write(
+                conn,
+                """
+                UPDATE chart_of_accounts
+                SET code = ?, account_code = ?
+                WHERE id = ?
+                  AND (code IS NULL OR TRIM(code) = '')
+                  AND (account_code IS NULL OR TRIM(account_code) = '')
+                """,
+                (default_code, default_code, int(row_get(row, "id"))),
+            )
+        stats["updated"] += 1
+    return stats
+
+
+def ensure_default_account_codes_integrity(conn):
+    """Startup-only helper to backfill blank codes on known default accounts."""
+    try:
+        return backfill_default_account_codes(conn, dry_run=False)
+    except Exception as exc:
+        logger.warning(
+            "Default account code backfill skipped: %s",
+            exc,
+        )
+        return {"updated": 0, "skipped_has_code": 0, "skipped_unknown_account": 0, "dry_run": False, "failed": True}
+
+
 def _inventory_value_query(conn, company_key, branch_id=None):
     inventory_columns = {column["name"] for column in list_columns(conn, "inventory")}
     query = """
@@ -459,6 +546,7 @@ def get_chart_of_accounts_diagnostics(conn=None):
         invalid_types = []
         header_posting_allowed = []
         control_accounts_manual = []
+        missing_account_codes = []
         seen_codes = {}
         parent_ids = {int(row["parent_id"]) for row in rows if row.get("parent_id") not in (None, "")}
         for row in rows:
@@ -468,6 +556,8 @@ def get_chart_of_accounts_diagnostics(conn=None):
             posting_allowed = bool(int(row.get("posting_allowed") or 0))
             control_account = bool(int(row.get("control_account") or 0))
             allow_manual_posting = bool(int(row.get("allow_manual_posting") or 0))
+            if not account_code:
+                missing_account_codes.append(account_name)
             if account_code:
                 owner = seen_codes.get(account_code.lower())
                 if owner and owner != account_name:
@@ -489,12 +579,15 @@ def get_chart_of_accounts_diagnostics(conn=None):
             warnings.append(f"header accounts still allow posting: {len(header_posting_allowed)}")
         if control_accounts_manual:
             warnings.append(f"control accounts still allow manual posting: {len(control_accounts_manual)}")
+        if missing_account_codes:
+            warnings.append(f"accounts missing codes: {len(missing_account_codes)}")
         return {
             "total_accounts": len(rows),
             "duplicate_account_codes": duplicate_codes,
             "invalid_account_types": invalid_types,
             "header_accounts_allowing_posting": header_posting_allowed,
             "control_accounts_allowing_manual_posting": control_accounts_manual,
+            "missing_account_codes": missing_account_codes,
             "warnings": warnings,
         }
     finally:
