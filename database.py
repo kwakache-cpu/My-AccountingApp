@@ -10261,6 +10261,17 @@ def _run_lightweight_integrity_checks(conn):
     ensure_users_user_id_schema_integrity(conn)
     ensure_payments_party_identity_schema_integrity(conn)
     ensure_system_logs_event_id_schema_integrity(conn)
+    try:
+        from accounting_engine import ensure_default_account_codes_integrity
+
+        code_backfill = ensure_default_account_codes_integrity(conn)
+        if int(code_backfill.get("updated") or 0) > 0:
+            logger.info(
+                "Backfilled default account codes on startup: updated=%s",
+                code_backfill.get("updated"),
+            )
+    except Exception as exc:
+        logger.warning("Default account code integrity skipped: %s", exc)
     fixed_asset_schema = get_fixed_assets_schema_diagnostics(conn, repair=False)
     if fixed_asset_schema.get("missing_columns") or fixed_asset_schema.get("failed_repairs"):
         logger.warning(

@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timedelta
 import importlib.util
 import logging
 import os
@@ -12,6 +12,7 @@ from security_utils import build_user_safe_error, sanitize_error_message
 
 from database import (
     dataframe_from_portable_rows,
+    db_column_exists,
     db_insert_ignore_sql,
     db_table_exists,
     ensure_insert_sql_returning,
@@ -36,6 +37,7 @@ from accounting_engine import (
     get_bank_reconciliation,
     get_finance_integrity_diagnostics,
     post_accounting_impact as post_journal_entry,
+    resolve_display_account_code,
 )
 logger = logging.getLogger(__name__)
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -112,6 +114,158 @@ def _payment_method_account_name(payment_method):
     if normalized_method == "Mobile Money":
         return "Mobile Money"
     return "Cash"
+
+
+def _payment_flash_session_key(company_key, payment_kind):
+    return f"payment_flash_{payment_kind}_{company_key}"
+
+
+def _set_payment_flash(company_key, payment_kind, message):
+    st.session_state[_payment_flash_session_key(company_key, payment_kind)] = str(message or "")
+
+
+def _render_payment_flash(company_key, payment_kind):
+    message = st.session_state.pop(_payment_flash_session_key(company_key, payment_kind), None)
+    if message:
+        st.success(message)
+
+
+_PAYMENT_DEDUPE_WINDOW_SECONDS = 120
+
+
+def _payment_submit_guard_key(company_key, payment_kind):
+    return f"payment_submit_guard_{payment_kind}_{company_key}"
+
+
+def _payment_fingerprint(payment_type, party_id, amount, payment_date, reference, created_by, method=None):
+    date_value = payment_date.isoformat() if hasattr(payment_date, "isoformat") else str(payment_date or "")
+    return (
+        str(payment_type or "").strip(),
+        int(party_id) if party_id is not None else None,
+        round(float(amount or 0.0), 2),
+        date_value,
+        str(reference or "").strip(),
+        str(created_by or "").strip(),
+        str(method or "").strip() if method is not None else "",
+    )
+
+
+def _clear_payment_submit_guard(company_key, payment_kind):
+    st.session_state.pop(_payment_submit_guard_key(company_key, payment_kind), None)
+
+
+def _find_recent_duplicate_payment(
+    conn,
+    company_key,
+    payment_type,
+    party_column,
+    party_id,
+    amount,
+    payment_date,
+    reference,
+    created_by,
+    method=None,
+    window_seconds=_PAYMENT_DEDUPE_WINDOW_SECONDS,
+):
+    if party_id is None:
+        return None
+    payment_date_str = payment_date.isoformat() if hasattr(payment_date, "isoformat") else str(payment_date or "")
+    amount_value = round(float(amount or 0.0), 2)
+    reference_norm = str(reference or "").strip()
+    created_by_norm = str(created_by or "").strip()
+    method_norm = str(method or "").strip() if method is not None else None
+    where_parts = [
+        "company_key = ?",
+        "payment_type = ?",
+        f"{party_column} = ?",
+        "ABS(COALESCE(amount, 0) - ?) < 0.01",
+        "payment_date = ?",
+        "COALESCE(reference, '') = ?",
+        "COALESCE(created_by, '') = ?",
+    ]
+    params = [
+        company_key,
+        payment_type,
+        int(party_id),
+        amount_value,
+        payment_date_str,
+        reference_norm,
+        created_by_norm,
+    ]
+    if method_norm is not None:
+        where_parts.append("COALESCE(method, '') = ?")
+        params.append(method_norm)
+    where_sql = " AND ".join(where_parts)
+    if db_column_exists(conn, "payments", "created_at"):
+        cutoff = (datetime.utcnow() - timedelta(seconds=int(window_seconds))).strftime("%Y-%m-%d %H:%M:%S")
+        query = f"SELECT id FROM payments WHERE {where_sql} AND created_at >= ? ORDER BY id DESC LIMIT 1"
+        params.append(cutoff)
+    else:
+        query = f"SELECT id FROM payments WHERE {where_sql} ORDER BY id DESC LIMIT 1"
+    row = execute_portable_query(conn, query, tuple(params)).fetchone()
+    if not row:
+        return None
+    duplicate_id = int(row_get(row, "id", row_get(row, 0)))
+    if not db_column_exists(conn, "payments", "created_at"):
+        latest_id = fetch_scalar(conn, "SELECT MAX(id) FROM payments WHERE company_key = ?", (company_key,), default=0)
+        if int(latest_id or 0) != duplicate_id:
+            return None
+    return duplicate_id
+
+
+def _payment_duplicate_blocked(
+    company_key,
+    payment_kind,
+    conn,
+    fingerprint,
+    payment_type,
+    party_column,
+    party_id,
+    amount,
+    payment_date,
+    reference,
+    created_by,
+    method=None,
+):
+    guard_key = _payment_submit_guard_key(company_key, payment_kind)
+    if st.session_state.get(guard_key) == fingerprint:
+        return True, "This payment was already submitted in this session."
+    duplicate_id = _find_recent_duplicate_payment(
+        conn,
+        company_key,
+        payment_type,
+        party_column,
+        party_id,
+        amount,
+        payment_date,
+        reference,
+        created_by,
+        method=method,
+    )
+    if duplicate_id:
+        return True, f"A matching payment was already recorded (id {duplicate_id})."
+    st.session_state[guard_key] = fingerprint
+    return False, ""
+
+
+def _coerce_ledger_money_columns(df, column_names):
+    """Normalize ledger money columns to float before cumulative calculations."""
+    if df is None or df.empty:
+        return df
+    normalized = df.copy()
+    for column_name in column_names:
+        if column_name not in normalized.columns:
+            continue
+        values = normalized[column_name]
+        if values.dtype == object:
+            values = (
+                values.astype(str)
+                .str.replace(",", "", regex=False)
+                .str.replace("GHS", "", regex=False)
+                .str.strip()
+            )
+        normalized[column_name] = pd.to_numeric(values, errors="coerce").fillna(0.0)
+    return normalized
 
 
 def _journal_df(company_key, branch_id=None, start_date=None, end_date=None, account_name=None):
@@ -252,6 +406,15 @@ FINANCIAL_REPORT_TYPE_OPTIONS = (
 FINANCIAL_REPORT_TYPE_LABELS = {key: label for label, key in FINANCIAL_REPORT_TYPE_OPTIONS}
 FINANCIAL_REPORT_TYPE_KEYS = {label: key for label, key in FINANCIAL_REPORT_TYPE_OPTIONS}
 DEFAULT_FINANCIAL_REPORT_TYPE = "trial_balance"
+_DEPRECIATION_SCHEDULE_EMPTY_MESSAGE = (
+    "No depreciable assets have been registered yet.\n\n"
+    "Register fixed assets under Asset Register and post depreciation to generate this schedule."
+)
+_GENERIC_FINANCIAL_REPORT_EMPTY_MESSAGE = (
+    "No financial report rows were returned for the current filters. "
+    "Trial Balance and Balance Sheet use cumulative balances through End Date; "
+    "Income Statement uses Start Date through End Date."
+)
 
 
 def _money_label():
@@ -262,6 +425,23 @@ def _account_label(account_code, account_name):
     code = str(account_code or "").strip()
     name = str(account_name or "").strip()
     return f"{code} - {name}" if code else name
+
+
+def _display_account_name(account_code, account_name):
+    """Keep account name separate when Account Code is already its own column."""
+    code = str(account_code or "").strip()
+    name = str(account_name or "").strip()
+    if code:
+        prefixed = f"{code} - "
+        if name.startswith(prefixed):
+            return name[len(prefixed) :].strip() or name
+    return name
+
+
+def _financial_report_empty_message(report_label=None, report_type_key=None):
+    if report_type_key == "depreciation" or report_label == "Depreciation Schedule":
+        return _DEPRECIATION_SCHEDULE_EMPTY_MESSAGE
+    return _GENERIC_FINANCIAL_REPORT_EMPTY_MESSAGE
 
 
 def _portable_read_dataframe(conn, query, params=()):
@@ -342,7 +522,7 @@ def _format_account_headers(dataframe):
         code_column = "Account Code" if "Account Code" in df.columns else None
         if code_column:
             df["Account"] = df.apply(
-                lambda row: _account_label(row.get(code_column), row.get("Account")),
+                lambda row: _display_account_name(row.get(code_column), row.get("Account")),
                 axis=1,
             )
     return df
@@ -427,6 +607,7 @@ def get_cash_book(company_key, start_date=None, end_date=None, account_name=None
     cash_df = df[df["Account"].isin(["Cash", "Bank", "Mobile Money"])].copy()
     if cash_df.empty:
         return pd.DataFrame(columns=columns)
+    cash_df = _coerce_ledger_money_columns(cash_df, ["Debit (GHS)", "Credit (GHS)"])
     cash_df["Movement (GHS)"] = cash_df["Debit (GHS)"] - cash_df["Credit (GHS)"]
     cash_df["Account Running Balance (GHS)"] = cash_df.groupby("Account", sort=False)["Movement (GHS)"].cumsum()
     account_balances = (
@@ -1314,6 +1495,11 @@ def show_create_invoice_page(company_key, role):
 
 def show_receive_payment_page(company_key, role):
     st.header("💳 Receive Payment")
+    _render_payment_flash(company_key, "customer_receipt")
+    st.caption(
+        "Posted receipts debit Cash/Bank and credit Accounts Receivable. "
+        "In Trial Balance, customer receipts appear in the A/R **Credit** column — they reduce the receivable balance."
+    )
     if not require_permission(
         role,
         "receive_customer_payment",
@@ -1331,13 +1517,41 @@ def show_receive_payment_page(company_key, role):
         ).fetchall()
     ]
     conn.close()
+    receive_payment_form_reset_key = f"receive_payment_form_reset_{company_key}"
     with st.form(f"receive_payment_form_{company_key}"):
-        customer_name = st.selectbox("Customer", [""] + customers)
-        amount = st.number_input("Amount (GHS)", min_value=0.0, step=0.01, key=f"receive_payment_amount_{company_key}")
-        payment_method = st.selectbox("Method", ["Cash", "Bank", "Mobile Money"], key=f"receive_payment_method_{company_key}")
-        posting_state = st.selectbox("Posting State", DOCUMENT_WORKFLOW_STATUSES, index=3, key=f"receive_payment_posting_state_{company_key}")
-        payment_ref = st.text_input("Reference", key=f"receive_payment_ref_{company_key}")
-        payment_date = st.date_input("Payment Date", value=datetime.now().date(), key=f"receive_payment_date_{company_key}")
+        customer_name = st.selectbox(
+            "Customer",
+            [""] + customers,
+            key=eka_modules._form_widget_key(f"receive_payment_customer_{company_key}", receive_payment_form_reset_key),
+        )
+        amount = st.number_input(
+            "Amount (GHS)",
+            min_value=0.0,
+            step=0.01,
+            value=0.0,
+            key=eka_modules._form_widget_key(f"receive_payment_amount_{company_key}", receive_payment_form_reset_key),
+        )
+        payment_method = st.selectbox(
+            "Method",
+            ["Cash", "Bank", "Mobile Money"],
+            key=eka_modules._form_widget_key(f"receive_payment_method_{company_key}", receive_payment_form_reset_key),
+        )
+        posting_state = st.selectbox(
+            "Posting State",
+            DOCUMENT_WORKFLOW_STATUSES,
+            index=3,
+            key=eka_modules._form_widget_key(f"receive_payment_posting_state_{company_key}", receive_payment_form_reset_key),
+        )
+        payment_ref = st.text_input(
+            "Reference",
+            value="",
+            key=eka_modules._form_widget_key(f"receive_payment_ref_{company_key}", receive_payment_form_reset_key),
+        )
+        payment_date = st.date_input(
+            "Payment Date",
+            value=datetime.now().date(),
+            key=eka_modules._form_widget_key(f"receive_payment_date_{company_key}", receive_payment_form_reset_key),
+        )
         if st.form_submit_button("Save Receipt") and amount > 0 and customer_name:
             conn = get_connection()
             if not require_permission(
@@ -1355,73 +1569,105 @@ def show_receive_payment_page(company_key, role):
                 (company_key, customer_name),
             ).fetchone()
             customer_id = int(row_get(row, "id", row_get(row, 0))) if row else None
-            payment_cursor = conn.execute(
-                ensure_insert_sql_returning(
-                    "INSERT INTO payments (company_key, payment_date, payment_type, status, customer_id, supplier_id, amount, currency, method, reference, approval_status, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, 'GHS', ?, ?, ?, ?)"
-                ),
-                (company_key, payment_date.isoformat(), "Customer Receipt", posting_state, customer_id, None, amount, payment_method, payment_ref, posting_state, role),
+            fingerprint = _payment_fingerprint(
+                "Customer Receipt",
+                customer_id,
+                amount,
+                payment_date,
+                payment_ref,
+                role,
+                payment_method,
             )
-            payment_id = get_inserted_id(payment_cursor)
-            if posting_state == "Posted":
-                if not require_permission(
-                    role,
-                    "post_accounting_document",
-                    action_label="post accounting documents",
-                    company_key=company_key,
-                    conn=conn,
-                ):
-                    conn.rollback()
-                    conn.close()
-                    return
-                lines = [
-                    {"account_id": get_account_id(conn, _payment_method_account_name(payment_method), "Asset"), "debit": amount, "credit": 0},
-                    {"account_id": get_account_id(conn, "Accounts Receivable", "Asset"), "debit": 0, "credit": amount},
-                ]
-                post_journal_entry(
-                    company_key=company_key,
-                    date=payment_date,
-                    description=f"Customer receipt - {customer_name}",
-                    reference=payment_ref,
-                    lines=lines,
-                    created_by=role,
-                    branch_id=st.session_state.get("active_branch_id"),
-                    payment_id=payment_id,
-                    source_module="Payments",
-                    source_table="payments",
-                    source_type="Customer Receipt",
-                    source_id=payment_id,
-                    customer_id=customer_id,
-                    approval_status="Posted",
-                    user_role=role,
-                    conn=conn,
-                )
-                log_audit_action(
-                    conn,
-                    company_key,
-                    role,
-                    "Customer Receipt Posted",
-                    "Payments",
-                    details=f"type=Customer Receipt; amount={amount:.2f}; method={payment_method}; user={role}; reference={payment_ref or ''}",
-                    branch_id=st.session_state.get("active_branch_id"),
-                    action_type="post",
-                    document_ref=str(payment_id),
-                )
-                log_system_event(
-                    "INFO",
-                    "Payments",
-                    "Posted customer receipt amount={amount:.2f} method={method} user={user} payment_id={payment_id}".format(
-                        amount=float(amount or 0.0),
-                        method=payment_method,
-                        user=role,
-                        payment_id=payment_id,
+            blocked, block_message = _payment_duplicate_blocked(
+                company_key,
+                "customer_receipt",
+                conn,
+                fingerprint,
+                "Customer Receipt",
+                "customer_id",
+                customer_id,
+                amount,
+                payment_date,
+                payment_ref,
+                role,
+                payment_method,
+            )
+            if blocked:
+                conn.close()
+                _set_payment_flash(company_key, "customer_receipt", block_message)
+                eka_modules._increment_form_reset(receive_payment_form_reset_key)
+                st.rerun()
+                return
+            try:
+                payment_cursor = conn.execute(
+                    ensure_insert_sql_returning(
+                        "INSERT INTO payments (company_key, payment_date, payment_type, status, customer_id, supplier_id, amount, currency, method, reference, approval_status, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, 'GHS', ?, ?, ?, ?)"
                     ),
+                    (company_key, payment_date.isoformat(), "Customer Receipt", posting_state, customer_id, None, amount, payment_method, payment_ref, posting_state, role),
                 )
-            else:
-                st.warning("Receipt saved without accounting impact. Move Posting State to Posted when it is approved.")
-            conn.commit()
-            conn.close()
-            st.success("Customer receipt saved successfully.")
-            st.rerun()
+                payment_id = get_inserted_id(payment_cursor)
+                if posting_state == "Posted":
+                    if not require_permission(
+                        role,
+                        "post_accounting_document",
+                        action_label="post accounting documents",
+                        company_key=company_key,
+                        conn=conn,
+                    ):
+                        conn.rollback()
+                        return
+                    lines = [
+                        {"account_id": get_account_id(conn, _payment_method_account_name(payment_method), "Asset"), "debit": amount, "credit": 0},
+                        {"account_id": get_account_id(conn, "Accounts Receivable", "Asset"), "debit": 0, "credit": amount},
+                    ]
+                    post_journal_entry(
+                        company_key=company_key,
+                        date=payment_date,
+                        description=f"Customer receipt - {customer_name}",
+                        reference=payment_ref,
+                        lines=lines,
+                        created_by=role,
+                        branch_id=st.session_state.get("active_branch_id"),
+                        payment_id=payment_id,
+                        source_module="Payments",
+                        source_table="payments",
+                        source_type="Customer Receipt",
+                        source_id=payment_id,
+                        customer_id=customer_id,
+                        approval_status="Posted",
+                        user_role=role,
+                        conn=conn,
+                    )
+                    log_audit_action(
+                        conn,
+                        company_key,
+                        role,
+                        "Customer Receipt Posted",
+                        "Payments",
+                        details=f"type=Customer Receipt; amount={amount:.2f}; method={payment_method}; user={role}; reference={payment_ref or ''}",
+                        branch_id=st.session_state.get("active_branch_id"),
+                        action_type="post",
+                        document_ref=str(payment_id),
+                    )
+                    log_system_event(
+                        "INFO",
+                        "Payments",
+                        "Posted customer receipt amount={amount:.2f} method={method} user={user} payment_id={payment_id}".format(
+                            amount=float(amount or 0.0),
+                            method=payment_method,
+                            user=role,
+                            payment_id=payment_id,
+                        ),
+                    )
+                else:
+                    st.warning("Receipt saved without accounting impact. Move Posting State to Posted when it is approved.")
+                conn.commit()
+                _set_payment_flash(company_key, "customer_receipt", "Customer receipt saved successfully.")
+                eka_modules._increment_form_reset(receive_payment_form_reset_key)
+                st.rerun()
+            finally:
+                _clear_payment_submit_guard(company_key, "customer_receipt")
+                conn.close()
 
     conn = get_connection()
     df = _portable_read_dataframe(
@@ -1436,6 +1682,11 @@ def show_receive_payment_page(company_key, role):
 
 def show_supplier_payment_page(company_key, role):
     st.header("💸 Supplier Payment")
+    _render_payment_flash(company_key, "supplier_payment")
+    st.caption(
+        "Posted supplier payments debit Accounts Payable and credit Cash/Bank. "
+        "In Trial Balance, supplier payments appear in the A/P **Debit** column — they reduce the payable balance."
+    )
     if not require_permission(
         role,
         "make_supplier_payment",
@@ -1453,13 +1704,41 @@ def show_supplier_payment_page(company_key, role):
         ).fetchall()
     ]
     conn.close()
+    supplier_payment_form_reset_key = f"supplier_payment_form_reset_{company_key}"
     with st.form(f"supplier_payment_form_{company_key}"):
-        supplier_name = st.selectbox("Supplier", [""] + suppliers)
-        amount = st.number_input("Amount (GHS)", min_value=0.0, step=0.01, key=f"supplier_payment_amount_{company_key}")
-        payment_method = st.selectbox("Method", ["Cash", "Bank", "Mobile Money"], key=f"supplier_payment_method_{company_key}")
-        posting_state = st.selectbox("Posting State", DOCUMENT_WORKFLOW_STATUSES, index=3, key=f"supplier_payment_posting_state_{company_key}")
-        payment_ref = st.text_input("Reference", key=f"supplier_payment_ref_{company_key}")
-        payment_date = st.date_input("Payment Date", value=datetime.now().date(), key=f"supplier_payment_date_{company_key}")
+        supplier_name = st.selectbox(
+            "Supplier",
+            [""] + suppliers,
+            key=eka_modules._form_widget_key(f"supplier_payment_supplier_{company_key}", supplier_payment_form_reset_key),
+        )
+        amount = st.number_input(
+            "Amount (GHS)",
+            min_value=0.0,
+            step=0.01,
+            value=0.0,
+            key=eka_modules._form_widget_key(f"supplier_payment_amount_{company_key}", supplier_payment_form_reset_key),
+        )
+        payment_method = st.selectbox(
+            "Method",
+            ["Cash", "Bank", "Mobile Money"],
+            key=eka_modules._form_widget_key(f"supplier_payment_method_{company_key}", supplier_payment_form_reset_key),
+        )
+        posting_state = st.selectbox(
+            "Posting State",
+            DOCUMENT_WORKFLOW_STATUSES,
+            index=3,
+            key=eka_modules._form_widget_key(f"supplier_payment_posting_state_{company_key}", supplier_payment_form_reset_key),
+        )
+        payment_ref = st.text_input(
+            "Reference",
+            value="",
+            key=eka_modules._form_widget_key(f"supplier_payment_ref_{company_key}", supplier_payment_form_reset_key),
+        )
+        payment_date = st.date_input(
+            "Payment Date",
+            value=datetime.now().date(),
+            key=eka_modules._form_widget_key(f"supplier_payment_date_{company_key}", supplier_payment_form_reset_key),
+        )
         if st.form_submit_button("Save Payment") and amount > 0 and supplier_name:
             conn = get_connection()
             if not require_permission(
@@ -1477,73 +1756,105 @@ def show_supplier_payment_page(company_key, role):
                 (company_key, supplier_name),
             ).fetchone()
             supplier_id = int(row_get(row, "id", row_get(row, 0))) if row else None
-            payment_cursor = conn.execute(
-                ensure_insert_sql_returning(
-                    "INSERT INTO payments (company_key, payment_date, payment_type, status, customer_id, supplier_id, amount, currency, method, reference, approval_status, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, 'GHS', ?, ?, ?, ?)"
-                ),
-                (company_key, payment_date.isoformat(), "Supplier Payment", posting_state, None, supplier_id, amount, payment_method, payment_ref, posting_state, role),
+            fingerprint = _payment_fingerprint(
+                "Supplier Payment",
+                supplier_id,
+                amount,
+                payment_date,
+                payment_ref,
+                role,
+                payment_method,
             )
-            payment_id = get_inserted_id(payment_cursor)
-            if posting_state == "Posted":
-                if not require_permission(
-                    role,
-                    "post_accounting_document",
-                    action_label="post accounting documents",
-                    company_key=company_key,
-                    conn=conn,
-                ):
-                    conn.rollback()
-                    conn.close()
-                    return
-                lines = [
-                    {"account_id": get_account_id(conn, "Accounts Payable", "Liability"), "debit": amount, "credit": 0},
-                    {"account_id": get_account_id(conn, _payment_method_account_name(payment_method), "Asset"), "debit": 0, "credit": amount},
-                ]
-                post_journal_entry(
-                    company_key=company_key,
-                    date=payment_date,
-                    description=f"Supplier payment - {supplier_name}",
-                    reference=payment_ref,
-                    lines=lines,
-                    created_by=role,
-                    branch_id=st.session_state.get("active_branch_id"),
-                    payment_id=payment_id,
-                    source_module="Payments",
-                    source_table="payments",
-                    source_type="Supplier Payment",
-                    source_id=payment_id,
-                    supplier_id=supplier_id,
-                    approval_status="Posted",
-                    user_role=role,
-                    conn=conn,
-                )
-                log_audit_action(
-                    conn,
-                    company_key,
-                    role,
-                    "Supplier Payment Posted",
-                    "Payments",
-                    details=f"type=Supplier Payment; amount={amount:.2f}; method={payment_method}; user={role}; reference={payment_ref or ''}",
-                    branch_id=st.session_state.get("active_branch_id"),
-                    action_type="post",
-                    document_ref=str(payment_id),
-                )
-                log_system_event(
-                    "INFO",
-                    "Payments",
-                    "Posted supplier payment amount={amount:.2f} method={method} user={user} payment_id={payment_id}".format(
-                        amount=float(amount or 0.0),
-                        method=payment_method,
-                        user=role,
-                        payment_id=payment_id,
+            blocked, block_message = _payment_duplicate_blocked(
+                company_key,
+                "supplier_payment",
+                conn,
+                fingerprint,
+                "Supplier Payment",
+                "supplier_id",
+                supplier_id,
+                amount,
+                payment_date,
+                payment_ref,
+                role,
+                payment_method,
+            )
+            if blocked:
+                conn.close()
+                _set_payment_flash(company_key, "supplier_payment", block_message)
+                eka_modules._increment_form_reset(supplier_payment_form_reset_key)
+                st.rerun()
+                return
+            try:
+                payment_cursor = conn.execute(
+                    ensure_insert_sql_returning(
+                        "INSERT INTO payments (company_key, payment_date, payment_type, status, customer_id, supplier_id, amount, currency, method, reference, approval_status, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, 'GHS', ?, ?, ?, ?)"
                     ),
+                    (company_key, payment_date.isoformat(), "Supplier Payment", posting_state, None, supplier_id, amount, payment_method, payment_ref, posting_state, role),
                 )
-            else:
-                st.warning("Supplier payment saved without accounting impact. Move Posting State to Posted when it is approved.")
-            conn.commit()
-            conn.close()
-            st.success("Supplier payment saved successfully.")
-            st.rerun()
+                payment_id = get_inserted_id(payment_cursor)
+                if posting_state == "Posted":
+                    if not require_permission(
+                        role,
+                        "post_accounting_document",
+                        action_label="post accounting documents",
+                        company_key=company_key,
+                        conn=conn,
+                    ):
+                        conn.rollback()
+                        return
+                    lines = [
+                        {"account_id": get_account_id(conn, "Accounts Payable", "Liability"), "debit": amount, "credit": 0},
+                        {"account_id": get_account_id(conn, _payment_method_account_name(payment_method), "Asset"), "debit": 0, "credit": amount},
+                    ]
+                    post_journal_entry(
+                        company_key=company_key,
+                        date=payment_date,
+                        description=f"Supplier payment - {supplier_name}",
+                        reference=payment_ref,
+                        lines=lines,
+                        created_by=role,
+                        branch_id=st.session_state.get("active_branch_id"),
+                        payment_id=payment_id,
+                        source_module="Payments",
+                        source_table="payments",
+                        source_type="Supplier Payment",
+                        source_id=payment_id,
+                        supplier_id=supplier_id,
+                        approval_status="Posted",
+                        user_role=role,
+                        conn=conn,
+                    )
+                    log_audit_action(
+                        conn,
+                        company_key,
+                        role,
+                        "Supplier Payment Posted",
+                        "Payments",
+                        details=f"type=Supplier Payment; amount={amount:.2f}; method={payment_method}; user={role}; reference={payment_ref or ''}",
+                        branch_id=st.session_state.get("active_branch_id"),
+                        action_type="post",
+                        document_ref=str(payment_id),
+                    )
+                    log_system_event(
+                        "INFO",
+                        "Payments",
+                        "Posted supplier payment amount={amount:.2f} method={method} user={user} payment_id={payment_id}".format(
+                            amount=float(amount or 0.0),
+                            method=payment_method,
+                            user=role,
+                            payment_id=payment_id,
+                        ),
+                    )
+                else:
+                    st.warning("Supplier payment saved without accounting impact. Move Posting State to Posted when it is approved.")
+                conn.commit()
+                _set_payment_flash(company_key, "supplier_payment", "Supplier payment saved successfully.")
+                eka_modules._increment_form_reset(supplier_payment_form_reset_key)
+                st.rerun()
+            finally:
+                _clear_payment_submit_guard(company_key, "supplier_payment")
+                conn.close()
 
     conn = get_connection()
     df = _portable_read_dataframe(
@@ -1793,7 +2104,7 @@ def _ifrs_account_display(dataframe):
         return df
     if "Account" in df.columns and "Account Code" in df.columns:
         df["Account"] = df.apply(
-            lambda row: _account_label(row.get("Account Code"), row.get("Account")),
+            lambda row: _display_account_name(row.get("Account Code"), row.get("Account")),
             axis=1,
         )
     return df
@@ -2054,7 +2365,7 @@ def _trial_balance_from_balances(balances):
         total_credits += credit
         rows.append(
             {
-                "Account Code": payload.get("account_code", ""),
+                "Account Code": resolve_display_account_code(payload.get("account_code", "")),
                 "Account": account_name_key,
                 "Type": payload.get("account_type", ""),
                 "Debit (GHS)": debit,
@@ -2947,6 +3258,11 @@ def show_financial_reports(company_key, role=None):
                 "Balanced" if balance_sheet_balanced else "Needs Review",
             )
             st.caption(f"Debit/Credit Validation: {'Balanced' if balanced else 'Needs review'}")
+            if active_report_type_key == "trial_balance":
+                st.caption(
+                    "Customer receipts appear as credits to Accounts Receivable. "
+                    "Supplier payments appear as debits to Accounts Payable."
+                )
 
         with _ShowFinancialReportsProfilerStage(profiler, "integrity_expander_render"):
             with st.expander("Finance Integrity", expanded=False):
@@ -2999,8 +3315,15 @@ def show_financial_reports(company_key, role=None):
                         st.markdown("Source documents with missing or unexpected GL impact")
                         st.dataframe(pd.DataFrame(integrity["source_document_mismatches"]), use_container_width=True)
                     account_warnings = integrity["chart_of_accounts"].get("warnings", [])
+                    missing_codes = integrity["chart_of_accounts"].get("missing_account_codes") or []
                     if account_warnings:
                         st.warning("Account structure warnings: " + "; ".join(account_warnings))
+                    elif missing_codes:
+                        st.warning(
+                            "Accounts missing codes: "
+                            + ", ".join(str(name) for name in missing_codes[:12])
+                            + ("..." if len(missing_codes) > 12 else "")
+                        )
                     else:
                         st.success("Account structure warnings: none")
 
@@ -3017,19 +3340,23 @@ def show_financial_reports(company_key, role=None):
                 ]
                 reports_empty = all(_safe_dataframe(df, []).empty for _, df in report_defs)
                 if reports_empty:
-                    st.warning(
-                        "No financial report rows were returned for the current filters. "
-                        "Trial Balance and Balance Sheet use cumulative balances through End Date; "
-                        "Income Statement uses Start Date through End Date."
-                    )
+                    st.warning(_GENERIC_FINANCIAL_REPORT_EMPTY_MESSAGE)
                 for tab, (label, df) in zip(tabs, report_defs):
                     tab_started = time.perf_counter()
                     with tab:
+                        if label == "Trial Balance":
+                            st.caption(
+                                "Customer receipts appear as credits to Accounts Receivable. "
+                                "Supplier payments appear as debits to Accounts Payable."
+                            )
                         format_started = time.perf_counter()
                         display_df = _ifrs_account_display(_convert_money_frame(_safe_dataframe(df, [])))
                         format_ms = (time.perf_counter() - format_started) * 1000.0
                         render_started = time.perf_counter()
-                        _display_table_with_rate(display_df)
+                        if display_df.empty and label == "Depreciation Schedule":
+                            st.warning(_DEPRECIATION_SCHEDULE_EMPTY_MESSAGE)
+                        else:
+                            _display_table_with_rate(display_df)
                         _lazy_csv_button(label, display_df, f"{label}_ifrs_safe_{company_key}")
                         render_ms = (time.perf_counter() - render_started) * 1000.0
                     profiler.record_stage(
@@ -3048,9 +3375,10 @@ def show_financial_reports(company_key, role=None):
                 format_ms = (time.perf_counter() - format_started) * 1000.0
                 if display_df.empty:
                     st.warning(
-                        "No financial report rows were returned for the current filters. "
-                        "Trial Balance and Balance Sheet use cumulative balances through End Date; "
-                        "Income Statement uses Start Date through End Date."
+                        _financial_report_empty_message(
+                            report_label=active_report_label,
+                            report_type_key=active_report_type_key,
+                        )
                     )
                 render_started = time.perf_counter()
                 _display_table_with_rate(display_df)
