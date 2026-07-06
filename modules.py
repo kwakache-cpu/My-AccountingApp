@@ -91,6 +91,8 @@ ALL_ENTERPRISE_PERMISSIONS = {
     "reopen_period",
     "lock_period",
     "view_reports",
+    "view_taxation",
+    "manage_taxation",
     "view_audit_trail",
     "view_system_health",
     "export_backup",
@@ -450,6 +452,7 @@ PERMISSION_ALIASES = {
     "fixed_assets": {"view_fixed_assets", "manage_fixed_assets"},
     "inventory": {"view_inventory", "manage_inventory"},
     "manage_company_branches": {"manage_branches"},
+    "taxation": {"view_taxation", "manage_taxation"},
 }
 ENTERPRISE_ROLE_PERMISSIONS = {
     "Dev": set(ALL_ENTERPRISE_PERMISSIONS),
@@ -477,6 +480,8 @@ ENTERPRISE_ROLE_PERMISSIONS = {
         "reopen_period",
         "lock_period",
         "view_reports",
+        "view_taxation",
+        "manage_taxation",
         "view_audit_trail",
         "view_system_health",
         "export_backup",
@@ -534,6 +539,8 @@ ENTERPRISE_ROLE_PERMISSIONS = {
         "reopen_period",
         "lock_period",
         "view_reports",
+        "view_taxation",
+        "manage_taxation",
         "view_audit_trail",
         "view_system_health",
         "use_ai_assistant",
@@ -566,6 +573,8 @@ ENTERPRISE_ROLE_PERMISSIONS = {
         "reopen_period",
         "lock_period",
         "view_reports",
+        "view_taxation",
+        "manage_taxation",
         "view_audit_trail",
         "view_system_health",
         "use_ai_assistant",
@@ -612,6 +621,7 @@ ENTERPRISE_ROLE_PERMISSIONS = {
     "Auditor / Read Only": {
         "view_dashboard",
         "view_reports",
+        "view_taxation",
         "view_audit_trail",
         "view_system_health",
     },
@@ -626,6 +636,8 @@ ENTERPRISE_ROLE_PERMISSIONS = {
         "make_supplier_payment",
         "post_accounting_document",
         "view_reports",
+        "view_taxation",
+        "manage_taxation",
         "view_audit_trail",
         "use_ai_assistant",
         "sell_pos",
@@ -660,6 +672,8 @@ ENTERPRISE_ROLE_PERMISSIONS = {
         "post_accounting_document",
         "close_period",
         "view_reports",
+        "view_taxation",
+        "manage_taxation",
         "view_audit_trail",
         "use_ai_assistant",
         "sell_pos",
@@ -686,6 +700,8 @@ ENTERPRISE_ROLE_PERMISSIONS = {
         "make_supplier_payment",
         "post_accounting_document",
         "view_reports",
+        "view_taxation",
+        "manage_taxation",
         "use_ai_assistant",
         "sell_pos",
         "view_inventory",
@@ -709,6 +725,8 @@ ENTERPRISE_ROLE_PERMISSIONS = {
         "make_supplier_payment",
         "post_accounting_document",
         "view_reports",
+        "view_taxation",
+        "manage_taxation",
         "use_ai_assistant",
         "sell_pos",
         "view_inventory",
@@ -981,7 +999,7 @@ PAGE_PERMISSION_MAP = {
     "Create Bill": "create_bill",
     "Banking & Cash": "view_banking",
     "Banking": "view_banking",
-    "Taxation (VAT/NHIL)": "view_reports",
+    "Taxation (VAT/NHIL)": "view_taxation",
     "Payroll & Salaries": "view_payroll",
     "Asset Register": "view_fixed_assets",
     "Data Analytics": "view_reports",
@@ -14813,19 +14831,27 @@ def show_aging(company_key, aging_type="Receivable"):
 # ==========================================
 def show_taxation(company_key):
     st.header("🧮 Taxation (VAT / NHIL)")
+    role = st.session_state.get("user", {}).get("role", "System")
+    branch_id = st.session_state.get("active_branch_id")
+    if not require_permission(
+        role,
+        "view_taxation",
+        action_label="view taxation reports",
+        company_key=company_key,
+        branch_id=branch_id,
+    ):
+        return
+
     VAT_RATE = 0.125
     NHIL_RATE = 0.025
     GETFUND_RATE = 0.025
 
-    role = st.session_state.get("user", {}).get("role", "System")
-    branch_id = st.session_state.get("active_branch_id")
     conn = None
     try:
         conn = get_connection()
         ensured_accounts = ensure_tax_control_accounts(company_key, conn=conn)
         account_map = {row["canonical_name"]: row for row in ensured_accounts}
         total_sales = get_account_total(company_key, "Sales Revenue", balance_side="credit", conn=conn)
-        compare_legacy_and_journal_totals(company_key, logger_instance=logger, conn=conn)
 
         vat = round(total_sales * VAT_RATE, 2)
         nhil = round(total_sales * NHIL_RATE, 2)
@@ -14925,6 +14951,15 @@ def show_taxation(company_key):
                 reference = st.text_input("Reference", value=f"TAX-{datetime.now().strftime('%Y%m%d%H%M%S')}")
                 submitted = st.form_submit_button("Post Tax Settlement")
                 if submitted:
+                    if not require_permission(
+                        role,
+                        "manage_taxation",
+                        action_label="post tax settlement",
+                        company_key=company_key,
+                        conn=conn,
+                        branch_id=branch_id,
+                    ):
+                        return
                     if not require_permission(
                         role,
                         "post_accounting_document",

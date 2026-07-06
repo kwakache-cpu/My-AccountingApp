@@ -23,8 +23,8 @@
 |---|------|-----------|-----------|----------|
 | P0-1 | **Persist `customer_id` on customer payment INSERT** | AR, Banking, financials | Subledger reconciliation; payment reports; migration cleanup | **Sprint 1 complete** — `show_receive_payment_page` fixed; schema ensure + backfill added |
 | P0-2 | **Persist `supplier_id` on supplier payment INSERT** | AP, Banking, financials | Same as P0-1 for payables | **Sprint 1 complete** — `show_supplier_payment_page` fixed; banking path already correct |
-| P0-3 | **Add taxation test suite** | Tax/VAT/NHIL | Zero test coverage on compliance module | Module audit §12 |
-| P0-4 | **Add view permission gate on taxation page** | Tax | Ungated read of tax control data | Module audit §12 |
+| P0-3 | **Add taxation test suite** | Tax/VAT/NHIL | Zero test coverage on compliance module | **Sprint 2 complete** — `tests/test_program_a_p0_taxation_hardening.py` |
+| P0-4 | **Add view permission gate on taxation page** | Tax | Ungated read of tax control data | **Sprint 2 complete** — `view_taxation` / `manage_taxation`; page + sidebar + route gates |
 | P0-5 | **Resolve POS posting permission model** | POS, accounting_engine | Cashier posts without `post_accounting_document` when `user_role` omitted — document as intentional OR pass role | Workflow trace 1–2; permission audit |
 | P0-6 | **Document bill vs inventory receive for users** | Purchases, Inventory | Users expect bill post to increase stock — causes silent inventory/GL drift | Workflow trace 5–7 |
 

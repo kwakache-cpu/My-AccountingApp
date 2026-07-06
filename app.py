@@ -2130,7 +2130,7 @@ PAGE_PERMISSION_MAP = {
     "Create Bill": "create_bill",
     "Banking & Cash": "view_banking",
     "Banking": "view_banking",
-    "Taxation (VAT/NHIL)": "view_reports",
+    "Taxation (VAT/NHIL)": "view_taxation",
     "Payroll & Salaries": "view_payroll",
     "Asset Register": "view_fixed_assets",
     "Data Analytics": "view_reports",
