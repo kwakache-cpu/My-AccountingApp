@@ -140,15 +140,52 @@ def _persist_posting_engine_event(level, message):
             conn.close()
 
 
-def _assert_posting_role_allowed(user_role):
+_POS_SCOPED_POSTING_PERMISSIONS = {
+    "POS": "sell_pos",
+    "POS Return": "process_pos_return",
+}
+
+
+def _assert_posting_role_allowed(user_role, source_module=None):
     if user_role is None:
         return
     normalized_role = str(user_role or "").strip()
+    source_module_key = str(source_module or "").strip()
+    pos_scoped_permission = _POS_SCOPED_POSTING_PERMISSIONS.get(source_module_key)
     try:
         from enterprise_services import has_permission
 
+        if pos_scoped_permission and has_permission(normalized_role, pos_scoped_permission):
+            return
         allowed = has_permission(normalized_role, "post_accounting_document")
     except Exception:
+        legacy_pos_roles = {
+            "POS": {
+                "Dev",
+                "Master Admin",
+                "Sub-Admin",
+                "Owner / CEO",
+                "Accountant",
+                "Bookkeeper",
+                "Branch_Bookkeeper",
+                "Branch Manager",
+                "Cashier",
+                "Sales Officer",
+                "Staff",
+            },
+            "POS Return": {
+                "Dev",
+                "Master Admin",
+                "Owner / CEO",
+                "Accountant",
+                "Bookkeeper",
+                "Branch_Bookkeeper",
+                "Branch Manager",
+                "Sub-Admin",
+            },
+        }
+        if pos_scoped_permission and normalized_role in legacy_pos_roles.get(source_module_key, set()):
+            return
         allowed = normalized_role in {"Dev", "Master Admin", "Sub-Admin", "Bookkeeper", "Branch_Bookkeeper"}
     if not allowed:
         raise PermissionError(f"Role '{normalized_role or 'Unknown'}' is not allowed to post accounting impact.")
@@ -1503,7 +1540,7 @@ def post_accounting_impact(
     conn = conn or get_connection()
     try:
         effective_user_role = _resolve_effective_posting_role(user_role, created_by)
-        _assert_posting_role_allowed(effective_user_role)
+        _assert_posting_role_allowed(effective_user_role, source_module=source_module)
         entry_id = post_journal_entry(
             company_key=company_key,
             date=date,
