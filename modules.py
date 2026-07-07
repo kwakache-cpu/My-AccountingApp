@@ -6565,6 +6565,228 @@ def _normalize_purchase_classification(value):
     return "Inventory Purchase"
 
 
+PURCHASE_INVENTORY_STATUS_LABELS = {
+    "bill_posted_to_gl": "Bill Posted to GL",
+    "stock_received": "Stock Received",
+    "inventory_gl_posted": "Inventory GL Posted",
+    "quantity_updated": "Quantity Updated",
+}
+
+INVENTORY_RECEIVE_BILL_LINK_NOTICE = (
+    "Enter the supplier bill number in Reference Number to link this receipt to accounting. "
+    "Receiving stock updates quantity only — it does not post journal entries."
+)
+
+PURCHASE_INVENTORY_UNRECEIVED_BILL_NOTICE = (
+    "Posted inventory-classified bills below have not been received into stock. "
+    "Inventory GL may be ahead of physical quantity."
+)
+
+
+def _normalize_purchase_reference(value):
+    return str(value or "").strip().upper()
+
+
+def _is_bill_posted_to_gl(bill_row):
+    approval_status = bill_row["approval_status"] if hasattr(bill_row, "keys") else bill_row.get("approval_status")
+    return str(approval_status or "").strip() == "Posted"
+
+
+def _is_inventory_purchase_bill_row(bill_row):
+    classification = bill_row["purchase_classification"] if hasattr(bill_row, "keys") else bill_row.get("purchase_classification")
+    return _normalize_purchase_classification(classification) == "Inventory Purchase"
+
+
+def _bill_has_linked_stock_receipt(conn, company_key, bill_number):
+    reference = _normalize_purchase_reference(bill_number)
+    if not reference:
+        return False
+    row = execute_portable_query(
+        conn,
+        """
+        SELECT id
+        FROM stock_movements
+        WHERE company_key = ?
+          AND UPPER(TRIM(COALESCE(reference, ''))) = ?
+          AND UPPER(REPLACE(REPLACE(COALESCE(movement_type, ''), ' ', '_'), '/', '_')) IN ('STOCK_IN', 'IN')
+          AND COALESCE(reason, '') = 'Receive Stock'
+        LIMIT 1
+        """,
+        (company_key, reference),
+    ).fetchone()
+    return row is not None
+
+
+def compute_purchase_inventory_status(conn, company_key, bill_row):
+    bill_posted = _is_bill_posted_to_gl(bill_row)
+    inventory_gl_posted = bill_posted and _is_inventory_purchase_bill_row(bill_row)
+    bill_number = bill_row["bill_number"] if hasattr(bill_row, "keys") else bill_row.get("bill_number")
+    stock_received = _bill_has_linked_stock_receipt(conn, company_key, bill_number)
+    quantity_updated = stock_received
+    return {
+        "bill_posted_to_gl": bill_posted,
+        "inventory_gl_posted": inventory_gl_posted,
+        "stock_received": stock_received,
+        "quantity_updated": quantity_updated,
+        "is_drift_risk": bool(inventory_gl_posted and not stock_received),
+    }
+
+
+def _fetch_posted_inventory_bills_missing_stock(conn, company_key, limit=50):
+    bills = execute_portable_query(
+        conn,
+        """
+        SELECT b.id, b.bill_number, b.bill_date, b.amount, b.approval_status,
+               b.purchase_classification, b.posted_entry_id, s.name AS supplier_name
+        FROM bills b
+        LEFT JOIN suppliers s ON s.id = b.supplier_id
+        WHERE b.company_key = ?
+          AND COALESCE(b.purchase_classification, '') = 'Inventory Purchase'
+          AND COALESCE(b.approval_status, '') = 'Posted'
+        ORDER BY b.bill_date DESC, b.id DESC
+        LIMIT ?
+        """,
+        (company_key, int(limit)),
+    ).fetchall()
+    unmatched = []
+    for bill_row in bills:
+        status = compute_purchase_inventory_status(conn, company_key, bill_row)
+        if status["is_drift_risk"]:
+            row = dict(bill_row)
+            row.update(status)
+            unmatched.append(row)
+    return unmatched
+
+
+def _fetch_stock_receipts_missing_bill_link(conn, company_key, limit=50):
+    rows = execute_portable_query(
+        conn,
+        """
+        SELECT sm.id, sm.reference, sm.item_name, sm.quantity, sm.created_at, sm.created_by
+        FROM stock_movements sm
+        WHERE sm.company_key = ?
+          AND COALESCE(sm.reason, '') = 'Receive Stock'
+          AND NOT EXISTS (
+              SELECT 1
+              FROM bills b
+              WHERE b.company_key = sm.company_key
+                AND UPPER(TRIM(COALESCE(b.bill_number, ''))) = UPPER(TRIM(COALESCE(sm.reference, '')))
+                AND TRIM(COALESCE(b.bill_number, '')) <> ''
+                AND COALESCE(b.purchase_classification, '') = 'Inventory Purchase'
+          )
+        ORDER BY sm.created_at DESC, sm.id DESC
+        LIMIT ?
+        """,
+        (company_key, int(limit)),
+    ).fetchall()
+    results = []
+    for row in rows:
+        item = dict(row)
+        item["quantity_updated"] = True
+        item["stock_received"] = True
+        item["bill_posted_to_gl"] = False
+        item["inventory_gl_posted"] = False
+        item["is_unlinked_receipt"] = True
+        results.append(item)
+    return results
+
+
+def compute_stock_receipt_link_status(conn, company_key, reference_number):
+    reference = str(reference_number or "").strip()
+    normalized = _normalize_purchase_reference(reference)
+    if not normalized:
+        return {
+            "bill_posted_to_gl": False,
+            "inventory_gl_posted": False,
+            "stock_received": False,
+            "quantity_updated": False,
+            "is_unlinked_receipt": True,
+            "missing_bill_reference": True,
+        }
+    bill = execute_portable_query(
+        conn,
+        """
+        SELECT id, bill_number, approval_status, purchase_classification
+        FROM bills
+        WHERE company_key = ?
+          AND UPPER(TRIM(COALESCE(bill_number, ''))) = ?
+        LIMIT 1
+        """,
+        (company_key, normalized),
+    ).fetchone()
+    if not bill:
+        return {
+            "bill_posted_to_gl": False,
+            "inventory_gl_posted": False,
+            "stock_received": False,
+            "quantity_updated": True,
+            "is_unlinked_receipt": True,
+            "unknown_bill_reference": True,
+        }
+    bill_status = compute_purchase_inventory_status(conn, company_key, bill)
+    return {
+        **bill_status,
+        "is_unlinked_receipt": False,
+        "linked_bill_id": int(bill["id"]),
+        "linked_bill_number": bill["bill_number"],
+    }
+
+
+def _render_purchase_inventory_drift_monitor(conn, company_key, *, context="create_bill"):
+    unmatched_bills = _fetch_posted_inventory_bills_missing_stock(conn, company_key)
+    unmatched_receipts = _fetch_stock_receipts_missing_bill_link(conn, company_key)
+    expand_default = bool(unmatched_bills) if context == "create_bill" else bool(unmatched_receipts)
+    with st.expander("Purchase / Inventory Drift Monitor", expanded=expand_default):
+        if context == "create_bill":
+            st.caption(
+                "Status is computed from posted inventory bills and Receive Stock movements "
+                "linked by bill number in the receive reference field."
+            )
+            if unmatched_bills:
+                st.warning(PURCHASE_INVENTORY_UNRECEIVED_BILL_NOTICE)
+                drift_df = pd.DataFrame(
+                    [
+                        {
+                            "Bill #": row.get("bill_number"),
+                            "Supplier": row.get("supplier_name") or "",
+                            "Date": row.get("bill_date"),
+                            "Amount": row.get("amount"),
+                            PURCHASE_INVENTORY_STATUS_LABELS["bill_posted_to_gl"]: "Yes" if row.get("bill_posted_to_gl") else "No",
+                            PURCHASE_INVENTORY_STATUS_LABELS["inventory_gl_posted"]: "Yes" if row.get("inventory_gl_posted") else "No",
+                            PURCHASE_INVENTORY_STATUS_LABELS["stock_received"]: "No",
+                            PURCHASE_INVENTORY_STATUS_LABELS["quantity_updated"]: "No",
+                        }
+                        for row in unmatched_bills
+                    ]
+                )
+                st.dataframe(drift_df, use_container_width=True, hide_index=True)
+            else:
+                st.success("No posted inventory bills are waiting for stock receipt.")
+        else:
+            st.info(INVENTORY_RECEIVE_BILL_LINK_NOTICE)
+            if unmatched_receipts:
+                st.warning(
+                    "Stock receipts below updated quantity but are not linked to a supplier inventory bill."
+                )
+                receipt_df = pd.DataFrame(
+                    [
+                        {
+                            "Reference": row.get("reference") or "(empty)",
+                            "Item": row.get("item_name"),
+                            "Qty": row.get("quantity"),
+                            "Date/Time": row.get("created_at"),
+                            PURCHASE_INVENTORY_STATUS_LABELS["quantity_updated"]: "Yes",
+                            PURCHASE_INVENTORY_STATUS_LABELS["bill_posted_to_gl"]: "No",
+                            PURCHASE_INVENTORY_STATUS_LABELS["inventory_gl_posted"]: "No",
+                        }
+                        for row in unmatched_receipts
+                    ]
+                )
+                st.dataframe(receipt_df, use_container_width=True, hide_index=True)
+            else:
+                st.success("All recent Receive Stock movements are linked to inventory bills.")
+
+
 def _purchase_payment_account_name(payment_method):
     normalized_method = str(payment_method or "").strip()
     if normalized_method == "Bank":
@@ -9211,6 +9433,7 @@ def show_create_bill_page(company_key):
             return
 
         _render_create_bill_workflow_guidance()
+        _render_purchase_inventory_drift_monitor(conn, company_key, context="create_bill")
 
         suppliers = conn.execute("SELECT id, name FROM suppliers WHERE company_key = ? ORDER BY name", (company_key,)).fetchall()
         supplier_options = [""] + [row["name"] for row in suppliers]
@@ -9252,6 +9475,7 @@ def show_create_bill_page(company_key):
                 if purchase_classification == "Inventory Purchase":
                     st.caption(CREATE_BILL_INVENTORY_QTY_NOTICE)
                     st.caption(CREATE_BILL_INVENTORY_NEXT_STEP)
+                    st.warning(PURCHASE_INVENTORY_UNRECEIVED_BILL_NOTICE)
                 input_vat_rate = st.number_input("Input VAT Rate (%)", min_value=0.0, max_value=100.0, step=0.5, value=0.0)
                 status = st.selectbox("Payment Status", ["Pending", "Received"])
                 st.caption(CREATE_BILL_PAYMENT_STATUS_NOTICE)
@@ -9385,6 +9609,21 @@ def show_create_bill_page(company_key):
                 log_system_event("INFO", "Create Bill", f"Created bill {bill_number} for {supplier_name}")
                 if posting_state == "Posted":
                     st.success(f"Bill created and posted successfully with ID {bill_id}.")
+                    if _normalize_purchase_classification(purchase_classification) == "Inventory Purchase":
+                        bill_status = compute_purchase_inventory_status(
+                            conn,
+                            company_key,
+                            {
+                                "bill_number": bill_number,
+                                "approval_status": posting_state,
+                                "purchase_classification": purchase_classification,
+                            },
+                        )
+                        if bill_status["is_drift_risk"]:
+                            st.warning(
+                                "Bill posted to Inventory GL. Stock not received yet — "
+                                "use Inventory → Receive Stock with bill number as reference."
+                            )
                 else:
                     st.success(f"Bill created with ID {bill_id}. Accounting impact will begin when Posting State becomes Posted.")
                 # Reset items
@@ -10210,8 +10449,10 @@ def show_inventory(company_key, role):
                                 receive_default_index = option_index
                                 break
                         st.info("Item pre-selected from Low Stock Action Center.")
+                    _render_purchase_inventory_drift_monitor(conn, company_key, context="inventory_receive")
                     supplier_options = _load_registered_supplier_names(company_key)
                     st.markdown("### Receive Stock")
+                    st.caption(INVENTORY_RECEIVE_BILL_LINK_NOTICE)
                     with st.form(f"inventory_receive_stock_form_{company_key}", clear_on_submit=True):
                         receive_supplier_key = _form_widget_key(
                             f"inventory_receive_supplier_{company_key}",
@@ -10287,6 +10528,30 @@ def show_inventory(company_key, role):
                             )
                         receive_reference_number = st.text_input("Reference Number", key=receive_reference_key)
                         receive_notes = st.text_area("Notes", key=receive_notes_key)
+                        receive_reference_value = str(st.session_state.get(receive_reference_key, "") or "").strip()
+                        receive_link_status = compute_stock_receipt_link_status(
+                            conn,
+                            company_key,
+                            receive_reference_value,
+                        )
+                        if receive_link_status.get("missing_bill_reference"):
+                            st.warning(
+                                "No bill reference entered. Quantity will update, but this receipt "
+                                "will not link to supplier bill accounting."
+                            )
+                        elif receive_link_status.get("unknown_bill_reference"):
+                            st.warning(
+                                "Reference does not match an inventory supplier bill. "
+                                "Quantity will update without a bill link."
+                            )
+                        elif receive_link_status.get("is_unlinked_receipt"):
+                            st.warning("Receipt link status could not be confirmed.")
+                        else:
+                            st.caption(
+                                f"Linked to bill {receive_link_status.get('linked_bill_number')} — "
+                                f"{PURCHASE_INVENTORY_STATUS_LABELS['bill_posted_to_gl']}: "
+                                f"{'Yes' if receive_link_status.get('bill_posted_to_gl') else 'No'}."
+                            )
                         receive_submitted = st.form_submit_button("Receive Stock")
 
                     if receive_submitted:

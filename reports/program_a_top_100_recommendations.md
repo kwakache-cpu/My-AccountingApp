@@ -14,7 +14,7 @@
 | 4 | Live backup restore rehearsal with documented RTO | P0 | Disaster recovery confidence | Total data loss | Medium | Firebase, ops SOP |
 | 5 | Finance sign-off on VAT/NHIL/GETFund outputs | P0 | GRA compliance | Tax penalties | Low | Finance owner, taxation page |
 | 6 | Finance sign-off on PAYE/SSNIT payroll outputs | P0 | Statutory payroll compliance | Employee/tax authority issues | Low | Finance owner, payroll module |
-| 7 | Purchase-to-pay: optional receive-on-post for inventory bills (P1-1) | P1 | Eliminates #1 user confusion | Inventory/GL drift | High | Inventory, bills, no posting rewrite |
+| 7 | Purchase-to-pay: optional receive-on-post for inventory bills (P1-1) | P1 | Eliminates #1 user confusion | Inventory/GL drift | High | Inventory, bills, no posting rewrite | **Sprint B P0-2 partial** — drift monitor + status; no auto-link |
 | 8 | Unified POS `stock_movements` writes (P1-2) | P1 | Single movement audit trail | Shrinkage invisible | Medium | POS, inventory |
 | 9 | Valued inventory receive prompts GL posting (P1-3) | P1 | Bookkeeper trust | Inventory GL ≠ subledger | Medium | Receive, accounting engine |
 | 10 | Invoice → Receive Payment shortcut (P1-4) | P1 | Faster collections | AR drag, user workarounds | Low | AR, payments UI |
