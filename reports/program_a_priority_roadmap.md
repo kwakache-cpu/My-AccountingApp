@@ -25,7 +25,7 @@
 | P0-2 | **Persist `supplier_id` on supplier payment INSERT** | AP, Banking, financials | Same as P0-1 for payables | **Sprint 1 complete** — `show_supplier_payment_page` fixed; banking path already correct |
 | P0-3 | **Add taxation test suite** | Tax/VAT/NHIL | Zero test coverage on compliance module | **Sprint 2 complete** — `tests/test_program_a_p0_taxation_hardening.py` |
 | P0-4 | **Add view permission gate on taxation page** | Tax | Ungated read of tax control data | **Sprint 2 complete** — `view_taxation` / `manage_taxation`; page + sidebar + route gates |
-| P0-5 | **Resolve POS posting permission model** | POS, accounting_engine | Cashier posts without `post_accounting_document` when `user_role` omitted — document as intentional OR pass role | Workflow trace 1–2; permission audit |
+| P0-5 | **Resolve POS posting permission model** | POS, accounting_engine | Cashier posts without `post_accounting_document` when `user_role` omitted | **Sprint B P0-1 complete** — `user_role=role` + POS-scoped `sell_pos` gate; `tests/test_program_b_p0_pos_posting_permission.py` |
 | P0-6 | **Document bill vs inventory receive for users** | Purchases, Inventory | Users expect bill post to increase stock — causes silent inventory/GL drift | **Sprint 3 complete** — Create Bill help text + `tests/test_program_a_p0_bill_inventory_receive_clarity.py` |
 
 ---
@@ -90,7 +90,7 @@
 ### Sprint A — Data Integrity (P0)
 1. ~~P0-1, P0-2 — payment subledger IDs~~ ✅ **Done (Sprint 1, 2026-07-04)** — see `reports/program_a_p0_sprint_1_payment_identity.md`
 2. ~~P0-3, P0-4 — taxation tests + permission~~ ✅ **Done (Sprint 2, 2026-07-06)** — see `reports/program_a_p0_sprint_2_taxation_hardening.md`
-3. P0-5 — POS posting permission decision
+3. ~~P0-5 — POS posting permission decision~~ ✅ **Done (Sprint B P0-1, 2026-07-07)** — see `reports/program_b_p0_sprint_1_pos_posting_permission.md`
 4. ~~P0-6 — in-app help text for bill vs receive~~ ✅ **Done (Sprint 3, 2026-07-06)** — see `reports/program_a_p0_sprint_3_bill_inventory_receive_clarity.md`
 
 ### Sprint B — Workflow Completeness (P1 top)

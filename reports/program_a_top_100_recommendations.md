@@ -8,7 +8,7 @@
 
 | # | Recommendation | Pri | Business Value | Risk if Ignored | Complexity | Dependencies |
 |---|----------------|-----|----------------|-----------------|------------|--------------|
-| 1 | Pass `user_role` on POS `post_journal_entry` (close P0-5) | P0 | Segregation of duties; auditor trust | Cashier posts unauthorized GL | Low | `accounting_engine`, `modules.show_pos` |
+| 1 | Pass `user_role` on POS `post_journal_entry` (close P0-5) | P0 | Segregation of duties; auditor trust | Cashier posts unauthorized GL | Low | `accounting_engine`, `modules.show_pos` | **Sprint B P0-1 complete** — `user_role=role` + POS-scoped `sell_pos` gate |
 | 2 | Execute browser UAT for all 10 operational roles | P0 | Human certification; find UX blockers | Unknown production failures | Low | Checklists in `reports/live_uat_checklist.md` |
 | 3 | PostgreSQL write-path E2E certification (bill, POS, payment, payroll) | P0 | Production cutover safety | Data corruption on migrate | Medium | Staging Supabase, CI harness |
 | 4 | Live backup restore rehearsal with documented RTO | P0 | Disaster recovery confidence | Total data loss | Medium | Firebase, ops SOP |

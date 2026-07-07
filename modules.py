@@ -12878,6 +12878,7 @@ def show_pos(company_key, company_name, role):
                             source_table="pos_sales",
                             source_type="POS Sale",
                             source_id=int(pos_sale_id),
+                            user_role=role,
                             conn=conn,
                         )
                         if payment_method == "On Credit":
@@ -12921,6 +12922,7 @@ def show_pos(company_key, company_name, role):
                                 source_table="pos_sales",
                                 source_type="POS COGS",
                                 source_id=int(pos_sale_id),
+                                user_role=role,
                                 conn=conn,
                             )
                         log_audit_action(
