@@ -5425,6 +5425,7 @@ def create_company_record(
     subscription_start_date=None,
     subscription_end_date=None,
     last_payment_reference=None,
+    correlation_id=None,
 ):
     if conn is None:
         raise RuntimeError("Database connection is required to create a company record.")
@@ -5487,6 +5488,7 @@ def create_company_record(
         start_date=derived_start_date,
         end_date=derived_end_date,
         last_payment_reference=last_payment_reference,
+        correlation_id=correlation_id,
     )
     return normalized_key
 
@@ -5788,6 +5790,8 @@ def upsert_company_subscription(
     start_date,
     end_date=None,
     last_payment_reference=None,
+    correlation_id=None,
+    _sequence_retry_used=False,
 ):
     if conn is None:
         raise RuntimeError("Database connection is required to update company subscriptions.")
@@ -5798,9 +5802,7 @@ def upsert_company_subscription(
     normalized_plan_name = str(plan_name or "Trial").strip() or "Trial"
     start_value = str(start_date or datetime.now().date().isoformat())
     end_value = str(end_date).strip() if end_date not in (None, "") else None
-    execute_portable_write(
-        conn,
-        """
+    write_sql = """
         INSERT INTO company_subscriptions (
             company_key, plan_name, status, start_date, end_date, last_payment_reference, updated_at
         )
@@ -5812,16 +5814,50 @@ def upsert_company_subscription(
             end_date = excluded.end_date,
             last_payment_reference = COALESCE(excluded.last_payment_reference, company_subscriptions.last_payment_reference),
             updated_at = CURRENT_TIMESTAMP
-        """,
-        (
-            normalized_key,
-            normalized_plan_name,
-            normalized_status,
-            start_value,
-            end_value,
-            str(last_payment_reference or "").strip() or None,
-        ),
+    """
+    params = (
+        normalized_key,
+        normalized_plan_name,
+        normalized_status,
+        start_value,
+        end_value,
+        str(last_payment_reference or "").strip() or None,
     )
+    try:
+        execute_portable_write(conn, write_sql, params)
+    except Exception as exc:
+        if (
+            not _sequence_retry_used
+            and is_postgres_backend()
+            and _is_postgres_serial_pk_violation(exc, "company_subscriptions", "id")
+        ):
+            try:
+                conn.rollback()
+            except Exception:
+                logger.debug(
+                    "Rollback before company_subscriptions sequence repair skipped.",
+                    exc_info=True,
+                )
+            repair_result = repair_postgres_sequence_for_table(conn, "company_subscriptions", "id")
+            logger.warning(
+                "company_subscriptions serial PK collision; sequence repair attempted correlation_id=%s table=company_subscriptions repaired=%s next_id=%s error=%s",
+                str(correlation_id or "").strip() or "none",
+                repair_result.get("repaired"),
+                repair_result.get("next_id"),
+                sanitize_error_message(exc),
+            )
+            return upsert_company_subscription(
+                conn,
+                company_key=normalized_key,
+                plan_name=normalized_plan_name,
+                status=normalized_status,
+                start_date=start_value,
+                end_date=end_value,
+                last_payment_reference=last_payment_reference,
+                correlation_id=correlation_id,
+                _sequence_retry_used=True,
+            )
+        raise
 
 
 def ensure_company_trial_subscription(
@@ -5831,6 +5867,7 @@ def ensure_company_trial_subscription(
     company_name,
     contact_email=None,
     trial_days=DEFAULT_SUBSCRIPTION_TRIAL_DAYS,
+    correlation_id=None,
 ):
     if conn is None:
         raise RuntimeError("Database connection is required to create a trial company.")
@@ -5858,6 +5895,7 @@ def ensure_company_trial_subscription(
             subscription_status="trial",
             subscription_start_date=today.isoformat(),
             subscription_end_date=end_date.isoformat(),
+            correlation_id=correlation_id,
         )
     else:
         execute_portable_write(
@@ -5872,6 +5910,7 @@ def ensure_company_trial_subscription(
             status="trial",
             start_date=today.isoformat(),
             end_date=end_date.isoformat(),
+            correlation_id=correlation_id,
         )
     return {
         "company_key": normalized_key,
@@ -7390,28 +7429,100 @@ def open_ephemeral_system_log_connection():
     return get_connection(), True
 
 
-def repair_postgres_table_identity_sequence(conn, table_name, column_name="id"):
-    """Best-effort repair for desynced PostgreSQL identity sequences after row copies."""
+POSTGRES_IDENTITY_SEQUENCE_HEALTH_TABLES = (
+    ("company_subscriptions", "id"),
+    ("license_payment_transactions", "id"),
+    ("system_logs", "id"),
+)
+
+
+def _is_safe_postgres_identifier(value):
+    token = str(value or "").strip()
+    return bool(token) and token.replace("_", "").isalnum()
+
+
+def _postgres_sequence_next_value(last_value, is_called):
+    normalized_last = int(last_value or 0)
+    return normalized_last + 1 if bool(is_called) else normalized_last
+
+
+def _is_postgres_serial_pk_violation(exc, table_name, id_column="id"):
+    if not is_postgres_backend() or exc is None:
+        return False
+    pgcode = getattr(exc, "pgcode", None)
+    if pgcode is None and getattr(exc, "__cause__", None) is not None:
+        pgcode = getattr(exc.__cause__, "pgcode", None)
+    if str(pgcode or "") != "23505":
+        message = sanitize_error_message(str(exc)).lower()
+        if "uniqueviolation" not in message and "duplicate key value violates unique constraint" not in message:
+            return False
+    else:
+        message = sanitize_error_message(str(exc)).lower()
+    constraint_name = f"{table_name}_pkey"
+    diag = getattr(exc, "diag", None) or getattr(getattr(exc, "__cause__", None), "diag", None)
+    diag_constraint = str(getattr(diag, "constraint_name", "") or "").strip()
+    if diag_constraint == constraint_name:
+        return True
+    if constraint_name in message.replace(" ", ""):
+        return True
+    if table_name in message and id_column in message and "duplicate key" in message:
+        return True
+    return False
+
+
+def repair_postgres_sequence_for_table(conn, table_name, id_column="id"):
+    """
+    Align a PostgreSQL identity sequence to MAX(id)+1.
+
+    Safe for empty tables and idempotent when already aligned.
+    """
     if conn is None or not is_postgres_backend():
-        return False
+        return {
+            "ok": False,
+            "repaired": False,
+            "table_name": table_name,
+            "id_column": id_column,
+            "reason": "not_postgres",
+        }
     safe_table = str(table_name or "").strip()
-    safe_column = str(column_name or "id").strip() or "id"
-    if not safe_table.replace("_", "").isalnum() or not safe_column.replace("_", "").isalnum():
-        return False
+    safe_column = str(id_column or "id").strip() or "id"
+    if not _is_safe_postgres_identifier(safe_table) or not _is_safe_postgres_identifier(safe_column):
+        return {
+            "ok": False,
+            "repaired": False,
+            "table_name": safe_table,
+            "id_column": safe_column,
+            "reason": "invalid_identifier",
+        }
     try:
+        max_row = execute_portable_query(
+            conn,
+            f"SELECT COALESCE(MAX({safe_column}), 0) AS max_id FROM {safe_table}",
+            (),
+            backend="postgres",
+        ).fetchone()
+        max_id = int(row_get(max_row, "max_id", 0) or 0)
+        next_id = max(max_id, 0) + 1
         execute_portable_write(
             conn,
             f"""
             SELECT setval(
                 pg_get_serial_sequence('{safe_table}', '{safe_column}'),
-                GREATEST(COALESCE((SELECT MAX({safe_column}) FROM {safe_table}), 0), 1),
-                (SELECT COUNT(*) > 0 FROM {safe_table})
+                {next_id},
+                false
             )
             """,
             (),
             backend="postgres",
         )
-        return True
+        return {
+            "ok": True,
+            "repaired": True,
+            "table_name": safe_table,
+            "id_column": safe_column,
+            "max_id": max_id,
+            "next_id": next_id,
+        }
     except Exception as exc:
         logger.debug(
             "PostgreSQL identity sequence repair skipped for %s.%s: %s",
@@ -7419,7 +7530,147 @@ def repair_postgres_table_identity_sequence(conn, table_name, column_name="id"):
             safe_column,
             sanitize_error_message(exc),
         )
-        return False
+        return {
+            "ok": False,
+            "repaired": False,
+            "table_name": safe_table,
+            "id_column": safe_column,
+            "reason": sanitize_error_message(exc),
+        }
+
+
+def repair_postgres_table_identity_sequence(conn, table_name, column_name="id"):
+    """Compatibility wrapper for PostgreSQL identity sequence repair."""
+    result = repair_postgres_sequence_for_table(conn, table_name, id_column=column_name)
+    return bool(result.get("repaired"))
+
+
+def get_postgres_identity_sequence_health(conn=None, tables=None):
+    """
+    Lightweight PostgreSQL identity sequence drift diagnostics.
+
+    Returns drift details without performing repairs.
+    """
+    if not is_postgres_backend():
+        return {
+            "backend": get_active_db_backend(),
+            "checked": False,
+            "drift_detected": False,
+            "tables": [],
+            "reason": "not_postgres",
+        }
+    owns_connection = conn is None
+    diagnostics_conn = conn
+    checked_tables = list(tables or POSTGRES_IDENTITY_SEQUENCE_HEALTH_TABLES)
+    table_results = []
+    try:
+        diagnostics_conn = diagnostics_conn or get_connection()
+        if diagnostics_conn is None:
+            return {
+                "backend": "postgres",
+                "checked": False,
+                "drift_detected": False,
+                "tables": [],
+                "reason": "connection_unavailable",
+            }
+        for table_name, id_column in checked_tables:
+            safe_table = str(table_name or "").strip()
+            safe_column = str(id_column or "id").strip() or "id"
+            if not _is_safe_postgres_identifier(safe_table) or not _is_safe_postgres_identifier(safe_column):
+                continue
+            if not db_table_exists(diagnostics_conn, safe_table):
+                table_results.append(
+                    {
+                        "table_name": safe_table,
+                        "id_column": safe_column,
+                        "present": False,
+                        "drift_detected": False,
+                    }
+                )
+                continue
+            row = execute_portable_query(
+                diagnostics_conn,
+                f"""
+                SELECT
+                    COALESCE((SELECT MAX({safe_column}) FROM {safe_table}), 0) AS max_id,
+                    pg_get_serial_sequence('{safe_table}', '{safe_column}') AS sequence_name,
+                    COALESCE(
+                        (
+                            SELECT ps.last_value::bigint
+                            FROM pg_sequences ps
+                            WHERE ps.schemaname = split_part(
+                                pg_get_serial_sequence('{safe_table}', '{safe_column}'),
+                                '.',
+                                1
+                            )
+                              AND ps.sequencename = split_part(
+                                pg_get_serial_sequence('{safe_table}', '{safe_column}'),
+                                '.',
+                                2
+                            )
+                        ),
+                        0
+                    ) AS sequence_last_value,
+                    COALESCE(
+                        (
+                            SELECT ps.is_called
+                            FROM pg_sequences ps
+                            WHERE ps.schemaname = split_part(
+                                pg_get_serial_sequence('{safe_table}', '{safe_column}'),
+                                '.',
+                                1
+                            )
+                              AND ps.sequencename = split_part(
+                                pg_get_serial_sequence('{safe_table}', '{safe_column}'),
+                                '.',
+                                2
+                            )
+                        ),
+                        false
+                    ) AS sequence_is_called
+                """,
+                (),
+                backend="postgres",
+            ).fetchone()
+            max_id = int(row_get(row, "max_id", 0) or 0)
+            sequence_last_value = int(row_get(row, "sequence_last_value", 0) or 0)
+            sequence_is_called = bool(row_get(row, "sequence_is_called", False))
+            next_sequence_value = _postgres_sequence_next_value(sequence_last_value, sequence_is_called)
+            drift_detected = bool(row_get(row, "sequence_name")) and next_sequence_value <= max_id
+            table_results.append(
+                {
+                    "table_name": safe_table,
+                    "id_column": safe_column,
+                    "present": True,
+                    "max_id": max_id,
+                    "sequence_last_value": sequence_last_value,
+                    "sequence_is_called": sequence_is_called,
+                    "next_sequence_value": next_sequence_value,
+                    "drift_detected": drift_detected,
+                    "sequence_name": row_get(row, "sequence_name"),
+                }
+            )
+        drift_detected = any(item.get("drift_detected") for item in table_results)
+        return {
+            "backend": "postgres",
+            "checked": True,
+            "drift_detected": drift_detected,
+            "tables": table_results,
+        }
+    except Exception as exc:
+        return {
+            "backend": "postgres",
+            "checked": False,
+            "drift_detected": False,
+            "tables": table_results,
+            "reason": sanitize_error_message(exc),
+        }
+    finally:
+        if owns_connection and diagnostics_conn:
+            try:
+                diagnostics_conn.close()
+            except Exception:
+                logger.debug("PostgreSQL sequence health connection close skipped.", exc_info=True)
 
 
 def _insert_system_log_row(conn, level, module_name, message, event_id):
@@ -10282,6 +10533,18 @@ def _run_lightweight_integrity_checks(conn):
         )
     _ensure_app_compatibility_tables(conn)
     log_schema_manifest_diagnostics(conn)
+    if is_postgres_backend():
+        sequence_health = get_postgres_identity_sequence_health(conn)
+        if sequence_health.get("drift_detected"):
+            drifted_tables = [
+                item.get("table_name")
+                for item in (sequence_health.get("tables") or [])
+                if item.get("drift_detected")
+            ]
+            logger.warning(
+                "PostgreSQL identity sequence drift detected at startup: tables=%s",
+                drifted_tables,
+            )
 
 
 def _advanced_startup_available():
