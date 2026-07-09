@@ -9980,8 +9980,312 @@ def show_subscription_renewal_page(company_key, role="Master Admin"):
                 st.warning(verification.get("reason") or "Subscription payment has not been verified yet.")
 
 
+ONBOARDING_PAYMENT_CUSTOMER_FAILURE_PREFIX = (
+    "Unable to start payment. Please try again or contact support."
+)
+
+
+def _onboarding_support_message(correlation_id):
+    code = str(correlation_id or "").strip() or "UNKNOWN"
+    return f"{ONBOARDING_PAYMENT_CUSTOMER_FAILURE_PREFIX} Support Code: {code}"
+
+
+def _onboarding_payment_branch(selected_plan):
+    if isinstance(selected_plan, dict) and selected_plan.get("configured"):
+        return "paystack"
+    return "trial_only"
+
+
+def _log_onboarding_stage_start(correlation_id, stage, **context):
+    context_bits = " ".join(f"{key}={value!r}" for key, value in context.items() if value is not None)
+    logger.info(
+        "Onboarding payment stage start stage=%s correlation_id=%s %s",
+        stage,
+        correlation_id,
+        context_bits,
+    )
+
+
+def _log_onboarding_stage_finish(correlation_id, stage, started_at, **context):
+    elapsed_ms = int((time.perf_counter() - started_at) * 1000)
+    context_bits = " ".join(f"{key}={value!r}" for key, value in context.items() if value is not None)
+    logger.info(
+        "Onboarding payment stage finish stage=%s correlation_id=%s elapsed_ms=%s %s",
+        stage,
+        correlation_id,
+        elapsed_ms,
+        context_bits,
+    )
+    return elapsed_ms
+
+
+def _log_onboarding_stage_failure(correlation_id, stage, exc, started_at=None, **context):
+    elapsed_ms = None
+    if started_at is not None:
+        elapsed_ms = int((time.perf_counter() - started_at) * 1000)
+    safe_error = sanitize_error_message(str(exc))
+    context_bits = " ".join(f"{key}={value!r}" for key, value in context.items() if value is not None)
+    logger.error(
+        "Onboarding payment stage failed stage=%s correlation_id=%s elapsed_ms=%s error=%s paystack=%s %s",
+        stage,
+        correlation_id,
+        elapsed_ms,
+        safe_error,
+        get_paystack_secret_status(),
+        context_bits,
+        exc_info=True,
+    )
+    return {
+        "ok": False,
+        "stage": stage,
+        "correlation_id": correlation_id,
+        "customer_message": _onboarding_support_message(correlation_id),
+        "safe_error": safe_error,
+    }
+
+
+def _close_onboarding_connection(conn):
+    if not conn:
+        return
+    try:
+        conn.close()
+    except Exception:
+        pass
+
+
+def _rollback_onboarding_connection(conn):
+    if not conn:
+        return
+    try:
+        conn.rollback()
+    except Exception:
+        pass
+
+
+def _execute_onboarding_submit_workflow(
+    company_name,
+    admin_email,
+    admin_phone,
+    sector,
+    selected_plan_name,
+    selected_plan,
+    correlation_id,
+):
+    """Run onboarding submit stages A-F (no Streamlit UI)."""
+    conn = None
+    company_key = None
+    reference = None
+    trial_result = None
+    payment_result = None
+    amount = float(selected_plan["amount"] or 0) if selected_plan.get("configured") else 0.0
+    normalized_company_name = company_name.strip()
+    normalized_admin_email = admin_email.strip()
+    normalized_admin_phone = admin_phone.strip()
+
+    stage = "stage_a_load_subscription_plans"
+    started_at = time.perf_counter()
+    try:
+        _log_onboarding_stage_start(correlation_id, stage, plan=selected_plan_name)
+        selected_plan = get_subscription_plan(selected_plan_name)
+        amount = float(selected_plan["amount"] or 0) if selected_plan.get("configured") else 0.0
+        _log_onboarding_stage_finish(
+            correlation_id,
+            stage,
+            started_at,
+            plan=selected_plan_name,
+            configured=selected_plan.get("configured"),
+        )
+    except Exception as exc:
+        return _log_onboarding_stage_failure(correlation_id, stage, exc, started_at, plan=selected_plan_name)
+
+    branch = _onboarding_payment_branch(selected_plan)
+
+    stage = "stage_b_db_connect"
+    started_at = time.perf_counter()
+    try:
+        _log_onboarding_stage_start(correlation_id, stage, branch=branch)
+        conn = get_connection()
+        _log_onboarding_stage_finish(correlation_id, stage, started_at, branch=branch)
+    except Exception as exc:
+        return _log_onboarding_stage_failure(correlation_id, stage, exc, started_at, branch=branch)
+
+    stage = "stage_c_duplicate_company_lookup"
+    started_at = time.perf_counter()
+    try:
+        _log_onboarding_stage_start(correlation_id, stage, company_name=normalized_company_name)
+        existing_company = conn.execute(
+            "SELECT key FROM companies WHERE lower(name) = lower(?) LIMIT 1",
+            (normalized_company_name,),
+        ).fetchone()
+        if existing_company:
+            _log_onboarding_stage_finish(correlation_id, stage, started_at, duplicate=True)
+            _close_onboarding_connection(conn)
+            return {
+                "ok": False,
+                "stage": stage,
+                "correlation_id": correlation_id,
+                "duplicate": True,
+                "customer_message": "A company with this name already exists. Please use a different company name.",
+            }
+        _log_onboarding_stage_finish(correlation_id, stage, started_at, duplicate=False)
+    except Exception as exc:
+        _rollback_onboarding_connection(conn)
+        _close_onboarding_connection(conn)
+        return _log_onboarding_stage_failure(
+            correlation_id,
+            stage,
+            exc,
+            started_at,
+            company_name=normalized_company_name,
+        )
+
+    company_key = _generate_company_key()
+
+    stage = "stage_d_ensure_company_trial_subscription"
+    started_at = time.perf_counter()
+    try:
+        _log_onboarding_stage_start(correlation_id, stage, company_key=company_key)
+        trial_result = ensure_company_trial_subscription(
+            conn,
+            company_key=company_key,
+            company_name=normalized_company_name,
+            contact_email=normalized_admin_email,
+            trial_days=7,
+        )
+        _log_onboarding_stage_finish(correlation_id, stage, started_at, company_key=company_key)
+    except Exception as exc:
+        _rollback_onboarding_connection(conn)
+        _close_onboarding_connection(conn)
+        return _log_onboarding_stage_failure(
+            correlation_id,
+            stage,
+            exc,
+            started_at,
+            company_key=company_key,
+        )
+
+    stage = "stage_e_commit"
+    started_at = time.perf_counter()
+    try:
+        _log_onboarding_stage_start(correlation_id, stage, company_key=company_key)
+        conn.commit()
+        _log_onboarding_stage_finish(correlation_id, stage, started_at, company_key=company_key)
+    except Exception as exc:
+        _rollback_onboarding_connection(conn)
+        _close_onboarding_connection(conn)
+        return _log_onboarding_stage_failure(
+            correlation_id,
+            stage,
+            exc,
+            started_at,
+            company_key=company_key,
+        )
+
+    if selected_plan.get("configured"):
+        stage = "stage_f_initialize_paystack_payment"
+        started_at = time.perf_counter()
+        try:
+            _log_onboarding_stage_start(
+                correlation_id,
+                stage,
+                company_key=company_key,
+                amount=amount,
+            )
+            reference = _generate_paystack_reference("ONB")
+            payment_result = initialize_paystack_payment(
+                normalized_admin_email,
+                amount,
+                reference,
+                company_key=company_key,
+                company_name=normalized_company_name,
+                payment_context="onboarding",
+                plan_name=selected_plan_name,
+                subscription_months=selected_plan.get("duration_months"),
+                subscription_days=selected_plan.get("duration_days"),
+                user_email=normalized_admin_email,
+                phone_number=normalized_admin_phone,
+                metadata_extra={
+                    "sector": sector,
+                    "trial_end_date": trial_result["end_date"],
+                    "correlation_id": correlation_id,
+                    "admin_email": normalized_admin_email,
+                },
+            )
+            if not payment_result.get("ok"):
+                reason = str(payment_result.get("reason") or "Payment could not be initialized yet.")
+                logger.warning(
+                    "Onboarding Paystack initialize failed correlation_id=%s reference=%s reason=%s paystack=%s",
+                    correlation_id,
+                    reference,
+                    reason,
+                    get_paystack_secret_status(),
+                )
+                _log_onboarding_stage_finish(
+                    correlation_id,
+                    stage,
+                    started_at,
+                    ok=False,
+                    reference=reference,
+                )
+                _close_onboarding_connection(conn)
+                return {
+                    "ok": False,
+                    "stage": stage,
+                    "correlation_id": correlation_id,
+                    "paystack_soft_failure": True,
+                    "trial_result": trial_result,
+                    "company_key": company_key,
+                    "reference": reference,
+                    "customer_message": (
+                        f"{reason} Trial access remains active until {trial_result['end_date']}. "
+                        f"Support Code: {correlation_id}"
+                    ),
+                }
+            _log_onboarding_stage_finish(
+                correlation_id,
+                stage,
+                started_at,
+                ok=True,
+                reference=reference,
+            )
+        except Exception as exc:
+            _rollback_onboarding_connection(conn)
+            _close_onboarding_connection(conn)
+            return _log_onboarding_stage_failure(
+                correlation_id,
+                stage,
+                exc,
+                started_at,
+                company_key=company_key,
+            )
+
+    _close_onboarding_connection(conn)
+    return {
+        "ok": True,
+        "correlation_id": correlation_id,
+        "company_key": company_key,
+        "reference": reference,
+        "selected_plan": selected_plan,
+        "payment_result": payment_result,
+        "trial_result": trial_result,
+        "amount": amount,
+    }
+
+
 def show_onboarding_payment():
     """Handle the onboarding payment process for new companies."""
+    handler_correlation_id = str(st.session_state.get("onboarding_handler_correlation_id") or "").strip()
+    if not handler_correlation_id:
+        handler_correlation_id = uuid.uuid4().hex[:12].upper()
+        st.session_state["onboarding_handler_correlation_id"] = handler_correlation_id
+    logger.info(
+        "Onboarding payment handler entered correlation_id=%s branch=render plan=%s company_name=%s email=%s",
+        handler_correlation_id,
+        st.session_state.get("onboarding_last_plan"),
+        st.session_state.get("onboarding_last_company_name"),
+        st.session_state.get("onboarding_last_admin_email"),
+    )
+
     st.header("🏢 New Company Registration")
     st.info("Create a 7-day trial company and optionally complete Paystack payment to activate a paid subscription plan immediately.")
 
@@ -9998,6 +10302,9 @@ def show_onboarding_payment():
 
         selected_plan = get_subscription_plan(selected_plan_name)
         amount = float(selected_plan["amount"] or 0) if selected_plan.get("configured") else 0.0
+        st.session_state["onboarding_last_plan"] = selected_plan_name
+        st.session_state["onboarding_last_company_name"] = company_name
+        st.session_state["onboarding_last_admin_email"] = admin_email
 
         if selected_plan.get("configured"):
             st.caption(
@@ -10015,133 +10322,98 @@ def show_onboarding_payment():
             if not company_name or not admin_email:
                 st.error("Please fill in all required fields.")
             else:
-                conn = None
                 correlation_id = uuid.uuid4().hex[:12].upper()
-                started_at = time.perf_counter()
-                step = "starting"
-                reference = None
-                company_key = None
-                try:
-                    step = "db_connect"
-                    conn = get_connection()
-                    step = "duplicate_company_check"
-                    existing_company = conn.execute(
-                        "SELECT key FROM companies WHERE lower(name) = lower(?) LIMIT 1",
-                        (company_name.strip(),),
-                    ).fetchone()
-                    if existing_company:
-                        st.warning("A company with this name already exists. Please use a different company name.")
+                branch = _onboarding_payment_branch(selected_plan)
+                workflow_started_at = time.perf_counter()
+                logger.info(
+                    "Onboarding payment handler entered correlation_id=%s branch=%s plan=%s company_name=%s email=%s",
+                    correlation_id,
+                    branch,
+                    selected_plan_name,
+                    company_name.strip(),
+                    admin_email.strip(),
+                )
+                result = _execute_onboarding_submit_workflow(
+                    company_name,
+                    admin_email,
+                    admin_phone,
+                    sector,
+                    selected_plan_name,
+                    selected_plan,
+                    correlation_id,
+                )
+                if not result.get("ok"):
+                    if result.get("duplicate"):
+                        st.warning(result.get("customer_message"))
+                    elif result.get("paystack_soft_failure"):
+                        st.warning(result.get("customer_message"))
                     else:
-                        step = "generate_company_key"
-                        company_key = _generate_company_key()
-                        step = "create_trial_company"
-                        trial_result = ensure_company_trial_subscription(
-                            conn,
-                            company_key=company_key,
-                            company_name=company_name.strip(),
-                            contact_email=admin_email.strip(),
-                            trial_days=7,
-                        )
-                        step = "trial_commit"
-                        conn.commit()
-                        if not selected_plan.get("configured"):
-                            st.success(
-                                "Trial company created successfully. Trial ends on {trial_end}.".format(
-                                    trial_end=trial_result["end_date"],
-                                )
-                            )
-                            st.warning(
-                                SUBSCRIPTION_PRICING_NOT_CONFIGURED_MESSAGE
-                                + f" Trial access remains active until {trial_result['end_date']}."
-                            )
-                            st.caption(f"Company Key: {company_key}")
-                        else:
-                            step = "generate_paystack_reference"
-                            reference = _generate_paystack_reference("ONB")
-                            step = "initialize_paystack_payment"
-                            payment_result = initialize_paystack_payment(
-                                admin_email,
-                                amount,
-                                reference,
-                                company_key=company_key,
-                                company_name=company_name.strip(),
-                                payment_context="onboarding",
-                                plan_name=selected_plan_name,
-                                subscription_months=selected_plan.get("duration_months"),
-                                subscription_days=selected_plan.get("duration_days"),
-                                user_email=admin_email.strip(),
-                                phone_number=admin_phone.strip(),
-                                metadata_extra={
-                                    "sector": sector,
-                                    "trial_end_date": trial_result["end_date"],
-                                    "correlation_id": correlation_id,
-                                    "admin_email": admin_email.strip(),
-                                },
-                            )
-                            if payment_result.get("ok"):
-                                st.success(
-                                    "Trial company created successfully. Trial ends on {trial_end}. You can continue to Paystack now or use the trial first.".format(
-                                        trial_end=trial_result["end_date"],
-                                    )
-                                )
-                                st.session_state.pending_reg = {
-                                    'company_name': company_name.strip(),
-                                    'company_key': company_key,
-                                    'email': admin_email.strip(),
-                                    'phone_number': admin_phone.strip(),
-                                    'amount': amount,
-                                    'plan_name': selected_plan_name,
-                                    'months': int(selected_plan.get("duration_months") or 0),
-                                    'reference': reference,
-                                    'authorization_url': payment_result.get("authorization_url"),
-                                    'trial_end_date': trial_result["end_date"],
-                                }
-                                st.caption(f"Company Key: {company_key}")
-                                checkout_url = str(payment_result.get("authorization_url") or "").strip()
-                                if checkout_url:
-                                    st.markdown(
-                                        f"[**Continue to Secure Paystack Checkout**]({checkout_url})"
-                                    )
-                                st.caption("Supported checkout channels: Card and Ghana Mobile Money.")
-                            else:
-                                st.warning(
-                                    (payment_result.get("reason") or "Payment could not be initialized yet.")
-                                    + f" Trial access remains active until {trial_result['end_date']}."
-                                )
-                    elapsed_ms = int((time.perf_counter() - started_at) * 1000)
+                        st.warning(result.get("customer_message") or _onboarding_support_message(correlation_id))
+                    elapsed_ms = int((time.perf_counter() - workflow_started_at) * 1000)
                     logger.info(
                         "Onboarding payment attempt completed correlation_id=%s step=%s company_key=%s email=%s reference=%s elapsed_ms=%s",
                         correlation_id,
-                        step,
-                        company_key or "pending",
+                        result.get("stage") or "failed",
+                        result.get("company_key") or "pending",
                         admin_email.strip(),
-                        reference or "none",
+                        result.get("reference") or "none",
                         elapsed_ms,
                     )
-                except Exception as exc:
-                    if conn:
-                        conn.rollback()
-                    elapsed_ms = int((time.perf_counter() - started_at) * 1000)
-                    st.warning(
-                        "Unable to start payment. Please try again or contact support. Support code: {code}".format(
-                            code=correlation_id
+                    return
+
+                company_key = result.get("company_key")
+                reference = result.get("reference")
+                payment_result = result.get("payment_result")
+                trial_result = result.get("trial_result")
+                selected_plan = result.get("selected_plan") or selected_plan
+                amount = result.get("amount", amount)
+
+                if not selected_plan.get("configured"):
+                    st.success(
+                        "Trial company created successfully. Trial ends on {trial_end}.".format(
+                            trial_end=trial_result["end_date"],
                         )
                     )
-                    logger.warning(
-                        "Onboarding payment failed correlation_id=%s step=%s company_name=%s company_key=%s email=%s reference=%s elapsed_ms=%s error=%s paystack_secrets=%s",
-                        correlation_id,
-                        step,
-                        company_name.strip(),
-                        company_key or "pending",
-                        admin_email.strip(),
-                        reference or "none",
-                        elapsed_ms,
-                        sanitize_error_message(exc),
-                        json.dumps(get_paystack_secret_status(), default=str),
+                    st.warning(
+                        SUBSCRIPTION_PRICING_NOT_CONFIGURED_MESSAGE
+                        + f" Trial access remains active until {trial_result['end_date']}."
                     )
-                finally:
-                    if conn:
-                        conn.close()
+                    st.caption(f"Company Key: {company_key}")
+                elif payment_result and payment_result.get("ok"):
+                    st.success(
+                        "Trial company created successfully. Trial ends on {trial_end}. You can continue to Paystack now or use the trial first.".format(
+                            trial_end=trial_result["end_date"],
+                        )
+                    )
+                    st.session_state.pending_reg = {
+                        'company_name': company_name.strip(),
+                        'company_key': company_key,
+                        'email': admin_email.strip(),
+                        'phone_number': admin_phone.strip(),
+                        'amount': amount,
+                        'plan_name': selected_plan_name,
+                        'months': int(selected_plan.get("duration_months") or 0),
+                        'reference': reference,
+                        'authorization_url': payment_result.get("authorization_url"),
+                        'trial_end_date': trial_result["end_date"],
+                    }
+                    st.caption(f"Company Key: {company_key}")
+                    checkout_url = str(payment_result.get("authorization_url") or "").strip()
+                    if checkout_url:
+                        st.markdown(
+                            f"[**Continue to Secure Paystack Checkout**]({checkout_url})"
+                        )
+                    st.caption("Supported checkout channels: Card and Ghana Mobile Money.")
+
+                elapsed_ms = int((time.perf_counter() - workflow_started_at) * 1000)
+                logger.info(
+                    "Onboarding payment attempt completed correlation_id=%s step=completed company_key=%s email=%s reference=%s elapsed_ms=%s",
+                    correlation_id,
+                    company_key or "pending",
+                    admin_email.strip(),
+                    reference or "none",
+                    elapsed_ms,
+                )
     _render_onboarding_payment_verification()
 
 
