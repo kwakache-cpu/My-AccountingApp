@@ -800,6 +800,7 @@ from database import (
     get_lv002_postgres_performance_diagnostics,
     get_postgres_query_timings,
     get_postgres_readiness_diagnostics,
+    get_postgres_identity_sequence_health,
     get_persistence_diagnostics,
     get_schema_manifest_diagnostics,
     _get_active_runtime_health_snapshot,
@@ -10151,6 +10152,7 @@ def _execute_onboarding_submit_workflow(
             company_name=normalized_company_name,
             contact_email=normalized_admin_email,
             trial_days=7,
+            correlation_id=correlation_id,
         )
         _log_onboarding_stage_finish(correlation_id, stage, started_at, company_key=company_key)
     except Exception as exc:
@@ -18037,6 +18039,21 @@ def render_lv006_startup_pipeline_panel(role, *, expanded=False, panel_key="lv00
                 use_container_width=True,
                 hide_index=True,
             )
+        if startup.get("active_backend") == "postgres":
+            sequence_health = get_postgres_identity_sequence_health()
+            drift_rows = [
+                item
+                for item in (sequence_health.get("tables") or [])
+                if item.get("present")
+            ]
+            if drift_rows:
+                st.markdown("**PostgreSQL identity sequence health**")
+                st.dataframe(pd.DataFrame(drift_rows), use_container_width=True, hide_index=True)
+                if sequence_health.get("drift_detected"):
+                    st.warning(
+                        "Identity sequence drift detected for one or more tables. "
+                        "Onboarding and payment writes may auto-repair company_subscriptions once per failure."
+                    )
 
 
 def get_session_company_subscription_status(company_key):
