@@ -1527,6 +1527,26 @@ def get_paystack_runtime_config():
     }
 
 
+def get_paystack_secret_status():
+    """
+    Non-sensitive Paystack secret/config status for forensics.
+
+    Never return secret values.
+    """
+    config = get_paystack_runtime_config()
+    callback_url = str(config.get("callback_url") or "").strip()
+    callback_url_valid = bool(callback_url) and callback_url.lower().startswith(("http://", "https://"))
+    currency = str(config.get("currency") or "").strip().upper()
+    return {
+        "PAYSTACK_SECRET_KEY": "present" if config.get("secret_key_present") else "missing",
+        "PAYSTACK_PUBLIC_KEY": "present" if config.get("public_key_present") else "missing",
+        "PAYSTACK_CALLBACK_URL": "present" if config.get("callback_url_configured") else "missing",
+        "PAYSTACK_CALLBACK_URL_valid": bool(callback_url_valid),
+        "PAYSTACK_CURRENCY": currency or "missing",
+        "PAYSTACK_WEBHOOK_SECRET": "present" if bool(config.get("webhook_secret")) else "missing",
+    }
+
+
 def get_paystack_diagnostics():
     config = get_paystack_runtime_config()
     return {
@@ -1997,6 +2017,9 @@ def initialize_paystack_payment(
     metadata_extra=None,
 ):
     """Initialize a live Paystack checkout for card or Ghana mobile money."""
+    correlation_id = None
+    if isinstance(metadata_extra, dict):
+        correlation_id = str(metadata_extra.get("correlation_id") or "").strip() or None
     config = get_paystack_runtime_config()
     if not config["secret_key_present"]:
         return {"ok": False, "reason": "Paystack secret key is not configured yet."}
@@ -2054,6 +2077,9 @@ def initialize_paystack_payment(
     }
     if not payload["email"] or not payload["reference"]:
         return {"ok": False, "reason": "Missing Paystack payment details."}
+    callback_url_value = str(payload.get("callback_url") or "").strip()
+    if not callback_url_value.lower().startswith(("http://", "https://")):
+        return {"ok": False, "reason": "Paystack callback URL is invalid."}
 
     headers = {
         "Authorization": f"Bearer {config['secret_key']}",
@@ -2061,16 +2087,34 @@ def initialize_paystack_payment(
     }
     conn = None
     try:
+        started_at = time.perf_counter()
         response = requests.post(
             "https://api.paystack.co/transaction/initialize",
             headers=headers,
             json=payload,
             timeout=30,
         )
-        response_data = response.json()
+        try:
+            response_data = response.json()
+        except Exception as json_exc:
+            logger.warning(
+                "Paystack initialize response JSON parse failed reference=%s correlation_id=%s status_code=%s error=%s",
+                payload.get("reference"),
+                correlation_id or "none",
+                getattr(response, "status_code", "unknown"),
+                sanitize_error_message(json_exc),
+            )
+            return {"ok": False, "reason": "Paystack initialization response could not be read. Please try again."}
         if response.status_code >= 400 or not response_data.get("status"):
             gateway_message = response_data.get("message") if isinstance(response_data, dict) else "Paystack initialization failed."
-            logger.warning("Paystack initialize failed for reference=%s status_code=%s", reference, response.status_code)
+            logger.warning(
+                "Paystack initialize failed reference=%s correlation_id=%s status_code=%s message=%s elapsed_ms=%s",
+                payload.get("reference"),
+                correlation_id or "none",
+                response.status_code,
+                str(gateway_message or ""),
+                int((time.perf_counter() - started_at) * 1000),
+            )
             return {"ok": False, "reason": str(gateway_message or "Paystack initialization failed.")}
         authorization_url = response_data.get("data", {}).get("authorization_url")
         if not authorization_url:
@@ -2096,7 +2140,15 @@ def initialize_paystack_payment(
             gateway_status_summary=_serialize_paystack_gateway_summary(response_data),
         )
         conn.commit()
-        log_system_event("INFO", "Paystack", f"Initialized payment reference={payload['reference']} context={payment_context}")
+        log_system_event(
+            "INFO",
+            "Paystack",
+            "Initialized payment reference={reference} context={context} correlation_id={correlation_id}".format(
+                reference=payload["reference"],
+                context=payment_context,
+                correlation_id=correlation_id or "none",
+            ),
+        )
         return {
             "ok": True,
             "reference": payload["reference"],
@@ -2104,9 +2156,22 @@ def initialize_paystack_payment(
             "currency": resolved_currency,
             "expected_amount": expected_amount,
         }
+    except requests.Timeout as exc:
+        logger.warning(
+            "Paystack initialize timeout reference=%s correlation_id=%s: %s",
+            reference,
+            correlation_id or "none",
+            sanitize_error_message(exc),
+        )
+        return {"ok": False, "reason": "Paystack checkout timed out. Please try again."}
     except Exception as exc:
-        logger.warning("Paystack initialize request failed for reference=%s: %s", reference, sanitize_error_message(exc))
-        return {"ok": False, "reason": "Paystack checkout could not be initialized right now. Please try again."}
+        logger.warning(
+            "Paystack initialize request failed reference=%s correlation_id=%s: %s",
+            reference,
+            correlation_id or "none",
+            sanitize_error_message(exc),
+        )
+        return {"ok": False, "reason": "Unable to start payment. Please try again or contact support."}
     finally:
         if conn:
             conn.close()
@@ -9951,8 +10016,15 @@ def show_onboarding_payment():
                 st.error("Please fill in all required fields.")
             else:
                 conn = None
+                correlation_id = uuid.uuid4().hex[:12].upper()
+                started_at = time.perf_counter()
+                step = "starting"
+                reference = None
+                company_key = None
                 try:
+                    step = "db_connect"
                     conn = get_connection()
+                    step = "duplicate_company_check"
                     existing_company = conn.execute(
                         "SELECT key FROM companies WHERE lower(name) = lower(?) LIMIT 1",
                         (company_name.strip(),),
@@ -9960,7 +10032,9 @@ def show_onboarding_payment():
                     if existing_company:
                         st.warning("A company with this name already exists. Please use a different company name.")
                     else:
+                        step = "generate_company_key"
                         company_key = _generate_company_key()
+                        step = "create_trial_company"
                         trial_result = ensure_company_trial_subscription(
                             conn,
                             company_key=company_key,
@@ -9968,6 +10042,7 @@ def show_onboarding_payment():
                             contact_email=admin_email.strip(),
                             trial_days=7,
                         )
+                        step = "trial_commit"
                         conn.commit()
                         if not selected_plan.get("configured"):
                             st.success(
@@ -9981,7 +10056,9 @@ def show_onboarding_payment():
                             )
                             st.caption(f"Company Key: {company_key}")
                         else:
+                            step = "generate_paystack_reference"
                             reference = _generate_paystack_reference("ONB")
+                            step = "initialize_paystack_payment"
                             payment_result = initialize_paystack_payment(
                                 admin_email,
                                 amount,
@@ -9994,7 +10071,12 @@ def show_onboarding_payment():
                                 subscription_days=selected_plan.get("duration_days"),
                                 user_email=admin_email.strip(),
                                 phone_number=admin_phone.strip(),
-                                metadata_extra={"sector": sector, "trial_end_date": trial_result["end_date"]},
+                                metadata_extra={
+                                    "sector": sector,
+                                    "trial_end_date": trial_result["end_date"],
+                                    "correlation_id": correlation_id,
+                                    "admin_email": admin_email.strip(),
+                                },
                             )
                             if payment_result.get("ok"):
                                 st.success(
@@ -10026,11 +10108,37 @@ def show_onboarding_payment():
                                     (payment_result.get("reason") or "Payment could not be initialized yet.")
                                     + f" Trial access remains active until {trial_result['end_date']}."
                                 )
+                    elapsed_ms = int((time.perf_counter() - started_at) * 1000)
+                    logger.info(
+                        "Onboarding payment attempt completed correlation_id=%s step=%s company_key=%s email=%s reference=%s elapsed_ms=%s",
+                        correlation_id,
+                        step,
+                        company_key or "pending",
+                        admin_email.strip(),
+                        reference or "none",
+                        elapsed_ms,
+                    )
                 except Exception as exc:
                     if conn:
                         conn.rollback()
-                    st.warning("Onboarding payment could not be started right now. Please try again.")
-                    logger.warning("Onboarding payment error: %s", sanitize_error_message(exc))
+                    elapsed_ms = int((time.perf_counter() - started_at) * 1000)
+                    st.warning(
+                        "Unable to start payment. Please try again or contact support. Support code: {code}".format(
+                            code=correlation_id
+                        )
+                    )
+                    logger.warning(
+                        "Onboarding payment failed correlation_id=%s step=%s company_name=%s company_key=%s email=%s reference=%s elapsed_ms=%s error=%s paystack_secrets=%s",
+                        correlation_id,
+                        step,
+                        company_name.strip(),
+                        company_key or "pending",
+                        admin_email.strip(),
+                        reference or "none",
+                        elapsed_ms,
+                        sanitize_error_message(exc),
+                        json.dumps(get_paystack_secret_status(), default=str),
+                    )
                 finally:
                     if conn:
                         conn.close()
