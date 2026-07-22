@@ -20,6 +20,7 @@ from database import (
     rows_to_dicts,
     restore_latest_cloud_backup_to_local,
     should_run_sqlite_startup,
+    wipe_company_records,
 )
 import json
 import logging
@@ -747,23 +748,6 @@ def get_dashboard_metric_counts(conn, company_key):
     }
 
 
-def wipe_company_records(conn, company_key):
-    company_scoped_tables = [
-        "users",
-        "counterparties",
-        "inventory",
-        "vouchers",
-        "payroll",
-        "fixed_assets",
-        "audit_logs",
-        "pending_approvals",
-    ]
-    for table_name in company_scoped_tables:
-        try:
-            conn.execute(f"DELETE FROM {table_name} WHERE company_key = ?", (company_key,))
-        except sqlite3.Error:
-            continue
-    conn.execute("DELETE FROM companies WHERE key = ?", (company_key,))
 
 def check_maintenance_status():
     conn = None
@@ -3865,17 +3849,47 @@ else:
                                             )
                                             st.success(f"{action_company_name} archived. Data retained and login disabled.")
                                         else:
-                                            wipe_company_records(conn, action_company_key)
-                                            conn.commit()
-                                            log_audit_action(
-                                                conn,
-                                                "SYSTEM",
-                                                "Dev",
-                                                "Company Wiped",
-                                                "Gatekeeper Dashboard",
-                                                f"{action_company_name} permanently deleted.",
-                                            )
-                                            st.success(f"{action_company_name} and all linked records were deleted.")
+                                            wipe_correlation_id = uuid.uuid4().hex[:12].upper()
+                                            try:
+                                                wipe_result = wipe_company_records(
+                                                    conn,
+                                                    action_company_key,
+                                                    correlation_id=wipe_correlation_id,
+                                                    manage_transaction=False,
+                                                )
+                                                conn.commit()
+                                                log_audit_action(
+                                                    conn,
+                                                    "SYSTEM",
+                                                    "Dev",
+                                                    "Company Wiped",
+                                                    "Gatekeeper Dashboard",
+                                                    (
+                                                        f"{action_company_name} permanently deleted. "
+                                                        f"correlation_id={wipe_correlation_id}"
+                                                    ),
+                                                )
+                                                deployment_status = str(
+                                                    wipe_result.get("deployment_status") or ""
+                                                ).strip().lower()
+                                                if deployment_status == "trial":
+                                                    st.success("Trial company deleted successfully.")
+                                                else:
+                                                    st.success(f"{action_company_name} and all linked records were deleted.")
+                                            except Exception as wipe_error:
+                                                conn.rollback()
+                                                logger.error(
+                                                    "Company wipe failed correlation_id=%s company_key=%s error=%s",
+                                                    wipe_correlation_id,
+                                                    action_company_key,
+                                                    sanitize_error_message(wipe_error),
+                                                    exc_info=True,
+                                                )
+                                                st.error(
+                                                    "Company could not be deleted. Support Code: {code}".format(
+                                                        code=wipe_correlation_id
+                                                    )
+                                                )
                                         st.rerun()
                                     except Exception as action_error:
                                         conn.rollback()
