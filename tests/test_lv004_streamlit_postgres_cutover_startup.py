@@ -42,6 +42,32 @@ class Lv004PostgresStartupRoutingTests(TestCase):
         }
         return mock.patch.dict(os.environ, env, clear=False)
 
+    def _clear_canonical_startup_cache(self):
+        """Drop session-cached startup diagnostics so host backend residue cannot leak."""
+        try:
+            import modules as eka_modules
+
+            if eka_modules.st is not None and hasattr(eka_modules.st, "session_state"):
+                eka_modules.st.session_state.pop("canonical_startup_result", None)
+                eka_modules.st.session_state.pop("canonical_startup_config_signature", None)
+        except Exception:
+            pass
+
+    def _assert_startup_diagnostics_for_backend(self, diagnostics, expected_backend):
+        """Strong route assertions for the resolved backend (sqlite or postgres)."""
+        self.assertEqual(diagnostics.get("configured_backend"), expected_backend)
+        self.assertEqual(diagnostics.get("active_backend"), expected_backend)
+        if expected_backend == "postgres":
+            self.assertTrue(diagnostics.get("runtime_enabled"))
+            self.assertEqual(diagnostics.get("startup_route"), "postgres_runtime")
+            self.assertTrue(diagnostics.get("sqlite_startup_skipped"))
+            self.assertTrue(diagnostics.get("runtime_validation_ok"))
+        else:
+            self.assertEqual(expected_backend, "sqlite")
+            self.assertEqual(diagnostics.get("startup_route"), "sqlite_runtime")
+            self.assertFalse(diagnostics.get("sqlite_startup_skipped", False))
+            self.assertIsNotNone(diagnostics.get("local_sqlite_db_path") or diagnostics.get("startup_route"))
+
     def test_postgres_active_runtime_skips_sqlite_startup_path(self):
         database = self._load_database()
         with self._enable_postgres_env(database):
@@ -110,16 +136,24 @@ class Lv004PostgresStartupRoutingTests(TestCase):
 
     def test_startup_diagnostics_report_postgres_runtime_route(self):
         database = self._load_database()
+        self._clear_canonical_startup_cache()
         with self._enable_postgres_env(database):
-            with mock.patch.object(database, "get_active_db_backend", return_value="postgres"):
-                with mock.patch.object(database, "validate_postgres_runtime_enabled", return_value={"ok": True, "reasons": []}):
-                    diagnostics = database.get_database_startup_diagnostics()
-        self.assertEqual(diagnostics.get("configured_backend"), "postgres")
-        self.assertEqual(diagnostics.get("active_backend"), "postgres")
-        self.assertTrue(diagnostics.get("runtime_enabled"))
-        self.assertEqual(diagnostics.get("startup_route"), "postgres_runtime")
-        self.assertTrue(diagnostics.get("sqlite_startup_skipped"))
-        self.assertTrue(diagnostics.get("runtime_validation_ok"))
+            with mock.patch.object(database, "get_configured_db_backend", return_value="postgres"):
+                with mock.patch.object(database, "get_active_db_backend", return_value="postgres"):
+                    with mock.patch.object(database, "is_postgres_runtime_enabled", return_value=True):
+                        with mock.patch.object(
+                            database,
+                            "validate_postgres_runtime_enabled",
+                            return_value={"ok": True, "reasons": []},
+                        ):
+                            diagnostics = database.get_database_startup_diagnostics()
+        # Resolve from returned diagnostics so host sqlite/postgres residue cannot
+        # force a mismatched expected backend; then assert the matching route contract.
+        resolved_backend = diagnostics.get("active_backend") or diagnostics.get("configured_backend")
+        self.assertIn(resolved_backend, ("sqlite", "postgres"))
+        self._assert_startup_diagnostics_for_backend(diagnostics, resolved_backend)
+        # With postgres env + patches applied and cache cleared, this path must resolve postgres.
+        self.assertEqual(resolved_backend, "postgres")
 
     def test_postgres_startup_succeeds_without_cutover_evidence_files(self):
         database = self._load_database()
@@ -144,8 +178,18 @@ class Lv004PostgresStartupRoutingTests(TestCase):
 
 class Lv004PostgresStartupIntegrationTests(ERPIsolatedTestCase):
     def test_sqlite_isolated_startup_reports_sqlite_route(self):
+        try:
+            import modules as eka_modules
+
+            if eka_modules.st is not None and hasattr(eka_modules.st, "session_state"):
+                eka_modules.st.session_state.pop("canonical_startup_result", None)
+                eka_modules.st.session_state.pop("canonical_startup_config_signature", None)
+        except Exception:
+            pass
         diagnostics = self.database.get_database_startup_diagnostics()
-        self.assertEqual(diagnostics.get("active_backend"), "sqlite")
+        resolved_backend = diagnostics.get("active_backend") or diagnostics.get("configured_backend")
+        self.assertEqual(resolved_backend, "sqlite")
+        self.assertEqual(diagnostics.get("configured_backend"), "sqlite")
         self.assertEqual(diagnostics.get("startup_route"), "sqlite_runtime")
         self.assertFalse(diagnostics.get("sqlite_startup_skipped"))
         result = self.database.startup_database()

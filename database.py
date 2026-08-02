@@ -5493,6 +5493,282 @@ def create_company_record(
     return normalized_key
 
 
+COMPANY_WIPE_SCOPED_DELETES = (
+    (
+        "journal_lines",
+        "DELETE FROM journal_lines WHERE entry_id IN (SELECT id FROM journal_entries WHERE company_key = ?)",
+    ),
+    (
+        "invoice_lines",
+        "DELETE FROM invoice_lines WHERE invoice_id IN (SELECT id FROM invoices WHERE company_key = ?)",
+    ),
+    (
+        "bill_lines",
+        "DELETE FROM bill_lines WHERE bill_id IN (SELECT id FROM bills WHERE company_key = ?)",
+    ),
+    (
+        "pos_sale_lines",
+        "DELETE FROM pos_sale_lines WHERE pos_sale_id IN (SELECT id FROM pos_sales WHERE company_key = ?)",
+    ),
+)
+
+COMPANY_WIPE_PRIORITY_TABLES = (
+    "journal_lines",
+    "invoice_lines",
+    "bill_lines",
+    "pos_sale_lines",
+    "payment_allocations",
+    "stock_movements",
+    "customer_transactions",
+    "supplier_transactions",
+    "license_payment_transactions",
+    "company_subscriptions",
+    "pending_approvals",
+    "audit_logs",
+    "users",
+    "branches",
+    "journal_entries",
+    "invoices",
+    "bills",
+    "payments",
+    "inventory",
+    "customers",
+    "suppliers",
+    "vouchers",
+    "payroll",
+    "payroll_records",
+    "fixed_assets",
+    "counterparties",
+    "transactions",
+    "bank_accounts",
+    "accounting_periods",
+    "recurring_transactions",
+    "pos_sales",
+    "pos_returns",
+)
+
+
+def list_foreign_key_dependencies(conn, table_names=None, backend=None):
+    """Return FK edges as (child_table, parent_table) within the active schema."""
+    if conn is None:
+        return []
+    backend = _normalize_db_backend(backend or get_active_db_backend())
+    allowed = {str(name or "").strip() for name in (table_names or []) if str(name or "").strip()}
+    edges = []
+    if backend == "postgres":
+        rows = execute_portable_query(
+            conn,
+            """
+            SELECT
+                tc.table_name AS child_table,
+                ccu.table_name AS parent_table
+            FROM information_schema.table_constraints tc
+            JOIN information_schema.key_column_usage kcu
+              ON kcu.constraint_schema = tc.constraint_schema
+             AND kcu.constraint_name = tc.constraint_name
+            JOIN information_schema.constraint_column_usage ccu
+              ON ccu.constraint_schema = tc.constraint_schema
+             AND ccu.constraint_name = tc.constraint_name
+            WHERE tc.table_schema = current_schema()
+              AND tc.constraint_type = 'FOREIGN KEY'
+            ORDER BY tc.table_name, ccu.table_name
+            """,
+            (),
+            backend=backend,
+        ).fetchall()
+        for row in rows:
+            child_table = str(row_get(row, "child_table", "") or "").strip()
+            parent_table = str(row_get(row, "parent_table", "") or "").strip()
+            if not child_table or not parent_table:
+                continue
+            if allowed and (child_table not in allowed or parent_table not in allowed):
+                continue
+            edges.append((child_table, parent_table))
+        return edges
+
+    tables = list(table_names or list_tables(conn, backend=backend))
+    for table_name in tables:
+        if allowed and table_name not in allowed:
+            continue
+        try:
+            rows = conn.execute(f"PRAGMA foreign_key_list({table_name})").fetchall()
+        except Exception:
+            continue
+        for row in rows:
+            child_table = str(table_name or "").strip()
+            parent_table = str(_row_value(row, "table", 2) or "").strip()
+            if not child_table or not parent_table:
+                continue
+            if allowed and parent_table not in allowed:
+                continue
+            edges.append((child_table, parent_table))
+    return edges
+
+
+def discover_company_key_tables(conn, backend=None):
+    """Discover tables that can be wiped using a direct company_key filter."""
+    if conn is None:
+        return []
+    backend = _normalize_db_backend(backend or get_active_db_backend())
+    discovered = []
+    for table_name in list_tables(conn, backend=backend):
+        if table_name == "companies" or table_name.startswith("sqlite_"):
+            continue
+        try:
+            column_names = {column["name"] for column in list_columns(conn, table_name, backend=backend)}
+        except Exception:
+            continue
+        if "company_key" in column_names:
+            discovered.append(table_name)
+    return discovered
+
+
+def sort_company_wipe_tables(table_names, fk_edges):
+    """Order tables so referencing rows are deleted before referenced company rows."""
+    remaining = set(table_names)
+    referenced_by = {}
+    for child_table, parent_table in fk_edges:
+        referenced_by.setdefault(parent_table, set()).add(child_table)
+    ordered = []
+    while remaining:
+        ready = sorted(
+            table_name
+            for table_name in remaining
+            if not (referenced_by.get(table_name, set()) & remaining)
+        )
+        if not ready:
+            ready = [sorted(remaining)[0]]
+        for table_name in ready:
+            ordered.append(table_name)
+            remaining.remove(table_name)
+    priority_rank = {name: index for index, name in enumerate(COMPANY_WIPE_PRIORITY_TABLES)}
+
+    def _sort_key(table_name):
+        return (priority_rank.get(table_name, len(COMPANY_WIPE_PRIORITY_TABLES)), table_name)
+
+    return sorted(ordered, key=_sort_key)
+
+
+def build_company_wipe_delete_plan(conn, company_key, backend=None):
+    """Build ordered DELETE statements for a full company wipe."""
+    normalized_key = str(company_key or "").strip()
+    if not normalized_key:
+        raise ValueError("company_key is required")
+    backend = _normalize_db_backend(backend or get_active_db_backend())
+    existing_tables = set(list_tables(conn, backend=backend))
+    plan = []
+    scoped_tables = set()
+
+    for table_name, delete_sql in COMPANY_WIPE_SCOPED_DELETES:
+        if table_name in existing_tables:
+            plan.append((table_name, delete_sql, (normalized_key,)))
+            scoped_tables.add(table_name)
+
+    company_key_tables = [
+        table_name
+        for table_name in discover_company_key_tables(conn, backend=backend)
+        if table_name in existing_tables and table_name not in scoped_tables
+    ]
+    fk_edges = list_foreign_key_dependencies(conn, company_key_tables, backend=backend)
+    ordered_tables = sort_company_wipe_tables(company_key_tables, fk_edges)
+    for table_name in ordered_tables:
+        plan.append((table_name, f"DELETE FROM {table_name} WHERE company_key = ?", (normalized_key,)))
+    return plan
+
+
+def get_company_wipe_referencing_tables(conn, backend=None):
+    """Return tables that reference companies.key via FK or company_key column."""
+    backend = _normalize_db_backend(backend or get_active_db_backend())
+    existing_tables = set(list_tables(conn, backend=backend))
+    direct_tables = discover_company_key_tables(conn, backend=backend)
+    fk_edges = list_foreign_key_dependencies(conn, existing_tables, backend=backend)
+    referencing = sorted(
+        {
+            child_table
+            for child_table, parent_table in fk_edges
+            if parent_table == "companies" and child_table in existing_tables
+        }
+    )
+    scoped_tables = [table_name for table_name, _sql in COMPANY_WIPE_SCOPED_DELETES if table_name in existing_tables]
+    return {
+        "company_key_tables": sorted(direct_tables),
+        "foreign_key_references_to_companies": referencing,
+        "scoped_child_tables": scoped_tables,
+    }
+
+
+def wipe_company_records(conn, company_key, *, correlation_id=None, manage_transaction=True):
+    """
+    Delete a company and all dependent records in FK-safe order.
+
+    Returns metadata for admin/audit logging. Raises on failure after rollback.
+    """
+    if conn is None:
+        raise RuntimeError("Database connection is required to wipe a company.")
+    normalized_key = str(company_key or "").strip()
+    if not normalized_key:
+        raise ValueError("company_key is required")
+    correlation_id = str(correlation_id or "").strip() or uuid.uuid4().hex[:12].upper()
+    backend = _normalize_db_backend(get_active_db_backend())
+    company_row = execute_portable_query(
+        conn,
+        "SELECT key, name, deployment_status FROM companies WHERE key = ? LIMIT 1",
+        (normalized_key,),
+        backend=backend,
+    ).fetchone()
+    if not company_row:
+        raise ValueError("Company not found.")
+
+    owns_transaction = bool(manage_transaction)
+    if owns_transaction:
+        conn.execute("BEGIN")
+
+    deleted_tables = []
+    try:
+        delete_plan = build_company_wipe_delete_plan(conn, normalized_key, backend=backend)
+        for table_name, delete_sql, params in delete_plan:
+            execute_portable_write(conn, delete_sql, params, backend=backend)
+            deleted_tables.append(table_name)
+        execute_portable_write(
+            conn,
+            "DELETE FROM companies WHERE key = ?",
+            (normalized_key,),
+            backend=backend,
+        )
+        deleted_tables.append("companies")
+        if owns_transaction:
+            conn.commit()
+        logger.info(
+            "Company wipe completed correlation_id=%s company_key=%s deleted_tables=%s",
+            correlation_id,
+            normalized_key,
+            deleted_tables,
+        )
+        return {
+            "ok": True,
+            "correlation_id": correlation_id,
+            "company_key": normalized_key,
+            "company_name": row_get(company_row, "name"),
+            "deployment_status": row_get(company_row, "deployment_status"),
+            "deleted_tables": deleted_tables,
+        }
+    except Exception as exc:
+        if owns_transaction:
+            try:
+                conn.rollback()
+            except Exception:
+                logger.debug("Company wipe rollback skipped.", exc_info=True)
+        logger.error(
+            "Company wipe failed correlation_id=%s company_key=%s deleted_tables=%s error=%s",
+            correlation_id,
+            normalized_key,
+            deleted_tables,
+            sanitize_error_message(exc),
+            exc_info=True,
+        )
+        raise
+
+
 def _parse_datetime_like(value):
     if value is None:
         return None

@@ -2021,13 +2021,33 @@ def initialize_paystack_payment(
     correlation_id = None
     if isinstance(metadata_extra, dict):
         correlation_id = str(metadata_extra.get("correlation_id") or "").strip() or None
+    failure_step = "load_runtime_config"
     config = get_paystack_runtime_config()
+    secret_status = get_paystack_secret_status()
+    failure_step = "validate_secret_key"
     if not config["secret_key_present"]:
-        return {"ok": False, "reason": "Paystack secret key is not configured yet."}
+        return {
+            "ok": False,
+            "reason": "Paystack secret key is not configured yet.",
+            "failure_step": failure_step,
+            "paystack_status": secret_status,
+        }
+    failure_step = "validate_public_key"
     if not config["public_key_present"]:
-        return {"ok": False, "reason": "Paystack public key is not configured yet."}
+        return {
+            "ok": False,
+            "reason": "Paystack public key is not configured yet.",
+            "failure_step": failure_step,
+            "paystack_status": secret_status,
+        }
+    failure_step = "validate_callback_url"
     if not config["callback_url_configured"]:
-        return {"ok": False, "reason": "Paystack callback URL is not configured yet."}
+        return {
+            "ok": False,
+            "reason": "Paystack callback URL is not configured yet.",
+            "failure_step": failure_step,
+            "paystack_status": secret_status,
+        }
 
     resolved_amount = float(amount or 0)
     resolved_currency = str(config["currency"] or "GHS").strip().upper() or "GHS"
@@ -2036,17 +2056,29 @@ def initialize_paystack_payment(
     plan_snapshot = None
     normalized_plan_name = str(plan_name or "").strip() or None
     if normalized_plan_name:
+        failure_step = "resolve_subscription_plan_snapshot"
         plan_snapshot = _resolve_subscription_plan_payment_snapshot(normalized_plan_name)
         if not plan_snapshot.get("ok"):
-            return {"ok": False, "reason": plan_snapshot.get("reason") or SUBSCRIPTION_PRICING_NOT_CONFIGURED_MESSAGE}
+            return {
+                "ok": False,
+                "reason": plan_snapshot.get("reason") or SUBSCRIPTION_PRICING_NOT_CONFIGURED_MESSAGE,
+                "failure_step": failure_step,
+                "paystack_status": secret_status,
+            }
         resolved_amount = float(plan_snapshot["configured_amount"])
         resolved_currency = plan_snapshot["currency"]
         resolved_duration_months = int(plan_snapshot["duration_months"] or 0)
         resolved_duration_days = int(plan_snapshot["duration_days"] or 0)
 
     expected_amount = int(round(float(resolved_amount or 0) * 100))
+    failure_step = "validate_payment_amount"
     if expected_amount <= 0:
-        return {"ok": False, "reason": "Payment amount must be greater than zero."}
+        return {
+            "ok": False,
+            "reason": "Payment amount must be greater than zero.",
+            "failure_step": failure_step,
+            "paystack_status": secret_status,
+        }
 
     metadata = {
         "company_key": company_key,
@@ -2077,10 +2109,23 @@ def initialize_paystack_payment(
         "metadata": metadata,
     }
     if not payload["email"] or not payload["reference"]:
-        return {"ok": False, "reason": "Missing Paystack payment details."}
+        return {
+            "ok": False,
+            "reason": "Missing Paystack payment details.",
+            "failure_step": "validate_payload",
+            "paystack_status": secret_status,
+        }
     callback_url_value = str(payload.get("callback_url") or "").strip()
-    if not callback_url_value.lower().startswith(("http://", "https://")):
-        return {"ok": False, "reason": "Paystack callback URL is invalid."}
+    callback_url_valid = callback_url_value.lower().startswith(("http://", "https://"))
+    failure_step = "validate_callback_url_scheme"
+    if not callback_url_valid:
+        return {
+            "ok": False,
+            "reason": "Paystack callback URL is invalid.",
+            "failure_step": failure_step,
+            "paystack_status": secret_status,
+            "callback_url_valid": False,
+        }
 
     headers = {
         "Authorization": f"Bearer {config['secret_key']}",
@@ -2089,6 +2134,7 @@ def initialize_paystack_payment(
     conn = None
     try:
         started_at = time.perf_counter()
+        failure_step = "http_post_initialize"
         response = requests.post(
             "https://api.paystack.co/transaction/initialize",
             headers=headers,
@@ -2096,30 +2142,71 @@ def initialize_paystack_payment(
             timeout=30,
         )
         try:
+            failure_step = "parse_gateway_json"
             response_data = response.json()
         except Exception as json_exc:
             logger.warning(
-                "Paystack initialize response JSON parse failed reference=%s correlation_id=%s status_code=%s error=%s",
+                "Paystack initialize response JSON parse failed reference=%s correlation_id=%s status_code=%s failure_step=%s error=%s paystack=%s",
                 payload.get("reference"),
                 correlation_id or "none",
                 getattr(response, "status_code", "unknown"),
+                failure_step,
                 sanitize_error_message(json_exc),
+                secret_status,
             )
-            return {"ok": False, "reason": "Paystack initialization response could not be read. Please try again."}
+            return {
+                "ok": False,
+                "reason": "Paystack initialization response could not be read. Please try again.",
+                "failure_step": failure_step,
+                "http_status": getattr(response, "status_code", None),
+                "paystack_status": secret_status,
+                "callback_url_valid": callback_url_valid,
+            }
+        failure_step = "validate_gateway_response"
         if response.status_code >= 400 or not response_data.get("status"):
             gateway_message = response_data.get("message") if isinstance(response_data, dict) else "Paystack initialization failed."
             logger.warning(
-                "Paystack initialize failed reference=%s correlation_id=%s status_code=%s message=%s elapsed_ms=%s",
+                "Paystack initialize failed reference=%s correlation_id=%s failure_step=%s status_code=%s message=%s gateway_response=%s elapsed_ms=%s paystack=%s callback_url_valid=%s",
                 payload.get("reference"),
                 correlation_id or "none",
+                failure_step,
                 response.status_code,
                 str(gateway_message or ""),
+                json.dumps(response_data, default=str)[:500],
                 int((time.perf_counter() - started_at) * 1000),
+                secret_status,
+                callback_url_valid,
             )
-            return {"ok": False, "reason": str(gateway_message or "Paystack initialization failed.")}
+            return {
+                "ok": False,
+                "reason": str(gateway_message or "Paystack initialization failed."),
+                "failure_step": failure_step,
+                "http_status": response.status_code,
+                "gateway_response": response_data,
+                "paystack_status": secret_status,
+                "callback_url_valid": callback_url_valid,
+            }
+        failure_step = "extract_authorization_url"
         authorization_url = response_data.get("data", {}).get("authorization_url")
         if not authorization_url:
-            return {"ok": False, "reason": "Paystack did not return a checkout URL."}
+            logger.warning(
+                "Paystack initialize missing authorization_url reference=%s correlation_id=%s failure_step=%s status_code=%s paystack=%s",
+                payload.get("reference"),
+                correlation_id or "none",
+                failure_step,
+                response.status_code,
+                secret_status,
+            )
+            return {
+                "ok": False,
+                "reason": "Paystack did not return a checkout URL.",
+                "failure_step": failure_step,
+                "http_status": response.status_code,
+                "gateway_response": response_data,
+                "paystack_status": secret_status,
+                "callback_url_valid": callback_url_valid,
+            }
+        failure_step = "persist_license_payment_transaction"
         conn = get_connection()
         _upsert_license_payment_transaction(
             conn,
@@ -2156,23 +2243,39 @@ def initialize_paystack_payment(
             "authorization_url": authorization_url,
             "currency": resolved_currency,
             "expected_amount": expected_amount,
+            "failure_step": None,
+            "http_status": response.status_code,
+            "paystack_status": secret_status,
+            "callback_url_valid": callback_url_valid,
         }
     except requests.Timeout as exc:
         logger.warning(
-            "Paystack initialize timeout reference=%s correlation_id=%s: %s",
+            "Paystack initialize timeout reference=%s correlation_id=%s failure_step=http_post_initialize: %s",
             reference,
             correlation_id or "none",
             sanitize_error_message(exc),
         )
-        return {"ok": False, "reason": "Paystack checkout timed out. Please try again."}
+        return {
+            "ok": False,
+            "reason": "Paystack checkout timed out. Please try again.",
+            "failure_step": "http_post_initialize",
+            "paystack_status": secret_status,
+        }
     except Exception as exc:
         logger.warning(
-            "Paystack initialize request failed reference=%s correlation_id=%s: %s",
+            "Paystack initialize request failed reference=%s correlation_id=%s failure_step=%s: %s",
             reference,
             correlation_id or "none",
+            failure_step,
             sanitize_error_message(exc),
+            exc_info=True,
         )
-        return {"ok": False, "reason": "Unable to start payment. Please try again or contact support."}
+        return {
+            "ok": False,
+            "reason": "Unable to start payment. Please try again or contact support.",
+            "failure_step": failure_step,
+            "paystack_status": secret_status,
+        }
     finally:
         if conn:
             conn.close()
@@ -10216,11 +10319,14 @@ def _execute_onboarding_submit_workflow(
             if not payment_result.get("ok"):
                 reason = str(payment_result.get("reason") or "Payment could not be initialized yet.")
                 logger.warning(
-                    "Onboarding Paystack initialize failed correlation_id=%s reference=%s reason=%s paystack=%s",
+                    "Onboarding Paystack initialize failed correlation_id=%s reference=%s failure_step=%s http_status=%s reason=%s paystack=%s callback_url_valid=%s",
                     correlation_id,
                     reference,
+                    payment_result.get("failure_step") or "unknown",
+                    payment_result.get("http_status"),
                     reason,
-                    get_paystack_secret_status(),
+                    payment_result.get("paystack_status") or get_paystack_secret_status(),
+                    payment_result.get("callback_url_valid"),
                 )
                 _log_onboarding_stage_finish(
                     correlation_id,
