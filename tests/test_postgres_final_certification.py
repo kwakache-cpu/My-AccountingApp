@@ -65,11 +65,23 @@ class PostgresFinalCertificationTests(ERPIsolatedTestCase):
             "Depreciation posting": inspect.getsource(self.modules.run_straight_line_depreciation),
         }
         for workflow, source in critical_sources.items():
-            self.assertIn(
-                "execute_portable_write",
-                source,
-                msg=f"{workflow} should route critical DML through execute_portable_write().",
+            uses_portable = "execute_portable_write" in source
+            # Inventory qty mutations route through apply_inventory_quantity_change,
+            # which itself uses execute_portable_write for SQLite/PostgreSQL parity.
+            uses_inventory_integrity = "apply_inventory_quantity_change" in source
+            self.assertTrue(
+                uses_portable or uses_inventory_integrity,
+                msg=(
+                    f"{workflow} should route critical DML through "
+                    "execute_portable_write() or apply_inventory_quantity_change()."
+                ),
             )
+        integrity_source = inspect.getsource(self.modules.apply_inventory_quantity_change)
+        self.assertIn(
+            "execute_portable_write",
+            integrity_source,
+            msg="Inventory movement integrity helper must use execute_portable_write().",
+        )
 
     def test_payroll_posting_links_source_document_to_journal(self):
         payroll_cursor = self.conn.execute(
