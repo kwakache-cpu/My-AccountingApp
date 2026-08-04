@@ -4659,34 +4659,19 @@ def apply_invoice_stock_effects(
         if unit_cost <= 0:
             unit_cost = float(item.get("cost_price") or 0.0)
         total_cost = round(quantity_sold * unit_cost, 2)
-        new_qty = round(available_qty - quantity_sold, 4)
-        execute_portable_write(
+        apply_inventory_quantity_change(
             conn,
-            "UPDATE inventory SET qty = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND company_key = ?",
-            (new_qty, int(inventory_row["id"]), company_key),
-        )
-        execute_portable_write(
-            conn,
-            """
-            INSERT INTO stock_movements (
-                company_key, branch_id, inventory_item_id, item_name, movement_type,
-                quantity, reason, previous_qty, new_qty, created_by, created_at, reference
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?)
-            """,
-            (
-                company_key,
-                branch_id,
-                int(inventory_row["id"]),
-                str(inventory_row["item_name"] or item["item_name"]),
-                "Invoice Sale",
-                quantity_sold,
-                f"Invoice sale {invoice_reference}",
-                available_qty,
-                new_qty,
-                role,
-                invoice_reference,
-            ),
+            company_key=company_key,
+            inventory_item_id=int(inventory_row["id"]),
+            movement_type="POS_SALE",
+            created_by=role,
+            branch_id=branch_id,
+            quantity_delta=-quantity_sold,
+            reason=f"Invoice sale {invoice_reference}",
+            reference=f"{invoice_reference}-{int(inventory_row['id'])}",
+            source_document="invoice",
+            source_id=invoice_reference,
+            item_name=str(inventory_row["item_name"] or item["item_name"]),
         )
         enriched_item = dict(item)
         enriched_item["cost_price"] = unit_cost
@@ -6151,33 +6136,19 @@ def _process_pos_return(
             ).fetchone()
             if not current_item:
                 raise ValueError(f"Inventory item for {line_row['item_name']} could not be found.")
-            previous_qty = float(current_item["qty"] or 0.0)
-            new_qty = previous_qty + qty_requested
-            conn.execute(
-                "UPDATE inventory SET qty = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND company_key = ?",
-                (new_qty, inventory_item_id, company_key),
-            )
-            conn.execute(
-                """
-                INSERT INTO stock_movements (
-                    company_key, branch_id, inventory_item_id, item_name, movement_type,
-                    quantity, reason, previous_qty, new_qty, created_by, created_at, reference
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?)
-                """,
-                (
-                    company_key,
-                    branch_id,
-                    inventory_item_id,
-                    line_row["item_name"],
-                    "Return / Refund Restock",
-                    qty_requested,
-                    reason,
-                    previous_qty,
-                    new_qty,
-                    role,
-                    return_reference,
-                ),
+            apply_inventory_quantity_change(
+                conn,
+                company_key=company_key,
+                inventory_item_id=inventory_item_id,
+                movement_type="POS_RETURN",
+                created_by=role,
+                branch_id=branch_id,
+                quantity_delta=qty_requested,
+                reason=reason,
+                reference=f"{return_reference}-{inventory_item_id}",
+                source_document="pos_return",
+                source_id=return_reference,
+                item_name=line_row["item_name"],
             )
 
         cursor = conn.execute(
@@ -6527,6 +6498,13 @@ def _import_inventory_from_excel(conn, company_key, file_obj):
     if missing:
         raise ValueError(f"Missing required columns: {', '.join(missing)}")
 
+    branch_id = _resolve_inventory_movement_branch_id(
+        conn,
+        company_key,
+        st.session_state.get("active_branch_id"),
+    )
+    created_by = str(st.session_state.get("user", {}).get("role") or "System")
+    import_token = datetime.now().strftime("%Y%m%d%H%M%S%f")
     changed_rows = 0
     for _, row in imported_df.iterrows():
         row_id = row[column_map["id"]] if "id" in column_map and not pd.isna(row[column_map["id"]]) else None
@@ -6545,23 +6523,38 @@ def _import_inventory_from_excel(conn, company_key, file_obj):
         cost_price = float(row[cost_column] or 0) if cost_column else 0.0
         if row_id is not None:
             existing = conn.execute(
-                "SELECT id FROM inventory WHERE company_key = ? AND id = ?",
+                "SELECT id, qty FROM inventory WHERE company_key = ? AND id = ?",
                 (company_key, int(row_id)),
             ).fetchone()
             if existing:
                 conn.execute(
                     """
                     UPDATE inventory
-                    SET item_name = ?, barcode = ?, category = ?, opening_balance = ?, qty = ?, price = ?, cost_price = ?
+                    SET item_name = ?, barcode = ?, category = ?, opening_balance = ?, price = ?, cost_price = ?
                     WHERE company_key = ? AND id = ?
                     """,
-                    (item_name, barcode, category, opening_balance, qty, price, cost_price, company_key, int(row_id)),
+                    (item_name, barcode, category, opening_balance, price, cost_price, company_key, int(row_id)),
                 )
+                if abs(float(qty) - float(existing["qty"] or 0.0)) > 1e-9:
+                    apply_inventory_quantity_change(
+                        conn,
+                        company_key=company_key,
+                        inventory_item_id=int(existing["id"]),
+                        movement_type="IMPORT",
+                        created_by=created_by,
+                        branch_id=branch_id,
+                        target_qty=float(qty),
+                        reason="Legacy Excel Import",
+                        reference=f"XLS-IMP-{import_token}-{int(existing['id'])}",
+                        source_document="inventory_excel_import",
+                        source_id=import_token,
+                        item_name=item_name,
+                    )
                 changed_rows += 1
                 continue
         existing = conn.execute(
             """
-            SELECT id FROM inventory
+            SELECT id, qty FROM inventory
             WHERE company_key = ? AND item_name = ? AND COALESCE(category, '') = ?
             """,
             (company_key, item_name, category),
@@ -6570,18 +6563,35 @@ def _import_inventory_from_excel(conn, company_key, file_obj):
             conn.execute(
                 """
                 UPDATE inventory
-                SET barcode = COALESCE(NULLIF(?, ''), barcode), opening_balance = ?, qty = ?, price = ?, cost_price = ?
+                SET barcode = COALESCE(NULLIF(?, ''), barcode), opening_balance = ?, price = ?, cost_price = ?
                 WHERE company_key = ? AND id = ?
                 """,
-                (barcode, opening_balance, qty, price, cost_price, company_key, existing["id"]),
+                (barcode, opening_balance, price, cost_price, company_key, existing["id"]),
             )
+            if abs(float(qty) - float(existing["qty"] or 0.0)) > 1e-9:
+                apply_inventory_quantity_change(
+                    conn,
+                    company_key=company_key,
+                    inventory_item_id=int(existing["id"]),
+                    movement_type="IMPORT",
+                    created_by=created_by,
+                    branch_id=branch_id,
+                    target_qty=float(qty),
+                    reason="Legacy Excel Import",
+                    reference=f"XLS-IMP-{import_token}-{int(existing['id'])}",
+                    source_document="inventory_excel_import",
+                    source_id=import_token,
+                    item_name=item_name,
+                )
             changed_rows += 1
             continue
-        conn.execute(
-            """
-            INSERT INTO inventory (company_key, item_name, barcode, category, opening_balance, qty, price, cost_price, inventory_account_id, cogs_account_id)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
+        insert_cursor = conn.execute(
+            ensure_insert_sql_returning(
+                """
+                INSERT INTO inventory (company_key, item_name, barcode, category, opening_balance, qty, price, cost_price, inventory_account_id, cogs_account_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """
+            ),
             (
                 company_key,
                 item_name,
@@ -6595,6 +6605,24 @@ def _import_inventory_from_excel(conn, company_key, file_obj):
                 get_account_id(conn, "Cost of Goods Sold", "Expense"),
             ),
         )
+        new_item_id = get_inserted_id(insert_cursor)
+        if float(qty or 0) > 0 and new_item_id:
+            apply_inventory_quantity_change(
+                conn,
+                company_key=company_key,
+                inventory_item_id=int(new_item_id),
+                movement_type="OPENING_BALANCE",
+                created_by=created_by,
+                branch_id=branch_id,
+                update_inventory=False,
+                before_qty_override=0.0,
+                after_qty_override=float(qty),
+                reason="Legacy Excel Import Opening",
+                reference=f"XLS-OPEN-{import_token}-{int(new_item_id)}",
+                source_document="inventory_excel_import",
+                source_id=import_token,
+                item_name=item_name,
+            )
         opening_stock_value = round(float(opening_balance or 0) * float(cost_price or 0), 2)
         if opening_stock_value > 0:
             offset_account, offset_type = _inventory_offset_account("Accounts Payable")
@@ -6607,8 +6635,8 @@ def _import_inventory_from_excel(conn, company_key, file_obj):
                     {"account_id": get_account_id(conn, "Inventory", "Asset"), "debit": opening_stock_value, "credit": 0},
                     {"account_id": get_account_id(conn, offset_account, offset_type), "debit": 0, "credit": opening_stock_value},
                 ],
-                created_by=st.session_state.get("user", {}).get("role", "System"),
-                branch_id=st.session_state.get("active_branch_id"),
+                created_by=created_by,
+                branch_id=branch_id,
                 source_module="Inventory Import",
                 source_table="inventory",
                 conn=conn,
@@ -7730,11 +7758,24 @@ STOCK_MOVEMENT_TYPE_ALIASES = {
     "stock_out": "STOCK_OUT",
     "invoice sale": "POS_SALE",
     "pos sale": "POS_SALE",
+    "invoice_sale": "POS_SALE",
     "return_refund_restock": "POS_RETURN",
     "pos return": "POS_RETURN",
+    "pos_return": "POS_RETURN",
+    "sales return": "POS_RETURN",
+    "sales_return": "POS_RETURN",
     "adjustment": "ADJUSTMENT",
+    "opening": "OPENING_BALANCE",
+    "opening balance": "OPENING_BALANCE",
+    "opening_balance": "OPENING_BALANCE",
     "import": "IMPORT",
     "transfer": "TRANSFER",
+    "damage": "DAMAGE",
+    "expiry": "EXPIRY",
+    "write off": "WRITE_OFF",
+    "write_off": "WRITE_OFF",
+    "barcode receive": "STOCK_IN",
+    "barcode_receive": "STOCK_IN",
 }
 
 
@@ -7756,9 +7797,59 @@ def _normalize_stock_movement_type(movement_type):
 def _stock_movement_qty_change(movement_type, quantity):
     normalized_type = _normalize_stock_movement_type(movement_type)
     qty = abs(float(quantity or 0.0))
-    if normalized_type in {"STOCK_OUT", "POS_SALE"}:
+    if normalized_type in {"STOCK_OUT", "POS_SALE", "DAMAGE", "EXPIRY", "WRITE_OFF"}:
         return -qty
     return qty
+
+
+def _find_duplicate_stock_movement(
+    conn,
+    *,
+    company_key,
+    inventory_item_id,
+    movement_type,
+    reference,
+    previous_qty=None,
+    new_qty=None,
+):
+    """Return an existing movement id when the same auditable event was already written."""
+    normalized_reference = str(reference or "").strip()
+    if not normalized_reference:
+        return None
+    normalized_type = _normalize_stock_movement_type(movement_type)
+    row = conn.execute(
+        """
+        SELECT id, previous_qty, new_qty
+        FROM stock_movements
+        WHERE company_key = ?
+          AND inventory_item_id = ?
+          AND movement_type = ?
+          AND reference = ?
+        ORDER BY id DESC
+        LIMIT 1
+        """,
+        (company_key, int(inventory_item_id), normalized_type, normalized_reference),
+    ).fetchone()
+    if not row:
+        return None
+    if previous_qty is not None and abs(float(row["previous_qty"] or 0.0) - float(previous_qty or 0.0)) > 1e-9:
+        return None
+    if new_qty is not None and abs(float(row["new_qty"] or 0.0) - float(new_qty or 0.0)) > 1e-9:
+        return None
+    return int(row["id"])
+
+
+def _compose_stock_movement_notes(notes=None, source_document=None, source_id=None):
+    parts = []
+    note_text = str(notes or "").strip()
+    if note_text:
+        parts.append(note_text)
+    source_document_text = str(source_document or "").strip()
+    if source_document_text:
+        parts.append(f"source_document={source_document_text}")
+    if source_id not in (None, ""):
+        parts.append(f"source_id={source_id}")
+    return " | ".join(parts) if parts else None
 
 
 def _insert_stock_movement_record(
@@ -7776,7 +7867,24 @@ def _insert_stock_movement_record(
     reason=None,
     reference=None,
     notes=None,
+    source_document=None,
+    source_id=None,
 ):
+    composed_notes = _compose_stock_movement_notes(
+        notes=notes,
+        source_document=source_document,
+        source_id=source_id,
+    )
+    duplicate_id = _find_duplicate_stock_movement(
+        conn,
+        company_key=company_key,
+        inventory_item_id=inventory_item_id,
+        movement_type=movement_type,
+        reference=reference,
+    )
+    if duplicate_id is not None:
+        return duplicate_id
+    resolved_branch = str(branch_id).strip() if branch_id not in (None, "") else None
     movement_cursor = conn.execute(
         ensure_insert_sql_returning(
             """
@@ -7790,7 +7898,7 @@ def _insert_stock_movement_record(
         ),
         (
             company_key,
-            str(branch_id) if branch_id else None,
+            resolved_branch,
             int(inventory_item_id),
             str(item_name or ""),
             _normalize_stock_movement_type(movement_type),
@@ -7800,10 +7908,229 @@ def _insert_stock_movement_record(
             float(new_qty or 0.0),
             str(created_by or ""),
             str(reference or "").strip() or None,
-            str(notes or "").strip() or None,
+            composed_notes,
         ),
     )
     return get_inserted_id(movement_cursor)
+
+
+def _resolve_inventory_movement_branch_id(conn, company_key, branch_id):
+    """
+    Resolve a FK-safe branch_id for stock movements.
+
+    Prefers the caller-provided branch when it exists for the company.
+    Falls back to the company's first active branch. Empty/missing branch
+    context returns None (NULL is FK-safe) rather than inventing an invalid id.
+    Invalid explicit branch ids are rejected.
+    """
+    candidate = str(branch_id or "").strip()
+    if candidate:
+        existing = conn.execute(
+            """
+            SELECT branch_id
+            FROM branches
+            WHERE company_key = ? AND branch_id = ?
+            LIMIT 1
+            """,
+            (company_key, candidate),
+        ).fetchone()
+        if existing:
+            return str(existing["branch_id"])
+        raise ValueError(
+            f"Branch '{candidate}' was not found for company {company_key}. "
+            "Inventory movements require a valid branch_id."
+        )
+
+    fallback = conn.execute(
+        """
+        SELECT branch_id
+        FROM branches
+        WHERE company_key = ?
+        ORDER BY
+            CASE
+                WHEN UPPER(COALESCE(branch_id, '')) = 'MAIN' THEN 0
+                WHEN UPPER(COALESCE(branch_name, '')) LIKE '%MAIN%' THEN 1
+                ELSE 2
+            END,
+            branch_id ASC
+        LIMIT 1
+        """,
+        (company_key,),
+    ).fetchone()
+    if fallback:
+        return str(fallback["branch_id"])
+    return None
+
+
+def apply_inventory_quantity_change(
+    conn,
+    *,
+    company_key,
+    inventory_item_id,
+    movement_type,
+    created_by,
+    branch_id,
+    quantity_delta=None,
+    target_qty=None,
+    reason=None,
+    reference=None,
+    notes=None,
+    source_document=None,
+    source_id=None,
+    allow_negative=False,
+    update_inventory=True,
+    before_qty_override=None,
+    after_qty_override=None,
+    item_name=None,
+):
+    """
+    Atomic inventory quantity mutation with exactly one stock_movements audit row.
+
+    Uses existing previous_qty/new_qty columns as before/after quantities.
+    Never silently updates qty without a movement. Duplicate reference events are idempotent.
+    Set update_inventory=False with before/after overrides when qty was already written
+    (for example opening INSERT), and this helper only records the movement.
+    """
+    if conn is None:
+        raise RuntimeError("Database connection is required for inventory quantity changes.")
+    if not str(company_key or "").strip():
+        raise ValueError("company_key is required.")
+    resolved_branch = _resolve_inventory_movement_branch_id(conn, company_key, branch_id)
+
+    item_row = conn.execute(
+        """
+        SELECT id, item_name, qty
+        FROM inventory
+        WHERE id = ? AND company_key = ?
+        LIMIT 1
+        """,
+        (int(inventory_item_id), company_key),
+    ).fetchone()
+    if not item_row:
+        raise ValueError("Inventory item could not be found.")
+
+    resolved_item_name = str(item_name or item_row["item_name"] or "").strip()
+    normalized_type = _normalize_stock_movement_type(movement_type)
+
+    if not update_inventory:
+        if before_qty_override is None or after_qty_override is None:
+            raise ValueError("before_qty_override and after_qty_override are required when update_inventory is False.")
+        before_qty = float(before_qty_override)
+        after_qty = float(after_qty_override)
+        delta = after_qty - before_qty
+    else:
+        if quantity_delta is None and target_qty is None:
+            raise ValueError("quantity_delta or target_qty is required.")
+        if quantity_delta is not None and target_qty is not None:
+            raise ValueError("Pass either quantity_delta or target_qty, not both.")
+        before_qty = float(item_row["qty"] or 0.0)
+        if target_qty is not None:
+            after_qty = float(target_qty)
+            delta = after_qty - before_qty
+        else:
+            delta = float(quantity_delta or 0.0)
+            after_qty = before_qty + delta
+
+    if abs(delta) < 1e-12:
+        return {
+            "ok": True,
+            "skipped": True,
+            "movement_id": None,
+            "before_qty": before_qty,
+            "after_qty": after_qty,
+            "quantity": 0.0,
+            "item_name": resolved_item_name,
+        }
+
+    if update_inventory and (not allow_negative) and after_qty < -1e-9:
+        raise ValueError(
+            f"Insufficient stock for {resolved_item_name}. Available {before_qty:,.4f}, requested change {delta:,.4f}."
+        )
+
+    movement_qty = abs(float(delta))
+    movement_reference = str(reference or "").strip() or (
+        f"{normalized_type}-{int(inventory_item_id)}-{datetime.now().strftime('%Y%m%d%H%M%S%f')}"
+    )
+
+    duplicate_id = _find_duplicate_stock_movement(
+        conn,
+        company_key=company_key,
+        inventory_item_id=int(inventory_item_id),
+        movement_type=normalized_type,
+        reference=movement_reference,
+    )
+    if duplicate_id is not None:
+        existing = conn.execute(
+            "SELECT previous_qty, new_qty FROM stock_movements WHERE id = ? LIMIT 1",
+            (duplicate_id,),
+        ).fetchone()
+        return {
+            "ok": True,
+            "duplicate": True,
+            "movement_id": duplicate_id,
+            "before_qty": float(existing["previous_qty"] or before_qty) if existing else before_qty,
+            "after_qty": float(existing["new_qty"] or after_qty) if existing else after_qty,
+            "quantity": movement_qty,
+            "item_name": resolved_item_name,
+            "reference": movement_reference,
+            "movement_type": normalized_type,
+        }
+
+    if update_inventory:
+        execute_portable_write(
+            conn,
+            "UPDATE inventory SET qty = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND company_key = ?",
+            (float(after_qty), int(inventory_item_id), company_key),
+        )
+
+    try:
+        movement_id = _insert_stock_movement_record(
+            conn,
+            company_key=company_key,
+            inventory_item_id=int(inventory_item_id),
+            item_name=resolved_item_name,
+            movement_type=normalized_type,
+            quantity=movement_qty,
+            previous_qty=before_qty,
+            new_qty=after_qty,
+            created_by=created_by,
+            branch_id=resolved_branch,
+            reason=reason,
+            reference=movement_reference,
+            notes=notes,
+            source_document=source_document,
+            source_id=source_id,
+        )
+    except Exception:
+        # Never leave a quantity mutation without an auditable movement in this connection.
+        # Surrounding callers must still roll back the full business transaction.
+        if update_inventory:
+            try:
+                execute_portable_write(
+                    conn,
+                    "UPDATE inventory SET qty = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND company_key = ?",
+                    (float(before_qty), int(inventory_item_id), company_key),
+                )
+            except Exception:
+                logger.debug(
+                    "Inventory qty restore after stock movement failure skipped company_key=%s item_id=%s",
+                    company_key,
+                    inventory_item_id,
+                    exc_info=True,
+                )
+        raise
+    return {
+        "ok": True,
+        "duplicate": False,
+        "skipped": False,
+        "movement_id": movement_id,
+        "before_qty": before_qty,
+        "after_qty": after_qty,
+        "quantity": movement_qty,
+        "item_name": resolved_item_name,
+        "reference": movement_reference,
+        "movement_type": normalized_type,
+    }
 
 
 def _fetch_recent_inventory_movement_rows(conn, company_key, branch_id=None, limit=50):
@@ -7879,10 +8206,8 @@ def _receive_inventory_stock(
     if not item_row:
         raise ValueError("Inventory item could not be found.")
 
-    previous_qty = float(item_row["qty"] or 0.0)
-    new_qty = previous_qty + qty_value
-    update_fields = ["qty = ?", "updated_at = CURRENT_TIMESTAMP"]
-    update_values = [new_qty]
+    update_fields = ["updated_at = CURRENT_TIMESTAMP"]
+    update_values = []
     if unit_cost is not None and float(unit_cost or 0.0) > 0:
         update_fields.append("cost_price = ?")
         update_values.append(float(unit_cost))
@@ -7895,39 +8220,41 @@ def _receive_inventory_stock(
     if expiry_value:
         update_fields.append("expiry_date = ?")
         update_values.append(expiry_value)
-    update_values.extend([int(inventory_item_id), company_key])
-    conn.execute(
-        f"""
-        UPDATE inventory
-        SET {", ".join(update_fields)}
-        WHERE id = ? AND company_key = ?
-        """,
-        tuple(update_values),
-    )
+    if len(update_fields) > 1:
+        update_values.extend([int(inventory_item_id), company_key])
+        conn.execute(
+            f"""
+            UPDATE inventory
+            SET {", ".join(update_fields)}
+            WHERE id = ? AND company_key = ?
+            """,
+            tuple(update_values),
+        )
     movement_reference = str(reference_number or "").strip() or f"RCV-{int(inventory_item_id)}-{datetime.now().strftime('%Y%m%d%H%M%S')}"
     movement_notes = str(notes or "").strip()
     if supplier_name:
         movement_notes = (movement_notes + f" | Supplier: {supplier_name}").strip(" |")
-    _insert_stock_movement_record(
+    movement_result = apply_inventory_quantity_change(
         conn,
         company_key=company_key,
         inventory_item_id=int(inventory_item_id),
-        item_name=item_row["item_name"],
         movement_type="STOCK_IN",
-        quantity=qty_value,
-        previous_qty=previous_qty,
-        new_qty=new_qty,
         created_by=role,
         branch_id=branch_id,
+        quantity_delta=qty_value,
         reason="Receive Stock",
         reference=movement_reference,
         notes=movement_notes or None,
+        source_document="inventory_receive",
+        source_id=movement_reference,
+        item_name=item_row["item_name"],
     )
     return {
         "item_name": item_row["item_name"],
-        "previous_qty": previous_qty,
-        "new_qty": new_qty,
+        "previous_qty": movement_result["before_qty"],
+        "new_qty": movement_result["after_qty"],
         "reference": movement_reference,
+        "movement_id": movement_result.get("movement_id"),
     }
 
 
@@ -8523,6 +8850,12 @@ def _import_validated_stock_rows(conn, company_key, validated_rows, existing_ite
 
     inventory_account_id = get_account_id(conn, "Inventory", "Asset")
     cogs_account_id = get_account_id(conn, "Cost of Goods Sold", "Expense")
+    branch_id = _resolve_inventory_movement_branch_id(
+        conn,
+        company_key,
+        st.session_state.get("active_branch_id"),
+    )
+    created_by = str(st.session_state.get("user", {}).get("role") or "System")
 
     for row_data in validated_rows:
         try:
@@ -8532,29 +8865,37 @@ def _import_validated_stock_rows(conn, company_key, validated_rows, existing_ite
                 if existing_item_behavior == "skip":
                     result["skipped"] += 1
                     continue
-                new_qty = max(float(existing_row["qty"] or 0.0), 0.0) + quantity_to_apply
-                conn.execute(
-                    """
-                    UPDATE inventory
-                    SET qty = ?, updated_at = CURRENT_TIMESTAMP
-                    WHERE id = ? AND company_key = ?
-                    """,
-                    (new_qty, int(existing_row["id"]), company_key),
-                )
+                if quantity_to_apply > 0:
+                    apply_inventory_quantity_change(
+                        conn,
+                        company_key=company_key,
+                        inventory_item_id=int(existing_row["id"]),
+                        movement_type="IMPORT",
+                        created_by=created_by,
+                        branch_id=branch_id,
+                        quantity_delta=quantity_to_apply,
+                        reason="Stock Import",
+                        reference=f"{result['import_reference']}-UPD-{int(existing_row['id'])}",
+                        source_document="inventory_import",
+                        source_id=result["import_reference"],
+                        item_name=existing_row["item_name"],
+                    )
                 result["updated"] += 1
                 result["posted_opening_value"] += quantity_to_apply * float(row_data.get("cost_price") or 0.0)
                 continue
 
-            conn.execute(
-                """
-                INSERT INTO inventory (
-                    company_key, item_name, barcode, item_code, category, brand, supplier_name, unit, qty,
-                    cost_price, price, min_stock_level, tax_rate, warehouse_location, expiry_date,
-                    batch_number, vat_category, description, is_active, opening_balance,
-                    inventory_account_id, cogs_account_id
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
+            insert_cursor = conn.execute(
+                ensure_insert_sql_returning(
+                    """
+                    INSERT INTO inventory (
+                        company_key, item_name, barcode, item_code, category, brand, supplier_name, unit, qty,
+                        cost_price, price, min_stock_level, tax_rate, warehouse_location, expiry_date,
+                        batch_number, vat_category, description, is_active, opening_balance,
+                        inventory_account_id, cogs_account_id
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """
+                ),
                 (
                     company_key,
                     str(row_data.get("item_name") or "").strip(),
@@ -8580,6 +8921,24 @@ def _import_validated_stock_rows(conn, company_key, validated_rows, existing_ite
                     cogs_account_id,
                 ),
             )
+            new_item_id = get_inserted_id(insert_cursor)
+            if quantity_to_apply > 0 and new_item_id:
+                apply_inventory_quantity_change(
+                    conn,
+                    company_key=company_key,
+                    inventory_item_id=int(new_item_id),
+                    movement_type="OPENING_BALANCE",
+                    created_by=created_by,
+                    branch_id=branch_id,
+                    update_inventory=False,
+                    before_qty_override=0.0,
+                    after_qty_override=quantity_to_apply,
+                    reason="Stock Import Opening",
+                    reference=f"{result['import_reference']}-NEW-{int(new_item_id)}",
+                    source_document="inventory_import",
+                    source_id=result["import_reference"],
+                    item_name=str(row_data.get("item_name") or "").strip(),
+                )
             result["created"] += 1
             result["posted_opening_value"] += quantity_to_apply * float(row_data.get("cost_price") or 0.0)
         except Exception as exc:
@@ -8602,14 +8961,14 @@ def _import_validated_stock_rows(conn, company_key, validated_rows, existing_ite
         (
             result["import_reference"],
             company_key,
-            st.session_state.get("active_branch_id"),
+            branch_id,
             int(result.get("created", 0) + result.get("updated", 0)),
             int(result.get("created") or 0),
             int(result.get("updated") or 0),
             int(result.get("skipped") or 0),
             int(len(result.get("errors") or [])),
             float(result.get("posted_opening_value") or 0.0),
-            str(st.session_state.get("user", {}).get("role") or "System"),
+            created_by,
         ),
     )
     return result
@@ -10589,15 +10948,22 @@ def show_inventory(company_key, role):
             conn = get_connection()
             matched_item = _lookup_inventory_by_barcode(conn, company_key, pending_inventory_barcode)
             if matched_item:
-                updated_qty = float(matched_item["qty"] or 0) + 1
-                conn.execute(
-                    """
-                    UPDATE inventory
-                    SET qty = COALESCE(qty, 0) + 1, updated_at = CURRENT_TIMESTAMP
-                    WHERE id = ? AND company_key = ?
-                    """,
-                    (int(matched_item["id"]), company_key),
+                branch_id = st.session_state.get("active_branch_id")
+                movement_result = apply_inventory_quantity_change(
+                    conn,
+                    company_key=company_key,
+                    inventory_item_id=int(matched_item["id"]),
+                    movement_type="STOCK_IN",
+                    created_by=role,
+                    branch_id=branch_id,
+                    quantity_delta=1.0,
+                    reason="Barcode Receive",
+                    reference=f"BARCODE-{pending_inventory_barcode}-{datetime.now().strftime('%Y%m%d%H%M%S%f')}",
+                    source_document="barcode_receive",
+                    source_id=pending_inventory_barcode,
+                    item_name=matched_item["item_name"],
                 )
+                updated_qty = float(movement_result["after_qty"])
                 conn.commit()
                 log_audit_action(
                     conn,
@@ -10606,6 +10972,7 @@ def show_inventory(company_key, role):
                     "Inventory Barcode Scan",
                     "Inventory",
                     f"Incremented {matched_item['item_name']} via barcode {pending_inventory_barcode}",
+                    branch_id=branch_id,
                 )
                 _trigger_scan_feedback(
                     inventory_message_key,
@@ -10850,12 +11217,17 @@ def show_inventory(company_key, role):
                             )
                             try:
                                 conn = get_connection()
+                                existing_qty_row = conn.execute(
+                                    "SELECT qty, item_name FROM inventory WHERE id = ? AND company_key = ? LIMIT 1",
+                                    (int(edit_item_id), company_key),
+                                ).fetchone()
+                                previous_edit_qty = float(existing_qty_row["qty"] or 0.0) if existing_qty_row else 0.0
                                 conn.execute(
                                     """
                                     UPDATE inventory
                                     SET item_code = ?, barcode = ?, unit = ?, category = ?, description = ?, brand = ?,
                                         supplier_name = ?, expiry_date = ?, batch_number = ?, vat_category = ?,
-                                        qty = ?, min_stock_level = ?, price = ?, cost_price = ?, tax_rate = ?,
+                                        min_stock_level = ?, price = ?, cost_price = ?, tax_rate = ?,
                                         warehouse_location = ?, is_active = ?, updated_at = CURRENT_TIMESTAMP
                                     WHERE id = ? AND company_key = ?
                                     """,
@@ -10870,7 +11242,6 @@ def show_inventory(company_key, role):
                                         edit_expiry_date.isoformat() if edit_expiry_enabled else None,
                                         edit_batch_number.strip(),
                                         edit_vat_category.strip(),
-                                        edit_qty,
                                         edit_reorder_level,
                                         edit_price,
                                         edit_cost_price,
@@ -10881,6 +11252,22 @@ def show_inventory(company_key, role):
                                         company_key,
                                     ),
                                 )
+                                branch_id = st.session_state.get("active_branch_id")
+                                if abs(float(edit_qty) - previous_edit_qty) > 1e-9:
+                                    apply_inventory_quantity_change(
+                                        conn,
+                                        company_key=company_key,
+                                        inventory_item_id=int(edit_item_id),
+                                        movement_type="ADJUSTMENT",
+                                        created_by=role,
+                                        branch_id=branch_id,
+                                        target_qty=float(edit_qty),
+                                        reason="Manual quantity edit",
+                                        reference=f"EDIT-{int(edit_item_id)}-{datetime.now().strftime('%Y%m%d%H%M%S')}",
+                                        source_document="inventory_edit",
+                                        source_id=int(edit_item_id),
+                                        item_name=(existing_qty_row["item_name"] if existing_qty_row else None),
+                                    )
                                 conn.commit()
                                 log_audit_action(conn, company_key, role, "Inventory Item Updated", "Inventory", f"Updated item ID {int(edit_item_id)}")
                                 conn.close()
@@ -10912,7 +11299,17 @@ def show_inventory(company_key, role):
                     """,
                     (company_key,),
                 ).fetchall()
-                movement_reasons = ["Restock", "Damage", "Sale", "Return", "Adjustment", "Transfer", "Other"]
+                movement_reasons = [
+                    "Restock",
+                    "Damage",
+                    "Expiry",
+                    "Write Off",
+                    "Sale",
+                    "Return",
+                    "Adjustment",
+                    "Transfer",
+                    "Other",
+                ]
                 branch_id = st.session_state.get("active_branch_id")
 
                 if not stock_items:
@@ -11135,37 +11532,41 @@ def show_inventory(company_key, role):
                             if movement_type == "Out" and new_qty < 0:
                                 st.error(f"Cannot record stock out of {movement_qty:,.2f}. Available quantity is {current_qty:,.2f}.")
                             else:
-                                conn.execute(
-                                    """
-                                    UPDATE inventory
-                                    SET qty = ?, updated_at = CURRENT_TIMESTAMP
-                                    WHERE id = ? AND company_key = ?
-                                    """,
-                                    (new_qty, selected_item_id, company_key),
-                                )
                                 movement_value = round(float(selected_item["cost_price"] or 0.0) * movement_qty, 2)
-                                movement_status = "Posted" if movement_value > 0 else "Approved"
                                 reason_key = str(reason or "").strip().lower()
                                 if reason_key == "transfer":
                                     recorded_movement_type = "TRANSFER"
                                 elif reason_key == "adjustment":
                                     recorded_movement_type = "ADJUSTMENT"
+                                elif reason_key == "damage":
+                                    recorded_movement_type = "DAMAGE"
+                                elif reason_key in {"expiry", "expired"}:
+                                    recorded_movement_type = "EXPIRY"
+                                elif reason_key in {"write off", "write_off"}:
+                                    recorded_movement_type = "WRITE_OFF"
+                                elif reason_key == "sale" and movement_type == "Out":
+                                    recorded_movement_type = "POS_SALE"
+                                elif reason_key == "return" and movement_type == "In":
+                                    recorded_movement_type = "POS_RETURN"
                                 else:
                                     recorded_movement_type = "STOCK_IN" if movement_type == "In" else "STOCK_OUT"
-                                movement_id = _insert_stock_movement_record(
+                                movement_reference = f"STK-{selected_item_id}-{datetime.now().strftime('%Y%m%d%H%M%S')}"
+                                movement_result = apply_inventory_quantity_change(
                                     conn,
                                     company_key=company_key,
                                     inventory_item_id=selected_item_id,
-                                    item_name=selected_item["item_name"],
                                     movement_type=recorded_movement_type,
-                                    quantity=movement_qty,
-                                    previous_qty=current_qty,
-                                    new_qty=new_qty,
                                     created_by=role,
                                     branch_id=branch_id,
+                                    quantity_delta=delta,
                                     reason=reason,
-                                    reference=f"STK-{selected_item_id}-{datetime.now().strftime('%Y%m%d%H%M%S')}",
+                                    reference=movement_reference,
+                                    source_document="stock_adjustment",
+                                    source_id=movement_reference,
+                                    item_name=selected_item["item_name"],
                                 )
+                                movement_id = movement_result.get("movement_id")
+                                new_qty = float(movement_result["after_qty"])
                                 if movement_value > 0:
                                     inventory_account_id = int(selected_item["inventory_account_id"] or get_account_id(conn, "Inventory", "Asset"))
                                     cogs_account_id = int(selected_item["cogs_account_id"] or get_account_id(conn, "Cost of Goods Sold", "Expense"))
@@ -11188,7 +11589,7 @@ def show_inventory(company_key, role):
                                         company_key=company_key,
                                         date=datetime.now().date(),
                                         description=f"Inventory movement - {selected_item['item_name']} ({reason})",
-                                        reference=f"STK-{selected_item_id}-{datetime.now().strftime('%Y%m%d%H%M%S')}",
+                                        reference=movement_reference,
                                         lines=journal_lines,
                                         created_by=role,
                                         branch_id=branch_id,
@@ -11352,16 +11753,18 @@ def show_inventory(company_key, role):
                             st.error(f"Barcode {normalized_barcode} is already assigned to {existing_barcode['item_name']}.")
                             conn.close()
                             return
-                    conn.execute(
-                        """
-                        INSERT INTO inventory (
-                            company_key, item_name, item_code, barcode, unit, category, description, brand,
-                            supplier_name, expiry_date, batch_number, vat_category, opening_balance, qty,
-                            min_stock_level, price, cost_price, tax_rate, warehouse_location, is_active,
-                            inventory_account_id, cogs_account_id
-                        )
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                        """,
+                    insert_cursor = conn.execute(
+                        ensure_insert_sql_returning(
+                            """
+                            INSERT INTO inventory (
+                                company_key, item_name, item_code, barcode, unit, category, description, brand,
+                                supplier_name, expiry_date, batch_number, vat_category, opening_balance, qty,
+                                min_stock_level, price, cost_price, tax_rate, warehouse_location, is_active,
+                                inventory_account_id, cogs_account_id
+                            )
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            """
+                        ),
                         (
                             company_key,
                             item_name,
@@ -11387,7 +11790,27 @@ def show_inventory(company_key, role):
                             get_account_id(conn, "Cost of Goods Sold", "Expense"),
                         ),
                     )
-                    opening_stock_value = round(float(opening_stock or 0) * float(cost_price or 0), 2)
+                    new_item_id = get_inserted_id(insert_cursor)
+                    branch_id = st.session_state.get("active_branch_id")
+                    opening_qty = float(opening_stock or 0.0)
+                    if opening_qty > 0 and new_item_id:
+                        apply_inventory_quantity_change(
+                            conn,
+                            company_key=company_key,
+                            inventory_item_id=int(new_item_id),
+                            movement_type="OPENING_BALANCE",
+                            created_by=role,
+                            branch_id=branch_id,
+                            update_inventory=False,
+                            before_qty_override=0.0,
+                            after_qty_override=opening_qty,
+                            reason="Opening inventory balance",
+                            reference=f"INV-OPEN-{int(new_item_id)}",
+                            source_document="inventory_add_item",
+                            source_id=int(new_item_id),
+                            item_name=item_name,
+                        )
+                    opening_stock_value = round(opening_qty * float(cost_price or 0), 2)
                     if opening_stock_value > 0:
                         offset_account, offset_type = _inventory_offset_account(funding_source)
                         post_journal_entry(
@@ -11400,7 +11823,7 @@ def show_inventory(company_key, role):
                                 {"account_id": get_account_id(conn, offset_account, offset_type), "debit": 0, "credit": opening_stock_value},
                             ],
                             created_by=role,
-                            branch_id=st.session_state.get("active_branch_id"),
+                            branch_id=branch_id,
                             source_module="Inventory",
                             source_table="inventory",
                             conn=conn,
@@ -13524,6 +13947,8 @@ def show_pos(company_key, company_name, role):
                         pos_tax_total = round(float(current_summary["tax_total"] or 0.0), 2)
                         pos_net_sales = round(total - pos_tax_total, 2)
                         cost_of_goods_sold = 0.0
+                        branch_id = st.session_state.get("active_branch_id")
+                        pos_movement_token = datetime.now().strftime("%Y%m%d%H%M%S%f")
                         for sale_line in sale_cart:
                             _recalculate_pos_line(sale_line)
                             line_items.append(
@@ -13535,18 +13960,27 @@ def show_pos(company_key, company_name, role):
                             )
                             cost_of_goods_sold += float(sale_line["qty"]) * float(sale_line.get("cost_price") or 0.0)
                             if sale_line["inventory_item_id"] is not None:
-                                current_item = conn.execute(
-                                    "SELECT qty FROM inventory WHERE id = ? AND company_key = ?",
-                                    (int(sale_line["inventory_item_id"]), company_key),
-                                ).fetchone()
-                                current_qty = float(current_item["qty"] or 0) if current_item else 0.0
-                                if float(sale_line["qty"]) > current_qty:
-                                    return {"ok": False, "level": "warning", "message": f"Insufficient stock for {sale_line['name']}."}
-                                execute_portable_write(
-                                    conn,
-                                    "UPDATE inventory SET qty = qty - ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND company_key = ?",
-                                    (sale_line["qty"], int(sale_line["inventory_item_id"]), company_key),
-                                )
+                                try:
+                                    apply_inventory_quantity_change(
+                                        conn,
+                                        company_key=company_key,
+                                        inventory_item_id=int(sale_line["inventory_item_id"]),
+                                        movement_type="POS_SALE",
+                                        created_by=role,
+                                        branch_id=branch_id,
+                                        quantity_delta=-float(sale_line["qty"]),
+                                        reason="POS Sale",
+                                        reference=f"POS-{pos_movement_token}-{int(sale_line['inventory_item_id'])}",
+                                        source_document="pos_sale",
+                                        source_id=pos_movement_token,
+                                        item_name=sale_line["name"],
+                                    )
+                                except ValueError as stock_exc:
+                                    return {
+                                        "ok": False,
+                                        "level": "warning",
+                                        "message": str(stock_exc) or f"Insufficient stock for {sale_line['name']}.",
+                                    }
                         payment_account_map = {
                             "Cash": ("Cash", "Asset"),
                             "Mobile Money": ("Mobile Money", "Asset"),
@@ -13556,7 +13990,6 @@ def show_pos(company_key, company_name, role):
                         }
                         receipt_account, receipt_category = payment_account_map.get(payment_method, ("Cash", "Asset"))
                         narration = ", ".join(f"{item['name']} x{item['qty']}" for item in line_items)
-                        branch_id = st.session_state.get("active_branch_id")
                         legacy_sale_id = _create_legacy_voucher_if_enabled(
                             conn,
                             company_key,
