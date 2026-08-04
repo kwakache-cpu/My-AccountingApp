@@ -526,6 +526,33 @@ def ensure_default_account_codes_integrity(conn):
         return {"updated": 0, "skipped_has_code": 0, "skipped_unknown_account": 0, "dry_run": False, "failed": True}
 
 
+# Verified costing behavior (Program B P0 Sprint 4):
+# EKA stores a single mutable unit cost on inventory.cost_price.
+# Receives overwrite that field when a positive unit cost is supplied.
+# No FIFO / weighted-average / moving-average engine is implemented.
+INVENTORY_COSTING_METHOD = {
+    "method_key": "last_unit_cost_field",
+    "label": "Last unit cost (mutable cost_price field)",
+    "authoritative_field": "cost_price",
+    "description": (
+        "Quantity × inventory.cost_price is the operational subledger valuation. "
+        "Receiving stock with a unit cost overwrites cost_price for the item; "
+        "there is no quantity-weighted average or FIFO lot layer."
+    ),
+    "not_implemented": (
+        "FIFO",
+        "LIFO",
+        "weighted_average",
+        "moving_average",
+        "standard_cost",
+    ),
+}
+
+INVENTORY_RECONCILIATION_MATCH_TOLERANCE = 0.01
+INVENTORY_RECONCILIATION_CRITICAL_ABS = 100.0
+INVENTORY_RECONCILIATION_CRITICAL_RATIO = 0.05
+
+
 def _inventory_value_query(conn, company_key, branch_id=None):
     inventory_columns = {column["name"] for column in list_columns(conn, "inventory")}
     query = """
@@ -538,6 +565,394 @@ def _inventory_value_query(conn, company_key, branch_id=None):
         query += " AND branch_id = ?"
         params.append(branch_id)
     return query, tuple(params)
+
+
+def parse_inventory_cost_value(raw_value):
+    """
+    Safely parse a currency/cost input into a non-negative float.
+
+    Accepts numbers, numeric strings (including currency symbols and commas),
+    blanks, and None without raising. Non-numeric values return missing=True.
+    """
+    if raw_value is None:
+        return {"unit_cost": 0.0, "missing": True, "parse_error": False, "raw": raw_value}
+    if isinstance(raw_value, bool):
+        return {"unit_cost": 0.0, "missing": True, "parse_error": True, "raw": raw_value}
+    if isinstance(raw_value, (int, float)):
+        amount = float(raw_value)
+        if amount != amount:  # NaN
+            return {"unit_cost": 0.0, "missing": True, "parse_error": True, "raw": raw_value}
+        return {
+            "unit_cost": round(max(amount, 0.0), 4),
+            "missing": amount <= 0,
+            "parse_error": False,
+            "raw": raw_value,
+        }
+
+    text = str(raw_value).strip()
+    if not text or text.lower() in {"none", "null", "nan", "-"}:
+        return {"unit_cost": 0.0, "missing": True, "parse_error": False, "raw": raw_value}
+
+    cleaned = (
+        text.replace(",", "")
+        .replace("GHS", "")
+        .replace("GHC", "")
+        .replace("GH¢", "")
+        .replace("¢", "")
+        .replace("$", "")
+        .strip()
+    )
+    try:
+        amount = float(cleaned)
+    except (TypeError, ValueError):
+        return {"unit_cost": 0.0, "missing": True, "parse_error": True, "raw": raw_value}
+    if amount != amount:
+        return {"unit_cost": 0.0, "missing": True, "parse_error": True, "raw": raw_value}
+    return {
+        "unit_cost": round(max(amount, 0.0), 4),
+        "missing": amount <= 0,
+        "parse_error": False,
+        "raw": raw_value,
+    }
+
+
+def resolve_inventory_unit_cost(source=None, *, fallback_cost=None, allow_line_fallback=True):
+    """
+    Resolve the authoritative unit cost for valuation / COGS.
+
+    Authority order (verified current behavior):
+      1. inventory.cost_price (or mapping key cost_price)
+      2. optional average_cost when present on the source mapping
+      3. optional line/fallback cost when allow_line_fallback is True
+
+    Missing or non-numeric costs never crash; they return unit_cost=0 and
+    flagged_for_review=True so callers can block valued posting or proceed
+    with the established zero-cost fallback.
+    """
+    mapping = {}
+    if source is None:
+        mapping = {}
+    elif isinstance(source, dict):
+        mapping = source
+    else:
+        try:
+            mapping = dict(source)
+        except Exception:
+            mapping = {
+                "cost_price": row_get(source, "cost_price"),
+                "average_cost": row_get(source, "average_cost", None),
+            }
+
+    primary = parse_inventory_cost_value(mapping.get("cost_price"))
+    if not primary["missing"] and not primary["parse_error"]:
+        return {
+            "unit_cost": primary["unit_cost"],
+            "missing": False,
+            "flagged_for_review": False,
+            "source_field": "cost_price",
+            "parse_error": False,
+            "authoritative_field": INVENTORY_COSTING_METHOD["authoritative_field"],
+            "method_key": INVENTORY_COSTING_METHOD["method_key"],
+        }
+
+    average_raw = mapping.get("average_cost")
+    if average_raw not in (None, ""):
+        average = parse_inventory_cost_value(average_raw)
+        if not average["missing"] and not average["parse_error"]:
+            return {
+                "unit_cost": average["unit_cost"],
+                "missing": False,
+                "flagged_for_review": True,
+                "source_field": "average_cost",
+                "parse_error": False,
+                "authoritative_field": INVENTORY_COSTING_METHOD["authoritative_field"],
+                "method_key": INVENTORY_COSTING_METHOD["method_key"],
+            }
+
+    if allow_line_fallback and fallback_cost is not None:
+        fallback = parse_inventory_cost_value(fallback_cost)
+        if not fallback["missing"] and not fallback["parse_error"]:
+            return {
+                "unit_cost": fallback["unit_cost"],
+                "missing": False,
+                "flagged_for_review": True,
+                "source_field": "fallback",
+                "parse_error": False,
+                "authoritative_field": INVENTORY_COSTING_METHOD["authoritative_field"],
+                "method_key": INVENTORY_COSTING_METHOD["method_key"],
+            }
+
+    return {
+        "unit_cost": 0.0,
+        "missing": True,
+        "flagged_for_review": True,
+        "source_field": "none",
+        "parse_error": bool(primary.get("parse_error")),
+        "authoritative_field": INVENTORY_COSTING_METHOD["authoritative_field"],
+        "method_key": INVENTORY_COSTING_METHOD["method_key"],
+    }
+
+
+def classify_inventory_reconciliation_status(
+    difference,
+    *,
+    missing_cost_count=0,
+    negative_quantity_count=0,
+    subledger_value=0.0,
+    gl_balance=0.0,
+):
+    """Classify inventory subledger vs GL gap without auto-posting corrections."""
+    abs_diff = abs(float(difference or 0.0))
+    baseline = max(abs(float(subledger_value or 0.0)), abs(float(gl_balance or 0.0)), 0.0)
+    critical_floor = max(
+        float(INVENTORY_RECONCILIATION_CRITICAL_ABS),
+        float(INVENTORY_RECONCILIATION_CRITICAL_RATIO) * baseline,
+    )
+    if abs_diff < INVENTORY_RECONCILIATION_MATCH_TOLERANCE:
+        if int(missing_cost_count or 0) > 0 or int(negative_quantity_count or 0) > 0:
+            return "REVIEW"
+        return "MATCHED"
+    if abs_diff >= critical_floor:
+        return "CRITICAL"
+    return "REVIEW"
+
+
+def build_inventory_valuation_snapshot(
+    company_key,
+    branch_id=None,
+    as_of_date=None,
+    conn=None,
+    active_backend=None,
+):
+    """
+    Read-only per-item inventory valuation snapshot.
+
+    Valuation authority: quantity_on_hand × resolved inventory.cost_price.
+    as_of_date is recorded for cache/GL comparison keys; the inventory table is
+    a live balance (no historical qty layers in current schema).
+    """
+    owns_connection = conn is None
+    conn = conn or get_connection()
+    resolved_backend = str(active_backend or get_active_db_backend() or "sqlite").strip().lower()
+    as_of_key = _resolve_date(as_of_date) or datetime.now().date().isoformat()
+    branch_key = str(branch_id).strip() if branch_id not in (None, "") else None
+    try:
+        inventory_columns = {column["name"] for column in list_columns(conn, "inventory")}
+        select_bits = [
+            "id",
+            "item_name",
+            "COALESCE(item_code, '') AS item_code",
+            "COALESCE(barcode, '') AS barcode",
+            "COALESCE(qty, 0) AS qty",
+            "cost_price",
+        ]
+        if "branch_id" in inventory_columns:
+            select_bits.append("branch_id")
+        if "average_cost" in inventory_columns:
+            select_bits.append("average_cost")
+        query = f"""
+            SELECT {", ".join(select_bits)}
+            FROM inventory
+            WHERE company_key = ?
+        """
+        params = [company_key]
+        if branch_key and "branch_id" in inventory_columns:
+            query += " AND branch_id = ?"
+            params.append(branch_key)
+        query += " ORDER BY item_name COLLATE NOCASE, id"
+        try:
+            rows = execute_portable_query(conn, query, tuple(params)).fetchall()
+        except Exception:
+            # COLLATE NOCASE is SQLite-friendly; fall back for strict Postgres paths.
+            query = query.replace(" ORDER BY item_name COLLATE NOCASE, id", " ORDER BY LOWER(item_name), id")
+            rows = execute_portable_query(conn, query, tuple(params)).fetchall()
+
+        movement_lookup = {}
+        try:
+            movement_rows = execute_portable_query(
+                conn,
+                """
+                SELECT inventory_item_id, reference, movement_type, created_at
+                FROM stock_movements
+                WHERE company_key = ?
+                  AND id IN (
+                      SELECT MAX(id)
+                      FROM stock_movements
+                      WHERE company_key = ?
+                      GROUP BY inventory_item_id
+                  )
+                """,
+                (company_key, company_key),
+            ).fetchall()
+            for movement in movement_rows:
+                movement_lookup[int(row_get(movement, "inventory_item_id") or 0)] = {
+                    "reference": row_get(movement, "reference"),
+                    "movement_type": row_get(movement, "movement_type"),
+                    "created_at": row_get(movement, "created_at"),
+                }
+        except Exception:
+            movement_lookup = {}
+
+        items = []
+        total_qty = 0.0
+        total_value = 0.0
+        missing_cost_count = 0
+        negative_quantity_count = 0
+        unvalued_quantity = 0.0
+        for row in rows:
+            qty = float(row_get(row, "qty") or 0.0)
+            cost_info = resolve_inventory_unit_cost(row)
+            unit_cost = float(cost_info["unit_cost"])
+            inventory_value = round(qty * unit_cost, 2)
+            missing_cost = bool(cost_info["missing"]) and abs(qty) > 1e-9
+            negative_quantity = qty < -1e-9
+            if missing_cost:
+                missing_cost_count += 1
+                unvalued_quantity += abs(qty)
+            if negative_quantity:
+                negative_quantity_count += 1
+            total_qty += qty
+            total_value += inventory_value
+            latest = movement_lookup.get(int(row_get(row, "id") or 0), {})
+            items.append(
+                {
+                    "item_id": int(row_get(row, "id") or 0),
+                    "item_name": str(row_get(row, "item_name") or ""),
+                    "item_code": str(row_get(row, "item_code") or ""),
+                    "sku": str(row_get(row, "item_code") or row_get(row, "barcode") or ""),
+                    "quantity_on_hand": round(qty, 4),
+                    "resolved_unit_cost": unit_cost,
+                    "inventory_value": inventory_value,
+                    "missing_cost": missing_cost,
+                    "negative_quantity": negative_quantity,
+                    "branch_id": branch_key or (str(row_get(row, "branch_id") or "").strip() or None),
+                    "cost_source_field": cost_info["source_field"],
+                    "latest_movement_reference": latest.get("reference"),
+                    "latest_movement_type": latest.get("movement_type"),
+                    "latest_movement_at": latest.get("created_at"),
+                }
+            )
+
+        unvalued_movement_count = 0
+        missing_item_ids = [item["item_id"] for item in items if item["missing_cost"]]
+        if missing_item_ids:
+            placeholders = ", ".join("?" for _ in missing_item_ids)
+            try:
+                unvalued_movement_count = int(
+                    fetch_scalar(
+                        conn,
+                        f"""
+                        SELECT COUNT(*)
+                        FROM stock_movements
+                        WHERE company_key = ?
+                          AND inventory_item_id IN ({placeholders})
+                        """,
+                        tuple([company_key] + missing_item_ids),
+                        default=0,
+                    )
+                    or 0
+                )
+            except Exception:
+                unvalued_movement_count = 0
+
+        return {
+            "company_key": company_key,
+            "branch_id": branch_key,
+            "as_of_date": as_of_key,
+            "active_backend": resolved_backend,
+            "costing_method": dict(INVENTORY_COSTING_METHOD),
+            "items": items,
+            "totals": {
+                "item_count": len(items),
+                "quantity_on_hand": round(total_qty, 4),
+                "inventory_value": round(total_value, 2),
+                "missing_cost_count": int(missing_cost_count),
+                "negative_quantity_count": int(negative_quantity_count),
+                "unvalued_quantity": round(unvalued_quantity, 4),
+                "unvalued_movement_count": int(unvalued_movement_count),
+            },
+            "cache_key_parts": {
+                "company_key": company_key,
+                "branch_id": branch_key or "",
+                "active_backend": resolved_backend,
+                "as_of_date": as_of_key,
+            },
+        }
+    finally:
+        if owns_connection and conn:
+            conn.close()
+
+
+def reconcile_inventory_subledger_to_gl(
+    company_key,
+    branch_id=None,
+    as_of_date=None,
+    conn=None,
+    active_backend=None,
+):
+    """
+    Compare inventory subledger valuation to the Inventory GL control account.
+
+    Detection and reporting only — never posts correcting journals or edits costs.
+    """
+    owns_connection = conn is None
+    conn = conn or get_connection()
+    try:
+        snapshot = build_inventory_valuation_snapshot(
+            company_key,
+            branch_id=branch_id,
+            as_of_date=as_of_date,
+            conn=conn,
+            active_backend=active_backend,
+        )
+        gl_balance = round(
+            float(
+                get_account_total(
+                    company_key,
+                    "Inventory",
+                    end_date=as_of_date,
+                    branch_id=branch_id,
+                    balance_side="debit",
+                    conn=conn,
+                )
+                or 0.0
+            ),
+            2,
+        )
+        subledger_value = round(float(snapshot["totals"]["inventory_value"] or 0.0), 2)
+        difference = round(subledger_value - gl_balance, 2)
+        status = classify_inventory_reconciliation_status(
+            difference,
+            missing_cost_count=snapshot["totals"]["missing_cost_count"],
+            negative_quantity_count=snapshot["totals"]["negative_quantity_count"],
+            subledger_value=subledger_value,
+            gl_balance=gl_balance,
+        )
+        return {
+            "company_key": company_key,
+            "branch_id": snapshot["branch_id"],
+            "as_of_date": snapshot["as_of_date"],
+            "active_backend": snapshot["active_backend"],
+            "costing_method": snapshot["costing_method"],
+            "subledger_value": subledger_value,
+            "gl_inventory_balance": gl_balance,
+            "difference": difference,
+            "status": status,
+            "matched": status == "MATCHED",
+            "missing_cost_item_count": int(snapshot["totals"]["missing_cost_count"]),
+            "negative_stock_item_count": int(snapshot["totals"]["negative_quantity_count"]),
+            "unvalued_movement_count": int(snapshot["totals"]["unvalued_movement_count"]),
+            "item_count": int(snapshot["totals"]["item_count"]),
+            "items": snapshot["items"],
+            "missing_cost_items": [item for item in snapshot["items"] if item["missing_cost"]],
+            "negative_stock_items": [item for item in snapshot["items"] if item["negative_quantity"]],
+            "auto_correct_journals_posted": False,
+            "costs_auto_modified": False,
+            "cache_key_parts": snapshot["cache_key_parts"],
+        }
+    finally:
+        if owns_connection and conn:
+            conn.close()
 
 
 def _safe_doc_status(row, columns):
@@ -785,6 +1200,13 @@ def get_finance_integrity_diagnostics(company_key, as_of_date=None, branch_id=No
             ),
             2,
         )
+        inventory_reconciliation = reconcile_inventory_subledger_to_gl(
+            company_key,
+            branch_id=branch_id,
+            as_of_date=as_of_date,
+            conn=conn,
+            active_backend=get_active_db_backend(),
+        )
         unbalanced_journal_rows = execute_portable_query(
             conn,
             """
@@ -855,6 +1277,12 @@ def get_finance_integrity_diagnostics(company_key, as_of_date=None, branch_id=No
                 "control_account_balance": inventory_gl_balance,
                 "difference": round(inventory_subledger_total - inventory_gl_balance, 2),
                 "reconciled": abs(inventory_subledger_total - inventory_gl_balance) < 0.01,
+                "status": inventory_reconciliation.get("status"),
+                "missing_cost_item_count": inventory_reconciliation.get("missing_cost_item_count", 0),
+                "negative_stock_item_count": inventory_reconciliation.get("negative_stock_item_count", 0),
+                "unvalued_movement_count": inventory_reconciliation.get("unvalued_movement_count", 0),
+                "costing_method": inventory_reconciliation.get("costing_method"),
+                "auto_correct_journals_posted": False,
             },
             "unbalanced_journal_count": len(unbalanced_journal_rows),
             "orphaned_journal_reference_count": len(orphaned_journal_refs),

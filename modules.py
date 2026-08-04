@@ -849,6 +849,8 @@ from accounting_engine import (
     get_trial_balance as engine_get_trial_balance,
     is_legacy_mirroring_enabled,
     post_accounting_impact as post_journal_entry,
+    reconcile_inventory_subledger_to_gl,
+    resolve_inventory_unit_cost,
     reverse_journal_entry,
 )
 
@@ -984,6 +986,7 @@ PAGE_PERMISSION_MAP = {
     "Dashboard": "view_dashboard",
     "Point of Sale": "sell_pos",
     "Inventory Management": "view_inventory",
+    "Inventory Valuation": "view_reports",
     "Vouchers & Journals": "post_accounting_document",
     "General Journal": "view_reports",
     "General Ledger": "view_reports",
@@ -4653,11 +4656,12 @@ def apply_invoice_stock_effects(
         available_qty = float(inventory_row["qty"] or 0.0)
         if quantity_sold > available_qty:
             raise ValueError(f"Insufficient stock for invoice item {inventory_row['item_name']}.")
-        unit_cost = float(inventory_row["cost_price"] or 0.0)
-        if unit_cost <= 0 and average_cost_available:
-            unit_cost = float(inventory_row["average_cost"] or 0.0)
-        if unit_cost <= 0:
-            unit_cost = float(item.get("cost_price") or 0.0)
+        unit_cost_info = resolve_inventory_unit_cost(
+            inventory_row,
+            fallback_cost=item.get("cost_price"),
+            allow_line_fallback=True,
+        )
+        unit_cost = float(unit_cost_info["unit_cost"] or 0.0)
         total_cost = round(quantity_sold * unit_cost, 2)
         apply_inventory_quantity_change(
             conn,
@@ -4671,11 +4675,18 @@ def apply_invoice_stock_effects(
             reference=f"{invoice_reference}-{int(inventory_row['id'])}",
             source_document="invoice",
             source_id=invoice_reference,
+            notes=(
+                "cost_flagged_for_review=true"
+                if unit_cost_info.get("flagged_for_review")
+                else None
+            ),
             item_name=str(inventory_row["item_name"] or item["item_name"]),
         )
         enriched_item = dict(item)
         enriched_item["cost_price"] = unit_cost
         enriched_item["inventory_total_cost"] = total_cost
+        enriched_item["cost_missing"] = bool(unit_cost_info.get("missing"))
+        enriched_item["cost_flagged_for_review"] = bool(unit_cost_info.get("flagged_for_review"))
         enriched_items.append(enriched_item)
         if total_cost > 0:
             cogs_total = round(cogs_total + total_cost, 2)
@@ -10887,6 +10898,173 @@ def show_onboarding_payment():
 # ==========================================
 # INVENTORY MANAGEMENT
 # ==========================================
+def can_view_inventory_valuation(role):
+    """Inventory valuation / GL reconciliation is accountant and admin facing only."""
+    normalized = _normalize_role_name(role)
+    allowed = {
+        "Dev",
+        "Master Admin",
+        "System Admin",
+        "Owner / CEO",
+        "Accountant",
+        "Auditor / Read Only",
+        "Sub-Admin",
+        "Branch Manager",
+        "Demo",
+    }
+    return normalized in allowed
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def _cached_inventory_valuation_reconciliation(company_key, branch_id_key, as_of_date_key, active_backend):
+    """
+    Safe cache wrapper — keys always include company, branch, as-of date, and backend.
+    Never share results across companies, branches, dates, or backends.
+    """
+    return reconcile_inventory_subledger_to_gl(
+        company_key,
+        branch_id=branch_id_key or None,
+        as_of_date=as_of_date_key or None,
+        active_backend=active_backend,
+    )
+
+
+def show_inventory_valuation(company_key, role):
+    """Accountant/admin inventory valuation vs Inventory GL reconciliation view."""
+    render_ui_standard_styles()
+    page_header(
+        "Inventory Valuation",
+        "Compare stock value to the Inventory account in the General Ledger",
+    )
+    if not can_view_inventory_valuation(role):
+        st.warning("Inventory valuation is available to accounting and admin roles only.")
+        return
+    if role != "Demo" and not require_permission(
+        role,
+        "view_reports",
+        action_label="view inventory valuation",
+        company_key=company_key,
+        branch_id=st.session_state.get("active_branch_id"),
+    ):
+        return
+
+    branch_id = st.session_state.get("active_branch_id")
+    as_of_date = datetime.now().date()
+    active_backend = get_active_db_backend()
+    try:
+        reconciliation = _cached_inventory_valuation_reconciliation(
+            company_key,
+            str(branch_id or ""),
+            as_of_date.isoformat(),
+            str(active_backend or "sqlite"),
+        )
+    except Exception as exc:
+        st.error(build_user_safe_error(exc, role))
+        return
+
+    if int(reconciliation.get("item_count") or 0) <= 0:
+        st.info(
+            "No inventory items yet. Add items and receive stock to see inventory value "
+            "and how it compares to the Inventory account in the General Ledger."
+        )
+        st.caption(
+            "Valuation uses each item's quantity × unit cost (cost price). "
+            "This screen never posts correcting journals."
+        )
+        return
+
+    status = str(reconciliation.get("status") or "REVIEW")
+    status_messages = {
+        "MATCHED": "Stock value matches the Inventory account.",
+        "REVIEW": "Review needed — values differ slightly, or some items need cost or quantity attention.",
+        "CRITICAL": "Critical mismatch — stock value and the Inventory account differ materially.",
+    }
+    if status == "MATCHED":
+        st.success(status_messages[status])
+    elif status == "CRITICAL":
+        st.error(status_messages[status])
+    else:
+        st.warning(status_messages.get(status, "Review inventory valuation."))
+
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Total inventory value", format_currency(reconciliation.get("subledger_value") or 0.0))
+    m2.metric("Inventory GL balance", format_currency(reconciliation.get("gl_inventory_balance") or 0.0))
+    m3.metric("Difference", format_currency(reconciliation.get("difference") or 0.0))
+    m4.metric("Status", status)
+
+    f1, f2, f3 = st.columns(3)
+    f1.metric("Missing-cost items", str(int(reconciliation.get("missing_cost_item_count") or 0)))
+    f2.metric("Negative-stock items", str(int(reconciliation.get("negative_stock_item_count") or 0)))
+    f3.metric("Unvalued movements", str(int(reconciliation.get("unvalued_movement_count") or 0)))
+
+    costing = reconciliation.get("costing_method") or {}
+    st.caption(
+        "Cost basis: {label}. Authority field: {field}. "
+        "This report does not change costs or post journals.".format(
+            label=costing.get("label") or "unit cost",
+            field=costing.get("authoritative_field") or "cost_price",
+        )
+    )
+    if branch_id:
+        st.caption(f"Branch context: {branch_id}")
+
+    with st.expander("Item-level valuation details", expanded=False):
+        items = reconciliation.get("items") or []
+        if not items:
+            st.caption("No item rows to display.")
+        else:
+            detail_rows = [
+                {
+                    "Item": row.get("item_name"),
+                    "SKU": row.get("sku"),
+                    "Qty": row.get("quantity_on_hand"),
+                    "Unit cost": row.get("resolved_unit_cost"),
+                    "Value": row.get("inventory_value"),
+                    "Missing cost": "Yes" if row.get("missing_cost") else "No",
+                    "Negative qty": "Yes" if row.get("negative_quantity") else "No",
+                    "Latest movement": row.get("latest_movement_reference") or "",
+                }
+                for row in items
+            ]
+            st.dataframe(pd.DataFrame(detail_rows), use_container_width=True)
+
+    missing_items = reconciliation.get("missing_cost_items") or []
+    if missing_items:
+        with st.expander("Missing-cost items", expanded=False):
+            st.dataframe(
+                pd.DataFrame(
+                    [
+                        {
+                            "Item": row.get("item_name"),
+                            "Qty": row.get("quantity_on_hand"),
+                            "Value shown": row.get("inventory_value"),
+                        }
+                        for row in missing_items
+                    ]
+                ),
+                use_container_width=True,
+            )
+
+    negative_items = reconciliation.get("negative_stock_items") or []
+    if negative_items:
+        with st.expander("Negative-stock items", expanded=False):
+            st.dataframe(
+                pd.DataFrame(
+                    [
+                        {
+                            "Item": row.get("item_name"),
+                            "Qty": row.get("quantity_on_hand"),
+                            "Unit cost": row.get("resolved_unit_cost"),
+                        }
+                        for row in negative_items
+                    ]
+                ),
+                use_container_width=True,
+            )
+
+    st.caption("No correcting journal was posted by this screen.")
+
+
 def show_inventory(company_key, role):
     render_ui_standard_styles()
     page_header("📦 Inventory Management", "Track inventory levels, update stock, and manage items")
@@ -11532,7 +11710,9 @@ def show_inventory(company_key, role):
                             if movement_type == "Out" and new_qty < 0:
                                 st.error(f"Cannot record stock out of {movement_qty:,.2f}. Available quantity is {current_qty:,.2f}.")
                             else:
-                                movement_value = round(float(selected_item["cost_price"] or 0.0) * movement_qty, 2)
+                                movement_value_info = resolve_inventory_unit_cost(selected_item)
+                                unit_cost = float(movement_value_info["unit_cost"] or 0.0)
+                                movement_value = round(unit_cost * movement_qty, 2)
                                 reason_key = str(reason or "").strip().lower()
                                 if reason_key == "transfer":
                                     recorded_movement_type = "TRANSFER"
@@ -11551,6 +11731,13 @@ def show_inventory(company_key, role):
                                 else:
                                     recorded_movement_type = "STOCK_IN" if movement_type == "In" else "STOCK_OUT"
                                 movement_reference = f"STK-{selected_item_id}-{datetime.now().strftime('%Y%m%d%H%M%S')}"
+                                movement_notes = None
+                                if movement_value_info.get("missing") or movement_value_info.get("flagged_for_review"):
+                                    movement_notes = "unvalued=true | cost_flagged_for_review=true"
+                                if recorded_movement_type == "TRANSFER":
+                                    movement_notes = (
+                                        (movement_notes + " | ") if movement_notes else ""
+                                    ) + "quantity_only_transfer=true"
                                 movement_result = apply_inventory_quantity_change(
                                     conn,
                                     company_key=company_key,
@@ -11561,13 +11748,21 @@ def show_inventory(company_key, role):
                                     quantity_delta=delta,
                                     reason=reason,
                                     reference=movement_reference,
+                                    notes=movement_notes,
                                     source_document="stock_adjustment",
                                     source_id=movement_reference,
                                     item_name=selected_item["item_name"],
                                 )
                                 movement_id = movement_result.get("movement_id")
                                 new_qty = float(movement_result["after_qty"])
-                                if movement_value > 0:
+                                # Transfers must not create artificial company-wide profit or loss.
+                                # Quantity-only adjustments with no cost basis are recorded without a valued journal.
+                                if recorded_movement_type == "TRANSFER":
+                                    st.info(
+                                        "Transfer recorded as a quantity movement only. "
+                                        "No inventory profit or loss was posted."
+                                    )
+                                elif movement_value > 0:
                                     inventory_account_id = int(selected_item["inventory_account_id"] or get_account_id(conn, "Inventory", "Asset"))
                                     cogs_account_id = int(selected_item["cogs_account_id"] or get_account_id(conn, "Cost of Goods Sold", "Expense"))
                                     if movement_type == "In":
@@ -11600,6 +11795,11 @@ def show_inventory(company_key, role):
                                         source_id=movement_id,
                                         approval_status="Posted",
                                         conn=conn,
+                                    )
+                                else:
+                                    st.warning(
+                                        "Quantity updated without a valued journal because unit cost is missing or zero. "
+                                        "Review item cost before relying on inventory valuation."
                                     )
                                 conn.commit()
                                 log_audit_action(
@@ -13958,9 +14158,17 @@ def show_pos(company_key, company_name, role):
                                     "price": sale_line["price"],
                                 }
                             )
-                            cost_of_goods_sold += float(sale_line["qty"]) * float(sale_line.get("cost_price") or 0.0)
                             if sale_line["inventory_item_id"] is not None:
                                 try:
+                                    line_cost_info = resolve_inventory_unit_cost(
+                                        {"cost_price": sale_line.get("cost_price")},
+                                        allow_line_fallback=False,
+                                    )
+                                    line_unit_cost = float(line_cost_info["unit_cost"] or 0.0)
+                                    sale_line["cost_price"] = line_unit_cost
+                                    sale_line["cost_missing"] = bool(line_cost_info.get("missing"))
+                                    sale_line["cost_flagged_for_review"] = bool(line_cost_info.get("flagged_for_review"))
+                                    cost_of_goods_sold += float(sale_line["qty"]) * line_unit_cost
                                     apply_inventory_quantity_change(
                                         conn,
                                         company_key=company_key,
@@ -13973,6 +14181,11 @@ def show_pos(company_key, company_name, role):
                                         reference=f"POS-{pos_movement_token}-{int(sale_line['inventory_item_id'])}",
                                         source_document="pos_sale",
                                         source_id=pos_movement_token,
+                                        notes=(
+                                            "cost_flagged_for_review=true"
+                                            if line_cost_info.get("flagged_for_review")
+                                            else None
+                                        ),
                                         item_name=sale_line["name"],
                                     )
                                 except ValueError as stock_exc:
