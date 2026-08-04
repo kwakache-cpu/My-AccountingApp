@@ -3291,7 +3291,10 @@ def show_financial_reports(company_key, role=None):
                     )
                     i3.metric(
                         "Inventory Reconciliation",
-                        "Matched" if integrity["inventory"]["reconciled"] else "Mismatch",
+                        (
+                            integrity["inventory"].get("status")
+                            or ("Matched" if integrity["inventory"]["reconciled"] else "Mismatch")
+                        ),
                         format_currency(integrity["inventory"]["difference"]),
                     )
                     j1, j2, j3 = st.columns(3)

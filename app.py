@@ -139,6 +139,7 @@ show_chart_of_accounts = eka_modules.show_chart_of_accounts
 show_company_setup = eka_modules.show_company_setup
 show_fixed_assets = eka_modules.show_fixed_assets
 show_inventory = eka_modules.show_inventory
+show_inventory_valuation = eka_modules.show_inventory_valuation
 show_journal_entries = eka_modules.show_journal_entries
 show_onboarding_payment = eka_modules.show_onboarding_payment
 show_payroll = eka_modules.show_payroll
@@ -2061,6 +2062,7 @@ SIDEBAR_NAV_GROUPS = [
         "📦 Inventory",
         [
             ("Inventory", "Inventory Management"),
+            ("Inventory Valuation", "Inventory Valuation"),
             ("Asset Register", "Asset Register"),
         ],
     ),
@@ -2098,6 +2100,7 @@ PAGE_PERMISSION_MAP = {
     "Dashboard": "view_dashboard",
     "Point of Sale": "sell_pos",
     "Inventory Management": "view_inventory",
+    "Inventory Valuation": "view_reports",
     "Vouchers & Journals": "post_accounting_document",
     "General Journal": "view_reports",
     "General Ledger": "view_reports",
@@ -2533,6 +2536,11 @@ def _render_primary_page(user):
             show_inventory("DEMO", "Demo")
         else:
             show_inventory(user["key"], user["role"])
+    elif current_page == "Inventory Valuation":
+        if user["role"] == "Demo":
+            show_inventory_valuation("DEMO", "Demo")
+        else:
+            show_inventory_valuation(user["key"], user["role"])
     elif current_page == "General Journal":
         show_journal_entries(user["key"], user["role"])
     elif current_page == "General Ledger":

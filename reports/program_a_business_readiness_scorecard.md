@@ -15,7 +15,7 @@ Can a company run the full lifecycle **without leaving the ERP**?
 | **Company Registration** | **PASS** | Trial registration, duplicate name block, Paystack verify → activation tested. Webhook harness thin. |
 | **Company Setup** | **PARTIAL** | System Configuration works; no DDL on render (certified). No guided first-setup wizard; branch/currency/tax defaults require knowledgeable admin. |
 | **Chart of Accounts** | **PARTIAL** | COA exists; core accounts auto-ensured. View ungated via `view_reports`. No usage hints; manual opening balances error-prone. |
-| **Inventory** | **PARTIAL** | Item master, barcode, expiry, receive, adjust, import exist. Movement ledger inconsistent across channels. Valuation vs GL reconciliation manual. |
+| **Inventory** | **PARTIAL** | Item master, barcode, expiry, receive, adjust, import exist. Sprint B P0-3 unified stock movements. Sprint B P0-4 adds valuation vs GL reconciliation (detection). Costing is last `cost_price`, not policy-grade average/FIFO. |
 | **Customers** | **PASS** | Master CRUD, balances, POS/invoice linkage, AR aging helpers. |
 | **Suppliers** | **PASS** | Master CRUD, balances, bill linkage, AP aging helpers. |
 | **Sales** | **PARTIAL** | POS + invoice paths strong. Credit sales, returns, corrections certified. Invoice→payment shortcut missing; duplicate invoice UIs. |
@@ -40,8 +40,8 @@ Can a company run the full lifecycle **without leaving the ERP**?
 | Dimension | Score | Notes |
 |-----------|-------|-------|
 | **Accounting** | 7.5/10 | Strong journal engine, TB integrity, source linkage. Gaps: bill/inventory GL vs physical, depreciation linkage, statutory reconciliation. |
-| **Inventory** | 5.5/10 | Functional item master and receive. Movement ledger inconsistent; purchase-to-pay not linked; no unified audit trail. |
-| **POS** | 7.0/10 | Fast path, barcode, stock checks, receipts. Permission bypass; no stock_movements; Postgres checkout staging uncertified. |
+| **Inventory** | 6.5/10 | Functional item master and receive. Sprint B P0-3 movement integrity; Sprint B P0-4 valuation/GL detection. Purchase-to-pay still not auto-linked; costing method not yet policy-grade. |
+| **POS** | 7.5/10 | Fast path, barcode, stock checks, receipts. Sprint B P0-1 permission gate; Sprint B P0-3 stock_movements on sale. |
 | **Payroll** | 6.5/10 | Ghana components present. Calculation tests thin; HR employee master shallow; statutory sign-off open. |
 | **Assets** | 6.0/10 | Register, acquisition, depreciation work. Disposal missing; dashboard impact minimal; certification gaps on source linkage. |
 | **Reporting** | 8.0/10 | Best-in-class for core financials at this stage. BI/actionable insights weak; large-scale performance unproven. |

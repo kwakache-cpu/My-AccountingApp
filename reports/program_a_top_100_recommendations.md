@@ -15,8 +15,8 @@
 | 5 | Finance sign-off on VAT/NHIL/GETFund outputs | P0 | GRA compliance | Tax penalties | Low | Finance owner, taxation page |
 | 6 | Finance sign-off on PAYE/SSNIT payroll outputs | P0 | Statutory payroll compliance | Employee/tax authority issues | Low | Finance owner, payroll module |
 | 7 | Purchase-to-pay: optional receive-on-post for inventory bills (P1-1) | P1 | Eliminates #1 user confusion | Inventory/GL drift | High | Inventory, bills, no posting rewrite | **Sprint B P0-2 partial** — drift monitor + status; no auto-link |
-| 8 | Unified POS `stock_movements` writes (P1-2) | P1 | Single movement audit trail | Shrinkage invisible | Medium | POS, inventory |
-| 9 | Valued inventory receive prompts GL posting (P1-3) | P1 | Bookkeeper trust | Inventory GL ≠ subledger | Medium | Receive, accounting engine |
+| 8 | Unified POS `stock_movements` writes (P1-2) | P1 | Single movement audit trail | Shrinkage invisible | Medium | POS, inventory | **Sprint B P0-3 complete** — all qty mutations via `apply_inventory_quantity_change` |
+| 9 | Valued inventory receive prompts GL posting (P1-3) | P1 | Bookkeeper trust | Inventory GL ≠ subledger | Medium | Receive, accounting engine | **Sprint B P0-4 partial** — valuation/GL mismatch now visible; no auto-post on receive |
 | 10 | Invoice → Receive Payment shortcut (P1-4) | P1 | Faster collections | AR drag, user workarounds | Low | AR, payments UI |
 | 11 | Persist `customer_id`/`supplier_id` on legacy tabbed payment form | P1 | Subledger accuracy | Reconciliation failures | Low | `financials.py` |
 | 12 | Run payment subledger backfill with operator review | P1 | Clean AR/AP aging | Historical ambiguity | Low | Sprint 1 backfill helper |
@@ -94,7 +94,7 @@
 | 84 | Secrets rotation procedure documented | P1 | Security | Key leakage | Low | Security |
 | 85 | Disable Dev credentials in production pilot | P0 | Security | Full platform access | Low | Deployment |
 | 86 | Limit Demo role in production tenant | P1 | Data integrity | Demo data in live | Low | Roles |
-| 87 | Inventory valuation vs GL reconciliation report | P1 | Month-end | Misstated inventory | Medium | Reports |
+| 87 | Inventory valuation vs GL reconciliation report | P1 | Month-end | Misstated inventory | Medium | Reports | **Sprint B P0-4 complete** — Inventory Valuation page + `reconcile_inventory_subledger_to_gl` (detection only) |
 | 88 | COGS reconciliation report (POS + invoice) | P2 | Margin accuracy | Wrong profitability | Medium | Reports |
 | 89 | Sales tax rounding policy documented and tested | P1 | Tax accuracy | Penny drift | Low | Tax engine |
 | 90 | Withholding tax on supplier payments (Ghana WHT) | P2 | Ghana compliance | WHT exposure | High | AP, tax |

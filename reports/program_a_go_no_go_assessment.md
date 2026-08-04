@@ -36,6 +36,10 @@ EKA is judged on **workflow continuity**, **accounting correctness**, **role app
 
 Operators must enter **supplier bill number** in Receive Stock **Reference Number** to link physical receipt to posted inventory bills. Review **Purchase / Inventory Drift Monitor** on Create Bill and Inventory weekly.
 
+### Pilot condition update (Sprint B P0-3 / P0-4)
+
+Every quantity change writes one stock movement (Sprint 3). Accountants must review **Inventory Valuation** weekly: stock value vs Inventory GL (`MATCHED` / `REVIEW` / `CRITICAL`). Costing remains last `cost_price` field — not FIFO/average. Do not expect auto-correcting journals.
+
 ---
 
 ### Would you deploy EKA to a 20-person business?
