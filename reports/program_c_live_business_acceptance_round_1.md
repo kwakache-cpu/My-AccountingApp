@@ -1,9 +1,33 @@
 # Program C — Live Business Acceptance Round 1
 
-**Branch:** `program-c-live-business-acceptance-round-1`  
-**Date opened:** 2026-08-04  
-**Sprint type:** Live workflow validation (documentation + evidence)  
-**Baseline:** Program A overall product **6.8/10**; Program B P0 inventory movement + valuation integrity merged  
+**Branch:** `program-c-round-a-onboarding-and-administration` (Round A live session)
+**Date opened:** 2026-08-04
+**Sprint type:** Live workflow validation (documentation + evidence)
+**Baseline:** Program A overall product **6.8/10**; Program B P0 inventory movement + valuation integrity merged
+
+### Round A live update (2026-08-04)
+
+Local Streamlit operator session against `http://localhost:8501/`.
+UAT company created: **`UAT-PC-RA Frozen Foods Ltd`** / key **`EKA-PAY-CMOM-6715`**.
+**Stopped after Paystack initialization FAIL** (missing `PAYSTACK_PUBLIC_KEY` in local secrets.toml).
+Detailed Round A records: `reports/program_c_round_a_onboarding_live_results.md`.
+
+| Round A workflow | Status |
+|------------------|--------|
+| Registration | **PASS** |
+| Paystack initialization | **FAIL** (config — public key/callback absent from local secrets) |
+| Trial activation | **PASS** (until 2026-08-11) |
+| Secure login → Company wipe | **NOT EXECUTED** (stop rule) |
+
+### Security remediation update (2026-08-06, same branch)
+
+Code changes on `program-c-round-a-onboarding-and-administration` (not committed unless requested):
+
+- Paystack resolver hardened (env → root secrets → nested `[paystack]`); admin-only source diagnostic
+- Public **System Status** tab removed; admin-only Gatekeeper surface
+- Public **Administrative Access Repair** removed; requires auth + recovery route + token
+- Defects DEF-PC-RA-001/003/004 updated; live Paystack retest still required after secrets are present
+
 
 ---
 
@@ -62,17 +86,17 @@
 
 For each workflow below, the live operator must capture:
 
-- Role used  
-- Start time / End time / Elapsed  
-- Steps taken  
-- Expected vs Actual  
-- Accounting impact  
-- Inventory impact  
-- Audit trail evidence  
-- Screenshot/evidence reference  
-- Status: `PASS` | `PARTIAL` | `FAIL` | `NOT EXECUTED`  
-- Severity (if not PASS): Critical / High / Medium / Low  
-- Launch blocking: YES / NO  
+- Role used
+- Start time / End time / Elapsed
+- Steps taken
+- Expected vs Actual
+- Accounting impact
+- Inventory impact
+- Audit trail evidence
+- Screenshot/evidence reference
+- Status: `PASS` | `PARTIAL` | `FAIL` | `NOT EXECUTED`
+- Severity (if not PASS): Critical / High / Medium / Low
+- Launch blocking: YES / NO
 
 ---
 
@@ -84,9 +108,9 @@ Statuses below reflect **this agent session**. Operators must overwrite with liv
 
 | ID | Workflow | Role (primary) | Expected result (summary) | Accounting proof required | Inventory proof required | Round 1 status | Severity if fail | Launch blocking if fail | Evidence class |
 |----|----------|----------------|---------------------------|---------------------------|--------------------------|----------------|------------------|-------------------------|----------------|
-| W01 | Company registration | Owner | Trial company created; unique name enforced | Company + subscription rows | N/A | **NOT EXECUTED** | Critical | YES | — |
-| W02 | Paystack initialization | Owner | Checkout init succeeds or clear config error | Payment attempt logged safely | N/A | **NOT EXECUTED** | Critical | YES | AUTO_CERT available in suite; live unpaid |
-| W03 | Trial/subscription activation | Owner | License active for trial path | Subscription status active | N/A | **NOT EXECUTED** | Critical | YES | — |
+| W01 | Company registration | Owner | Trial company created; unique name enforced | Company + subscription rows | N/A | **PASS** (Round A live: `EKA-PAY-CMOM-6715`) | Critical | YES | LIVE_UI |
+| W02 | Paystack initialization | Owner | Checkout init succeeds or clear config error | Payment attempt logged safely | N/A | **FAIL** (Round A: missing `PAYSTACK_PUBLIC_KEY`, support `9087A613E2D5`) | Critical | YES | LIVE_UI |
+| W03 | Trial/subscription activation | Owner | License active for trial path | Subscription status active | N/A | **PASS** (Round A: trial until 2026-08-11) | Critical | YES | LIVE_UI |
 | W04 | Secure login/logout | All | Auth resolves company/branch/user; logout clears session | N/A | N/A | **NOT EXECUTED** | Critical | YES | AUTO_CERT lockdown login tests |
 | W05 | Company Profile | Owner/Admin | Profile loads; **no DDL on render** | Company settings persist | N/A | **NOT EXECUTED** | High | YES | CODE_TRACE / lockdown |
 | W06 | Branch setup | Owner/Admin | MAIN branch usable | Branch row exists | Movements carry branch_id | **NOT EXECUTED** | High | YES | — |
@@ -128,12 +152,14 @@ Statuses below reflect **this agent session**. Operators must overwrite with liv
 
 | Status | Count |
 |--------|------:|
-| PASS | **0** |
-| PARTIAL | **0** (none promoted without live UI) |
-| FAIL | **0** (no new live failures recorded) |
-| NOT EXECUTED | **37** |
+| PASS | **2** (Round A: Registration, Trial activation) |
+| PARTIAL | **0** |
+| FAIL | **1** (Round A: Paystack initialization — missing public key) |
+| NOT EXECUTED | **34** remaining Round 1 workflows + Round A 4–13 |
 
-**Automated platform health (supporting, not live PASS):** regression suite executed in this Program C validation pass — see evidence index.
+**Automated platform health (supporting, not live PASS):** regression suite executed in validation pass — see evidence index.
+
+**Live UI note:** Round A operator session produced the first LIVE_UI evidence under `reports/evidence/program_c_r1/`.
 
 ---
 
@@ -141,17 +167,17 @@ Statuses below reflect **this agent session**. Operators must overwrite with liv
 
 Operator must verify **all** of:
 
-1. Source document exists  
-2. Exactly one expected posted journal (or documented multi-entry pattern)  
-3. Journal balanced  
-4. Correct debit/credit accounts  
-5. Customer/supplier subledger updated when applicable  
-6. Inventory qty updated when applicable  
-7. Stock movement exists when qty changed (Sprint 3 contract)  
-8. Valuation impact sensible when cost known (Sprint 4)  
-9. Trial Balance reflects entry  
-10. Financial statements reflect entry  
-11. Audit trail records action  
+1. Source document exists
+2. Exactly one expected posted journal (or documented multi-entry pattern)
+3. Journal balanced
+4. Correct debit/credit accounts
+5. Customer/supplier subledger updated when applicable
+6. Inventory qty updated when applicable
+7. Stock movement exists when qty changed (Sprint 3 contract)
+8. Valuation impact sensible when cost known (Sprint 4)
+9. Trial Balance reflects entry
+10. Financial statements reflect entry
+11. Audit trail records action
 
 Do **not** accept UI success toasts alone.
 
@@ -198,16 +224,16 @@ Automated permission denials exist in regression lockdown / permission tests —
 
 Record live observations for:
 
-1. Mobile Money as tender  
-2. Cash and bank handling clarity  
-3. VAT/NHIL terminology  
-4. Ghana cedi (GHS) presentation  
-5. Small retail workflow clarity  
-6. Carton vs piece/kg limitations (**do not build flexible-unit engine**)  
-7. Partial-unit selling limitations  
-8. Receipt usefulness  
-9. Supplier/customer payment clarity  
-10. Ease of use for a non-accountant  
+1. Mobile Money as tender
+2. Cash and bank handling clarity
+3. VAT/NHIL terminology
+4. Ghana cedi (GHS) presentation
+5. Small retail workflow clarity
+6. Carton vs piece/kg limitations (**do not build flexible-unit engine**)
+7. Partial-unit selling limitations
+8. Receipt usefulness
+9. Supplier/customer payment clarity
+10. Ease of use for a non-accountant
 
 Rank verified gaps in the scorecard. Round 1 agent session: **not observed live** — inherited Program A frozen-foods “Needs Work” stands.
 
@@ -215,23 +241,23 @@ Rank verified gaps in the scorecard. Round 1 agent session: **not observed live*
 
 ## Operator script (recommended sequence)
 
-1. Register `UAT PC R1 Frozen Foods Ltd`  
-2. Complete Paystack/trial path available in environment  
-3. Create users for six roles  
-4. Seed COA defaults; create customers/suppliers  
-5. Create 5 SKUs with cost + price; opening stock  
-6. Post inventory bill **without** receive; confirm qty unchanged  
-7. Receive stock with supplier bill number in reference  
-8. Open Inventory Valuation; note status  
-9. POS cash + credit + return  
-10. Customer receipt; supplier payment (Cash + MoMo if available)  
-11. Payroll mini-run; asset + depreciation  
-12. Tax page review  
-13. TB / P&L / BS / Cash flow  
-14. Audit trail spot-check  
-15. Dashboard timings  
-16. Backup status note  
-17. Wipe UAT company  
+1. Register `UAT PC R1 Frozen Foods Ltd`
+2. Complete Paystack/trial path available in environment
+3. Create users for six roles
+4. Seed COA defaults; create customers/suppliers
+5. Create 5 SKUs with cost + price; opening stock
+6. Post inventory bill **without** receive; confirm qty unchanged
+7. Receive stock with supplier bill number in reference
+8. Open Inventory Valuation; note status
+9. POS cash + credit + return
+10. Customer receipt; supplier payment (Cash + MoMo if available)
+11. Payroll mini-run; asset + depreciation
+12. Tax page review
+13. TB / P&L / BS / Cash flow
+14. Audit trail spot-check
+15. Dashboard timings
+16. Backup status note
+17. Wipe UAT company
 
 ---
 

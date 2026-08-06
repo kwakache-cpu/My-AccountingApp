@@ -28,6 +28,7 @@ import os
 import sys
 from datetime import date, datetime, timedelta
 import hashlib
+import hmac
 import random
 import string
 from dateutil.relativedelta import relativedelta
@@ -619,6 +620,8 @@ def _clear_session():
         "dev_gatekeeper_billing_snapshot",
         "_sidebar_nav_styles_rendered",
         "_currency_db_sync_key",
+        "admin_recovery_unlocked",
+        "admin_recovery_token_input",
     ]
     for k in keys:
         st.session_state.pop(k, None)
@@ -1051,30 +1054,38 @@ def enter_demo():
     st.session_state.login_attempts = 0
     st.rerun()
 
-def show_system_status():
-    """Public-facing system status monitoring dashboard."""
+def show_system_status(*, role=None, require_auth=True):
+    """Authenticated admin-only system status monitoring dashboard."""
+    authenticated = bool(st.session_state.get("auth"))
+    effective_role = role or (st.session_state.get("user") or {}).get("role")
+    if require_auth and (not authenticated or not eka_modules.can_view_runtime_admin_diagnostics(effective_role)):
+        st.error("System Status is available only to authenticated Dev, Master Admin, or System Admin users.")
+        st.info("Please sign in with an authorized administrator account.")
+        return False
+
     st.title("System Status Dashboard")
     st.markdown("Real-time monitoring of E.K.A Enterprise ERP infrastructure components.")
-    
+    st.caption("Internal admin surface — not available to unauthenticated or ordinary client roles.")
+
     # Status Indicators
     st.subheader("System Components")
     col1, col2, col3 = st.columns(3)
-    
+
     with col1:
         st.metric("API Gateway", "Operational", delta="Online")
     with col2:
         st.metric("Database Engine", "Operational", delta="Online")
     with col3:
         st.metric("Payment Server", "Operational", delta="Online")
-    
+
     st.markdown("---")
-    
+
     # Uptime Metric
     col1, col2 = st.columns(2)
     with col1:
         st.subheader("Live Uptime")
         st.metric("System Availability", "99.9%", delta="+0.1% this month")
-    
+
     with col2:
         st.subheader("Past Incidents")
         incidents_df = pd.DataFrame({
@@ -1083,6 +1094,7 @@ def show_system_status():
             'Duration': ['N/A'] * 90
         })
         st.dataframe(incidents_df, width='stretch', height=300)
+    return True
 
 
 def render_login_logo():
@@ -1108,7 +1120,7 @@ def login_ui():
         st.error("Too many failed login attempts. Please wait before trying again.")
         return
     
-    t1, t2, t3, t4 = st.tabs(["Secure Login", "System Recovery", "Register New Company", "System Status"])
+    t1, t2, t3 = st.tabs(["Secure Login", "System Recovery", "Register New Company"])
     
     with t1:
         if not st.session_state.get('demo_toggle'):
@@ -1208,11 +1220,6 @@ def login_ui():
         elif st.session_state.get('demo_toggle'):
             st.button('Enter Demo ERP', on_click=enter_demo)
 
-        if _has_restored_data_without_admin_users():
-            st.info(
-                "Secure company workspace detected. Please log in with your company access credentials."
-            )
-
         # License Renewal Section
         with st.expander("Renew License", expanded=False):
             st.subheader("License Renewal Portal")
@@ -1300,15 +1307,8 @@ def login_ui():
                         st.error("Unable to reset password at this time.")
                         logger.error("Password reset error: %s", sanitize_error_message(e))
 
-        if _has_restored_data_without_admin_users():
-            st.markdown("---")
-            _show_admin_recovery_panel()
-
     with t3:
         show_onboarding_payment()
-
-    with t4:
-        show_system_status()
 
     # Demo mode entry — button-only (avoids fragile Checkbox/Toggle frontend chunks on login/register reruns)
     st.markdown("---")
@@ -1642,6 +1642,107 @@ def check_session_lock():
         return True
 
 
+def _admin_recovery_expected_token():
+    """Return configured one-time/admin recovery token without logging it."""
+    try:
+        return eka_modules._read_secret_or_env(
+            "EKA_ADMIN_RECOVERY_TOKEN",
+            "admin_recovery_token",
+        )
+    except Exception:
+        return None
+
+
+def _is_admin_recovery_route_requested():
+    """True only on an explicit recovery route/query flag (not ordinary login)."""
+    try:
+        params = st.query_params
+        route_flag = str(params.get("admin_recovery") or params.get("recovery") or "").strip().lower()
+        return route_flag in {"1", "true", "yes", "unlock"}
+    except Exception:
+        return False
+
+
+def _admin_recovery_token_matches(candidate):
+    expected = _admin_recovery_expected_token()
+    provided = str(candidate or "").strip()
+    if not expected or not provided:
+        return False
+    try:
+        return hmac.compare_digest(str(expected), provided)
+    except Exception:
+        return False
+
+
+def is_admin_recovery_mode_authorized():
+    """
+    Administrative access repair requires ALL of:
+    1) authenticated Dev / Master Admin / System Admin
+    2) explicit recovery mode unlock in this session (token-verified)
+    3) dedicated recovery route query flag
+    4) verified bootstrap/recovery condition (companies needing admin)
+    """
+    if not st.session_state.get("auth"):
+        return False
+    role = (st.session_state.get("user") or {}).get("role")
+    if not eka_modules.can_view_runtime_admin_diagnostics(role):
+        return False
+    if not _is_admin_recovery_route_requested():
+        return False
+    if not st.session_state.get("admin_recovery_unlocked"):
+        return False
+    if not _has_restored_data_without_admin_users():
+        return False
+    return True
+
+
+def _render_admin_recovery_unlock_controls(*, role=None):
+    """Token unlock UI for authenticated admins on the dedicated recovery route only."""
+    if not st.session_state.get("auth"):
+        return False
+    effective_role = role or (st.session_state.get("user") or {}).get("role")
+    if not eka_modules.can_view_runtime_admin_diagnostics(effective_role):
+        return False
+    if not _is_admin_recovery_route_requested():
+        st.info("Administrative recovery is available only via the dedicated recovery route.")
+        return False
+    if st.session_state.get("admin_recovery_unlocked"):
+        return True
+    expected = _admin_recovery_expected_token()
+    if not expected:
+        st.warning(
+            "Administrative recovery token is not configured. "
+            "Set EKA_ADMIN_RECOVERY_TOKEN (env or secrets) before unlocking repair tools."
+        )
+        return False
+    st.subheader("Unlock Administrative Recovery")
+    st.caption("Enter the recovery token to unlock repair tools for this session. Token values are never displayed.")
+    token_input = st.text_input(
+        "Recovery Token",
+        type="password",
+        key="admin_recovery_token_input",
+    )
+    if st.button("Unlock Recovery Mode", key="admin_recovery_unlock_btn"):
+        if _admin_recovery_token_matches(token_input):
+            st.session_state.admin_recovery_unlocked = True
+            try:
+                conn = get_connection()
+                log_audit_action(
+                    conn,
+                    (st.session_state.get("user") or {}).get("key") or "SYSTEM",
+                    effective_role or "Unknown",
+                    "Administrative recovery mode unlocked",
+                    "Administrative Recovery",
+                )
+                conn.close()
+            except Exception:
+                logger.exception("Failed to audit administrative recovery unlock")
+            st.success("Recovery mode unlocked for this session.")
+            st.rerun()
+        st.error("Recovery token rejected.")
+    return False
+
+
 def _has_restored_data_without_admin_users():
     """Check if companies exist but no active admin-capable users exist in users table.
     
@@ -1688,7 +1789,10 @@ def _get_restored_companies_needing_admin():
     """Get list of active companies that have no admin-capable users.
     
     Returns list of (company_key, company_name) tuples.
+    Available only to authorized admin recovery sessions.
     """
+    if not is_admin_recovery_mode_authorized():
+        return []
     conn = None
     try:
         conn = get_connection()
@@ -1715,13 +1819,32 @@ def _get_restored_companies_needing_admin():
 
 def _show_admin_recovery_panel():
     """Show guided admin recovery panel for restored companies.
-    
-    Allows controlled creation of new admin users for companies that need them.
+
+    Never available on public login/password-recovery flows.
+    Requires authenticated admin + recovery route + token unlock + bootstrap condition.
     """
+    if not st.session_state.get("auth") or not eka_modules.can_view_runtime_admin_diagnostics(
+        (st.session_state.get("user") or {}).get("role")
+    ):
+        st.error("Administrative recovery is restricted to authorized administrators.")
+        return
+    if not _is_admin_recovery_route_requested():
+        st.info("Open the dedicated administrative recovery route to continue.")
+        return
+    if not _render_admin_recovery_unlock_controls():
+        return
+    if not _has_restored_data_without_admin_users():
+        st.success("No administrative recovery condition is currently active.")
+        return
+    if not is_admin_recovery_mode_authorized():
+        st.error("Administrative recovery is not authorized for this session.")
+        return
+
     st.warning("**Administrative Access Repair Needed**")
     st.info(
-        "Restored company data exists with no active admin users. "
-        "You can log in with your company Master Admin key, or create a new admin user below."
+        "A verified recovery condition is active. "
+        "Prefer signing in with an existing company Master Admin key when available. "
+        "Creating a replacement admin is audited."
     )
     
     restored_companies = _get_restored_companies_needing_admin()
@@ -1783,8 +1906,10 @@ def _show_admin_recovery_panel():
             submitted = st.form_submit_button("Create Admin User")
             
             if submitted:
+                if not is_admin_recovery_mode_authorized():
+                    st.error("Administrative recovery authorization expired. Unlock recovery mode again.")
                 # Validation
-                if not admin_name.strip():
+                elif not admin_name.strip():
                     st.error("Admin name is required.")
                 elif not admin_login.strip():
                     st.error("Admin login key is required.")
@@ -1805,7 +1930,7 @@ def _show_admin_recovery_panel():
                             (admin_login.strip(),)
                         ).fetchone()
                         if existing:
-                            st.error(f"Login key '{admin_login}' already exists. Choose a different key.")
+                            st.error("That login key already exists. Choose a different key.")
                             conn.close()
                         else:
                             user_id = f"{company_key}_{admin_login.strip()[:20]}_{int(time.time())}"
@@ -1832,17 +1957,16 @@ def _show_admin_recovery_panel():
                             log_audit_action(
                                 conn,
                                 company_key,
-                                "Recovery",
+                                (st.session_state.get("user") or {}).get("role") or "Recovery",
                                 "Admin user created during recovery",
                                 "Administrative Recovery",
-                                f"Created System Admin user: {admin_name}"
+                                f"Created System Admin user for company recovery"
                             )
                             conn.close()
                             
                             st.success(
-                                f"âœ… Admin user created successfully!\n\n"
-                                f"**Login Key:** {admin_login}\n\n"
-                                f"This user can now log in and manage {company_name}."
+                                "Admin user created successfully. "
+                                "Sign in with the new login key to manage the company."
                             )
                             time.sleep(2)
                             st.rerun()
@@ -2613,10 +2737,13 @@ def _render_primary_page(user):
 
 
 # Main application flow
-main()
-if not st.session_state.auth or not check_session_timeout():
+# Guard Streamlit entrypoint so process warmup can import this module as `app`
+# without re-running UI (DEF-PC-RA-002 / StreamlitDuplicateElementKey).
+if __name__ == "__main__":
+    main()
+if __name__ == "__main__" and (not st.session_state.auth or not check_session_timeout()):
     login_ui()
-else:
+elif __name__ == "__main__":
     session_started = time.perf_counter()
     check_session_lock()  # Check for session revocation
     
@@ -2699,6 +2826,15 @@ else:
                 st.markdown("---")
                 st.subheader("System Health")
                 st.caption(st.session_state.get("cloud_vault_status", "Cloud Vault: Local Mode"))
+                with st.expander("System Status Dashboard", expanded=False):
+                    show_system_status(role=u.get("role"), require_auth=True)
+                if eka_modules.can_view_runtime_admin_diagnostics(u.get("role")):
+                    eka_modules.render_paystack_config_diagnostics_panel(
+                        role=u.get("role"),
+                        surface="system_health",
+                    )
+                    with st.expander("Administrative Access Recovery", expanded=False):
+                        _show_admin_recovery_panel()
                 st.caption(
                     "Fast mode excludes subscription/deep backup checks. "
                     "Use Run full health audit for subscription billing and cloud backup verification."
@@ -2974,6 +3110,7 @@ else:
                     with paystack_col1:
                         if st.button("Test Paystack Connection", key="test_paystack_connection_btn", use_container_width=True):
                             if require_role_permission(u["role"], "view_system_health", action_label="test Paystack configuration"):
+                                eka_modules.clear_paystack_runtime_config_cache()
                                 paystack_health_result = test_paystack_connection()
                                 st.session_state[paystack_health_key] = paystack_health_result
                     with paystack_col2:

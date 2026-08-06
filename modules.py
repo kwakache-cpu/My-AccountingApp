@@ -1496,29 +1496,207 @@ def get_company_branches(company_key):
 # ==========================================
 # PAYSTACK PAYMENT
 # ==========================================
+_PAYSTACK_CONFIG_CACHE = None
+
+_PAYSTACK_SETTING_SPECS = (
+    {
+        "setting": "PAYSTACK_SECRET_KEY",
+        "env_keys": ("PAYSTACK_SECRET_KEY", "paystack_secret_key"),
+        "root_keys": ("PAYSTACK_SECRET_KEY", "paystack_secret_key"),
+        "nested_keys": ("secret_key", "PAYSTACK_SECRET_KEY", "paystack_secret_key"),
+        "allow_default": False,
+        "default": None,
+        "validate": None,
+    },
+    {
+        "setting": "PAYSTACK_PUBLIC_KEY",
+        "env_keys": ("PAYSTACK_PUBLIC_KEY", "paystack_public_key"),
+        "root_keys": ("PAYSTACK_PUBLIC_KEY", "paystack_public_key"),
+        "nested_keys": ("public_key", "PAYSTACK_PUBLIC_KEY", "paystack_public_key"),
+        "allow_default": False,
+        "default": None,
+        "validate": None,
+    },
+    {
+        "setting": "PAYSTACK_CALLBACK_URL",
+        "env_keys": ("PAYSTACK_CALLBACK_URL", "paystack_callback_url"),
+        "root_keys": ("PAYSTACK_CALLBACK_URL", "paystack_callback_url"),
+        "nested_keys": ("callback_url", "PAYSTACK_CALLBACK_URL", "paystack_callback_url"),
+        "allow_default": False,
+        "default": None,
+        "validate": "callback_url",
+    },
+    {
+        "setting": "PAYSTACK_CURRENCY",
+        "env_keys": ("PAYSTACK_CURRENCY", "paystack_currency"),
+        "root_keys": ("PAYSTACK_CURRENCY", "paystack_currency"),
+        "nested_keys": ("currency", "PAYSTACK_CURRENCY", "paystack_currency"),
+        "allow_default": True,
+        "default": "GHS",
+        "validate": "currency",
+    },
+    {
+        "setting": "PAYSTACK_WEBHOOK_SECRET",
+        "env_keys": ("PAYSTACK_WEBHOOK_SECRET", "paystack_webhook_secret"),
+        "root_keys": ("PAYSTACK_WEBHOOK_SECRET", "paystack_webhook_secret"),
+        "nested_keys": ("webhook_secret", "PAYSTACK_WEBHOOK_SECRET", "paystack_webhook_secret"),
+        "allow_default": False,
+        "default": None,
+        "validate": None,
+    },
+)
+
+
+def clear_paystack_runtime_config_cache():
+    """Invalidate cached Paystack runtime config (call after secrets/env changes)."""
+    global _PAYSTACK_CONFIG_CACHE
+    _PAYSTACK_CONFIG_CACHE = None
+    try:
+        if st is not None and hasattr(st, "session_state"):
+            st.session_state.pop("_paystack_runtime_config_cache", None)
+            st.session_state.pop("_paystack_config_source_diagnostics", None)
+    except Exception:
+        pass
+
+
+def _nonempty_secret_text(value):
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text if text else None
+
+
+def _secrets_mapping():
+    try:
+        if st is None or not hasattr(st, "secrets"):
+            return None
+        return st.secrets
+    except Exception:
+        return None
+
+
+def _read_from_mapping(mapping, key):
+    if mapping is None or not key:
+        return None
+    try:
+        if key not in mapping:
+            return None
+        return _nonempty_secret_text(mapping[key])
+    except Exception:
+        return None
+
+
+def _read_nested_paystack_secret(*nested_keys):
+    secrets = _secrets_mapping()
+    if secrets is None:
+        return None, "missing"
+    try:
+        section = None
+        for section_name in ("paystack", "Paystack", "PAYSTACK"):
+            try:
+                if section_name in secrets:
+                    section = secrets[section_name]
+                    break
+            except Exception:
+                continue
+        if section is None:
+            return None, "missing"
+        if not hasattr(section, "__getitem__"):
+            return None, "malformed"
+        for key in nested_keys:
+            value = _read_from_mapping(section, key)
+            if value is not None:
+                return value, "st.secrets nested section"
+        return None, "missing"
+    except Exception:
+        return None, "malformed"
+
+
+def _resolve_secret_candidate(*, env_keys=(), root_keys=(), nested_keys=()):
+    """
+    Resolve a secret with explicit precedence:
+    1) non-empty environment variable
+    2) non-empty root-level st.secrets key
+    3) non-empty nested st.secrets [paystack] key
+    """
+    for key in env_keys:
+        env_value = _nonempty_secret_text(os.getenv(key))
+        if env_value is not None:
+            return env_value, "os.environ"
+    secrets = _secrets_mapping()
+    for key in root_keys:
+        value = _read_from_mapping(secrets, key)
+        if value is not None:
+            return value, "st.secrets root"
+    nested_value, nested_source = _read_nested_paystack_secret(*nested_keys)
+    if nested_value is not None:
+        return nested_value, nested_source
+    if nested_source == "malformed":
+        return None, "malformed"
+    return None, "missing"
+
+
 def _read_secret_or_env(*candidate_keys):
-    for key in candidate_keys:
-        if not key:
+    """
+    Backward-compatible secret reader.
+
+    Prefer environment, then root st.secrets, then nested [paystack] aliases.
+    Empty strings are treated as missing.
+    """
+    keys = tuple(key for key in candidate_keys if key)
+    if not keys:
+        return None
+    nested_aliases = []
+    for key in keys:
+        lowered = str(key).strip()
+        if lowered.lower().startswith("paystack_"):
+            nested_aliases.append(lowered.split("_", 1)[-1])
+        nested_aliases.append(lowered)
+    value, _source = _resolve_secret_candidate(
+        env_keys=keys,
+        root_keys=keys,
+        nested_keys=tuple(dict.fromkeys(nested_aliases)),
+    )
+    return value
+
+
+def _validate_paystack_setting(setting_name, value, validate_kind):
+    if value is None:
+        return False
+    if validate_kind == "callback_url":
+        return str(value).lower().startswith(("http://", "https://"))
+    if validate_kind == "currency":
+        return str(value).strip().upper() == "GHS"
+    return True
+
+
+def _build_paystack_runtime_resolution():
+    resolved = {}
+    sources = {}
+    validity = {}
+    for spec in _PAYSTACK_SETTING_SPECS:
+        setting = spec["setting"]
+        value, source = _resolve_secret_candidate(
+            env_keys=spec["env_keys"],
+            root_keys=spec["root_keys"],
+            nested_keys=spec["nested_keys"],
+        )
+        if value is None and spec.get("allow_default"):
+            value = spec.get("default")
+            source = "default" if value is not None else "missing"
+        if value is None:
+            sources[setting] = source if source in {"malformed", "empty"} else "missing"
+            validity[setting] = False
+            resolved[setting] = None
             continue
-        try:
-            if st is not None and hasattr(st, "secrets") and key in st.secrets:
-                value = st.secrets[key]
-                if value is not None and str(value).strip():
-                    return str(value).strip()
-        except Exception:
-            pass
-        env_value = os.getenv(key)
-        if env_value and str(env_value).strip():
-            return str(env_value).strip()
-    return None
-
-
-def get_paystack_runtime_config():
-    secret_key = _read_secret_or_env("PAYSTACK_SECRET_KEY", "paystack_secret_key")
-    public_key = _read_secret_or_env("PAYSTACK_PUBLIC_KEY", "paystack_public_key")
-    currency = (_read_secret_or_env("PAYSTACK_CURRENCY", "paystack_currency") or "GHS").upper()
-    callback_url = _read_secret_or_env("PAYSTACK_CALLBACK_URL", "paystack_callback_url")
-    webhook_secret = _read_secret_or_env("PAYSTACK_WEBHOOK_SECRET", "paystack_webhook_secret")
+        sources[setting] = source
+        validity[setting] = _validate_paystack_setting(setting, value, spec.get("validate"))
+        resolved[setting] = value
+    secret_key = resolved.get("PAYSTACK_SECRET_KEY")
+    public_key = resolved.get("PAYSTACK_PUBLIC_KEY")
+    callback_url = resolved.get("PAYSTACK_CALLBACK_URL")
+    currency = str(resolved.get("PAYSTACK_CURRENCY") or "GHS").strip().upper() or "GHS"
+    webhook_secret = resolved.get("PAYSTACK_WEBHOOK_SECRET")
     return {
         "secret_key": secret_key,
         "public_key": public_key,
@@ -1528,7 +1706,16 @@ def get_paystack_runtime_config():
         "secret_key_present": bool(secret_key),
         "public_key_present": bool(public_key),
         "callback_url_configured": bool(callback_url),
+        "sources": sources,
+        "validity": validity,
     }
+
+
+def get_paystack_runtime_config(*, force_refresh=False):
+    """Resolve Paystack runtime config. Always reads current env/secrets (no sticky stale cache)."""
+    if force_refresh:
+        clear_paystack_runtime_config_cache()
+    return _build_paystack_runtime_resolution()
 
 
 def get_paystack_secret_status():
@@ -1541,6 +1728,7 @@ def get_paystack_secret_status():
     callback_url = str(config.get("callback_url") or "").strip()
     callback_url_valid = bool(callback_url) and callback_url.lower().startswith(("http://", "https://"))
     currency = str(config.get("currency") or "").strip().upper()
+    sources = config.get("sources") or {}
     return {
         "PAYSTACK_SECRET_KEY": "present" if config.get("secret_key_present") else "missing",
         "PAYSTACK_PUBLIC_KEY": "present" if config.get("public_key_present") else "missing",
@@ -1548,7 +1736,49 @@ def get_paystack_secret_status():
         "PAYSTACK_CALLBACK_URL_valid": bool(callback_url_valid),
         "PAYSTACK_CURRENCY": currency or "missing",
         "PAYSTACK_WEBHOOK_SECRET": "present" if bool(config.get("webhook_secret")) else "missing",
+        "sources": {
+            "PAYSTACK_SECRET_KEY": sources.get("PAYSTACK_SECRET_KEY", "missing"),
+            "PAYSTACK_PUBLIC_KEY": sources.get("PAYSTACK_PUBLIC_KEY", "missing"),
+            "PAYSTACK_CALLBACK_URL": sources.get("PAYSTACK_CALLBACK_URL", "missing"),
+            "PAYSTACK_CURRENCY": sources.get("PAYSTACK_CURRENCY", "missing"),
+            "PAYSTACK_WEBHOOK_SECRET": sources.get("PAYSTACK_WEBHOOK_SECRET", "missing"),
+        },
     }
+
+
+def get_paystack_config_source_diagnostics():
+    """
+    Admin-only safe Paystack configuration diagnostic.
+
+    Returns setting / present|missing / source / valid|invalid only.
+    Never includes secret values.
+    """
+    config = get_paystack_runtime_config()
+    sources = config.get("sources") or {}
+    validity = config.get("validity") or {}
+    rows = []
+    for spec in _PAYSTACK_SETTING_SPECS:
+        setting = spec["setting"]
+        present = bool(config.get("secret_key") if setting == "PAYSTACK_SECRET_KEY"
+                       else config.get("public_key") if setting == "PAYSTACK_PUBLIC_KEY"
+                       else config.get("callback_url") if setting == "PAYSTACK_CALLBACK_URL"
+                       else config.get("currency") if setting == "PAYSTACK_CURRENCY"
+                       else config.get("webhook_secret"))
+        if setting == "PAYSTACK_CURRENCY":
+            present = bool(str(config.get("currency") or "").strip())
+        source = sources.get(setting, "missing")
+        is_valid = bool(validity.get(setting)) if present or source == "default" else False
+        if setting == "PAYSTACK_CURRENCY" and source == "default":
+            is_valid = _validate_paystack_setting(setting, config.get("currency"), "currency")
+        rows.append(
+            {
+                "setting": setting,
+                "presence": "present" if present else "missing",
+                "source": source,
+                "validity": "valid" if is_valid else "invalid",
+            }
+        )
+    return rows
 
 
 def get_paystack_diagnostics():
@@ -1560,6 +1790,23 @@ def get_paystack_diagnostics():
         "callback_url_configured": config["callback_url_configured"],
         "webhook_secret_present": bool(config.get("webhook_secret")),
     }
+
+
+def render_paystack_config_diagnostics_panel(*, role=None, surface="system_health"):
+    """Render admin-only Paystack config status with no secret values."""
+    if not can_view_runtime_admin_diagnostics(role):
+        st.warning("Paystack configuration diagnostics are restricted to internal administrators.")
+        return
+    if not can_render_admin_diagnostics_surface(surface):
+        st.warning("Paystack configuration diagnostics are not available on this surface.")
+        return
+    st.subheader("Paystack Configuration Status")
+    st.caption("Shows presence and source only. Secret values are never displayed.")
+    if st.button("Refresh Paystack config status", key="refresh_paystack_config_diagnostics"):
+        clear_paystack_runtime_config_cache()
+        get_paystack_runtime_config(force_refresh=True)
+    rows = get_paystack_config_source_diagnostics()
+    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
 
 def get_subscription_plans():
@@ -2048,6 +2295,13 @@ def initialize_paystack_payment(
         return {
             "ok": False,
             "reason": "Paystack callback URL is not configured yet.",
+            "failure_step": failure_step,
+            "paystack_status": secret_status,
+        }
+    if not bool((config.get("validity") or {}).get("PAYSTACK_CALLBACK_URL")):
+        return {
+            "ok": False,
+            "reason": "Paystack callback URL is invalid. Use a full http:// or https:// URL.",
             "failure_step": failure_step,
             "paystack_status": secret_status,
         }
@@ -18446,7 +18700,14 @@ def run_process_startup_warmup(*, force=False):
         warmed.append("role_metadata")
         warmed.append("page_permissions_metadata")
         try:
-            import app as eka_app
+            # Prefer the already-running Streamlit script (__main__). Importing
+            # `app` while the script runs as __main__ re-executes module-level
+            # login_ui() and raises StreamlitDuplicateElementKey on cold start.
+            import sys
+
+            eka_app = sys.modules.get("__main__")
+            if eka_app is None or not hasattr(eka_app, "PRIMARY_NAV_ITEMS"):
+                import app as eka_app
 
             _ = getattr(eka_app, "PRIMARY_NAV_ITEMS", ())
             _ = getattr(eka_app, "SIDEBAR_NAV_GROUPS", ())
