@@ -1,20 +1,29 @@
 # Program C — Live UAT Scorecard (Round 1)
 
-**Date:** 2026-08-04  
-**Branch:** `program-c-live-business-acceptance-round-1`  
-**Program A baseline overall product:** **6.8/10**  
+**Date:** 2026-08-04
+**Branch:** `program-c-live-business-acceptance-round-1`
+**Program A baseline overall product:** **6.8/10**
 **Rule:** Do not inflate. Live UI not executed this session → scores stay conservative.
 
 ---
 
-## 1. Workflow outcome totals (Round 1 session)
+## 1. Workflow outcome totals (Round 1 + Round A live)
 
 | Status | Count | Notes |
 |--------|------:|-------|
-| PASS | 0 | No LIVE_UI PASS allowed without screenshots/timings |
-| PARTIAL | 0 | Automated proof kept in evidence index; not promoted to PARTIAL live status |
-| FAIL | 0 | No new live FAIL |
-| NOT EXECUTED | 37 | Full checklist pending operator session |
+| PASS | 2 | Registration + Trial activation (Round A live) |
+| PARTIAL | 0 | — |
+| FAIL | 1 | Paystack initialization — missing public key |
+| NOT EXECUTED | 34+ | Remainder of Round 1 + Round A login/admin flows stopped |
+
+---
+
+## Round A decision impact
+
+**Still CONDITIONAL GO** for supervised trial-only pilot.
+Paid onboarding remains **NO-GO** until `PAYSTACK_PUBLIC_KEY` + callback are present in the runtime secrets/env the app actually loads and W2 is retested to PASS.
+
+Security follow-up (2026-08-06): public System Status and public admin-recovery creation locked down on branch (DEF-PC-RA-003/004). Overall product readiness remains **~6.9/10** (no inflation).
 
 ---
 
@@ -74,31 +83,31 @@
 
 ## 5. Top 10 user-friction points (ranked)
 
-1. Supplier bill does not receive stock (training + drift risk)  
-2. Inventory valuation can disagree with Inventory GL without auto-fix  
-3. Costing method not policy-grade (last cost overwrite)  
-4. Frozen foods carton→piece/kg not supported  
-5. Duplicate invoice/bill UI paths (training cost)  
-6. Dense Streamlit navigation / menu sprawl  
-7. Tax outputs need external finance confirmation  
-8. Bank reconciliation is display-oriented, not match workflow  
-9. No notification engine for low stock / overdue AR  
-10. Live restore confidence missing for operators  
+1. Supplier bill does not receive stock (training + drift risk)
+2. Inventory valuation can disagree with Inventory GL without auto-fix
+3. Costing method not policy-grade (last cost overwrite)
+4. Frozen foods carton→piece/kg not supported
+5. Duplicate invoice/bill UI paths (training cost)
+6. Dense Streamlit navigation / menu sprawl
+7. Tax outputs need external finance confirmation
+8. Bank reconciliation is display-oriented, not match workflow
+9. No notification engine for low stock / overdue AR
+10. Live restore confidence missing for operators
 
 ---
 
 ## 6. Top 10 strengths observed (platform evidence)
 
-1. Balanced journal posting engine with tests  
-2. Trial Balance / P&L / Balance Sheet certification path  
-3. POS credit sale inventory + AR + audit automation  
-4. Supplier bill/payment AP lifecycle automation  
-5. Sprint 3: qty change ⇒ stock movement integrity  
-6. Sprint 4: inventory vs GL reconciliation visibility  
-7. Role permission matrix with regression lockdown  
-8. Safe user-facing errors (no raw DB dumps to clients)  
-9. Dual SQLite/PostgreSQL portability posture  
-10. Controlled corrections / audit trail patterns  
+1. Balanced journal posting engine with tests
+2. Trial Balance / P&L / Balance Sheet certification path
+3. POS credit sale inventory + AR + audit automation
+4. Supplier bill/payment AP lifecycle automation
+5. Sprint 3: qty change ⇒ stock movement integrity
+6. Sprint 4: inventory vs GL reconciliation visibility
+7. Role permission matrix with regression lockdown
+8. Safe user-facing errors (no raw DB dumps to clients)
+9. Dual SQLite/PostgreSQL portability posture
+10. Controlled corrections / audit trail patterns
 
 ---
 
@@ -125,16 +134,16 @@
 
 # CONDITIONAL GO (supervised 5-person pilot only)
 
-**Not** unconditional production GO.  
+**Not** unconditional production GO.
 **Not** 20+ person GO.
 
 ### Conditions (must remain)
 
-1. Complete live browser UAT (this checklist) with screenshots before expanding users.  
-2. Owner signs known-limitations: bill≠receive; last-cost valuation; no multi-UOM.  
-3. Weekly Trial Balance + Inventory Valuation review by accountant.  
-4. Daily/local backup until restore rehearsal signed.  
-5. Do not file VAT/NHIL from EKA without finance sign-off.  
+1. Complete live browser UAT (this checklist) with screenshots before expanding users.
+2. Owner signs known-limitations: bill≠receive; last-cost valuation; no multi-UOM.
+3. Weekly Trial Balance + Inventory Valuation review by accountant.
+4. Daily/local backup until restore rehearsal signed.
+5. Do not file VAT/NHIL from EKA without finance sign-off.
 6. Use SQLite only for low-concurrency single branch; Postgres production cutover remains separate NO-GO until certified.
 
 ### Why not NO-GO for tiny pilot

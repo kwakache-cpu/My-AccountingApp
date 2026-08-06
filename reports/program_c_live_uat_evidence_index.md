@@ -18,11 +18,17 @@
 
 ---
 
-## A. Live UI evidence (Round 1 session)
+## A. Live UI evidence (Round A session 2026-08-04)
 
 | Evidence ID | Workflow | File / note | Status |
 |-------------|----------|-------------|--------|
-| LIVE-000 | — | No live runtime session in agent Round 1 | **Missing** |
+| LIVE-RA-01 | Landing / Secure Login tab | `reports/evidence/program_c_r1/RA01_landing_secure_login.png` | Captured |
+| LIVE-RA-02 | Registration form filled | `reports/evidence/program_c_r1/RA02_registration_form_filled.png` | Captured |
+| LIVE-RA-03 | Registration submit context | `reports/evidence/program_c_r1/RA03_registration_paystack_message.png` | Captured |
+| LIVE-RA-04 | Paystack FAIL + trial active | `reports/evidence/program_c_r1/RA04_paystack_key_missing_support_code.png` | Captured |
+| LIVE-RA-DB | Company created | `EKA-PAY-CMOM-6715` / `UAT-PC-RA Frozen Foods Ltd` in `data/eka_enterprise_v3.db` | Verified |
+| LIVE-RA-SUP | Support code | `9087A613E2D5` | On UI |
+| LIVE-RA-DOC | Round A narrative | `reports/program_c_round_a_onboarding_live_results.md` | Written |
 
 ---
 

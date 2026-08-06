@@ -23,7 +23,84 @@
 
 | Defect ID | Workflow | Role | Severity | Status |
 |-----------|----------|------|----------|--------|
-| — | — | — | — | **None** — live browser UAT not executed; no new live failures observed |
+| DEF-PC-RA-001 | Paystack initialization | Registrant | High | **Remediated on branch** — local secrets lacked public key/callback; resolver hardened |
+| DEF-PC-RA-002 | Secure Login landing | Unauthenticated | Medium | **Fixed** on branch — cold-start `import app` double `login_ui()` |
+| DEF-PC-RA-003 | Public System Status | Unauthenticated | High | **Fixed** on branch — removed from login tabs; admin-only |
+| DEF-PC-RA-004 | Public admin recovery | Unauthenticated | Critical | **Fixed** on branch — token + authenticated recovery route required |
+
+### DEF-PC-RA-001 — Paystack public key not configured (Round A stop)
+
+| Field | Value |
+|-------|-------|
+| Workflow | Paystack initialization (Round A #2) |
+| Role | Unauthenticated registrant |
+| Severity | High (Critical for paid activation) |
+| Reproduction | Register company → Create Trial Company & Proceed to Payment on local Streamlit |
+| Expected | Paystack checkout starts, or clear fix instructions with configured keys |
+| Actual | “Paystack public key is not configured yet. Trial access remains active until 2026-08-11. Support Code: 9087A613E2D5” |
+| Evidence | `reports/evidence/program_c_r1/RA04_paystack_key_missing_support_code.png`; company `EKA-PAY-CMOM-6715` |
+| Forensic finding (2026-08-06) | Local `.streamlit/secrets.toml` contains **only** `PAYSTACK_SECRET_KEY` among Paystack keys. `PAYSTACK_PUBLIC_KEY` and `PAYSTACK_CALLBACK_URL` are **absent** from the file Streamlit loads for this workspace. Env vars for those keys were also missing. Runtime correctly reported missing. |
+| Re-verify (2026-08-06 clean) | After clearing env, resolution from local secrets.toml: SECRET=`st.secrets root` / present; PUBLIC=`missing`; CALLBACK=`missing`; CURRENCY=`default`/`GHS`. Claim that public key/callback were already in Streamlit secrets does **not** match this workspace secrets file (root keys: DB_NAME, FIREBASE_*, MASTER_KEY, OPENAI_API_KEY, PAYSTACK_SECRET_KEY only; no nested `[paystack]`). |
+| Code remediation | Hardened `_read_secret_or_env` / `get_paystack_runtime_config` precedence: env → root `st.secrets` → nested `[paystack]` → default(currency only). Added admin-only source diagnostic (no values). |
+| Ops action still required | Add non-empty `PAYSTACK_PUBLIC_KEY` and `PAYSTACK_CALLBACK_URL` (root or `[paystack]`) then restart Streamlit and retest W2. |
+| Accounting risk | None (no money moved) |
+| Data risk | Low — trial company created |
+| Workaround | Use trial until 2026-08-11; configure public key + callback |
+| Recommended priority | P0 for paid onboarding |
+| Owner | Ops / Deployer + Engineering (resolver) |
+| Status | **Remediated on branch** (resolver); **live retest pending** after secrets are actually present |
+| Launch blocking | YES for paid go-live until live W2 PASS |
+
+### DEF-PC-RA-002 — Intermittent duplicate Streamlit login key
+
+| Field | Value |
+|-------|-------|
+| Workflow | Secure Login landing |
+| Role | Unauthenticated |
+| Severity | Medium |
+| Reproduction | First cold load of `/` once showed DuplicateElementKey for `v3_final_access_key_field` |
+| Expected | Clean login form |
+| Actual | Exception banner on one load; not reproduced on later loads before registration |
+| Evidence | First-session browser snapshot text (error string); later screenshots clean |
+| Accounting risk | None |
+| Data risk | None |
+| Root cause | Cold-start `run_process_startup_warmup()` did `import app` while Streamlit ran the script as `__main__`, re-executing module-level `login_ui()` and registering `v3_final_access_key_field` twice. Warm cache skipped the import → intermittent. |
+| Fix | `app.py`: guard Streamlit entrypoint with `if __name__ == "__main__":`. `modules.py`: warmup prefers `sys.modules["__main__"]` for nav metadata. Tests: `tests/test_hotfix_streamlit_duplicate_login_key.py`. |
+| Workaround | Refresh page (pre-fix) |
+| Recommended priority | P2 (resolved on this branch) |
+| Owner | Engineering |
+| Status | **Fixed** on `program-c-round-a-onboarding-and-administration` (not committed unless requested) |
+| Launch blocking | NO |
+
+### DEF-PC-RA-003 — Public System Status exposure
+
+| Field | Value |
+|-------|-------|
+| Workflow | Unauthenticated login landing |
+| Role | Unauthenticated / ordinary client |
+| Severity | High |
+| Reproduction | Open `/` → **System Status** tab shows API Gateway, Database Engine, Payment Server, uptime, incidents |
+| Expected | No infrastructure diagnostics before authentication |
+| Actual | Public fourth tab rendered `show_system_status()` without auth |
+| Path | `login_ui()` → `st.tabs(..., "System Status")` → `with t4: show_system_status()` |
+| Fix | Removed public tab; `show_system_status()` now requires auth + Dev/Master Admin/System Admin; available under Gatekeeper System Health |
+| Status | **Fixed** on branch |
+| Launch blocking | YES until verified on live restart |
+
+### DEF-PC-RA-004 — Public administrative recovery exposure
+
+| Field | Value |
+|-------|-------|
+| Workflow | System Recovery tab (unauthenticated) |
+| Role | Unauthenticated |
+| Severity | Critical |
+| Reproduction | When active companies exist with zero admin-capable `users` rows, System Recovery showed “Administrative Access Repair Needed” and allowed creating System Admin for listed companies |
+| Expected | Anonymous users cannot create admins or see company recovery internals |
+| Actual | `_has_restored_data_without_admin_users()` auto-triggered `_show_admin_recovery_panel()` on public recovery tab |
+| Path | `login_ui()` → System Recovery (`t2`) → `_show_admin_recovery_panel()` |
+| Fix | Removed from public login UI. Repair requires authenticated Dev/Master Admin/System Admin + `?admin_recovery=1` route + `EKA_ADMIN_RECOVERY_TOKEN` unlock + verified recovery condition. Audited unlock/create. |
+| Status | **Fixed** on branch |
+| Launch blocking | YES until verified on live restart |
 
 ---
 
